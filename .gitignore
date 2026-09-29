@@ -1,0 +1,38 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+secrets/
+config/local.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+
+# Database / volumes
+*.db
+*.sqlite3
+postgres_data/
+redis_data/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

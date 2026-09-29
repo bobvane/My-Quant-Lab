@@ -111,3 +111,20 @@ API 默认只绑定 `127.0.0.1`，由 web 容器代理 `/api`。
 `ghcr.io/bobvane/my-quant-lab-backend` 与 `...-web`，用该版本跑冒烟测试，
 再创建 GitHub Release。
 **理由**：NAS 侧只需 `MQL_VERSION=<tag>` 即可拉取已构建镜像，无需本地构建。
+
+## ADR-019：生产 compose 只引用预构建镜像
+
+**决策**：`docker-compose.yml` 不含 `build:` 段，只写
+`image: ghcr.io/bobvane/my-quant-lab-backend:${MQL_VERSION:-latest}`；
+本地构建能力移到 `docker-compose.build.yml` 覆盖文件，仅供 CI 与开发者使用。
+**理由**：图形化 NAS 的 Compose 项目是"选目录 + 读单文件"，多文件叠加用不上；
+NAS 部署只需要 `docker-compose.yml` + `.env` 两个文件。
+
+## ADR-020：许可为"使用须经作者同意"，镜像公开
+
+**决策**：项目采用根目录 `LICENSE` 中的自定义许可（保留所有权利，
+查看/部署/使用/引用均须事先获得作者书面同意），不是开源许可；
+同时把两个 GHCR 镜像包设为公开以便 NAS 直接拉取（镜像内不含任何密钥，
+密钥只存在于用户 NAS 本地的 `.env`）。
+**理由**：代码仓库已公开，但作者要求对使用加以控制；镜像公开仅为部署便利，
+不改变许可性质。

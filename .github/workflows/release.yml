@@ -106,20 +106,17 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set +e
-          # Smoke test the images we just pushed. The single compose file is used
-          # as-is; pulling is switched on through the documented env variables
-          # instead of a second override file.
+          # Smoke test the images we just pushed, using the stock production
+          # compose file exactly as a NAS would (MQL_VERSION pins the tag).
           docker pull "${BACKEND_IMAGE}:${VERSION}"
           docker pull "${WEB_IMAGE}:${VERSION}"
 
           sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-smoke-password/' .env.example
           sed -i 's/^SECRET_KEY=.*/SECRET_KEY=ci-smoke-secret-key-0123456789abcdef/' .env.example
 
-          export MQL_PULL_POLICY=always
-          export MQL_BACKEND_IMAGE="${BACKEND_IMAGE}:${VERSION}"
-          export MQL_WEB_IMAGE="${WEB_IMAGE}:${VERSION}"
+          export MQL_VERSION="${VERSION#v}"
 
-          docker compose --env-file .env.example up -d --no-build
+          docker compose --env-file .env.example up -d
           up_rc=$?
 
           healthy=0
@@ -185,25 +182,20 @@ jobs:
             echo "docker pull ${WEB_IMAGE}:${version}"
             echo '```'
             echo
-            echo "### Deploy on your NAS"
+            echo "### Deploy on your NAS (2 files only)"
+            echo
+            echo "No source code needed. Download \`docker-compose.yml\` and"
+            echo "\`.env.example\` from this release (or the repo root), then:"
             echo
             echo '```bash'
-            echo "git clone https://github.com/${{ github.repository }}.git"
-            echo "cd $(basename "${{ github.repository }}")"
             echo "cp .env.example .env    # then edit POSTGRES_PASSWORD and SECRET_KEY"
-            echo "docker compose build && docker compose up -d"
+            echo "docker compose pull && docker compose up -d"
             echo '```'
             echo
-            echo "Prefer the published images instead of a local build? The repository"
-            echo "is private, so log in first, then point the stock compose file at them"
-            echo "(no extra compose file needed):"
+            echo "To pin a version instead of latest, set in \`.env\`:"
             echo
-            echo '```bash'
-            echo 'echo "$GITHUB_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin'
-            echo "export MQL_PULL_POLICY=always"
-            echo "export MQL_BACKEND_IMAGE=${BACKEND_IMAGE}:${version}"
-            echo "export MQL_WEB_IMAGE=${WEB_IMAGE}:${version}"
-            echo "docker compose up -d"
+            echo '```ini'
+            echo "MQL_VERSION=${version}"
             echo '```'
             echo
             echo "Web UI: http://<nas-ip>:8081 · API docs: http://<nas-ip>:8081/docs"

@@ -1,7 +1,7 @@
 # My Quant Lab — V1 production compose stack.
 #
-# 图形化 NAS 用法：在容器管理界面里选择本项目目录，直接使用本文件即可，
-# 唯一需要你创建的文件是同目录下的 .env。
+# 标准用法（图形化 NAS）：在容器管理界面里选择本项目目录，直接使用本文件。
+# 只需要两个文件：本文件 + 同目录下的 .env。不需要源码，不需要第二个文件。
 #
 #   quantlab-web       Vue 3 UI (nginx, 代理 /api)
 #   quantlab-api       FastAPI，启动时自动执行数据库迁移
@@ -10,25 +10,16 @@
 #   quantlab-postgres  PostgreSQL（仅 backend 网络，不对外暴露）
 #   quantlab-redis     Redis（仅 backend 网络，不对外暴露）
 #
-# 镜像策略（默认本地构建，不需要任何镜像仓库账号）
-#   后端与前端都带 build: 段，`docker compose build` / 界面里的"构建"按钮
-#   会在本机完成镜像构建，image 只是本地镜像的名字。
+# 镜像全部来自 GitHub Packages 预构建（本文件不含 build 段）：
+#   默认拉取 latest（.env 里可改 MQL_VERSION 锁定版本，例如 v0.0.8）。
 #
-#   如果你想改用 GitHub Packages 上的预构建镜像（可选，需要仓库是私有的，
-#   所以必须先 `docker login ghcr.io`），在 .env 里改这两行即可：
-#
-#       MQL_PULL_POLICY=always
-#       MQL_BACKEND_IMAGE=ghcr.io/bobvane/my-quant-lab-backend:v0.0.6
-#       MQL_WEB_IMAGE=ghcr.io/bobvane/my-quant-lab-web:v0.0.6
+# 本地构建 / CI 冒烟测试请叠加 docker-compose.build.yml：
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
 #
 name: my-quant-lab
 
 x-backend-image: &backend-image
-  build:
-    context: .
-    dockerfile: docker/Dockerfile.backend
-  image: ${MQL_BACKEND_IMAGE:-my-quant-lab-backend:local}
-  pull_policy: ${MQL_PULL_POLICY:-never}
+  image: ghcr.io/bobvane/my-quant-lab-backend:${MQL_VERSION:-latest}
 
 x-backend-env: &backend-env
   APP_ENVIRONMENT: ${APP_ENVIRONMENT:-production}
@@ -164,11 +155,7 @@ services:
       start_period: 30s
 
   quantlab-web:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.web
-    image: ${MQL_WEB_IMAGE:-my-quant-lab-web:local}
-    pull_policy: ${MQL_PULL_POLICY:-never}
+    image: ghcr.io/bobvane/my-quant-lab-web:${MQL_VERSION:-latest}
     container_name: quantlab-web
     restart: unless-stopped
     ports:

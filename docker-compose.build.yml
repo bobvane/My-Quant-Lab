@@ -1,0 +1,33 @@
+# My Quant Lab — 本地构建覆盖文件（开发者 / CI 专用）。
+#
+# 生产 compose（docker-compose.yml）只引用 GHCR 预构建镜像，不含 build 段，
+# 因此 NAS 上只需要两个文件即可运行。
+#
+# 需要从源码构建时（本地开发、CI 冒烟测试），叠加本文件：
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml build
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+#
+# 注意：叠加后 image 名字沿用主文件的 ghcr.io 路径，构建产物会打上该 tag，
+# up 时直接使用本地构建结果，不会再去拉取。
+
+services:
+  quantlab-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+
+  quantlab-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+
+  quantlab-scheduler:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+
+  quantlab-web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web

@@ -1,0 +1,98 @@
+My Quant Lab — 许可协议 / License Agreement
+==================================================
+
+版权所有 (c) 2026 bobvane。保留所有权利。
+Copyright (c) 2026 bobvane. All rights reserved.
+
+------------------------------------------------------------------------
+第一部分：中文（以中文版本为准 / The Chinese version prevails）
+------------------------------------------------------------------------
+
+1. 许可性质
+   本项目采用"保留所有权利 + 事先书面同意"许可。本协议不是开源许可，
+   不授予任何默示权利。法律未明确授予的权利，一律保留。
+
+2. 允许的行为（无需事先申请）
+   (a) 为个人学习与研究目的，查看本仓库公开的代码与文档；
+   (b) 通过公开渠道（如 GitHub Issues）向作者反馈问题与建议。
+
+3. 需要事先获得作者书面同意的行为
+   未经作者事先书面同意，任何人不得实施以下任一行为：
+   (a) 使用本项目（包括但不限于部署、运行本项目的 Docker 镜像、
+       复制本项目的配置文件与部署方式搭建相同或类似服务）；
+   (b) 复制、分发、出版本项目的全部或部分代码、文档、策略 DSL、
+       示例策略或提示词模板；
+   (c) 修改本项目或基于本项目创作衍生作品；
+   (d) 将本项目或其衍生作品用于任何商业用途（包括但不限于收费服务、
+       嵌入商业产品、为第三方提供量化策略服务）；
+   (e) 引用本项目作为自身产品、服务、论文、宣传材料的一部分或背书。
+
+   申请方式：在本仓库提交 Issue（标题注明 [License Request]）并说明
+   使用目的、范围与期限，或通过作者公开的其他联系方式提出申请。
+   未收到作者明确书面同意前，视为未获许可。
+
+4. 第三方组件
+   本项目依赖的第三方开源组件（如 Python 包、npm 包、PostgreSQL、
+   Redis 等）各自遵循其原始许可证，本协议不改变这些组件的许可条件。
+   Ghostfolio 等外部系统的商标与权利归其各自权利人所有。
+
+5. 免责声明
+   本软件按"现状"提供，不作任何明示或默示保证，包括但不限于适销性、
+   特定用途适用性与不侵权。本项目是量化"研究"工具，不构成投资建议；
+   任何投资决策与盈亏均由使用者自行承担，作者不承担任何责任。
+
+6. 终止
+   一旦违反本协议，许可自动终止，违反者须立即停止一切使用并删除
+   已获取的全部副本。作者保留追究法律责任的权利。
+
+------------------------------------------------------------------------
+Part 2: English (informational; the Chinese version prevails)
+------------------------------------------------------------------------
+
+1. Nature of license
+   This project is released under an "all rights reserved + prior written
+   consent" license. It is NOT an open-source license. No rights are granted
+   by implication; all rights not expressly granted are reserved.
+
+2. Allowed without prior request
+   (a) viewing the publicly available code and documentation for personal
+       study and research;
+   (b) reporting issues or suggestions to the author via public channels
+       (e.g. GitHub Issues).
+
+3. Actions requiring prior written consent
+   Without the author's prior written consent, no one may:
+   (a) USE the project (including but not limited to deploying or running
+       its Docker images, or reproducing the same or a similar service using
+       its configuration and deployment files);
+   (b) copy, distribute or publish all or any part of the code,
+       documentation, strategy DSL, sample strategies or prompt templates;
+   (c) modify the project or create derivative works based on it;
+   (d) use the project or its derivatives for any commercial purpose
+       (including paid services, embedding in commercial products, or
+       providing quantitative-strategy services to third parties);
+   (e) reference the project as part of, or endorsement for, one's own
+       products, services, papers or promotional materials.
+
+   To request consent, open an Issue in this repository titled
+   [License Request], describing the purpose, scope and duration of the
+   intended use, or contact the author through other public channels.
+   Absence of an explicit written consent means NO permission is granted.
+
+4. Third-party components
+   Third-party open-source components this project depends on (Python and
+   npm packages, PostgreSQL, Redis, etc.) remain under their original
+   licenses; this agreement does not alter them. Trademarks and rights of
+   external systems such as Ghostfolio belong to their respective owners.
+
+5. Disclaimer
+   This software is provided "as is", without warranty of any kind, express
+   or implied, including merchantability, fitness for a particular purpose
+   and non-infringement. This project is a quantitative RESEARCH tool and
+   does not constitute investment advice; all investment decisions, gains
+   and losses are solely the user's responsibility.
+
+6. Termination
+   Any violation terminates the license automatically; the violator must
+   immediately cease all use and delete all copies obtained. The author
+   reserves the right to pursue legal remedies.

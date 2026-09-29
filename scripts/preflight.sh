@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Pre-flight checks before `docker compose up`.
 #
-# Catches the two failure modes that produce the most confusing Docker errors:
-#   * an incomplete clone  -> "lstat /path/to/repo/docker: no such file or directory"
-#   * a missing .env       -> "POSTGRES_PASSWORD is required"
+# Standard deploy needs only docker-compose.yml + .env (images come from GHCR),
+# so this script verifies: compose file present, .env configured, images
+# reachable, docker daemon working.
 #
 # Usage:  ./scripts/preflight.sh
 set -euo pipefail
@@ -52,21 +52,21 @@ if [ -f .env ]; then
         fi
     done
 
-    policy=$(grep -E '^MQL_PULL_POLICY=' .env | head -n 1 | cut -d= -f2- || echo never)
-    if [ "$policy" = "always" ]; then
-        backend=$(grep -E '^MQL_BACKEND_IMAGE=' .env | head -n 1 | cut -d= -f2- || echo '')
-        if printf '%s' "$backend" | grep -q '^ghcr.io/'; then
-            if docker pull "$backend" >/dev/null 2>&1; then
-                ok "GHCR image reachable ($backend)"
-            else
-                bad "MQL_PULL_POLICY=always but $backend cannot be pulled"
-                echo "       the repository is private: docker login ghcr.io -u <user> --password-stdin"
-                echo "       or set MQL_PULL_POLICY=never to build locally instead"
-            fi
-        fi
-    else
-        ok "images will be built locally (no registry account needed)"
+    policy=$(grep -E '^MQL_VERSION=' .env | head -n 1 | cut -d= -f2- || echo latest)
+    if [ -z "$policy" ]; then
+        policy=latest
     fi
+    ok ".env: MQL_VERSION=${policy}"
+    for img in "ghcr.io/bobvane/my-quant-lab-backend:${policy}" \
+               "ghcr.io/bobvane/my-quant-lab-web:${policy}"; do
+        if docker manifest inspect "$img" >/dev/null 2>&1; then
+            ok "image reachable ($img)"
+        else
+            bad "image NOT reachable ($img)"
+            echo "       packages must be public, or run: docker login ghcr.io"
+            echo "       check https://github.com/bobvane/My-Quant-Lab/pkgs/container/my-quant-lab-backend"
+        fi
+    done
 else
     bad ".env not found — run: cp .env.example .env  and edit POSTGRES_PASSWORD / SECRET_KEY"
 fi
@@ -95,6 +95,5 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 echo "Pre-flight passed. Next:"
-echo "  docker compose build"
-echo "  docker compose up -d"
+echo "  docker compose pull && docker compose up -d"
 echo "  docker compose logs -f quantlab-api"

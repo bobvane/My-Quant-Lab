@@ -1,7 +1,8 @@
 # My Quant Lab — Personal Quantitative Research Laboratory
 
 > 个人量化策略研究实验室 · NAS Docker 自托管 · **研究用途，不自动交易**
-> 当前版本：**v0.0.1** · 技术栈：Python 3.12 + FastAPI + PostgreSQL + Redis + Celery + Vue 3
+> 技术栈：Python 3.12 + FastAPI + PostgreSQL + Redis + Celery + Vue 3
+> 许可：使用须经作者事先书面同意，详见 [LICENSE](./LICENSE)
 
 本项目为非程序员提供**可复现、可解释、AI 辅助**的量化策略研究环境，重点覆盖美股 / ETF /
 加密货币的策略研究、回测、Walk-Forward 分析与 Paper Trading。
@@ -22,42 +23,52 @@
 
 ## 快速开始（NAS 部署）
 
-**只需要两个文件参与启动**：`docker-compose.yml`（仓库自带，不用改）和 `.env`（唯一需要你创建的文件）。
+**只需要两个文件**：`docker-compose.yml` 和 `.env`（都放在同一个项目目录里）。
+镜像来自 GitHub Packages 预构建，**不需要源码、不需要登录、不需要构建**。
 
-### 图形化 NAS 界面
+> 许可说明：本项目使用须经作者同意，详见 [LICENSE](./LICENSE)。
+> 镜像公开仅为方便部署，不代表放弃任何权利。
 
-1. 把**整个仓库**放进项目目录，例如 `/vol1/1000/Docker/My-Quant-Lab/`
-   （关键是整个目录完整搬运 —— 里面的 `docker/`、`backend/`、`frontend/` 都是构建必需的）
-2. 在该目录下新建文件 `.env`（**文件名就是 `.env`，开头有点、没有扩展名**）
-3. 内容照抄 `.env.example`，至少改掉这两项：
+### 图形化 NAS 界面（推荐）
+
+1. 在 NAS 上建项目目录，例如 `/vol1/1000/Docker/My-Quant-Lab/`
+2. 把仓库根目录的 `docker-compose.yml` 和 `.env.example` 拷进去，
+   后者改名为 `.env`（**文件名就是 `.env`，开头有点、没有扩展名**）
+3. 编辑 `.env`，至少改掉这两项：
 
    ```ini
    POSTGRES_PASSWORD=你的数据库密码
    SECRET_KEY=0123456789abcdef0123456789abcdef
    ```
 
-4. 在容器管理界面里：Compose / 项目 → 选择 `My-Quant-Lab` 目录 → 构建 → 启动
-
-镜像在**本机构建**，不需要任何镜像仓库账号。
+4. 在容器管理界面里：Compose / 项目 → 选择该目录 → 拉取并启动
+   （飞牛/群晖的 Compose 项目会自动 `pull`，不需要你手动构建）
 
 ### 终端命令
 
 ```bash
-cd /vol1/1000/Docker/My-Quant-Lab
+mkdir -p /vol1/1000/Docker/My-Quant-Lab && cd /vol1/1000/Docker/My-Quant-Lab
+# 把 docker-compose.yml 与 .env.example 放进来，后者改名 .env 并改两处密码
 cp .env.example .env
 sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=你的密码/' .env
 sed -i 's/^SECRET_KEY=.*/SECRET_KEY=0123456789abcdef0123456789abcdef/' .env
 
-./scripts/preflight.sh      # 可选：检查目录完整 / .env 已配置 / Docker 可用
-docker compose build
-docker compose up -d
+docker compose pull && docker compose up -d
+```
+
+### 锁定版本（可选）
+
+默认 `MQL_VERSION=latest`（每次 pull 都是最新发布版）。想锁定版本防意外升级：
+
+```ini
+MQL_VERSION=v0.0.8
 ```
 
 ### 访问
 
 - **Web 界面**：http://<NAS-IP>:8081
-- **API 文档**：http://127.0.0.1:8080/docs（默认仅本机绑定，避免无认证暴露）
-- **存活探针**：http://127.0.0.1:8080/api/v1/healthz
+- **API 文档**：http://<NAS-IP>:8081/docs（经 Web 容器代理；API 直连端口默认只绑本机）
+- **存活探针**：http://<NAS-IP>:8081/healthz
 
 首次进入「行情与策略」页面：
 
@@ -77,32 +88,31 @@ docker compose logs --tail 80 quantlab-api
 
 | 报错 | 原因 | 处理 |
 |---|---|---|
-| `lstat .../My-Quant-Lab/docker: no such file or directory` | 仓库拷贝不完整或过旧（缺 `docker/` 目录） | 重新完整拷贝，或在该目录执行 `git pull` |
 | `POSTGRES_PASSWORD is required` | `.env` 未创建或未填写 | `cp .env.example .env` 后修改 |
 | `container quantlab-api is unhealthy` | 启动失败 | `docker compose logs --tail 100 quantlab-api`，日志会直接给出原因 |
-| `Head "https://ghcr.io/...": unauthorized` | 把 `MQL_PULL_POLICY` 改成了 `always` 但没登录 | 改回 `MQL_PULL_POLICY=never` 走本地构建；或先 `docker login ghcr.io` |
+| 拉取镜像缓慢或超时 | 和 GitHub 之间的网络问题 | 多试几次，或换个时间段；也可以在有源码的机器上用 `docker-compose.build.yml` 本地构建 |
 
 > 想用真实行情：`.env` 中设置 `MARKET_DATA_PROVIDER=yahoo_finance`
 > （免费行情，无需密钥，但受上游限流影响）。
 
 ---
 
-## 可选：使用 GitHub Packages 预构建镜像
+## 可选：从源码构建（开发者）
 
-默认走本地构建。如果你想跳过现场构建（NAS 性能有限时更快）：
+生产 compose 不含 `build:` 段。需要本地构建时叠加
+[`docker-compose.build.yml`](./docker-compose.build.yml)：
 
 ```bash
-# 仓库是私有的，必须先登录，否则 unauthorized
-echo "$GITHUB_TOKEN" | docker login ghcr.io -u <你的GitHub用户名> --password-stdin
+docker compose -f docker-compose.yml -f docker-compose.build.yml build
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
 ```
 
-然后在 `.env` 里改三项，**不需要额外的 compose 文件**：
+---
 
-```ini
-MQL_PULL_POLICY=always
-MQL_BACKEND_IMAGE=ghcr.io/bobvane/my-quant-lab-backend:v0.0.6
-MQL_WEB_IMAGE=ghcr.io/bobvane/my-quant-lab-web:v0.0.6
-```
+## 许可
+
+本项目**不是开源项目**。查看、部署、使用、引用均须事先获得作者书面同意，
+详见 [LICENSE](./LICENSE).
 
 ---
 

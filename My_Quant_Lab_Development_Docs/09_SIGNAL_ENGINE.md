@@ -30,6 +30,7 @@ scheduled scan
 ## 3. Portfolio Context
 
 从 Ghostfolio 获取：
+
 - current quantity
 - cost basis / investment context where available
 - portfolio weight
@@ -52,6 +53,7 @@ Policy max reference = 20%
 ## 4. 去重
 
 同一：
+
 - symbol
 - timeframe
 - strategy version
@@ -64,6 +66,7 @@ Policy max reference = 20%
 ## 5. Signal Evidence
 
 必须记录：
+
 - exact strategy version
 - exact bar timestamp
 - rule IDs triggered
@@ -73,11 +76,12 @@ Policy max reference = 20%
 
 ## 6. AI explanation
 
-AI 只能基于 Signal Evidence 解释；不能重新计算或“改判”。
+AI 只能基于 Signal Evidence 解释；不能重新计算或"改判"。
 
 ## 7. Alert noise control
 
 用户可以设置：
+
 - only BUY/SELL
 - include WAIT
 - quiet hours
@@ -95,4 +99,4 @@ AI 只能基于 Signal Evidence 解释；不能重新计算或“改判”。
 3. Recent Paper Stats：模拟盘情况
 4. Portfolio Context：与用户当前真实组合的关系
 
-“AI explanation”作为第五层，只负责解释以上数据。
+"AI explanation"作为第五层，只负责解释以上数据。

@@ -122,20 +122,54 @@ src/
 
 ## 6. Docker 服务
 
-最小生产组合：
+### 6.1 核心基础设施服务
 
-- quantlab-api
-- quantlab-worker
-- quantlab-scheduler
-- quantlab-web
-- quantlab-postgres
-- quantlab-redis
+六个核心服务，符合模块化单体 + Docker 服务化基础设施的设计原则：
 
-可选：
-- quantlab-nginx
-- quantlab-data-worker
+- `quantlab-web`：Vue 3 + TypeScript 前端，提供仪表盘、策略管理、回测、模拟交易和信号监控等功能
+- `quantlab-api`：FastAPI API 网关，提供 REST/WebSocket 接口，统一服务路由和认证
+- `quantlab-worker`：Celery 异步任务处理，支持市场数据同步、回测和扫描等任务
+- `quantlab-scheduler`：Celery Beat 定时任务，定时执行策略扫描和数据更新
+- `quantlab-postgres`：PostgreSQL 数据库，存储所有业务数据，包括策略、回测、信号、用户数据等
+- `quantlab-redis`：Redis 缓存和分布式任务队列，支持会话管理、缓存和Celery任务Broker
 
-所有服务必须支持 healthcheck。
+### 6.2 网络架构
+
+采用两层网络架构实现安全隔离：
+
+- **frontend network**：仅允许 Web 应用和 API 网关访问
+- **backend network**：包含所有业务逻辑层、异步任务处理和基础设施服务
+
+服务访问关系：
+- `quantlab-web` 和 `quantlab-api` 位于 `frontend` network
+- `quantlab-api`、`quantlab-worker`、`quantlab-scheduler`、`quantlab-postgres`、`quantlab-redis` 位于 `backend` network
+
+### 6.3 可选服务
+
+增强安全性和性能时，可选部署：
+- `quantlab-nginx`：反向代理和SSL终止
+- `quantlab-data-worker`：专用数据处理 worker
+
+### 6.4 健康检查
+
+所有服务必须支持健康检查，确保系统稳定性和可监控性。
+
+### 6.5 应用内部架构
+
+**业务逻辑采用六层架构模块化设计**，避免 V1 过度微服务化：
+
+```text
+domain/          # 领域模型和业务规则
+data/            # 数据访问和持久化
+features/        # 技术指标和价格行为特征
+strategies/      # 策略执行和DSL解析
+research/        # 回测、OOS和Walk-Forward分析
+simulation/     # 模拟交易引擎和持仓管理
+ai/             # AI 提供者适配器和解释引擎
+infrastructure/ # 通用工具和支持服务
+```
+
+这六个模块作为 Python 应用的一部分运行在 `quantlab-api` 和 `quantlab-worker` 内部，实现"模块化单体 + Docker 服务化基础设施"的设计原则。
 
 ## 7. 可插拔接口
 

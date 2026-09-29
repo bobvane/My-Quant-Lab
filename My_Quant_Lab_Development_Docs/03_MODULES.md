@@ -1,5 +1,7 @@
 # 03 功能模块规范
 
+根据新的模块化单体设计，所有核心业务逻辑被整合为应用内部的六个核心模块。Docker 服务将专注于基础设施，应用内部采用六层架构。
+
 ## M01 Dashboard
 
 目标：让不懂量化的用户一眼看到“现在有什么值得关注的事情”。
@@ -109,3 +111,63 @@ P1 支持 Feishu、Telegram、Email、PushPlus。
 - scan schedule
 
 Secrets UI 只能显示掩码；日志绝不能输出完整 key。
+
+## 新的模块化架构
+
+所有核心业务逻辑被整合为应用内部的六个核心模块，这些模块运行在 `quantlab-api` 和 `quantlab-worker` 服务内部：
+
+### Module Structure
+
+```text
+quantlab-api (FastAPI + Celery Worker)
+├── domain/          # 领域模型和业务规则
+├── data/            # 数据访问和持久化
+├── features/        # 技术指标和价格行为特征
+├── strategies/      # 策略执行和DSL解析
+├── research/        # 回测、OOS和Walk-Forward分析
+├── simulation/     # 模拟交易引擎和持仓管理
+├── ai/             # AI 提供者适配器和解释引擎
+└── infrastructure/ # 通用工具和支持服务
+```
+
+### 模块职责
+
+**domain/**
+- 核心业务实体定义
+- 值对象和领域规则
+- 策略DSL和参数管理
+
+**data/**
+- 数据库访问层
+- 数据迁移和备份
+- 数据质量验证
+
+**features/**
+- 指标计算引擎
+- 价格行为特征提取
+- 特征缓存和管理
+
+**strategies/**
+- 策略执行引擎
+- 规则验证和优化
+- 策略生命周期管理
+
+**research/**
+- 回测引擎核心
+- OOS和Walk-Forward分析
+- 绩效评估和报告生成
+
+**simulation/**
+- 模拟交易引擎
+- 持仓管理和风险控制
+- 交易记录和结算
+
+**ai/**
+- AI提供者适配器
+- 解释和分析引擎
+- 提示模板管理和缓存
+
+**infrastructure/**
+- 日志和监控
+- 配置管理和环境
+- 安全和认证

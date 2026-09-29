@@ -5,6 +5,7 @@
 交付：Docker Compose、DB、Redis、API、Web、基础认证、迁移、日志。
 
 验收：
+
 - `docker compose up -d` 可启动
 - healthcheck 全绿
 - 数据库迁移可重复执行
@@ -15,6 +16,7 @@
 交付：OHLCV、EMA/ATR/RSI/MACD/Bollinger、PA features、Strategy DSL。
 
 验收：
+
 - 相同输入得到相同特征
 - 时间排序正确
 - 缺失数据有明确状态
@@ -25,6 +27,7 @@
 交付：backtest、fees/slippage、trade log、metrics、OOS。
 
 验收：
+
 - golden fixtures 全通过
 - no-lookahead tests 全通过
 - backtest run 可复现
@@ -35,6 +38,7 @@
 交付：REST adapter、sync、portfolio context。
 
 验收：
+
 - 能测试连接
 - 能同步活动和资产
 - Ghostfolio 原数据不会被修改
@@ -45,6 +49,7 @@
 交付：virtual cash、positions、equity curve、signal lifecycle。
 
 验收：
+
 - 初始资金可配置
 - 买卖后现金/持仓正确
 - fee/slippage 正确进入结果
@@ -55,6 +60,7 @@
 交付：provider abstraction、OpenAI-compatible API、budget、cache、explanation。
 
 验收：
+
 - API key 不泄漏
 - provider 可切换
 - AI 输出 schema 可验证
@@ -66,6 +72,7 @@
 交付：repo import、strategy extraction、provenance、license、version diff。
 
 验收：
+
 - GitHub repo 输入后产生 import report
 - 能标记 unknown/unsafe rules
 - 不执行不受信任代码
@@ -77,6 +84,7 @@
 交付：scheduler、scanner、notification、signal outcomes。
 
 验收：
+
 - 只用 closed bars
 - 同一事件不会重复通知
 - BUY/SELL/WAIT 状态可追溯
@@ -87,9 +95,10 @@
 交付：automated promotion/degradation rules、strategy dashboard。
 
 验收：
+
 - Experimental → OOS → Paper 的流程可见
 - 每次晋级/降级有证据
-- 没有“AI 一句话升级策略”的路径
+- 没有"AI 一句话升级策略"的路径
 
 ## Definition of Done
 

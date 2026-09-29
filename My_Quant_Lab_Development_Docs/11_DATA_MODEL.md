@@ -1,15 +1,18 @@
 # 11 数据模型
 
-下面是逻辑模型，不要求第一版严格按字段一字不差实现，但领域关系必须保留。
+本数据模型实现了新的架构决策，遵循 PostgreSQL 关系数据库设计，并确保策略版本不可变性。模型包含 17 个核心表，覆盖资产管理、市场数据、策略版本、回测结果、模拟交易、AI 提供商等所有业务领域。
 
-## Asset
+## 核心实体
 
-- id
-- symbol
-- display_name
-- asset_class
-- currency
-- exchange
+### Assets
+存储所有支持的交易资产信息，包括股票、ETF、加密货币等。
+
+```sql
+id SERIAL PRIMARY KEY,
+symbol VARCHAR(20) NOT NULL UNIQUE,
+display_name VARCHAR(100),
+asset_class VARCHAR(20) NOT NULL, -- stock, crypto, etf
+
 
 ## MarketDataSeries
 

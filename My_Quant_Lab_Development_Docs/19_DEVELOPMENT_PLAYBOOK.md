@@ -4,7 +4,7 @@
 
 推荐把本目录放到 GitHub repository 根目录，并把 `16_AGENTS.md` 重命名或复制为 `AGENTS.md`，必要时再创建工具特定的 `CLAUDE.md` / `.cursor/rules/`。
 
-第一轮不要让 AI“一次性做完全部项目”。应该按 Phase 0 → Phase 8 顺序执行。
+第一轮不要让 AI"一次性做完全部项目"。应该按 Phase 0 → Phase 8 顺序执行。
 
 ## 2. 每阶段 AI Prompt 模板
 

@@ -86,7 +86,7 @@ Signal Explanation：
 }
 ```
 
-不得要求模型输出“保证盈利”“确定上涨”等结论。
+不得要求模型输出"保证盈利""确定上涨等结论"。
 
 ## 7. Model routing
 
@@ -101,6 +101,7 @@ Signal Explanation：
 ## 8. Cache
 
 同一：
+
 - prompt version
 - model
 - structured input hash
@@ -113,14 +114,13 @@ Signal Explanation：
 
 优先展示：
 
-> “发生了什么？”
-> “为什么？”
-> “需要关注什么？”
+> "发生了什么？"
+> "为什么？"
+> "需要关注什么？"
 
 再提供：
 
-> “查看专业数据”
-
+> "查看专业数据"\n
 ## 10. AI Daily Budget
 
 系统提供预算设置：

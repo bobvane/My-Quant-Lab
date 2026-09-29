@@ -20,6 +20,31 @@ API base: `/api/v1`
 
 参数：symbol、timeframe、start、end、provider。
 
+## Market Data Series
+
+`GET /market-data-series`
+`GET /market-data-series/{id}`
+`POST /market-data-series`
+
+参数：asset_id、timeframe、provider、timezone。
+
+## Market Data Snapshots
+
+`GET /market-data-snapshots/{series_id}`
+`GET /market-data-snapshots/latest/{series_id}`
+
+## Features
+
+`GET /features`
+`GET /features/{id}`
+`POST /features`
+
+参数：name、type、inputs、outputs。
+
+## Feature Snapshots
+
+`GET /feature-snapshots/{series_id}/bar/{timestamp}`
+
 ## Strategies
 
 `GET /strategies`
@@ -27,9 +52,21 @@ API base: `/api/v1`
 `GET /strategies/{id}`
 `POST /strategies/{id}/versions`
 `GET /strategies/{id}/versions`
+`GET /strategies/{id}/versions/{version}`
 `POST /strategies/{id}/validate`
 `POST /strategies/{id}/backtest`
 `POST /strategies/import/github`
+
+## Strategy Versions
+
+`GET /strategy-versions`
+`GET /strategy-versions/{id}`
+`PUT /strategy-versions/{id}/activate`
+
+## Strategy Parameters
+
+`GET /strategy-parameters`
+`GET /strategy-parameters/{id}`
 
 ## Backtests
 
@@ -38,12 +75,21 @@ API base: `/api/v1`
 `GET /backtests/{id}/trades`
 `POST /backtests/{id}/compare`
 
+## Backtest Results
+
+`GET /backtest-results`
+`GET /backtest-results/{id}`
+
+## Backtest Metrics
+
+`GET /backtest-metrics/backtest/{backtest_id}`
+
 ## Walk-forward/OOS
 
 `POST /research/walk-forward`
 `GET /research/runs/{id}`
 
-## Paper
+## Paper Accounts
 
 `GET /paper/accounts`
 `POST /paper/accounts`
@@ -51,6 +97,23 @@ API base: `/api/v1`
 `GET /paper/accounts/{id}/equity`
 `GET /paper/accounts/{id}/trades`
 `POST /paper/accounts/{id}/reset`（强提醒并生成审计事件）
+
+## Paper Positions
+
+`GET /paper/positions`
+`GET /paper/positions/{id}`
+
+## Paper Orders
+
+`GET /paper/orders`
+`GET /paper/orders/{id}`
+`POST /paper/orders`
+
+## Paper Trades
+
+`GET /paper/trades`
+`GET /paper/trades/{id}`
+`GET /paper/trades/account/{account_id}`
 
 ## Signals
 
@@ -60,37 +123,98 @@ API base: `/api/v1`
 `POST /signals/{id}/explain`
 `POST /signals/{id}/acknowledge`
 
-## Ghostfolio
-
-`POST /integrations/ghostfolio/test`
-`POST /integrations/ghostfolio/sync`
-`GET /integrations/ghostfolio/status`
-
-## AI
+## AI Providers
 
 `GET /ai/providers`
-`POST /ai/test`
+`POST /ai/providers`
+`GET /ai/providers/{id}`
+`PUT /ai/providers/{id}`
+
+## AI Models
+
+`GET /ai/models`
+`GET /ai/models/provider/{provider_id}`
+
+## AI Tasks
+
+`GET /ai/tasks`
+`GET /ai/tasks/{id}`
+`POST /ai/tasks`
+
+## AI Usage
+
 `GET /ai/usage`
-`POST /ai/explain-backtest`
-`POST /ai/explain-signal`
+`GET /ai/usage/provider/{provider_id}`
 
-## GitHub
+## AI Prompts
 
-`POST /github/import`
+`GET /ai/prompts`
+`GET /ai/prompts/{id}`
+`POST /ai/prompts`
+
+## GitHub Sources
+
 `GET /github/sources`
+`POST /github/sources`
+`GET /github/sources/{id}`
 `POST /github/sources/{id}/sync`
 `GET /github/sources/{id}/history`
 
-## Settings
+## GitHub Snapshots
+
+`GET /github/snapshots`
+`GET /github/snapshots/{id}`
+
+## Audit Logs
+
+`GET /audit/logs`
+`GET /audit/logs/entity/{entity_type}/{entity_id}`
+
+## System Settings
 
 `GET /settings`
 `PUT /settings`
 
-## API rules
+## API 规则
 
-- All mutation endpoints require idempotency where jobs can be retried.
-- Long-running tasks return job ID.
-- Errors use structured JSON with code/message/details.
-- Never return API keys.
-- Pagination required for lists.
-- All strategy and signal outputs include explicit versions and timestamps.
+- 所有变更端点都需要幂等性（可重试）
+- 长时间运行的任务返回作业 ID
+- 错误使用结构化 JSON（code/message/details）
+- 从不返回 API key
+- 列表需要分页
+- 所有策略和信号输出包含明确的版本和时间戳
+
+## 扩展端点
+
+根据新的 17 表结构，可能需要以下附加端点：
+
+### Market Data Sources API
+
+`GET /data-sources`
+`POST /data-sources`
+
+### Feature Versions API
+
+`GET /features/versions`
+`GET /features/{feature_id}/versions`
+
+### Strategy Bloodline API
+
+`GET /strategies/{strategy_id}/bloodline`
+`GET /strategies/{strategy_id}/lineage`
+
+### AI Task Monitoring API
+
+`GET /ai/tasks/{task_id}/status`
+`POST /ai/tasks/{task_id}/cancel`
+
+### Paper Trading API
+
+`POST /paper/accounts/{account_id}/orders`
+`GET /paper/accounts/{account_id}/positions/{asset_id}`
+`POST /paper/accounts/{account_id}/orders/{order_id}/cancel`
+
+### Backtest Comparison API
+
+`POST /backtests/compare`
+`GET /backtests/comparisons/{comparison_id}`

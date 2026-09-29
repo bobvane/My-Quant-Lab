@@ -3,6 +3,7 @@
 ## 1. 核心原则
 
 回测引擎必须是确定性的。相同：
+
 - strategy version
 - dataset snapshot
 - parameters
@@ -26,6 +27,7 @@ Bar t closes
 ## 3. Lookahead 防护
 
 测试必须覆盖：
+
 - rolling window 正确 shift
 - target/label 不回流到 features
 - current forming bar 禁止作为已知数据
@@ -37,6 +39,7 @@ Bar t closes
 ## 4. 成交模型
 
 默认：
+
 - next_bar_open
 - fee_bps configurable
 - slippage_bps configurable
@@ -47,6 +50,7 @@ Stop/Take Profit 在同一根 K 线同时触发时，V1 使用保守规则并明
 ## 5. 订单类型
 
 V1：
+
 - Market at next bar open
 - Stop loss
 - Take profit
@@ -56,6 +60,7 @@ P1：Limit、Stop entry。
 ## 6. 市场时段
 
 股票策略必须知道：
+
 - timezone
 - trading session
 - holiday/gap
@@ -65,6 +70,7 @@ P1：Limit、Stop entry。
 ## 7. 费用与滑点
 
 每个 backtest run 必须保存：
+
 - fee model
 - fee rate
 - slippage model
@@ -74,6 +80,7 @@ P1：Limit、Stop entry。
 ## 8. 输出指标
 
 基础：
+
 - initial capital
 - final equity
 - total return
@@ -88,6 +95,7 @@ P1：Limit、Stop entry。
 - turnover
 
 风险调整：
+
 - Sharpe
 - Sortino
 
@@ -96,6 +104,7 @@ P1：Limit、Stop entry。
 ## 9. 交易级记录
 
 每笔交易：
+
 - entry timestamp
 - entry price
 - exit timestamp
@@ -129,6 +138,7 @@ Train window
 ## 12. Golden Tests
 
 内置小型固定 OHLCV fixtures，验证：
+
 - EMA
 - ATR
 - breakout
@@ -138,7 +148,7 @@ Train window
 - no-lookahead
 - portfolio accounting
 
-## 13. 禁止的“回测作弊”
+## 13. 禁止的"回测作弊"
 
 - 未来价格参与当前信号
 - 用最终数据反推历史参数

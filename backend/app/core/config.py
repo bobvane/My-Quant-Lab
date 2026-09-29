@@ -6,10 +6,12 @@ used in every environment. Secrets are never logged and never returned by the AP
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -47,7 +49,10 @@ class Settings(BaseSettings):
     celery_broker_url: str = Field(default="redis://quantlab-redis:6379/1")
     celery_result_backend: str = Field(default="redis://quantlab-redis:6379/2")
 
-    cors_origins: list[str] = Field(
+    # `NoDecode` is essential: without it pydantic-settings tries to json.loads()
+    # the raw environment variable, and a comma separated value such as
+    # "http://a:1,http://b:2" raises SettingsError before our validator runs.
+    cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://localhost:8081"]
     )
 
@@ -76,8 +81,18 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
+        """Accept a comma separated list or a JSON array from the environment."""
+
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
+            text = value.strip()
+            if text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    return [str(item) for item in parsed]
+            return [item.strip() for item in text.split(",") if item.strip()]
         return value
 
     @property

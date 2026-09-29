@@ -51,6 +51,22 @@ if [ -f .env ]; then
             ok ".env: $key is set"
         fi
     done
+
+    policy=$(grep -E '^MQL_PULL_POLICY=' .env | head -n 1 | cut -d= -f2- || echo never)
+    if [ "$policy" = "always" ]; then
+        backend=$(grep -E '^MQL_BACKEND_IMAGE=' .env | head -n 1 | cut -d= -f2- || echo '')
+        if printf '%s' "$backend" | grep -q '^ghcr.io/'; then
+            if docker pull "$backend" >/dev/null 2>&1; then
+                ok "GHCR image reachable ($backend)"
+            else
+                bad "MQL_PULL_POLICY=always but $backend cannot be pulled"
+                echo "       the repository is private: docker login ghcr.io -u <user> --password-stdin"
+                echo "       or set MQL_PULL_POLICY=never to build locally instead"
+            fi
+        fi
+    else
+        ok "images will be built locally (no registry account needed)"
+    fi
 else
     bad ".env not found — run: cp .env.example .env  and edit POSTGRES_PASSWORD / SECRET_KEY"
 fi

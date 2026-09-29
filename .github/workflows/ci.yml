@@ -94,6 +94,8 @@ jobs:
         run: docker compose --env-file .env.example build
 
       - name: Boot the stack
+        env:
+          APP_ENVIRONMENT: ci
         run: |
           set +e
           docker compose --env-file .env.example up -d
@@ -171,15 +173,48 @@ jobs:
           curl -fsS http://127.0.0.1:8081/healthz
           curl -fsS http://127.0.0.1:8081/ | head -c 200
 
-      - name: End-to-end smoke (sync → strategy → backtest → scan)
+      - name: "Smoke 1/5: sync market data"
+        env:
+          APP_ENVIRONMENT: ci
         run: |
           set -euo pipefail
           API=http://127.0.0.1:8080/api/v1
-          curl -fsS -X POST "$API/market-data/sync" \
+          code=$(curl -sS -o /tmp/sync.json -w '%{http_code}' -X POST "$API/market-data/sync" \
             -H 'Content-Type: application/json' \
-            -d '{"symbol":"DEMO-AAPL","timeframe":"1d","lookback_days":400}' | tee /tmp/sync.json
-          grep -q '"inserted":[1-9]' /tmp/sync.json || grep -q '"inserted": [1-9]' /tmp/sync.json
+            -d '{"symbol":"DEMO-AAPL","timeframe":"1d","lookback_days":400}')
+          echo "HTTP $code"
+          cat /tmp/sync.json; echo
+          if [ "$code" != "200" ]; then
+            echo "--- api logs ---"
+            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-api
+            exit 1
+          fi
+          python3 -c "import json;d=json.load(open('/tmp/sync.json'));assert d['inserted']>0, d"
 
+      - name: "Smoke 2/5: create strategy"
+        env:
+          APP_ENVIRONMENT: ci
+        run: |
+          set -euo pipefail
+          API=http://127.0.0.1:8080/api/v1
+          code=$(curl -sS -o /tmp/strategy.json -w '%{http_code}' -X POST "$API/strategies" \
+            -H 'Content-Type: application/json' -d '{"name":"CI Strategy"}')
+          echo "HTTP $code"
+          cat /tmp/strategy.json; echo
+          if [ "$code" != "201" ]; then
+            echo "--- api logs (server traceback is here) ---"
+            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-api
+            exit 1
+          fi
+          SID=$(python3 -c "import json;print(json.load(open('/tmp/strategy.json'))['id'])")
+          echo "SID=$SID" >> "$GITHUB_ENV"
+
+      - name: "Smoke 3/5: create strategy version"
+        env:
+          APP_ENVIRONMENT: ci
+        run: |
+          set -euo pipefail
+          API=http://127.0.0.1:8080/api/v1
           cat > /tmp/dsl.json <<'JSON'
           {
             "schema_version": "1.0",
@@ -191,21 +226,52 @@ jobs:
             "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5, "initial_capital": 10000}
           }
           JSON
+          payload=$(python3 -c "import json;print(json.dumps({'version':'1.0.0','dsl':json.load(open('/tmp/dsl.json'))}))")
+          code=$(curl -sS -o /tmp/version.json -w '%{http_code}' -X POST "$API/strategies/$SID/versions" \
+            -H 'Content-Type: application/json' -d "$payload")
+          echo "HTTP $code"
+          cat /tmp/version.json; echo
+          if [ "$code" != "201" ]; then
+            echo "--- api logs ---"
+            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-api
+            exit 1
+          fi
+          VID=$(python3 -c "import json;print(json.load(open('/tmp/version.json'))['id'])")
+          echo "VID=$VID" >> "$GITHUB_ENV"
 
-          SID=$(curl -fsS -X POST "$API/strategies" -H 'Content-Type: application/json' \
-            -d '{"name":"CI Strategy"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-          VID=$(curl -fsS -X POST "$API/strategies/$SID/versions" -H 'Content-Type: application/json' \
-            -d "$(python3 -c 'import json;print(json.dumps({"version":"1.0.0","dsl":json.load(open("/tmp/dsl.json"))}))')" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-          echo "strategy=$SID version=$VID"
+      - name: "Smoke 4/5: run backtest"
+        env:
+          APP_ENVIRONMENT: ci
+        run: |
+          set -euo pipefail
+          API=http://127.0.0.1:8080/api/v1
+          code=$(curl -sS -o /tmp/backtest.json -w '%{http_code}' -X POST "$API/backtests" \
+            -H 'Content-Type: application/json' \
+            -d "{\"strategy_version_id\": $VID, \"symbol\": \"DEMO-AAPL\", \"timeframe\": \"1d\"}")
+          echo "HTTP $code"
+          head -c 600 /tmp/backtest.json; echo
+          if [ "$code" != "200" ]; then
+            echo "--- api logs ---"
+            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-api
+            exit 1
+          fi
+          python3 -c "import json;d=json.load(open('/tmp/backtest.json'));assert d['status']=='completed', d"
 
-          curl -fsS -X POST "$API/backtests" -H 'Content-Type: application/json' \
-            -d "{\"strategy_version_id\": $VID, \"symbol\": \"DEMO-AAPL\", \"timeframe\": \"1d\"}" \
-            | tee /tmp/backtest.json
-          grep -q '"status":"completed"' /tmp/backtest.json || grep -q '"status": "completed"' /tmp/backtest.json
-
-          curl -fsS -X POST "$API/signals/scan" | head -c 400
-          echo
+      - name: "Smoke 5/5: scan signals"
+        env:
+          APP_ENVIRONMENT: ci
+        run: |
+          set -euo pipefail
+          API=http://127.0.0.1:8080/api/v1
+          code=$(curl -sS -o /tmp/scan.json -w '%{http_code}' -X POST "$API/signals/scan")
+          echo "HTTP $code"
+          head -c 400 /tmp/scan.json; echo
+          if [ "$code" != "200" ]; then
+            echo "--- api logs ---"
+            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-api
+            exit 1
+          fi
+          python3 -c "import json;d=json.load(open('/tmp/scan.json'));print('evaluated =', d['evaluated'])"
 
       - name: Dump logs on failure
         if: failure()

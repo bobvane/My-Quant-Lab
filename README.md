@@ -22,24 +22,38 @@
 
 ## 快速开始（NAS 部署）
 
+**只需要两个文件参与启动**：`docker-compose.yml`（仓库自带，不用改）和 `.env`（唯一需要你创建的文件）。
+
+### 图形化 NAS 界面
+
+1. 把**整个仓库**放进项目目录，例如 `/vol1/1000/Docker/My-Quant-Lab/`
+   （关键是整个目录完整搬运 —— 里面的 `docker/`、`backend/`、`frontend/` 都是构建必需的）
+2. 在该目录下新建文件 `.env`（**文件名就是 `.env`，开头有点、没有扩展名**）
+3. 内容照抄 `.env.example`，至少改掉这两项：
+
+   ```ini
+   POSTGRES_PASSWORD=你的数据库密码
+   SECRET_KEY=0123456789abcdef0123456789abcdef
+   ```
+
+4. 在容器管理界面里：Compose / 项目 → 选择 `My-Quant-Lab` 目录 → 构建 → 启动
+
+镜像在**本机构建**，不需要任何镜像仓库账号。
+
+### 终端命令
+
 ```bash
-git clone https://github.com/bobvane/My-Quant-Lab.git
-cd My-Quant-Lab
-
-# 1) 先跑体检脚本：一次性检查目录完整、.env 已配置、Docker 可用
-./scripts/preflight.sh
-
-# 2) 配置（preflight 会提示缺什么）
+cd /vol1/1000/Docker/My-Quant-Lab
 cp .env.example .env
-sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=换成你的密码/' .env
+sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=你的密码/' .env
 sed -i 's/^SECRET_KEY=.*/SECRET_KEY=0123456789abcdef0123456789abcdef/' .env
 
-# 3) 本地构建并启动（不需要任何镜像仓库账号）
+./scripts/preflight.sh      # 可选：检查目录完整 / .env 已配置 / Docker 可用
 docker compose build
 docker compose up -d
 ```
 
-访问：
+### 访问
 
 - **Web 界面**：http://<NAS-IP>:8081
 - **API 文档**：http://127.0.0.1:8080/docs（默认仅本机绑定，避免无认证暴露）
@@ -55,43 +69,40 @@ docker compose up -d
 排查问题：
 
 ```bash
-docker compose ps -a              # 容器状态与健康状况
+docker compose ps -a                    # 容器状态与健康状况
 docker compose logs --tail 80 quantlab-api
 ```
-
-> 想用真实行情：`.env` 中设置 `MARKET_DATA_PROVIDER=yahoo_finance`
-> （免费行情，无需密钥，但受上游限流影响）。
 
 ### 常见报错对照
 
 | 报错 | 原因 | 处理 |
 |---|---|---|
-| `lstat .../My-Quant-Lab/docker: no such file or directory` | 仓库拷贝不完整或过旧（`docker/` 目录缺失） | 重新 `git clone`，或在该目录执行 `git pull` |
-| `Head "https://ghcr.io/...": unauthorized` | 试图从私有仓库拉镜像 | 默认已改为本地构建；见下方「使用预构建镜像」 |
-| `POSTGRES_PASSWORD is required` | `.env` 未创建或未填写 | `cp .env.example .env` 后编辑 |
+| `lstat .../My-Quant-Lab/docker: no such file or directory` | 仓库拷贝不完整或过旧（缺 `docker/` 目录） | 重新完整拷贝，或在该目录执行 `git pull` |
+| `POSTGRES_PASSWORD is required` | `.env` 未创建或未填写 | `cp .env.example .env` 后修改 |
 | `container quantlab-api is unhealthy` | 启动失败 | `docker compose logs --tail 100 quantlab-api`，日志会直接给出原因 |
+| `Head "https://ghcr.io/...": unauthorized` | 把 `MQL_PULL_POLICY` 改成了 `always` 但没登录 | 改回 `MQL_PULL_POLICY=never` 走本地构建；或先 `docker login ghcr.io` |
+
+> 想用真实行情：`.env` 中设置 `MARKET_DATA_PROVIDER=yahoo_finance`
+> （免费行情，无需密钥，但受上游限流影响）。
 
 ---
 
-## 使用预构建镜像（GitHub Packages）
+## 可选：使用 GitHub Packages 预构建镜像
 
-仓库是私有的，拉取前需要登录：
+默认走本地构建。如果你想跳过现场构建（NAS 性能有限时更快）：
 
 ```bash
+# 仓库是私有的，必须先登录，否则 unauthorized
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u <你的GitHub用户名> --password-stdin
-
-# 切换到 GHCR 覆盖文件
-docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
-docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 ```
 
-或在 `.env` 里指定版本号（需先 `docker login ghcr.io`）：
+然后在 `.env` 里改三项，**不需要额外的 compose 文件**：
 
-```bash
-echo "MQL_VERSION=v0.0.4" >> .env
+```ini
+MQL_PULL_POLICY=always
+MQL_BACKEND_IMAGE=ghcr.io/bobvane/my-quant-lab-backend:v0.0.6
+MQL_WEB_IMAGE=ghcr.io/bobvane/my-quant-lab-web:v0.0.6
 ```
-
-**默认路径不需要登录**：直接 `docker compose build` 即可在本机构建。
 
 ---
 

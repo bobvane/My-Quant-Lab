@@ -106,14 +106,18 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set +e
-          # Pull the released images and force compose to use them instead of
-          # building locally (the repo checkout is used only as config source).
+          # Smoke test the images we just pushed. The single compose file is used
+          # as-is; pulling is switched on through the documented env variables
+          # instead of a second override file.
           docker pull "${BACKEND_IMAGE}:${VERSION}"
           docker pull "${WEB_IMAGE}:${VERSION}"
 
-          sed -i "s#^MQL_VERSION=.*#MQL_VERSION=${VERSION}#" .env.example
           sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-smoke-password/' .env.example
           sed -i 's/^SECRET_KEY=.*/SECRET_KEY=ci-smoke-secret-key-0123456789abcdef/' .env.example
+
+          export MQL_PULL_POLICY=always
+          export MQL_BACKEND_IMAGE="${BACKEND_IMAGE}:${VERSION}"
+          export MQL_WEB_IMAGE="${WEB_IMAGE}:${VERSION}"
 
           docker compose --env-file .env.example up -d --no-build
           up_rc=$?

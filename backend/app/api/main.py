@@ -82,13 +82,18 @@ def create_app() -> FastAPI:
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):  # pragma: no cover
         logger.exception("unhandled error on %s", request.url.path)
+        details: dict[str, object] = {"path": str(request.url.path)}
+        if not settings.is_production:
+            # Outside production the cause is returned to the caller so CI and
+            # local debugging do not have to dig through container logs.
+            details["exception"] = f"{type(exc).__name__}: {exc}"
         return JSONResponse(
             status_code=500,
             content={
                 "error": {
                     "code": "internal_error",
                     "message": "internal server error",
-                    "details": {"path": str(request.url.path)},
+                    "details": details,
                 }
             },
         )

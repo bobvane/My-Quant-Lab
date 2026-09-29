@@ -191,11 +191,22 @@ jobs:
             echo "git clone https://github.com/${{ github.repository }}.git"
             echo "cd $(basename "${{ github.repository }}")"
             echo "cp .env.example .env    # then edit POSTGRES_PASSWORD and SECRET_KEY"
-            echo "sed -i 's#^MQL_VERSION=.*#MQL_VERSION=${version}#' .env"
+            echo "docker compose build && docker compose up -d"
+            echo '```'
+            echo
+            echo "Prefer the published images instead of a local build? The repository"
+            echo "is private, so log in first, then point the stock compose file at them"
+            echo "(no extra compose file needed):"
+            echo
+            echo '```bash'
+            echo 'echo "$GITHUB_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin'
+            echo "export MQL_PULL_POLICY=always"
+            echo "export MQL_BACKEND_IMAGE=${BACKEND_IMAGE}:${version}"
+            echo "export MQL_WEB_IMAGE=${WEB_IMAGE}:${version}"
             echo "docker compose up -d"
             echo '```'
             echo
-            echo "Web UI: http://<nas-ip>:8081 · API docs: http://<nas-ip>:8080/docs"
+            echo "Web UI: http://<nas-ip>:8081 · API docs: http://<nas-ip>:8081/docs"
             echo
             echo "### Notes"
             echo

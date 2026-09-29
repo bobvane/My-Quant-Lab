@@ -269,9 +269,7 @@ def test_openapi_schema_generated(client) -> None:
     assert "/api/v1/backtests" in paths
 
 
-def test_unexpected_error_is_reported_with_detail_outside_production(
-    client, monkeypatch
-) -> None:
+def test_unexpected_error_is_reported_with_detail_outside_production(client, monkeypatch) -> None:
     """Outside production the failure reason is returned to the caller.
 
     Container debugging (CI smoke tests, NAS troubleshooting) depends on this:

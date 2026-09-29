@@ -17,6 +17,22 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    services:
+      # Scratch PostgreSQL for the trigger regression suite. The unit suite
+      # runs on SQLite, but anything that only exists on PostgreSQL (trigger
+      # functions, timestamptz behaviour) is invisible there — which is how a
+      # broken trigger shipped and 500'd every version creation in production.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: quantlab_test
+          POSTGRES_PASSWORD: quantlab_test
+          POSTGRES_DB: quantlab_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U quantlab_test -d quantlab_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v5
 
@@ -44,6 +60,14 @@ jobs:
           MARKET_DATA_PROVIDER: synthetic
           APP_ENVIRONMENT: test
         run: pytest -o addopts= --cov=app --cov-report=term-missing --cov-report=xml
+
+      - name: Run PostgreSQL regression tests
+        env:
+          DATABASE_URL: "sqlite+pysqlite:///:memory:"
+          TEST_POSTGRES_URL: postgresql+psycopg://quantlab_test:quantlab_test@localhost:5433/quantlab_test
+          MARKET_DATA_PROVIDER: synthetic
+          APP_ENVIRONMENT: test
+        run: pytest -o addopts= tests/test_postgres_triggers.py -v
 
       - name: Upload coverage
         if: always()

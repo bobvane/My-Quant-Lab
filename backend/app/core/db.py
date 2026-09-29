@@ -15,9 +15,17 @@ class Base(DeclarativeBase):
     """Declarative base shared by every ORM model."""
 
 
-def _build_engine():
+def _build_engine(database_url: str | None = None):
+    """Build the application engine.
+
+    ``database_url`` is injectable so tests can construct the *real* engine
+    against a scratch PostgreSQL (session timezone pinning, timeouts and pool
+    settings included) instead of reimplementing them.
+    """
+
+    url = database_url or settings.database_url
     kwargs: dict = {"echo": settings.database_echo, "future": True, "pool_pre_ping": True}
-    if settings.database_url.startswith("sqlite"):
+    if url.startswith("sqlite"):
         kwargs.pop("pool_pre_ping", None)
         kwargs["connect_args"] = {"check_same_thread": False}
     else:
@@ -25,8 +33,14 @@ def _build_engine():
         kwargs["max_overflow"] = settings.db_max_overflow
         # Never let a half-open connection wedge a request (or the container
         # health check): fail fast instead of hanging forever.
-        kwargs["connect_args"] = {"connect_timeout": settings.db_connect_timeout}
-    return create_engine(settings.database_url, **kwargs)
+        # `options` pins the session timezone to UTC so timestamp behaviour is
+        # identical regardless of the server's own timezone setting (CI, NAS,
+        # developer machines all differ here).
+        kwargs["connect_args"] = {
+            "connect_timeout": settings.db_connect_timeout,
+            "options": "-c timezone=UTC",
+        }
+    return create_engine(url, **kwargs)
 
 
 engine = _build_engine()

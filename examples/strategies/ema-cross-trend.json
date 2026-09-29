@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "strategy": {
+    "id": "ema-cross-trend",
+    "name": "EMA 交叉趋势过滤",
+    "version": "1.0.0",
+    "description": "快慢 EMA 金叉做多、死叉离场，并用收盘位置过滤弱突破。仅用于演示结构，不构成投资建议。",
+    "source": { "type": "builtin" }
+  },
+  "market": {
+    "asset_classes": ["stock", "etf", "crypto"],
+    "timeframes": ["1d"],
+    "allow_short": false
+  },
+  "indicators": [
+    { "id": "fast", "type": "EMA", "period": 20, "input": "close" },
+    { "id": "slow", "type": "EMA", "period": 50, "input": "close" }
+  ],
+  "features": [
+    "body_ratio",
+    "close_position",
+    "range_atr_ratio",
+    "atr14"
+  ],
+  "parameters": {
+    "stop_atr_multiple": 2.0,
+    "target_r_multiple": 2.0
+  },
+  "entry": {
+    "long": {
+      "all": [
+        { "op": "crosses_above", "left": "ema20", "right": "ema50" },
+        { "op": "gt", "left": "close", "right": "ema20" },
+        { "op": "gt", "left": "close_position", "right": "0.5" }
+      ]
+    }
+  },
+  "exit": {
+    "long": {
+      "any": [
+        { "op": "crosses_below", "left": "ema20", "right": "ema50" },
+        { "op": "lt", "left": "close_position", "right": "0.3" }
+      ]
+    }
+  },
+  "risk": {
+    "stop_loss": { "type": "atr_multiple", "multiple": 2.0 },
+    "take_profit": { "type": "risk_multiple", "multiple": 2.0 },
+    "max_position_pct": 0.5
+  },
+  "execution": {
+    "fill_model": "next_bar_open",
+    "fee_bps": 10,
+    "slippage_bps": 5,
+    "allow_fractional": true,
+    "initial_capital": 10000
+  }
+}

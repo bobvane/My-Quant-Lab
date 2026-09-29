@@ -1,197 +1,229 @@
-# My Quant Lab — 个人量化策略实验室
+# My Quant Lab — Personal Quantitative Research Laboratory
 
-> 版本：V0.0.1 Product & Development Specification
-> 目标：NAS Docker 自托管的 AI 辅助个人量化策略实验室
+> 个人量化策略研究实验室 · NAS Docker 自托管 · **研究用途，不自动交易**
+> 当前版本：**v0.0.1** · 技术栈：Python 3.12 + FastAPI + PostgreSQL + Redis + Celery + Vue 3
 
-## 📋 项目概述
+本项目为非程序员提供**可复现、可解释、AI 辅助**的量化策略研究环境，重点覆盖美股 / ETF /
+加密货币的策略研究、回测、Walk-Forward 分析与 Paper Trading。
 
-My Quant Lab 是为非程序员设计的个人量化策略研究实验室，专注于策略验证、模拟交易和实时信号生成。系统基于六层模块化架构，采用 6 个 Docker 服务，遵循"模块化单体 + Docker 服务化基础设施"的设计原则。
+---
 
-## 🔧 核心架构决策 (Q1-Q10)
+## 五条不可逾越的红线
 
-### Q1 Docker 服务架构
-**采用 6 个核心服务：**
-- `quantlab-web`：Vue 3 + TypeScript 前端
-- `quantlab-api`：FastAPI API 网关
-- `quantlab-worker`：Celery 异步任务处理
-- `quantlab-scheduler`：Celery Beat 定时任务
-- `quantlab-postgres`：PostgreSQL 数据库
-- `quantlab-redis`：Redis 缓存和分布式任务队列
+| # | 红线 | 实现方式 |
+|---|------|----------|
+| 1 | **不自动交易** | 代码中不存在任何券商下单端点，测试 `test_no_broker_endpoint_exists` 强制校验 |
+| 2 | **AI 不决定量化结果** | 所有指标由 `app/research/metrics.py` 计算；AI 只做解释（`app/ai/`） |
+| 3 | **回测必须可复现** | 结果哈希 = 策略版本 + 数据集哈希 + 参数 + 引擎版本 + 特征版本 |
+| 4 | **真实持仓与模拟盘隔离** | Ghostfolio 只读；模拟账户使用独立表与虚拟资金 |
+| 5 | **GitHub 代码视为不可信输入** | 导入器只做文本/结构分析，不执行第三方代码 |
 
-**网络架构：**
-- **frontend network**：Web 应用和 API 网关
-- **backend network**：所有业务逻辑层和服务基础设施
+---
 
-### Q2 数据库设计
-**17 个核心表，包括：**
-- Assets, MarketData, MarketDataSources
-- Strategies, StrategyVersions, StrategyParameters
-- Features, FeatureSnapshots
-- BacktestRuns, BacktestResults, BacktestMetrics
-- PaperAccounts, PaperPositions, PaperOrders, PaperTrades
-- AIProviders, AIModels, AITasks, AIUsage, AIPrompts
-- Jobs, JobLogs, AuditLogs, SystemSettings
+## 快速开始（NAS 部署）
 
-**策略版本不可变性**：历史回测关联 Strategy Version + Dataset Version + Parameters + Engine Version + Feature Version
-
-### Q5 AI 提供者
-**采用 Provider Adapter 架构，支持：**
-- OpenAI、Anthropic、Google Gemini、DeepSeek、Qwen、Kimi、GLM、OpenRouter 等
-- OpenAI-compatible API 适配
-- 预算管理和任务路由
-
-### Q7 市场数据
-**采用 MarketDataProvider 抽象，统一接口：**
-```python
-MarketDataProvider
-├── get_assets()
-├── get_quotes()
-├── get_ohlcv()
-├── get_intraday()
-└── get_fundamentals()
-```
-
-## 🎯 项目目标
-
-My Quant Lab V1 专注于：
-
-- **策略验证和模拟交易**
-- **AI 辅助策略发现**
-- **实时信号生成**
-- **完整审计跟踪**
-
-**不**提供自动交易功能，专注于研究和分析。
-
-## 🚀 部署到 NAS
-
-### 1. 克隆仓库
 ```bash
 git clone https://github.com/bobvane/My-Quant-Lab.git
 cd My-Quant-Lab
-```
 
-### 2. 设置环境
-```bash
-# 复制环境模板并配置
-source .env.example
-# 编辑 .env 文件
-# 设置数据库密码、Redis 密码等
-```
+cp .env.example .env
+# 必改两项：
+#   POSTGRES_PASSWORD=你的数据库密码
+#   SECRET_KEY=openssl rand -hex 32 的输出
 
-### 3. 构建和运行
-```bash
-# 构建镜像和启动服务
-docker compose build
 docker compose up -d
 ```
 
-### 4. 访问服务
-- Web 界面：NAS IP
-- API 健康检查：NAS IP:8080/api/v1/health
+访问：
 
-### 5. 测试
+- **Web 界面**：http://<NAS-IP>:8081
+- **API 文档**：http://127.0.0.1:8080/docs（默认仅本机绑定，避免无认证暴露）
+- **健康检查**：http://127.0.0.1:8080/api/v1/health
+
+首次进入「行情与策略」页面：
+
+1. 点击 **同步日线数据**（默认 `synthetic` 行情源，无需 API Key，即可跑通全流程）
+2. 编辑左侧 DSL → **校验 DSL** → **创建策略与版本**
+3. 回到「研究仪表盘」→ **立即扫描** 查看信号
+4. 到「回测实验室」运行回测并查看权益曲线
+
+> 想用真实行情：`.env` 中设置 `MARKET_DATA_PROVIDER=yahoo_finance`
+> （免费行情，无需密钥，但受上游限流影响）。
+
+---
+
+## 直接拉取已发布镜像（GHCR）
+
+每次打 `v*` 标签，CI 会构建并推送两个镜像到 GitHub Packages：
+
 ```bash
-curl -f http://localhost:8080/api/v1/health
-curl -f http://localhost/health
+docker pull ghcr.io/bobvane/my-quant-lab-backend:v0.0.1
+docker pull ghcr.io/bobvane/my-quant-lab-web:v0.0.1
 ```
 
-## 📁 文件结构
+在 `.env` 中设置 `MQL_VERSION=v0.0.1` 后 `docker compose up -d` 即可使用该版本。
 
+镜像若为私有包，先执行：
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u <你的GitHub用户名> --password-stdin
 ```
+
+---
+
+## 架构（已确定的 Q1–Q10 决策）
+
+### 六个 Docker 服务
+
+| 服务 | 作用 | 网络 |
+|------|------|------|
+| `quantlab-web` | Vue 3 + TypeScript + Vite（nginx 分发，代理 /api） | frontend |
+| `quantlab-api` | FastAPI（REST + OpenAPI），启动时自动执行 Alembic 迁移 | frontend + backend |
+| `quantlab-worker` | Celery worker（行情同步、回测、信号扫描） | backend |
+| `quantlab-scheduler` | Celery Beat（每 15 分钟扫描一次信号） | backend |
+| `quantlab-postgres` | PostgreSQL 16 | backend（不对外暴露） |
+| `quantlab-redis` | Redis 7（缓存 + Broker + Result） | backend（不对外暴露） |
+
+> 设计原则：**模块化单体 + Docker 服务化基础设施**。业务域不拆微服务。
+
+### 应用内部领域层
+
+```text
+backend/app/
+├── domain/         # 枚举、ORM 模型、Provider 协议
+├── data/           # 仓储、行情 Provider（Graft 抽象）
+├── features/       # 指标 + Price Action（纯确定性函数）
+├── strategies/     # DSL Schema、静态校验器、确定性执行器
+├── research/       # 回测引擎、绩效指标、Walk-Forward
+├── simulation/     # 模拟盘、信号引擎
+├── ai/             # Provider Adapter（仅解释，不计算）
+├── infrastructure/ # 密钥加密、日志脱敏
+├── api/            # FastAPI 路由与 Schema
+└── workers/        # Celery 任务
+```
+
+---
+
+## 量化引擎契约
+
+### 时间推进（无未来函数）
+
+```text
+bar t 收盘
+  → 用截至 t 的信息评估信号
+  → 订单在 t+1 开盘成交（fill_model = next_bar_open）
+```
+
+- 指标预热期输出 `NaN`，不参与交易；
+- 突破位使用**当前 K 线之前**的 N 根最高/最低价；
+- 截断历史数据后重算，历史区间的特征值必须完全一致
+  （`test_build_features_lookahead_regression` 强制校验）。
+
+### 成交与成本
+
+- 默认 `next_bar_open` 成交，滑点与手续费按 bps 计入；
+- 止损与止盈在同一根 K 线同时触发时，**按保守的止损价成交**并标记
+  `ambiguous_fill`，绝不选择对结果更有利的一侧。
+
+### 可复现性
+
+每次回测记录并可校验：
+
+```text
+Strategy Version (immutable_hash) + Dataset Hash + Parameters
++ Engine Version + Feature Version  →  Result Hash
+```
+
+策略版本在**数据库层面**由触发器保护（`alembic/versions/0002_immutability.py`），
+已完成的回测结果同样不可篡改。
+
+---
+
+## 本地开发
+
+### 后端
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+pip install pytest ruff
+
+export DATABASE_URL=sqlite+pysqlite:///:memory:      # 测试无需外部服务
+export MARKET_DATA_PROVIDER=synthetic
+
+pytest -o addopts=            # 运行全部测试
+ruff check app tests          # 静态检查
+python scripts/check_examples.py   # 校验示例策略可跑通
+```
+
+启动开发服务器：
+
+```bash
+uvicorn app.api.main:app --reload --port 8080
+```
+
+### 前端
+
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:5173，/api 代理到 8080
+npm run build
+```
+
+---
+
+## 版本与发布
+
+版本号从 `v0.0.1` 起，每段 0–9，到 10 进位（`v0.0.10 → v0.1.0`）。
+
+```bash
+./scripts/version.sh show          # 查看当前版本
+./scripts/version.sh bump --tag    # 升版本、提交、打标签
+git push origin main && git push origin <新版本号>
+```
+
+推送标签后 `release.yml` 会自动：
+
+1. 构建并推送 `backend` / `web` 镜像到 GHCR；
+2. 用该版本镜像跑一次冒烟测试；
+3. 创建 GitHub Release，附带 NAS 部署说明。
+
+---
+
+## 常见问题
+
+**页面能打开但提示后端不可用**
+后端默认只绑定 `127.0.0.1:8080`，由 `quantlab-web` 代理访问。若要从局域网直接调 API，
+把 `.env` 的 `API_BIND` 改为 `0.0.0.0`（**请自行加反向代理与认证**）。
+
+**回测提示「需要至少 60 根已收盘 K 线」**
+先在「行情与策略」页面同步数据。
+
+**指标显示 N/A**
+样本不足时系统**故意不显示**数值，而不是编造。样本量满足后自动出现。
+
+**AI 解释不可用**
+AI 是可选能力。未配置 provider 时量化功能全部正常，只是没有自然语言解释。
+
+---
+
+## 目录结构
+
+```text
 My-Quant-Lab/
-├── My_Quant_Lab_Development_Docs/
-│   └── 00_README.md              # 项目总纲
-├── MY_QUANT_LAB_Docs/            # 设计文档汇总
-│   └── summary.md               # 架构决策总结
-├── scripts/                     # 版本管理工具
-│   └── version.sh
-├── NAS_DEPLOYMENT_GUIDE.md      # NAS 部署指南
-├── README.md                    # 本 README 文件
-└── .env.example                 # 环境配置示例
+├── backend/            # FastAPI 应用、领域层、迁移、测试
+├── frontend/           # Vue 3 + TypeScript 界面
+├── docker/             # Dockerfile、entrypoint、nginx 配置
+├── examples/strategies # 示例策略 DSL
+├── scripts/version.sh  # 版本与发布脚本
+├── docs/               # 开发文档（设计规格）
+├── docker-compose.yml  # 六服务编排
+└── .env.example        # 环境变量模板
 ```
 
-## 📋 主要设计文件
+---
 
-- **00_README.md** - 项目总纲和 V1 技术栈
-- **01_PRODUCT_SPEC.md** - 产品需求和用户流程
-- **02_ARCHITECTURE.md** - 系统架构和模块设计
-- **03_MODULES.md** - 功能模块规范
-- **04_STRATEGY_DSL.md** - 统一策略规范
-- **05_GITHUB_STRATEGY_IMPORT.md** - GitHub 策略导入
-- **06_AI_LAYER.md** - AI 智能层设计
-- **07_BACKTEST_ENGINE.md** - 回测引擎
-- **08_PAPER_TRADING.md** - 模拟交易
-- **09_SIGNAL_ENGINE.md** - 信号引擎
-- **10_GHOSTFOLIO_INTEGRATION.md** - Ghostfolio 集成
-- **11_DATA_MODEL.md** - 数据模型设计
-- **12_API_SPEC.md** - API 契约
-- **14_SECURITY_LICENSE.md** - 安全和许可证
-- **15_ROADMAP_ACCEPTANCE.md** - 路线图和验收标准
-- **19_DEVELOPMENT_PLAYBOOK.md** - 分阶段实施指南
-
-## 🔧 开发流程
-
-### Phase 0 – Foundation (Weeks 1-4)
-- Docker Compose、DB、Redis、API、Web、基础认证、迁移、日志
-
-### Phase 1 – Market Data + Quant Core (Weeks 5-10)
-- OHLCV、EMA/ATR/RSI/MACD/Bollinger、PA features、Strategy DSL
-
-### Phase 2 – Backtest Lab (Weeks 11-16)
-- 核心回测引擎、trade log、metrics、OOS
-
-### Phase 3 – Ghostfolio (Weeks 17-22)
-- REST adapter、sync、portfolio context
-
-### Phase 4 – Paper Trading (Weeks 23-28)
-- 虚拟现金、持仓、权益曲线、交易记录
-
-### Phase 5 – AI Layer (Weeks 29-36)
-- Provider abstraction、OpenAI-compatible API、预算、缓存、解释
-
-### Phase 6 – GitHub Strategy Importer (Weeks 37-44)
-- 仓库导入、策略提取、provenance、license、version diff
-
-### Phase 7 – Live Signal (Weeks 45-52)
-- scheduler、scanner、notification、signal outcomes
-
-### Phase 8 – Strategy Lifecycle (Weeks 53-60)
-- automated promotion/degradation rules、strategy dashboard
-
-## 🔴 五条架构红线
-
-1. **不自动交易** - V1 是研究实验室，不是自动交易系统
-2. **AI 不决定量化结果** - AI 只解释，不计算
-3. **回测可复现** - 策略版本 + 数据集 + 参数 + 引擎 + 特征
-4. **Real Portfolio 与 Paper Trading 隔离** - Ghostfolio 数据只读
-5. **GitHub 导入代码视为不可信输入** - 使用 AST/文本/AI 提取
-
-## 📊 项目状态
-
-| 阶段 | 状态 | 备注 |
-|-------|------|------|
-| 架构设计 | ✅ 已完成 | 所有 Q1-Q10 决策已确定 |
-| 设计文档 | ✅ 已完成 | 14 个文件已更新 |
-| Phase 0 实施 | ⏳ 待开始 | 完成后立即开始 |
-
-## 🚀 下一步
-
-1. **克隆仓库** 并设置环境
-2. **启动服务**
-3. **进行功能测试**
-4. **验证架构设计**
-
-## 📞 技术支持
-
-如遇问题，请检查：
-1. **环境配置** - Docker、环境变量、端口冲突
-2. **日志** - 服务日志、docker compose logs
-3. **网络** - Docker 网络、连接状态
-
-## 🏷️ 版本信息
-
-当前版本：v0.0.1
-下一版本将基于开发进度发布
-
-> GitHub 仓库：https://github.com/bobvane/My-Quant-Lab
-> NAS 部署指南：NAS_DEPLOYMENT_GUIDE.md
+> **免责声明**：本项目仅用于策略研究、回测与模拟，不构成投资建议，
+> 不连接任何券商，也不会自动执行真实交易。所有投资决策由你自己做出。

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+secrets/
+config/local.*
+
+# Build artefacts
+release/
+.mql-venv/
+*.db
+*.sqlite3
+postgres_data/
+redis_data/
+testout.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "strategy": {
+    "id": "pa-breakout",
+    "name": "PA Breakout（价格行为突破）",
+    "version": "1.0.0",
+    "description": "收盘价突破前 N 根 K 线高点且站上 EMA20 时入场，ATR 止损 + R 倍数止盈。仅用于验证系统结构，不代表已验证有效的策略。",
+    "source": { "type": "builtin" }
+  },
+  "market": {
+    "asset_classes": ["stock", "etf", "crypto"],
+    "timeframes": ["1d"],
+    "allow_short": false
+  },
+  "indicators": [
+    { "id": "trend", "type": "EMA", "period": 20, "input": "close" },
+    { "id": "vol", "type": "ATR", "period": 14, "input": "ohlc" }
+  ],
+  "features": [
+    "body_ratio",
+    "close_position",
+    "breakout",
+    "breakout_follow_through",
+    "prior_high",
+    "atr14"
+  ],
+  "parameters": {
+    "lookback": 20
+  },
+  "entry": {
+    "long": {
+      "all": [
+        { "op": "gt", "left": "close", "right": "prior_high" },
+        { "op": "gt", "left": "close", "right": "ema20" },
+        { "op": "gt", "left": "close_position", "right": "0.6" }
+      ]
+    }
+  },
+  "exit": {
+    "long": {
+      "any": [
+        { "op": "lt", "left": "close", "right": "ema20" },
+        { "op": "gt", "left": "lower_wick_ratio", "right": "0.5" }
+      ]
+    }
+  },
+  "risk": {
+    "stop_loss": { "type": "atr_multiple", "multiple": 2.0 },
+    "take_profit": { "type": "risk_multiple", "multiple": 2.5 },
+    "max_position_pct": 0.4
+  },
+  "execution": {
+    "fill_model": "next_bar_open",
+    "fee_bps": 10,
+    "slippage_bps": 5,
+    "allow_fractional": true,
+    "initial_capital": 10000
+  }
+}

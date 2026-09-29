@@ -185,8 +185,7 @@ jobs:
             echo "### Deploy on your NAS (2 files only)"
             echo
             echo "No source code needed. Get \`docker-compose.yml\` and"
-            echo "\`.env.example\` from the deploy repository"
-            echo "(https://github.com/bobvane/My-Quant-Lab-Deploy), then:"
+            echo "\`.env.example\` from the repo root, then:"
             echo
             echo '```bash'
             echo "cp .env.example .env    # then edit POSTGRES_PASSWORD and SECRET_KEY"
@@ -203,7 +202,7 @@ jobs:
             echo
             echo "### License"
             echo
-            echo "Use requires the author's prior written consent — see LICENSE."
+            echo "MIT — see LICENSE."
             echo
             echo "### Notes"
             echo

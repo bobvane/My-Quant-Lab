@@ -2,7 +2,7 @@
 
 > 个人量化策略研究实验室 · NAS Docker 自托管 · **研究用途，不自动交易**
 > 技术栈：Python 3.12 + FastAPI + PostgreSQL + Redis + Celery + Vue 3
-> 许可：使用须经作者事先书面同意，详见 [LICENSE](./LICENSE)
+> 许可：MIT，详见 [LICENSE](./LICENSE)
 
 本项目为非程序员提供**可复现、可解释、AI 辅助**的量化策略研究环境，重点覆盖美股 / ETF /
 加密货币的策略研究、回测、Walk-Forward 分析与 Paper Trading。
@@ -23,16 +23,8 @@
 
 ## 快速开始（NAS 部署）
 
-> 本仓库为私有开发仓库。面向最终用户的部署文件在公开仓库
-> **My-Quant-Lab-Deploy**（仅 `docker-compose.yml` + `.env.example` +
-> `README.md` + `LICENSE`，无源码）。以下为开发者备忘，面向用户的
-> 最新部署说明以 Deploy 仓库的 README 为准。
-
 **只需要两个文件**：`docker-compose.yml` 和 `.env`（都放在同一个项目目录里）。
 镜像来自 GitHub Packages 预构建，**不需要源码、不需要登录、不需要构建**。
-
-> 许可说明：本项目使用须经作者同意，详见 [LICENSE](./LICENSE)。
-> 镜像公开仅为方便部署，不代表放弃任何权利。
 
 ### 图形化 NAS 界面（推荐）
 
@@ -116,8 +108,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
 
 ## 许可
 
-本项目**不是开源项目**。查看、部署、使用、引用均须事先获得作者书面同意，
-详见 [LICENSE](./LICENSE).
+本项目采用 MIT 许可，详见 [LICENSE](./LICENSE)。
 
 ---
 

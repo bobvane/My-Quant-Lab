@@ -1,72 +1,109 @@
 #!/bin/sh
 # Role-based entrypoint for the shared backend image.
 #
-#   APP_ROLE=api        -> run migrations, then serve the FastAPI app
-#   APP_ROLE=worker     -> run Celery worker
-#   APP_ROLE=scheduler  -> run Celery beat
-#   APP_ROLE=migrate    -> run migrations only, then exit
+#   APP_ROLE=api        run migrations, then serve the FastAPI app
+#   APP_ROLE=worker     run the Celery worker
+#   APP_ROLE=scheduler  run Celery beat
+#   APP_ROLE=migrate    run migrations only, then exit
+#   APP_ROLE=shell      drop into a shell
 set -eu
 
 ROLE="${APP_ROLE:-api}"
+PORT="${PORT:-8080}"
 
+log() { echo "[entrypoint] $*"; }
+
+dump_context() {
+    log "---- diagnostics ----"
+    log "role=$ROLE port=$PORT"
+    log "python: $(python -V 2>&1)"
+    log "alembic current: $(alembic current 2>&1 | tail -n 2 | tr '\n' ' ')"
+    log "alembic history: $(alembic history 2>&1 | tail -n 5 | tr '\n' ' ')"
+    log "----------------------"
+}
+
+# Wait for PostgreSQL. Uses a real query, not just a TCP connect, so we do not
+# race the database's own startup.
 wait_for_db() {
-    # Alembic will fail fast anyway; this gives a clearer log on first boot.
     i=0
-    while [ "$i" -lt 30 ]; do
-        if python -c "
+    while [ "$i" -lt 60 ]; do
+        if python - <<'PY' >/dev/null 2>&1
 import sys
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 from app.core.config import settings
+
 try:
-    e = create_engine(settings.database_url, poolclass=__import__('sqlalchemy').pool.NullPool)
-    with e.connect() as c:
-        c.execute(text('SELECT 1'))
-except Exception:
+    engine = create_engine(settings.database_url, poolclass=NullPool)
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+except Exception as exc:  # noqa: BLE001
+    print(f"not ready: {exc}", file=sys.stderr)
     sys.exit(1)
-" 2>/dev/null; then
+PY
+        then
+            log "database is ready"
             return 0
         fi
         i=$((i + 1))
-        echo "waiting for database ($i/30)..."
+        log "waiting for database ($i/60)…"
         sleep 2
     done
-    echo "database not reachable, continuing anyway (alembic will report the error)"
+    log "WARNING: database did not become ready in time; continuing"
     return 0
 }
 
 run_migrations() {
-    echo ">>> running database migrations"
-    alembic upgrade head
+    # Several API/worker replicas can start at once; alembic serialises on the
+    # version table, and a failure here must stop the container loudly rather
+    # than let the app serve against a half-migrated schema.
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+        log "running database migrations (attempt ${attempt}/3)"
+        if alembic upgrade head; then
+            log "migrations complete"
+            return 0
+        fi
+        log "migration attempt ${attempt} failed"
+        attempt=$((attempt + 1))
+        sleep 5
+    done
+    log "ERROR: migrations failed; refusing to start"
+    dump_context
+    return 1
 }
 
 case "$ROLE" in
     api)
         wait_for_db
         run_migrations
-        echo ">>> starting API on port ${PORT:-8080}"
-        exec uvicorn app.api.main:app --host 0.0.0.0 --port "${PORT:-8080}" --proxy-headers
+        log "starting API on port ${PORT}"
+        exec uvicorn app.api.main:app \
+            --host 0.0.0.0 --port "${PORT}" \
+            --proxy-headers --forwarded-allow-ips='*' \
+            --no-server-header
         ;;
     worker)
         wait_for_db
-        echo ">>> starting celery worker"
+        log "starting celery worker"
         exec celery -A app.workers.celery_app.celery_app worker \
             --loglevel=INFO --concurrency="${CELERY_CONCURRENCY:-2}"
         ;;
     scheduler)
         wait_for_db
-        echo ">>> starting celery beat"
+        log "starting celery beat"
         exec celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
         ;;
     migrate)
         wait_for_db
         run_migrations
-        echo ">>> migrations complete"
+        log "migrations complete"
         ;;
     shell)
         exec /bin/sh
         ;;
     *)
-        echo "unknown APP_ROLE: $ROLE" >&2
+        log "unknown APP_ROLE: $ROLE"
         exit 1
         ;;
 esac

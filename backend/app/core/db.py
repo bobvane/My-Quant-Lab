@@ -23,6 +23,9 @@ def _build_engine():
     else:
         kwargs["pool_size"] = settings.db_pool_size
         kwargs["max_overflow"] = settings.db_max_overflow
+        # Never let a half-open connection wedge a request (or the container
+        # health check): fail fast instead of hanging forever.
+        kwargs["connect_args"] = {"connect_timeout": settings.db_connect_timeout}
     return create_engine(settings.database_url, **kwargs)
 
 

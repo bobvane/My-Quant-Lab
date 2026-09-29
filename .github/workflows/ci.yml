@@ -92,19 +92,42 @@ jobs:
 
       - name: Boot the stack
         run: |
+          set +e
           docker compose --env-file .env.example up -d
+          rc=$?
+          echo "=== compose up exit code: $rc ==="
+          echo "=== service states ==="
+          docker compose --env-file .env.example ps -a || true
+          echo "=== quantlab-api logs ==="
+          docker compose --env-file .env.example logs --no-color --tail 200 quantlab-api || true
+          echo "=== quantlab-postgres logs ==="
+          docker compose --env-file .env.example logs --no-color --tail 40 quantlab-postgres || true
+          exit $rc
+
+      - name: Wait for health
+        run: |
+          set -euo pipefail
+          ok=0
           for i in $(seq 1 40); do
             if curl -fsS http://127.0.0.1:8081/healthz >/dev/null 2>&1 \
-               && curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1; then
-              echo "stack is up"
+               && curl -fsS http://127.0.0.1:8080/api/v1/healthz >/dev/null 2>&1; then
+              ok=1
+              echo "stack is up after $((i * 5))s"
               break
             fi
             sleep 5
           done
+          if [ "$ok" -ne 1 ]; then
+            echo "=== stack never became healthy ==="
+            docker compose --env-file .env.example ps -a || true
+            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-api || true
+            exit 1
+          fi
 
       - name: Health assertions
         run: |
           set -euo pipefail
+          curl -fsS http://127.0.0.1:8080/api/v1/healthz
           curl -fsS http://127.0.0.1:8080/api/v1/health | tee /tmp/health.json
           grep -q '"status":"healthy"' /tmp/health.json || grep -q '"status": "healthy"' /tmp/health.json
           curl -fsS http://127.0.0.1:8081/healthz

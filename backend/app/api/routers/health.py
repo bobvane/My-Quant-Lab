@@ -27,6 +27,18 @@ def _check_database(db: Session) -> str:
         return "unavailable"
 
 
+def _check_workers() -> str:
+    """Best-effort ping of the Celery workers (never fatal for liveness)."""
+
+    try:
+        from app.workers.celery_app import celery_app
+
+        replies = celery_app.control.ping(timeout=1.0) or []
+        return f"{len(replies)} online" if replies else "0 online"
+    except Exception:
+        return "unknown"
+
+
 def _check_redis() -> str:
     try:
         import redis  # type: ignore
@@ -36,6 +48,18 @@ def _check_redis() -> str:
         return "connected"
     except Exception:
         return "unavailable"
+
+
+@router.get("/healthz", include_in_schema=False)
+def liveness() -> dict:
+    """Liveness probe: touches nothing.
+
+    Container health checks must not depend on PostgreSQL or Redis — a
+    dependency blip must not make the API container look dead and tear down
+    healthy dependents. Dependency state is reported by ``/health``.
+    """
+
+    return {"status": "alive"}
 
 
 @router.get("/health", summary="Liveness and dependency health")
@@ -48,7 +72,7 @@ def health(db: Session = Depends(get_db)) -> dict:
         "version": settings.app_version,
         "database": database,
         "redis": redis_state,
-        "workers": "unknown",
+        "workers": _check_workers(),
         "environment": settings.environment,
         "feature_version": FEATURE_VERSION,
         "engine_version": ENGINE_VERSION,

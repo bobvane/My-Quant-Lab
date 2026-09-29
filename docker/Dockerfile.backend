@@ -31,7 +31,9 @@ ENV APP_ROLE=api \
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD curl -fsS "http://127.0.0.1:${PORT}/api/v1/health" || exit 1
+# Liveness only: /healthz touches no dependency, so a PostgreSQL/Redis blip
+# cannot mark the API container dead. Full dependency state is at /api/v1/health.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+    CMD curl -fsS "http://127.0.0.1:${PORT}/api/v1/healthz" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

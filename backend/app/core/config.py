@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     database_echo: bool = False
     db_pool_size: int = 5
     db_max_overflow: int = 10
+    db_connect_timeout: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="Seconds to wait for a PostgreSQL connection before giving up.",
+    )
 
     redis_url: str = Field(default="redis://quantlab-redis:6379/0")
     celery_broker_url: str = Field(default="redis://quantlab-redis:6379/1")

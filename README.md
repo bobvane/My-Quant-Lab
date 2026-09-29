@@ -23,6 +23,11 @@
 
 ## 快速开始（NAS 部署）
 
+> 本仓库为私有开发仓库。面向最终用户的部署文件在公开仓库
+> **My-Quant-Lab-Deploy**（仅 `docker-compose.yml` + `.env.example` +
+> `README.md` + `LICENSE`，无源码）。以下为开发者备忘，面向用户的
+> 最新部署说明以 Deploy 仓库的 README 为准。
+
 **只需要两个文件**：`docker-compose.yml` 和 `.env`（都放在同一个项目目录里）。
 镜像来自 GitHub Packages 预构建，**不需要源码、不需要登录、不需要构建**。
 

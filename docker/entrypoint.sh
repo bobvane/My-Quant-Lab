@@ -11,23 +11,31 @@ set -eu
 ROLE="${APP_ROLE:-api}"
 PORT="${PORT:-8080}"
 
+# The app package lives in /app/app. Do not rely on the current directory
+# happening to be on sys.path — `python -` (stdin) does not always add it, and a
+# silently unimportable app turns the readiness probe into an endless retry.
+export PYTHONPATH="/app${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONUNBUFFERED=1
+
 log() { echo "[entrypoint] $*"; }
 
 dump_context() {
     log "---- diagnostics ----"
     log "role=$ROLE port=$PORT"
     log "python: $(python -V 2>&1)"
+    log "PYTHONPATH=$PYTHONPATH"
+    log "app importable: $(python -c 'import app; print(app.__version__)' 2>&1 | tail -n 1)"
     log "alembic current: $(alembic current 2>&1 | tail -n 2 | tr '\n' ' ')"
-    log "alembic history: $(alembic history 2>&1 | tail -n 5 | tr '\n' ' ')"
     log "----------------------"
 }
 
-# Wait for PostgreSQL. Uses a real query, not just a TCP connect, so we do not
-# race the database's own startup.
+# Wait for PostgreSQL with a real query (not just a TCP connect, which can
+# succeed while the server is still initialising).
+# 30 x 2s = 60s ceiling keeps startup inside the container healthcheck budget.
 wait_for_db() {
     i=0
-    while [ "$i" -lt 60 ]; do
-        if python - <<'PY' >/dev/null 2>&1
+    while [ "$i" -lt 30 ]; do
+        if python -c '
 import sys
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
@@ -37,19 +45,19 @@ try:
     engine = create_engine(settings.database_url, poolclass=NullPool)
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
-except Exception as exc:  # noqa: BLE001
-    print(f"not ready: {exc}", file=sys.stderr)
+    engine.dispose()
+except Exception as exc:
+    print("not ready: %s" % exc, file=sys.stderr)
     sys.exit(1)
-PY
-        then
+' >/dev/null 2>&1; then
             log "database is ready"
             return 0
         fi
         i=$((i + 1))
-        log "waiting for database ($i/60)…"
+        log "waiting for database ($i/30)"
         sleep 2
     done
-    log "WARNING: database did not become ready in time; continuing"
+    log "WARNING: database not ready after 60s; continuing so alembic reports the real error"
     return 0
 }
 

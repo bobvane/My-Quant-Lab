@@ -1,0 +1,27 @@
+# Override: pull the published images from GitHub Packages (GHCR) instead of
+# building locally.
+#
+#   echo "$GITHUB_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
+#
+# The repository is private, so an unauthenticated pull fails with
+#   Head "https://ghcr.io/v2/...": unauthorized
+# Log in first, or simply use docker-compose.yml alone and build locally.
+
+services:
+  quantlab-api:
+    image: ghcr.io/bobvane/my-quant-lab-backend:${MQL_VERSION:-latest}
+    pull_policy: always
+
+  quantlab-worker:
+    image: ghcr.io/bobvane/my-quant-lab-backend:${MQL_VERSION:-latest}
+    pull_policy: always
+
+  quantlab-scheduler:
+    image: ghcr.io/bobvane/my-quant-lab-backend:${MQL_VERSION:-latest}
+    pull_policy: always
+
+  quantlab-web:
+    image: ghcr.io/bobvane/my-quant-lab-web:${MQL_VERSION:-latest}
+    pull_policy: always

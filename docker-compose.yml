@@ -9,13 +9,21 @@
 #   quantlab-redis     Redis (backend network only)
 #
 # Two networks (Q2 decision): frontend / backend.
+#
+# Images are BUILT LOCALLY by default so a fresh clone works without any registry
+# credentials. To pull the prebuilt images from GitHub Packages instead, add the
+# override file:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+#
+# (private packages require:  echo $TOKEN | docker login ghcr.io -u <user> --password-stdin)
 name: my-quant-lab
 
 x-backend-image: &backend-image
   build:
     context: .
     dockerfile: docker/Dockerfile.backend
-  image: ghcr.io/bobvane/my-quant-lab-backend:${MQL_VERSION:-latest}
+  image: my-quant-lab-backend:${MQL_VERSION:-local}
 
 x-backend-env: &backend-env
   APP_ENVIRONMENT: ${APP_ENVIRONMENT:-production}
@@ -154,7 +162,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.web
-    image: ghcr.io/bobvane/my-quant-lab-web:${MQL_VERSION:-latest}
+    image: my-quant-lab-web:${MQL_VERSION:-local}
     container_name: quantlab-web
     restart: unless-stopped
     ports:

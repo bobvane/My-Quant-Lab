@@ -26,11 +26,16 @@
 git clone https://github.com/bobvane/My-Quant-Lab.git
 cd My-Quant-Lab
 
-cp .env.example .env
-# 必改两项：
-#   POSTGRES_PASSWORD=你的数据库密码
-#   SECRET_KEY=openssl rand -hex 32 的输出
+# 1) 先跑体检脚本：一次性检查目录完整、.env 已配置、Docker 可用
+./scripts/preflight.sh
 
+# 2) 配置（preflight 会提示缺什么）
+cp .env.example .env
+sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=换成你的密码/' .env
+sed -i 's/^SECRET_KEY=.*/SECRET_KEY=0123456789abcdef0123456789abcdef/' .env
+
+# 3) 本地构建并启动（不需要任何镜像仓库账号）
+docker compose build
 docker compose up -d
 ```
 
@@ -38,7 +43,7 @@ docker compose up -d
 
 - **Web 界面**：http://<NAS-IP>:8081
 - **API 文档**：http://127.0.0.1:8080/docs（默认仅本机绑定，避免无认证暴露）
-- **健康检查**：http://127.0.0.1:8080/api/v1/health
+- **存活探针**：http://127.0.0.1:8080/api/v1/healthz
 
 首次进入「行情与策略」页面：
 
@@ -47,27 +52,46 @@ docker compose up -d
 3. 回到「研究仪表盘」→ **立即扫描** 查看信号
 4. 到「回测实验室」运行回测并查看权益曲线
 
+排查问题：
+
+```bash
+docker compose ps -a              # 容器状态与健康状况
+docker compose logs --tail 80 quantlab-api
+```
+
 > 想用真实行情：`.env` 中设置 `MARKET_DATA_PROVIDER=yahoo_finance`
 > （免费行情，无需密钥，但受上游限流影响）。
 
+### 常见报错对照
+
+| 报错 | 原因 | 处理 |
+|---|---|---|
+| `lstat .../My-Quant-Lab/docker: no such file or directory` | 仓库拷贝不完整或过旧（`docker/` 目录缺失） | 重新 `git clone`，或在该目录执行 `git pull` |
+| `Head "https://ghcr.io/...": unauthorized` | 试图从私有仓库拉镜像 | 默认已改为本地构建；见下方「使用预构建镜像」 |
+| `POSTGRES_PASSWORD is required` | `.env` 未创建或未填写 | `cp .env.example .env` 后编辑 |
+| `container quantlab-api is unhealthy` | 启动失败 | `docker compose logs --tail 100 quantlab-api`，日志会直接给出原因 |
+
 ---
 
-## 直接拉取已发布镜像（GHCR）
+## 使用预构建镜像（GitHub Packages）
 
-每次打 `v*` 标签，CI 会构建并推送两个镜像到 GitHub Packages：
-
-```bash
-docker pull ghcr.io/bobvane/my-quant-lab-backend:v0.0.1
-docker pull ghcr.io/bobvane/my-quant-lab-web:v0.0.1
-```
-
-在 `.env` 中设置 `MQL_VERSION=v0.0.1` 后 `docker compose up -d` 即可使用该版本。
-
-镜像若为私有包，先执行：
+仓库是私有的，拉取前需要登录：
 
 ```bash
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u <你的GitHub用户名> --password-stdin
+
+# 切换到 GHCR 覆盖文件
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d --no-build
 ```
+
+或在 `.env` 里指定版本号（需先 `docker login ghcr.io`）：
+
+```bash
+echo "MQL_VERSION=v0.0.4" >> .env
+```
+
+**默认路径不需要登录**：直接 `docker compose build` 即可在本机构建。
 
 ---
 

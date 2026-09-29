@@ -31,6 +31,19 @@ def test_health_endpoint(client) -> None:
     assert "feature_version" in body
 
 
+def test_liveness_endpoint_is_dependency_free(client) -> None:
+    """`/healthz` is the container health probe: it must never touch the DB/Redis.
+
+    If it ever started failing because a dependency was down, Compose would mark
+    the API container dead and tear down healthy dependents (worker, scheduler,
+    web) with it.
+    """
+
+    response = client.get("/api/v1/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "alive"}
+
+
 def test_system_info_lists_modules(client) -> None:
     response = client.get("/api/v1/system/info")
     assert response.status_code == 200

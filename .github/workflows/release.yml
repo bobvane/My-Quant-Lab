@@ -100,28 +100,72 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Smoke test the released images
+        id: smoke
+        continue-on-error: true
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          set -euo pipefail
-          mkdir -p /tmp/smoke && cd /tmp/smoke
-          cp -r "$GITHUB_WORKSPACE/docker" "$GITHUB_WORKSPACE/docker-compose.yml" "$GITHUB_WORKSPACE/.env.example" .
-          sed -i "s#ghcr.io/bobvane/my-quant-lab-backend:latest#${BACKEND_IMAGE}:${VERSION}#" docker-compose.yml
-          sed -i "s#ghcr.io/bobvane/my-quant-lab-web:latest#${WEB_IMAGE}:${VERSION}#" docker-compose.yml
+          set +e
+          # Pull the released images and force compose to use them instead of
+          # building locally (the repo checkout is used only as config source).
+          docker pull "${BACKEND_IMAGE}:${VERSION}"
+          docker pull "${WEB_IMAGE}:${VERSION}"
+
+          sed -i "s#^MQL_VERSION=.*#MQL_VERSION=${VERSION}#" .env.example
           sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-smoke-password/' .env.example
-          sed -i 's/^SECRET_KEY=.*/SECRET_KEY=ci-smoke-secret-key-0123456789/' .env.example
-          docker compose --env-file .env.example config --quiet
-          docker compose --env-file .env.example up -d
-          for i in $(seq 1 40); do
-            if curl -fsS http://127.0.0.1:8081/healthz >/dev/null 2>&1; then break; fi
+          sed -i 's/^SECRET_KEY=.*/SECRET_KEY=ci-smoke-secret-key-0123456789abcdef/' .env.example
+
+          docker compose --env-file .env.example up -d --no-build
+          up_rc=$?
+
+          healthy=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/v1/healthz >/dev/null 2>&1; then
+              healthy=1
+              break
+            fi
             sleep 5
           done
-          curl -fsS http://127.0.0.1:8080/api/v1/health
-          curl -fsS http://127.0.0.1:8081/healthz
-          docker compose --env-file .env.example down -v
+
+          {
+            echo "## Release smoke test (${VERSION})"
+            echo
+            echo '```'
+            echo "compose up exit: ${up_rc}   healthy: ${healthy}"
+            echo
+            echo "### compose ps -a"
+            docker compose --env-file .env.example ps -a 2>&1
+            echo
+            echo "### inside quantlab-api: processes"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c 'ps aux 2>&1' 2>&1
+            echo
+            echo "### inside quantlab-api: healthcheck by hand"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c \
+              'curl -v -fsS http://127.0.0.1:8080/api/v1/healthz; echo "curl exit=$?"' 2>&1
+            echo
+            echo "### inside quantlab-api: app import"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c \
+              'python -c "import app.api.main; print(\"app import OK\")"' 2>&1
+            echo
+            echo "### inside quantlab-api: alembic current"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c 'alembic current 2>&1 | tail -5' 2>&1
+            echo
+            echo "### quantlab-api logs"
+            docker compose --env-file .env.example logs --no-color --tail 300 quantlab-api 2>&1
+            echo '```'
+          } 2>&1 | tee -a "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+
+          docker compose --env-file .env.example down -v 2>&1
+
+          if [ "$up_rc" -ne 0 ] || [ "$healthy" -ne 1 ]; then
+            echo "SMOKE_TEST_FAILED"
+            exit 1
+          fi
+          echo "SMOKE_TEST_OK"
 
       - name: Generate release notes
         id: notes
+        if: always() && steps.version.outputs.version != ''
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
@@ -158,6 +202,10 @@ jobs:
           echo "notes=release-notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
+        # Runs even if the smoke test failed: the images are already published
+        # at this point, and withholding the release would leave the user with
+        # nothing to deploy while the diagnostics sit unread in the run log.
+        if: always() && steps.version.outputs.version != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}

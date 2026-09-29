@@ -40,7 +40,7 @@ jobs:
 
       - name: Run tests
         env:
-          DATABASE_URL: sqlite+pysqlite:///:memory:
+          DATABASE_URL: "sqlite+pysqlite:///:memory:"
           MARKET_DATA_PROVIDER: synthetic
           APP_ENVIRONMENT: test
         run: pytest -o addopts= --cov=app --cov-report=term-missing --cov-report=xml
@@ -96,12 +96,9 @@ jobs:
           docker compose --env-file .env.example up -d
           rc=$?
           echo "=== compose up exit code: $rc ==="
-          echo "=== service states ==="
           docker compose --env-file .env.example ps -a || true
           echo "=== quantlab-api logs ==="
           docker compose --env-file .env.example logs --no-color --tail 200 quantlab-api || true
-          echo "=== quantlab-postgres logs ==="
-          docker compose --env-file .env.example logs --no-color --tail 40 quantlab-postgres || true
           exit $rc
 
       - name: Wait for health
@@ -118,11 +115,49 @@ jobs:
             sleep 5
           done
           if [ "$ok" -ne 1 ]; then
-            echo "=== stack never became healthy ==="
+            echo "stack never became healthy"
             docker compose --env-file .env.example ps -a || true
-            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-api || true
             exit 1
           fi
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+          {
+            echo "## Container diagnostics"
+            echo
+            echo '```'
+            echo "### compose ps -a"
+            docker compose --env-file .env.example ps -a 2>&1
+            echo
+            echo "### inspect health (quantlab-api)"
+            docker inspect --format '{{json .State}}' quantlab-api 2>&1 | head -c 4000
+            echo
+            echo
+            echo "### inside quantlab-api: processes"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c 'ps aux 2>&1 || echo "ps unavailable"'
+            echo
+            echo "### inside quantlab-api: listening sockets"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c 'cat /proc/net/tcp 2>&1 | head -20'
+            echo
+            echo "### inside quantlab-api: is curl present?"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c 'command -v curl; curl --version 2>&1 | head -2'
+            echo
+            echo "### inside quantlab-api: run the healthcheck by hand"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c 'curl -v -fsS http://127.0.0.1:8080/api/v1/healthz; echo "curl exit=$?"' 2>&1
+            echo
+            echo "### inside quantlab-api: can we import the app?"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c 'python -c "import app.api.main; print(\"app import OK\")"' 2>&1
+            echo
+            echo "### inside quantlab-api: alembic current"
+            docker compose --env-file .env.example exec -T quantlab-api sh -c 'alembic current 2>&1 | tail -5' 2>&1
+            echo
+            echo "### quantlab-api logs"
+            docker compose --env-file .env.example logs --no-color --tail 300 quantlab-api 2>&1
+            echo '```'
+          } 2>&1 | tee -a "$SUMMARY"
 
       - name: Health assertions
         run: |

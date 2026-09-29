@@ -18,9 +18,9 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -60,16 +60,16 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Type check
         run: npm run typecheck
@@ -80,9 +80,12 @@ jobs:
   compose:
     name: docker compose smoke test
     runs-on: ubuntu-latest
+    # Run even when a sibling job failed: the container smoke test is the only
+    # place the real startup path is exercised, so it must never be skipped.
     needs: [backend, frontend]
+    if: ${{ !cancelled() }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Validate compose file
         run: docker compose --env-file .env.example config --quiet

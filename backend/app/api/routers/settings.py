@@ -65,6 +65,13 @@ def upsert_setting(payload: dict[str, Any], db: Session = Depends(get_db)) -> di
     key = payload.get("key")
     if not key:
         raise HTTPException(status_code=400, detail="key is required")
+    if str(key).startswith("notification_"):
+        # Notification settings have their own validated endpoint; keeping them
+        # out of the generic path prevents bypassing URL/quiet-hours checks.
+        raise HTTPException(
+            status_code=400,
+            detail="notification settings must be updated via /notifications/config",
+        )
     is_secret = bool(payload.get("is_secret", False))
     value = payload.get("value")
 

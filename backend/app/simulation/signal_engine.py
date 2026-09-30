@@ -26,7 +26,14 @@ from app.strategies.executor import run_strategy
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ScanResult", "scan_series", "latest_intent_for_series"]
+__all__ = [
+    "ScanResult",
+    "latest_intent_for_series",
+    "persist_signal",
+    "scan_all",
+    "scan_and_persist",
+    "scan_series",
+]
 
 
 class ScanResult(dict):
@@ -60,6 +67,13 @@ def latest_intent_for_series(
     last_ts = feature_frame.frame.index[-1]
     input_hash = _feature_hash(feature_frame.frame.tail(1))
 
+    # ``event_bar_time`` is the bar the rules actually fired on; ``bar_time`` is
+    # the latest closed bar this scan was run against. ``is_fresh`` means the
+    # event really happened on that latest bar (docs/09 §4: one event, one
+    # signal — an old match must not be re-persisted and re-notified each bar).
+    event_bar_time = intent.get("bar_time")
+    is_fresh = event_bar_time is not None and event_bar_time == last_ts
+
     if intent.get("bar_time") is None:
         state, direction, triggered = "NO_SIGNAL", "FLAT", []
         reason = f"no rule matched on the last closed bar ({last_ts.isoformat()})"
@@ -74,6 +88,8 @@ def latest_intent_for_series(
         direction=direction,
         reason=reason,
         bar_time=last_ts,
+        event_bar_time=event_bar_time,
+        is_fresh=is_fresh,
         triggered_rules=triggered,
         price_reference=intent.get("price_reference"),
         stop_reference=intent.get("stop_reference"),
@@ -88,10 +104,18 @@ def latest_intent_for_series(
     )
 
 
-def scan_series(db: Session, strategy_version: StrategyVersion, series: MarketDataSeries) -> Signal:
-    """Evaluate and persist a signal, respecting the de-duplication rule."""
+def persist_signal(
+    db: Session,
+    strategy_version: StrategyVersion,
+    series: MarketDataSeries,
+    intent: ScanResult,
+) -> tuple[Signal, bool]:
+    """Persist one evaluated intent, respecting the de-duplication rule.
 
-    intent = latest_intent_for_series(db, strategy_version, series)
+    Returns ``(signal, created)`` where ``created`` is ``False`` when a signal
+    for the same (strategy version, asset, timeframe, bar) already exists.
+    """
+
     bar_time = intent.get("bar_time")
     if bar_time is None:
         raise ValueError("no closed bar available for this series")
@@ -111,7 +135,7 @@ def scan_series(db: Session, strategy_version: StrategyVersion, series: MarketDa
             series.asset_id,
             bar_time,
         )
-        return existing
+        return existing, False
 
     signal = Signal(
         strategy_version_id=strategy_version.id,
@@ -131,6 +155,14 @@ def scan_series(db: Session, strategy_version: StrategyVersion, series: MarketDa
     db.add(signal)
     db.commit()
     db.refresh(signal)
+    return signal, True
+
+
+def scan_series(db: Session, strategy_version: StrategyVersion, series: MarketDataSeries) -> Signal:
+    """Evaluate and persist a signal, respecting the de-duplication rule."""
+
+    intent = latest_intent_for_series(db, strategy_version, series)
+    signal, _created = persist_signal(db, strategy_version, series, intent)
     return signal
 
 
@@ -170,3 +202,44 @@ def scan_all(db: Session, *, asset_ids: list[int] | None = None) -> list[dict[st
                 }
             )
     return results
+
+
+def scan_and_persist(db: Session, *, asset_ids: list[int] | None = None) -> dict[str, Any]:
+    """Evaluate and persist every current strategy against every series.
+
+    This is the scheduled-scanner path (docs/09 §2): evaluate on closed bars,
+    persist de-duplicated signals, and report how many were newly created so the
+    caller can notify on exactly the new ones.
+    """
+
+    created = 0
+    evaluated = 0
+    versions = db.scalars(select(StrategyVersion).where(StrategyVersion.is_current.is_(True))).all()
+    series_stmt = select(MarketDataSeries).where(MarketDataSeries.is_archived.is_(False))
+    if asset_ids:
+        series_stmt = series_stmt.where(MarketDataSeries.asset_id.in_(asset_ids))
+    series_rows = db.scalars(series_stmt).all()
+
+    for version in versions:
+        for series in series_rows:
+            try:
+                intent = latest_intent_for_series(db, version, series)
+            except Exception:  # pragma: no cover - defensive
+                db.rollback()
+                logger.exception("scan failed for version=%s series=%s", version.id, series.id)
+                continue
+            evaluated += 1
+            # Only persist a signal that genuinely fired on the latest closed
+            # bar. NO_SIGNAL rows and stale historical matches are skipped so the
+            # table does not grow one row per bar and nothing gets re-notified.
+            if not intent.get("is_fresh"):
+                continue
+            try:
+                _signal, was_created = persist_signal(db, version, series, intent)
+            except Exception:  # pragma: no cover - defensive
+                db.rollback()
+                logger.exception("persist failed for version=%s series=%s", version.id, series.id)
+                continue
+            if was_created:
+                created += 1
+    return {"evaluated": evaluated, "created": created}

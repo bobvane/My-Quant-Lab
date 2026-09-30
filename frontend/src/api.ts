@@ -203,6 +203,25 @@ export interface ProviderTestResult {
   models_found: string[]
 }
 
+export interface NotificationConfig {
+  enabled: boolean
+  configured: boolean
+  webhook_url_set: boolean
+  webhook_url_masked: string
+  webhook_secret_set: boolean
+  include_wait: boolean
+  quiet_hours: string
+  daily_max: number
+  cooldown_minutes: number
+  base_url: string
+  eligible_states: string[]
+}
+
+export interface NotificationTestResult {
+  ok: boolean
+  detail: string
+}
+
 export interface SignalIntent {
   state: string
   direction: string
@@ -347,6 +366,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
     }),
+  notificationConfig: () => request<NotificationConfig>('/notifications/config'),
+  updateNotificationConfig: (payload: Record<string, unknown>) =>
+    request<NotificationConfig>('/notifications/config', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  testNotification: () =>
+    request<NotificationTestResult>('/notifications/test', { method: 'POST' }),
+  notificationEvents: (limit = 50) =>
+    request<{ events: Array<Record<string, unknown>> }>(`/notifications/events?limit=${limit}`),
   getGhostfolioHoldings: () =>
     request<{ holdings: Array<Record<string, any>> }>('/settings/ghostfolio/holdings'),
   testGhostfolio: () => request<Record<string, any>>('/settings/ghostfolio/test'),

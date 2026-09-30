@@ -184,3 +184,38 @@ GHCR 镜像保持公开供 NAS 直接拉取。
 
 **理由**：用户需要用实测数据判断 Quant Lab 是否值得做架构精简，
 而监控系统自身不能成为新的资源负担。
+
+## ADR-025：通知层 V1 只做 Generic Webhook，且必须可去重、可审计、可降噪
+
+**决策**：
+1. V1 只实现一个出站通知渠道：通用 Webhook（`NotificationProvider` 协议不变，
+   未来新增飞书/Telegram/邮件只需新增适配器，不改信号引擎）。
+2. 通知发生在信号流水线的 `persist → notify` 之后（docs/09 §2），由 Celery
+   worker 执行，绝不在 API 请求内同步外呼，避免慢/失败的 webhook 拖垮接口。
+3. 去重以 `Signal.notified_at` 为准：同一 (策略版本, 标的, 周期, K 线时间)
+   只通知一次；每条信号发送后**立即提交**，崩溃也不会重发。
+4. 只有真正发生在「最新已收盘 K 线」上的事件才会被持久化并通知
+   （`is_fresh`）。历史的旧命中不会被逐根 K 线重复落库、重复提醒；
+   NO_SIGNAL 也不落库，避免每根 K 线一行造成表膨胀。
+5. 告警降噪（docs/09 §7）：默认只发 BUY/SELL（WAIT 可选）、免打扰时段、
+   每日上限、同一系列冷却时间。免打扰/冷却期间只是延迟，不消费事件；
+   每日上限触发的丢弃会标记为已处理并记录审计，避免次日补发老信号。
+6. 启用时写入水位线（`notification_enabled_at`），只通知启用之后产生的
+   信号——打开开关不会把历史存量一次性轰炸出去。
+7. 配置存放在 `system_settings`（与运行时 proxy 同机制，UI 可改）；
+   webhook URL 与签名密钥标记为 secret 且**加密存储**（复用
+   `infrastructure.secrets`），写-only、列表只回显 scheme+host 掩码、
+   审计与异常信息都不含明文；通用 `PUT /settings` 拒绝写 `notification_*`
+   键，强制走专用校验端点。
+8. 出站安全（docs/14 §4/§5）：仅接受 http/https；拒绝云元数据主机名
+   并解析后拒绝 link-local（十进制/IPv6 写法也拦得住）；**不跟随重定向**；
+   固定超时。私有/局域网地址按设计放行（NAS 用户常通知自家服务）。
+   可选 `X-QuantLab-Signature: sha256=<HMAC>` 供接收方校验。
+9. 载荷只包含引擎已算出的字段（symbol / signal / direction / strategy /
+   timeframe / timestamp / reason / 触发规则 / link + 免责声明），
+   AI 文案永远不作为收益承诺，且通知只是信息，不触发任何交易。
+
+**理由**：通知是 Phase 7 的交付项，但此前仅有协议占位。缺少它，实时信号
+只能在页面里看到；而一旦实现不当（重复轰炸、明文密钥、SSRF、同步阻塞），
+又会引入新的噪声与安全面。以上约束把通知做成一个可预测、可追溯、默认关闭的
+可选能力。

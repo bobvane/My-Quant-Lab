@@ -28,6 +28,9 @@ from app.api.routers import (
     market_data as market_data_router,
 )
 from app.api.routers import (
+    notifications as notifications_router,
+)
+from app.api.routers import (
     paper as paper_router,
 )
 from app.api.routers import (
@@ -117,6 +120,7 @@ def create_app() -> FastAPI:
         resources_router.router,
         paper_router.router,
         signals_router.router,
+        notifications_router.router,
         settings_router.router,
         importer_router.router,
         ai_router.router,

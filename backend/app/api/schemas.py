@@ -28,6 +28,9 @@ __all__ = [
     "GithubImportRequest",
     "HealthOut",
     "MarketDataSyncRequest",
+    "NotificationConfigOut",
+    "NotificationConfigUpdate",
+    "NotificationTestOut",
     "PaperAccountCreate",
     "PaperAccountOut",
     "SignalOut",
@@ -433,3 +436,43 @@ class AITaskOut(BaseModel):
     created_at: dt.datetime
     completed_at: dt.datetime | None = None
     error_message: str | None = None
+
+
+class NotificationConfigOut(BaseModel):
+    """Notification settings. Secrets are only ever exposed masked."""
+
+    enabled: bool
+    configured: bool
+    webhook_url_set: bool
+    webhook_url_masked: str
+    webhook_secret_set: bool
+    include_wait: bool
+    quiet_hours: str
+    daily_max: int
+    cooldown_minutes: int
+    base_url: str
+    enabled_at: dt.datetime | None = None
+    eligible_states: list[str] = Field(default_factory=list)
+
+
+class NotificationConfigUpdate(BaseModel):
+    """Partial update: only the provided fields are changed.
+
+    Send an empty string for ``webhook_url`` / ``webhook_secret`` to clear it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    webhook_url: str | None = Field(default=None, max_length=1024)
+    webhook_secret: str | None = Field(default=None, max_length=512)
+    include_wait: bool | None = None
+    quiet_hours: str | None = Field(default=None, max_length=32)
+    daily_max: int | None = Field(default=None, ge=0, le=10_000)
+    cooldown_minutes: int | None = Field(default=None, ge=0, le=10_080)
+    base_url: str | None = Field(default=None, max_length=512)
+
+
+class NotificationTestOut(BaseModel):
+    ok: bool
+    detail: str

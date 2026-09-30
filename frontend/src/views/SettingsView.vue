@@ -1,12 +1,31 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api, type AIProviderRecord, type ProviderTestResult } from '@/api'
+import {
+  api,
+  type AIProviderRecord,
+  type NotificationConfig,
+  type NotificationTestResult,
+  type ProviderTestResult,
+} from '@/api'
 import { formatDateTime, formatNumber } from '@/format'
 
 const events = ref<Array<Record<string, unknown>>>([])
 const environment = ref<Record<string, unknown>>({})
 const error = ref('')
 const info = ref('')
+
+const notify = ref<NotificationConfig | null>(null)
+const notifyEnabled = ref(false)
+const webhookUrl = ref('')
+const webhookSecret = ref('')
+const notifyIncludeWait = ref(false)
+const quietHours = ref('')
+const dailyMax = ref(0)
+const cooldown = ref(0)
+const notifyBaseUrl = ref('')
+const savingNotify = ref(false)
+const testingNotify = ref(false)
+const notifyResult = ref<NotificationTestResult | null>(null)
 
 const providers = ref<AIProviderRecord[]>([])
 const providerName = ref('')
@@ -24,16 +43,76 @@ const busyId = ref<number | null>(null)
 async function load() {
   error.value = ''
   try {
-    const [audit, settings, ai] = await Promise.all([
+    const [audit, settings, ai, notification] = await Promise.all([
       api.audit(),
       api.settings(),
       api.aiProviders(),
+      api.notificationConfig(),
     ])
     events.value = audit.events
     environment.value = (settings.environment as Record<string, unknown>) ?? {}
     providers.value = ai.providers
+    applyNotification(notification)
   } catch (e) {
     error.value = (e as Error).message
+  }
+}
+
+function applyNotification(config: NotificationConfig) {
+  notify.value = config
+  notifyEnabled.value = config.enabled
+  notifyIncludeWait.value = config.include_wait
+  quietHours.value = config.quiet_hours
+  dailyMax.value = config.daily_max
+  cooldown.value = config.cooldown_minutes
+  notifyBaseUrl.value = config.base_url
+  // Secrets are write-only: never prefill them, only show whether they are set.
+  webhookUrl.value = ''
+  webhookSecret.value = ''
+}
+
+async function saveNotification() {
+  error.value = ''
+  info.value = ''
+  savingNotify.value = true
+  try {
+    const payload: Record<string, unknown> = {
+      enabled: notifyEnabled.value,
+      include_wait: notifyIncludeWait.value,
+      quiet_hours: quietHours.value.trim(),
+      daily_max: dailyMax.value,
+      cooldown_minutes: cooldown.value,
+      base_url: notifyBaseUrl.value.trim(),
+    }
+    // Only send secrets when the operator typed something, so an untouched
+    // field keeps the stored value. An explicit "-" clears it.
+    if (webhookUrl.value.trim()) {
+      payload.webhook_url = webhookUrl.value.trim() === '-' ? '' : webhookUrl.value.trim()
+    }
+    if (webhookSecret.value.trim()) {
+      payload.webhook_secret = webhookSecret.value.trim() === '-' ? '' : webhookSecret.value.trim()
+    }
+    const saved = await api.updateNotificationConfig(payload)
+    applyNotification(saved)
+    info.value = '通知设置已保存'
+    await load()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    savingNotify.value = false
+  }
+}
+
+async function testNotification() {
+  error.value = ''
+  notifyResult.value = null
+  testingNotify.value = true
+  try {
+    notifyResult.value = await api.testNotification()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    testingNotify.value = false
   }
 }
 
@@ -212,6 +291,59 @@ onMounted(load)
       </table>
       <p v-else class="muted">
         尚未配置 AI provider —— 信号与回测的「AI 解释」按钮会在配置后可用。
+      </p>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>信号通知（Generic Webhook）</h3>
+      <p class="muted">
+        当扫描产生 BUY/SELL（可选 WAIT）信号时，向你的 webhook 发送一条 JSON 通知。
+        URL 与签名密钥只写入、永不回显；留空表示保持原值，填 <code>-</code> 表示清空。
+        通知仅在已收盘 K 线评估后触发，且同一事件不会重复发送。
+      </p>
+
+      <div class="row" style="margin-bottom: 8px">
+        <label class="muted" style="display: flex; align-items: center; gap: 6px">
+          <input v-model="notifyEnabled" type="checkbox" style="width: auto" />
+          启用通知
+        </label>
+        <input
+          v-model="webhookUrl"
+          type="password"
+          style="max-width: 360px"
+          :placeholder="notify?.webhook_url_set ? `已设置（${notify.webhook_url_masked}），留空保持` : 'https://hooks.example.com/quantlab'"
+        />
+        <input
+          v-model="webhookSecret"
+          type="password"
+          style="max-width: 240px"
+          :placeholder="notify?.webhook_secret_set ? '签名密钥已设置，留空保持' : '签名密钥（可选）'"
+        />
+      </div>
+      <div class="row" style="margin-bottom: 8px">
+        <label class="muted" style="display: flex; align-items: center; gap: 6px">
+          <input v-model="notifyIncludeWait" type="checkbox" style="width: auto" />
+          同时通知 WAIT
+        </label>
+        <input v-model="quietHours" style="max-width: 160px" placeholder="免打扰 22:00-07:00（UTC）" />
+        <input v-model.number="dailyMax" type="number" min="0" style="max-width: 130px" placeholder="每日上限 0=不限" />
+        <input v-model.number="cooldown" type="number" min="0" style="max-width: 150px" placeholder="冷却分钟 0=不限" />
+      </div>
+      <div class="row" style="margin-bottom: 8px">
+        <input v-model="notifyBaseUrl" style="max-width: 300px" placeholder="站点地址（用于通知里的链接，可选）" />
+        <button class="ghost" :disabled="testingNotify" @click="testNotification">
+          {{ testingNotify ? '发送中…' : '发送测试' }}
+        </button>
+        <button :disabled="savingNotify" @click="saveNotification">
+          {{ savingNotify ? '保存中…' : '保存通知设置' }}
+        </button>
+      </div>
+
+      <p v-if="notifyResult" :class="notifyResult.ok ? 'notice' : 'error'">
+        测试通知{{ notifyResult.ok ? '已发送' : '失败' }}：{{ notifyResult.detail }}
+      </p>
+      <p v-else-if="notify && !notify.configured" class="muted">
+        当前未启用或未配置 webhook，所有量化功能不受影响，只是不会外发通知。
       </p>
     </div>
 

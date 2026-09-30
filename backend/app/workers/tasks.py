@@ -15,8 +15,9 @@ from app.core.db import session_scope
 from app.data.market_data_repo import frame_to_bars, get_or_create_series, upsert_bars
 from app.data.providers import asset_metadata_for, get_market_data_provider, mark_closed_bars
 from app.domain.models import Asset, MarketDataSource
+from app.notifications.service import notify_pending_signals
 from app.simulation.outcome_evaluator import evaluate_pending_outcomes
-from app.simulation.signal_engine import scan_all
+from app.simulation.signal_engine import scan_and_persist
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -96,13 +97,26 @@ def sync_market_data(symbols: list[str] | None = None) -> dict:
 
 @celery_app.task(name="quantlab.scan_signals")
 def scan_signals() -> dict:
-    """Evaluate all current strategies on all series (closed bars only)."""
+    """Evaluate all current strategies on all series (closed bars only).
+
+    Persists de-duplicated signals and then notifies on the pending ones, which
+    is the documented pipeline: evaluate → persist → notify (docs/09 §2).
+    """
     with session_scope() as db:
-        results = scan_all(db)
-    by_state: dict[str, int] = {}
-    for row in results:
-        by_state[row["state"]] = by_state.get(row["state"], 0) + 1
-    return {"evaluated": len(results), "by_state": by_state, "results": results[:50]}
+        result = scan_and_persist(db)
+        notification = notify_pending_signals(db)
+    return {**result, "notification": notification}
+
+
+@celery_app.task(name="quantlab.notify_signals")
+def notify_signals() -> dict:
+    """Notify on any eligible signal that has not been sent yet.
+
+    Separate from the scan so signals persisted through the API are still
+    delivered, and so a failing webhook can never block the scanner.
+    """
+    with session_scope() as db:
+        return notify_pending_signals(db)
 
 
 @celery_app.task(name="quantlab.collect_resources")

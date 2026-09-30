@@ -30,6 +30,12 @@ celery_app.conf.update(
             "task": "quantlab.scan_signals",
             "schedule": crontab(minute="*/15"),
         },
+        # Deliver any newly persisted signal; runs just after the scan so a slow
+        # or failing webhook can never delay signal generation.
+        "notify-signals": {
+            "task": "quantlab.notify_signals",
+            "schedule": crontab(minute="5,20,35,50"),
+        },
         "sync-market-data": {
             "task": "quantlab.sync_market_data",
             "schedule": crontab(minute=0, hour="*"),

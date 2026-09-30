@@ -123,6 +123,16 @@ API base: `/api/v1`
 `POST /signals/{id}/explain`
 `POST /signals/{id}/acknowledge`
 
+## Notifications
+
+Generic webhook channel (V1). Secrets (URL, signing key) are write-only and
+only ever returned masked.
+
+`GET /notifications/config`
+`PUT /notifications/config`
+`POST /notifications/test`
+`GET /notifications/events`
+
 ## AI Providers
 
 `GET /ai/providers`

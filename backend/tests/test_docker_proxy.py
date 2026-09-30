@@ -118,7 +118,12 @@ unix_ok = hasattr(socket, "AF_UNIX")
 
 
 def _build_sockets(tmp_path: pathlib.Path):
-    """Start the real proxy + a fake upstream on temp Unix sockets."""
+    """Start the real proxy (TCP) + a fake Docker upstream (Unix socket).
+
+    The proxy connects to the fake upstream via ``_UnixHTTPConnection``, which
+    is the exact wiring used in production. The test client talks to the proxy
+    over plain HTTP on a random port.
+    """
 
     from socketserver import BaseRequestHandler, BaseServer, ThreadingMixIn
 
@@ -139,35 +144,32 @@ def _build_sockets(tmp_path: pathlib.Path):
             except Exception:
                 pass
 
-    class _FakeServer(ThreadingMixIn, BaseServer):
+    class _FakeUnixServer(ThreadingMixIn, BaseServer):
+        address_family = socket.AF_UNIX
         daemon_threads = True
         allow_reuse_address = True
 
-    class _ProxyServer(proxy_module._Server):
-        pass
-
     docker_sock = tmp_path / "docker.sock"
-    proxy_sock = tmp_path / "proxy.sock"
 
-    fake = _FakeServer(str(docker_sock), _FakeHandler)
+    fake = _FakeUnixServer(str(docker_sock), _FakeHandler)
     fake.requests: list[tuple[str, str]] = []  # type: ignore[attr-defined]
     proxy_module.TOKEN = ""
     proxy_module.DOCKER_SOCK = str(docker_sock)
 
-    proxy = _ProxyServer(str(proxy_sock), proxy_module._Handler)
-    for _server, _role in ((fake, "fake"), (proxy, "proxy")):
-        threading.Thread(target=_server.serve_forever, daemon=True).start()
-    return {"fake": fake, "proxy": proxy, "proxy_sock": str(proxy_sock)}
+    # The proxy itself is a TCP server (ThreadingHTTPServer); port 0 lets the
+    # OS pick a free port, which we then read back from server_address.
+    proxy = proxy_module._Server(("127.0.0.1", 0), proxy_module._Handler)
+    proxy_port = proxy.server_address[1]
+
+    for _srv in (fake, proxy):
+        threading.Thread(target=_srv.serve_forever, daemon=True).start()
+    return {"fake": fake, "proxy": proxy, "proxy_port": proxy_port}
 
 
-def _http_over_unix(sock_path: str, method: str, path: str) -> tuple[int, str]:
+def _http_to_proxy(port: int, method: str, path: str) -> tuple[int, str]:
     import http.client
 
-    connection = http.client.HTTPConnection("localhost")
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(10)
-    sock.connect(sock_path)
-    connection.sock = sock
+    connection = http.client.HTTPConnection("127.0.0.1", port)
     connection.request(method, path, headers={"Host": "proxy"})
     response = connection.getresponse()
     body = response.read().decode("utf-8", "replace")
@@ -180,7 +182,7 @@ def _http_over_unix(sock_path: str, method: str, path: str) -> tuple[int, str]:
 def test_roundtrip_whitelisted_list(tmp_path: pathlib.Path) -> None:
     env = _build_sockets(tmp_path)
     try:
-        status, body = _http_over_unix(env["proxy_sock"], "GET", "/containers/json?all=1")
+        status, body = _http_to_proxy(env["proxy_port"], "GET", "/containers/json?all=1")
         assert status == 200
         assert "data" in body
     finally:
@@ -194,7 +196,7 @@ def test_roundtrip_whitelisted_list(tmp_path: pathlib.Path) -> None:
 def test_roundtrip_denied_request_never_reaches_upstream(tmp_path: pathlib.Path) -> None:
     env = _build_sockets(tmp_path)
     try:
-        status, body = _http_over_unix(env["proxy_sock"], "DELETE", "/containers/abc123")
+        status, body = _http_to_proxy(env["proxy_port"], "DELETE", "/containers/abc123")
         assert status == 403
         assert env["fake"].requests == []  # upstream untouched
     finally:

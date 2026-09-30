@@ -133,6 +133,14 @@ only ever returned masked.
 `POST /notifications/test`
 `GET /notifications/events`
 
+## Strategy Lifecycle
+
+Deterministic, evidence-gated promotion/degradation. No AI is involved.
+
+`GET /lifecycle/strategies`
+`GET /lifecycle/strategies/{strategy_id}`
+`POST /lifecycle/strategies/{strategy_id}/apply`
+
 ## AI Providers
 
 `GET /ai/providers`

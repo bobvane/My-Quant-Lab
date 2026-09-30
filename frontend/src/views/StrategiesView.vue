@@ -1,7 +1,34 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api, type Asset, type GithubAnalysis, type SignalIntent, type Strategy } from '@/api'
+import {
+  api,
+  type Asset,
+  type GithubAnalysis,
+  type SignalIntent,
+  type Strategy,
+  type StrategyLifecycle,
+} from '@/api'
 import { formatDateTime, formatNumber } from '@/format'
+
+const STAGE_LABELS: Record<string, string> = {
+  imported: '已导入',
+  normalized: '已规范化',
+  validated: '已校验',
+  backtested: '已回测',
+  oos_tested: '已做样本外',
+  paper_trading: '模拟盘',
+  reference_signal: '参考信号',
+  degraded: '已降级',
+  retired: '已退役',
+}
+
+function stageLabel(stage: string | null | undefined): string {
+  if (!stage) return '—'
+  return STAGE_LABELS[stage] ?? stage
+}
+
+const lifecycles = ref<StrategyLifecycle[]>([])
+const applyingLifecycle = ref<number | null>(null)
 
 const assets = ref<Asset[]>([])
 const strategies = ref<Strategy[]>([])
@@ -49,12 +76,44 @@ const validation = ref<{ is_valid: boolean; issues: Array<Record<string, unknown
 async function load() {
   error.value = ''
   try {
-    const [a, s, sr] = await Promise.all([api.assets(), api.strategies(), api.series()])
+    const [a, s, sr, lc] = await Promise.all([
+      api.assets(),
+      api.strategies(),
+      api.series(),
+      api.lifecycles(),
+    ])
     assets.value = a
     strategies.value = s
     series.value = sr
+    lifecycles.value = lc
   } catch (e) {
     error.value = (e as Error).message
+  }
+}
+
+function evidenceSummary(row: StrategyLifecycle): string {
+  const e = row.evidence
+  return [
+    `版本 ${e.version_count ?? 0}`,
+    `回测 ${e.backtest_runs ?? 0}`,
+    `样本外 ${e.oos_runs ?? 0}`,
+    `模拟成交 ${e.paper_trades ?? 0}`,
+  ].join(' · ')
+}
+
+async function applyLifecycle(row: StrategyLifecycle, target: string | null) {
+  if (!target) return
+  error.value = ''
+  info.value = ''
+  applyingLifecycle.value = row.strategy_id
+  try {
+    const result = await api.applyLifecycle(row.strategy_id, target)
+    info.value = `策略「${row.name}」生命周期：${stageLabel(result.previous)} → ${stageLabel(result.current)}`
+    await load()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    applyingLifecycle.value = null
   }
 }
 
@@ -290,6 +349,64 @@ onMounted(load)
         </table>
         <p v-else class="muted">还没有策略。</p>
       </div>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>策略生命周期（基于证据，无 AI 介入）</h3>
+      <p class="muted">
+        阶段推进只依据已记录的证据：版本校验、完成回测、样本外窗口、模拟成交。
+        每次只前进一阶段；<strong>参考信号</strong>与<strong>退役</strong>只能手动确认。
+        每次晋级/降级都会连同证据写入审计日志。
+      </p>
+      <table v-if="lifecycles.length">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>名称</th>
+            <th>当前阶段</th>
+            <th>建议下一步</th>
+            <th>证据</th>
+            <th>参考信号</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in lifecycles" :key="row.strategy_id">
+            <td>{{ row.strategy_id }}</td>
+            <td>{{ row.name }}</td>
+            <td>
+              {{ stageLabel(row.current) }}
+              <span v-if="row.degraded" class="error" style="margin-left: 4px">亏损降级</span>
+            </td>
+            <td>
+              <span v-if="row.suggested_next">{{ stageLabel(row.suggested_next) }}</span>
+              <span v-else class="muted">—</span>
+            </td>
+            <td class="muted">{{ evidenceSummary(row) }}</td>
+            <td>
+              <button
+                v-if="row.reference_eligible && row.current !== 'reference_signal'"
+                class="ghost"
+                :disabled="applyingLifecycle === row.strategy_id"
+                @click="applyLifecycle(row, 'reference_signal')"
+              >
+                升级为参考信号
+              </button>
+              <span v-else class="muted">条件未满足</span>
+            </td>
+            <td>
+              <button
+                v-if="row.suggested_next"
+                :disabled="applyingLifecycle === row.strategy_id"
+                @click="applyLifecycle(row, row.suggested_next)"
+              >
+                {{ applyingLifecycle === row.strategy_id ? '应用中…' : '应用下一步' }}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">还没有策略。</p>
     </div>
 
     <div class="card" style="margin-top: 14px">

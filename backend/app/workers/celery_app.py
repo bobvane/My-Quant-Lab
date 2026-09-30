@@ -55,5 +55,10 @@ celery_app.conf.update(
             "task": "quantlab.evaluate_signal_outcomes",
             "schedule": crontab(minute="*/30"),
         },
+        # Strategy lifecycle: apply evidence-gated promotions/degradations daily.
+        "evaluate-strategy-lifecycle": {
+            "task": "quantlab.evaluate_strategy_lifecycle",
+            "schedule": crontab(minute=30, hour=3),
+        },
     },
 )

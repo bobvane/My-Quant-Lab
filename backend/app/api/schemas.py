@@ -27,6 +27,9 @@ __all__ = [
     "GithubAnalyzeOut",
     "GithubImportRequest",
     "HealthOut",
+    "LifecycleApplyIn",
+    "LifecycleApplyOut",
+    "LifecycleStageOut",
     "MarketDataSyncRequest",
     "NotificationConfigOut",
     "NotificationConfigUpdate",
@@ -35,6 +38,7 @@ __all__ = [
     "PaperAccountOut",
     "SignalOut",
     "StrategyCreate",
+    "StrategyLifecycleOut",
     "StrategyOut",
     "StrategyValidationOut",
     "StrategyVersionCreate",
@@ -475,4 +479,44 @@ class NotificationConfigUpdate(BaseModel):
 
 class NotificationTestOut(BaseModel):
     ok: bool
+    detail: str
+
+
+class LifecycleStageOut(BaseModel):
+    stage: str
+    group: str
+    reached: bool
+
+
+class StrategyLifecycleOut(BaseModel):
+    """Current stage plus the deterministic evidence behind the next step."""
+
+    strategy_id: int
+    name: str
+    current: str
+    current_group: str
+    suggested_next: str | None = None
+    blocked_reason: str | None = None
+    reference_eligible: bool = False
+    degraded: bool = False
+    degrade_reason: str | None = None
+    stages: list[LifecycleStageOut] = Field(default_factory=list)
+    gates: dict[str, bool] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    thresholds: dict[str, Any] = Field(default_factory=dict)
+    manual_only_stages: list[str] = Field(default_factory=list)
+
+
+class LifecycleApplyIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_stage: str = Field(min_length=1, max_length=32)
+    note: str | None = Field(default=None, max_length=512)
+
+
+class LifecycleApplyOut(BaseModel):
+    strategy_id: int
+    previous: str
+    current: str
+    applied: bool
     detail: str

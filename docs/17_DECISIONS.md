@@ -219,3 +219,26 @@ GHCR 镜像保持公开供 NAS 直接拉取。
 只能在页面里看到；而一旦实现不当（重复轰炸、明文密钥、SSRF、同步阻塞），
 又会引入新的噪声与安全面。以上约束把通知做成一个可预测、可追溯、默认关闭的
 可选能力。
+
+## ADR-026：策略生命周期由确定性证据门控，AI 无权晋级
+
+**决策**：
+1. 生命周期阶段沿用 `StrategyLifecycle` 枚举，推进路径为
+   imported → normalized → validated → backtested → oos_tested → paper_trading；
+   reference_signal / degraded / retired 是终止或人工阶段。
+2. 晋级/降级规则**只读取引擎已记录的事实**：版本校验状态、已完成的
+   BacktestRun、walk-forward 审计事件、PaperTrade 记录。阈值固定且有默认值
+   （最少回测成交数、最少样本外窗口、最少模拟成交数、亏损降级阈值），
+   不使用任何模型判断。
+3. 每次只前进一个阶段，保留「Experimental → OOS → Paper」的可视路径；
+   证据不足时给出 `blocked_reason` 而不是跳级。
+4. **reference_signal 与 retired 只能手动应用**，自动化任务永不触及；
+   参考信号还要求模拟盘有足够成交且累计为正。
+5. 每次阶段变更都写 `strategy_lifecycle_changed` 审计事件，携带
+   from/to/证据快照/时间；不存在「AI 一句话升级」的路径。
+6. Celery beat 每日执行一次自动评估（`LIFECYCLE_AUTO_ENABLED` 可关），
+   只应用证据满足的晋级与亏损降级。
+
+**理由**：docs/15 Phase 8 要求晋级/降级有证据且排除 AI 干预。把规则写成固定
+阈值 + 只读事实 + 审计快照，既满足验收，也让用户随时能看清一个策略为什么
+停在某个阶段。

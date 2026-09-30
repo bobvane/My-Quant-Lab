@@ -84,6 +84,11 @@ class Settings(BaseSettings):
         description="Celery beat crontab used by the signal scanner.",
     )
 
+    # --- Strategy lifecycle (Phase 8) -------------------------------------
+    # Deterministic, evidence-gated promotion/degradation. Manual-only stages
+    # (reference_signal, retired) are never applied automatically.
+    lifecycle_auto_enabled: bool = True
+
     # --- System Resource Monitor ------------------------------------------
     # Phase 1a needs no Docker access at all: host metrics come from /proc via
     # psutil, and Quant Lab's own containers report through their cgroups.

@@ -25,6 +25,9 @@ from app.api.routers import (
     importer as importer_router,
 )
 from app.api.routers import (
+    lifecycle as lifecycle_router,
+)
+from app.api.routers import (
     market_data as market_data_router,
 )
 from app.api.routers import (
@@ -115,6 +118,7 @@ def create_app() -> FastAPI:
         assets_router.router,
         market_data_router.router,
         strategies_router.router,
+        lifecycle_router.router,
         backtests_router.router,
         research_router.router,
         resources_router.router,

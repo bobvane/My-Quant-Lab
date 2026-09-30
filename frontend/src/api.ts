@@ -222,6 +222,37 @@ export interface NotificationTestResult {
   detail: string
 }
 
+export interface LifecycleStage {
+  stage: string
+  group: string
+  reached: boolean
+}
+
+export interface StrategyLifecycle {
+  strategy_id: number
+  name: string
+  current: string
+  current_group: string
+  suggested_next: string | null
+  blocked_reason: string | null
+  reference_eligible: boolean
+  degraded: boolean
+  degrade_reason: string | null
+  stages: LifecycleStage[]
+  gates: Record<string, boolean>
+  evidence: Record<string, any>
+  thresholds: Record<string, any>
+  manual_only_stages: string[]
+}
+
+export interface LifecycleApplyResult {
+  strategy_id: number
+  previous: string
+  current: string
+  applied: boolean
+  detail: string
+}
+
 export interface SignalIntent {
   state: string
   direction: string
@@ -365,6 +396,14 @@ export const api = {
     request<ProviderTestResult>('/settings/ai/providers/test', {
       method: 'POST',
       body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
+    }),
+  lifecycles: () => request<StrategyLifecycle[]>('/lifecycle/strategies'),
+  lifecycle: (strategyId: number) =>
+    request<StrategyLifecycle>(`/lifecycle/strategies/${strategyId}`),
+  applyLifecycle: (strategyId: number, targetStage: string, note?: string) =>
+    request<LifecycleApplyResult>(`/lifecycle/strategies/${strategyId}/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ target_stage: targetStage, note }),
     }),
   notificationConfig: () => request<NotificationConfig>('/notifications/config'),
   updateNotificationConfig: (payload: Record<string, unknown>) =>

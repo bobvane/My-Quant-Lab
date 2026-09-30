@@ -142,6 +142,39 @@ def collect_resources() -> dict:
     }
 
 
+@celery_app.task(name="quantlab.evaluate_strategy_lifecycle")
+def evaluate_strategy_lifecycle() -> dict:
+    """Promote/degrade strategies using the deterministic evidence rules.
+
+    Never applies manual-only stages; every change is audit-logged with its
+    evidence snapshot (docs/15 Phase 8).
+    """
+
+    if not settings.lifecycle_auto_enabled:
+        return {"skipped": "lifecycle auto-evaluation disabled"}
+    from sqlalchemy import select
+
+    from app.domain.models import Strategy
+    from app.strategies.lifecycle import LifecycleError, apply_lifecycle, evaluate_lifecycle
+
+    applied: list[dict] = []
+    with session_scope() as db:
+        for strategy in db.scalars(select(Strategy).order_by(Strategy.id)).all():
+            evaluation = evaluate_lifecycle(db, strategy)
+            target = evaluation["suggested_next"]
+            if not target or target in evaluation["manual_only_stages"]:
+                continue
+            try:
+                apply_lifecycle(db, strategy, target, actor="system", evaluation=evaluation)
+            except LifecycleError:
+                logger.warning("lifecycle transition rejected for %s", strategy.id)
+                continue
+            applied.append(
+                {"strategy_id": strategy.id, "from": evaluation["current"], "to": target}
+            )
+    return {"count": len(applied), "applied": applied}
+
+
 @celery_app.task(name="quantlab.evaluate_signal_outcomes")
 def evaluate_signal_outcomes() -> dict:
     """Look forward in price data for signals without outcomes and record

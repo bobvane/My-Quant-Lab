@@ -125,7 +125,7 @@ def _build_sockets(tmp_path: pathlib.Path):
     over plain HTTP on a random port.
     """
 
-    from socketserver import BaseRequestHandler, BaseServer, ThreadingMixIn
+    from socketserver import BaseRequestHandler, TCPServer, ThreadingMixIn
 
     class _FakeHandler(BaseRequestHandler):
         def handle(self) -> None:
@@ -144,7 +144,9 @@ def _build_sockets(tmp_path: pathlib.Path):
             except Exception:
                 pass
 
-    class _FakeUnixServer(ThreadingMixIn, BaseServer):
+    class _FakeUnixServer(ThreadingMixIn, TCPServer):
+        """TCPServer with AF_UNIX: inherits socket creation, bind and listen."""
+
         address_family = socket.AF_UNIX
         daemon_threads = True
         allow_reuse_address = True

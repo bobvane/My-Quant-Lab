@@ -148,36 +148,24 @@ class GhostfolioAdapter:
                 first.get("type") or first.get("Type") or first.get("activityType"),
             )
 
-        # Aggregate current holdings from activities
+        # Aggregate current holdings from activities.
+        # Ghostfolio puts the symbol DIRECTLY on the activity object (flat),
+        # not nested in a SymbolProfile. The symbol field can also be a
+        # CoinGecko identifier for crypto (e.g. "bitcoin" instead of "BTC").
         holdings: dict[str, dict[str, Any]] = {}
         for activity in activities:
-            # Try every known profile key variation
-            profile = (
-                activity.get("SymbolProfile")
-                or activity.get("symbolProfile")
-                or activity.get("AssetProfile")
-                or activity.get("assetProfile")
-                or {}
-            )
-            if not isinstance(profile, dict):
-                continue
-
-            # Try every known symbol key variation
-            symbol = (
-                profile.get("symbol")
-                or profile.get("dataSourceSymbol")
-                or profile.get("ticker")
-                or ""
-            )
+            # Try direct symbol on activity first, then nested profile
+            symbol = activity.get("symbol") or activity.get("dataSourceSymbol") or ""
+            if not symbol:
+                profile = activity.get("SymbolProfile") or activity.get("symbolProfile") or {}
+                if isinstance(profile, dict):
+                    symbol = profile.get("symbol") or ""
             if not symbol:
                 continue
 
-            # Try every known type key variation
-            activity_type = (
-                activity.get("type") or activity.get("Type") or activity.get("activityType") or ""
-            ).upper()
+            activity_type = (activity.get("type") or activity.get("Type") or "").upper()
 
-            quantity = float(activity.get("quantity") or activity.get("Quantity") or 0)
+            quantity = float(activity.get("quantity") or 0)
 
             if symbol not in holdings:
                 name = profile.get("name") or profile.get("SymbolName") or symbol

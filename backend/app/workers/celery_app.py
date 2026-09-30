@@ -44,5 +44,10 @@ celery_app.conf.update(
             "task": "quantlab.purge_resources",
             "schedule": crontab(minute=17, hour=3),
         },
+        # Signal outcome tracking: look forward in price data for pending signals.
+        "evaluate-signal-outcomes": {
+            "task": "quantlab.evaluate_signal_outcomes",
+            "schedule": crontab(minute="*/30"),
+        },
     },
 )

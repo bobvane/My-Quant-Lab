@@ -146,6 +146,9 @@ def run_backtest(
     signals: list[dict[str, Any]] = []
     equity_curve: list[dict[str, Any]] = []
     in_position: list[bool] = []
+    trade_high = 0.0
+    trade_low = 0.0
+    entry_stop: float | None = None
 
     for i in range(len(frame)):
         bar_time = index[i]
@@ -153,6 +156,10 @@ def run_backtest(
 
         # 1) Manage an open position with the *current* bar's extremes.
         if quantity > 0:
+            # Track the best/worst prices seen during this trade for MAE/MFE.
+            trade_high = max(trade_high, float(highs[i]))
+            trade_low = min(trade_low, float(lows[i]))
+
             is_long = direction == "LONG"
             # A short position mirrors the levels: its stop sits above entry and
             # its target below, so the raw close/ATR lines are inverted.
@@ -190,12 +197,16 @@ def run_backtest(
                         exit_reason=reason,
                         ambiguous_fill=ambiguous,
                         strategy_version=strategy_version,
+                        trade_high=trade_high,
+                        trade_low=trade_low,
+                        entry_stop=entry_stop,
                     )
                 )
                 quantity = 0.0
                 entry_price = 0.0
                 entry_fee = 0.0
                 entry_slippage = 0.0
+                entry_stop = None
                 direction = "LONG"
                 signals.append(
                     {"bar_time": bar_time.isoformat(), "state": "SELL", "direction": "FLAT"}
@@ -227,6 +238,10 @@ def run_backtest(
                         entry_fee = fee
                         entry_slippage = abs(slip)
                         entry_index = i + 1
+                        trade_high = fill
+                        trade_low = fill
+                        raw_stop = stop_line[i] if want_long else stop_short_line[i]
+                        entry_stop = float(raw_stop) if not np.isnan(float(raw_stop)) else None
                         signals.append(
                             {
                                 "bar_time": index[i].isoformat(),
@@ -273,6 +288,9 @@ def run_backtest(
                 exit_reason="end_of_data",
                 ambiguous_fill=False,
                 strategy_version=strategy_version,
+                trade_high=trade_high,
+                trade_low=trade_low,
+                entry_stop=entry_stop,
             )
         )
         equity_curve[-1]["equity"] = cash
@@ -377,9 +395,28 @@ def _trade_record(
     exit_reason: str,
     ambiguous_fill: bool,
     strategy_version: str,
+    trade_high: float = 0.0,
+    trade_low: float = 0.0,
+    entry_stop: float | None = None,
 ) -> dict[str, Any]:
     pnl_pct = (exit_price - entry_price) / entry_price * direction_sign(direction)
-    risk = 0.0
+
+    # MAE = maximum adverse excursion (worst move against the position)
+    # MFE = maximum favourable excursion (best move in favour)
+    if direction == "LONG":
+        mae = round(max(0.0, entry_price - trade_low), 8) if trade_low else None
+        mfe = round(max(0.0, trade_high - entry_price), 8) if trade_high else None
+    else:
+        mae = round(max(0.0, trade_high - entry_price), 8) if trade_high else None
+        mfe = round(max(0.0, entry_price - trade_low), 8) if trade_low else None
+
+    # R multiple = actual PnL / initial dollar risk (entry to stop distance × qty)
+    r_multiple = None
+    if entry_stop is not None and quantity > 0:
+        risk_per_unit = abs(entry_price - entry_stop)
+        if risk_per_unit > 0:
+            r_multiple = round(pnl / (risk_per_unit * quantity), 4)
+
     return {
         "symbol": symbol,
         "direction": direction,
@@ -392,13 +429,13 @@ def _trade_record(
         "slippage": round(slippage, 8),
         "pnl": round(pnl, 8),
         "pnl_pct": round(pnl_pct, 8),
-        "r_multiple": round(pnl / risk, 4) if risk > 0 else None,
+        "r_multiple": r_multiple,
         "holding_bars": holding_bars,
         "exit_reason": exit_reason,
         "ambiguous_fill": ambiguous_fill,
         "strategy_version": strategy_version,
-        "mae": None,
-        "mfe": None,
+        "mae": mae,
+        "mfe": mfe,
     }
 
 

@@ -15,6 +15,7 @@ from app.core.db import session_scope
 from app.data.market_data_repo import frame_to_bars, get_or_create_series, upsert_bars
 from app.data.providers import asset_metadata_for, get_market_data_provider, mark_closed_bars
 from app.domain.models import Asset, MarketDataSource
+from app.simulation.outcome_evaluator import evaluate_pending_outcomes
 from app.simulation.signal_engine import scan_all
 from app.workers.celery_app import celery_app
 
@@ -125,6 +126,16 @@ def collect_resources() -> dict:
         "quantlab_cpu": quantlab["cpu"],
         "quantlab_mem_mb": quantlab["mem_mb"],
     }
+
+
+@celery_app.task(name="quantlab.evaluate_signal_outcomes")
+def evaluate_signal_outcomes() -> dict:
+    """Look forward in price data for signals without outcomes and record
+    pnl_pct / MAE / MFE. This is the "learn from results" mechanism."""
+
+    with session_scope() as db:
+        result = evaluate_pending_outcomes(db)
+    return result
 
 
 @celery_app.task(name="quantlab.purge_resources")

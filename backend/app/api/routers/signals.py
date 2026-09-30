@@ -255,3 +255,35 @@ def _series_id_for(db: Session, symbol: str, timeframe: str) -> int | None:
         )
     )
     return series.id if series else None
+
+
+@router.get("/outcomes", summary="Signal outcome tracking (did signals work?)")
+def list_outcomes(
+    db: Session = Depends(get_db),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    from app.domain.models import SignalOutcome
+
+    rows = db.scalars(
+        select(SignalOutcome, Signal)
+        .join(Signal, Signal.id == SignalOutcome.signal_id)
+        .order_by(SignalOutcome.evaluated_at.desc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "signal_id": outcome.signal_id,
+            "outcome_state": outcome.outcome_state,
+            "direction": signal.direction,
+            "timeframe": signal.timeframe,
+            "bar_timestamp": signal.bar_timestamp,
+            "entry_price": float(outcome.entry_price) if outcome.entry_price else None,
+            "exit_price": float(outcome.exit_price) if outcome.exit_price else None,
+            "pnl_pct": float(outcome.pnl_pct) if outcome.pnl_pct is not None else None,
+            "mae_pct": float(outcome.mae) if outcome.mae is not None else None,
+            "mfe_pct": float(outcome.mfe) if outcome.mfe is not None else None,
+            "evaluated_at": outcome.evaluated_at,
+            "notes": outcome.notes,
+        }
+        for outcome, signal in rows
+    ]

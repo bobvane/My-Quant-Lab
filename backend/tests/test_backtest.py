@@ -197,3 +197,73 @@ def test_short_position_uses_inverted_risk_levels(sample_bars: pd.DataFrame) -> 
         if pnl_pct is not None and trade["exit_price"] is not None:
             expected = (trade["entry_price"] - trade["exit_price"]) / trade["entry_price"]
             assert pnl_pct == pytest.approx(expected, rel=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# MAE / MFE / R multiple
+# --------------------------------------------------------------------------- #
+def test_mae_mfe_are_populated_and_non_negative(sample_bars: pd.DataFrame) -> None:
+    """Every trade must have MAE >= 0 and MFE >= 0 (they are absolute distances)."""
+
+    spec = _spec()
+    result = run_backtest(spec, sample_bars, strategy_version="mae-mfe@1.0.0")
+    assert result.trades, "need at least one trade"
+    for trade in result.trades:
+        assert trade["mae"] is not None, f"MAE is None for trade: {trade}"
+        assert trade["mfe"] is not None, f"MFE is None for trade: {trade}"
+        assert trade["mae"] >= 0, f"MAE must be >= 0, got {trade['mae']}"
+        assert trade["mfe"] >= 0, f"MFE must be >= 0, got {trade['mfe']}"
+
+
+def test_mae_mfe_directional_consistency(sample_bars: pd.DataFrame) -> None:
+    """For a LONG trade: MAE = entry - lowest_low, MFE = highest_high - entry."""
+
+    spec = _spec()
+    result = run_backtest(spec, sample_bars, strategy_version="mae-mfe@1.0.0")
+    for trade in result.trades:
+        if trade["direction"] != "LONG":
+            continue
+        entry = trade["entry_price"]
+        exit_ = trade["exit_price"]
+        # MAE + entry should be >= the lower of entry/exit prices
+        # MFE + entry should be >= the higher of entry/exit prices
+        if exit_ is not None:
+            lower_bound = min(entry, exit_)
+            upper_bound = max(entry, exit_)
+            assert (trade["mae"] or 0) + entry >= lower_bound - 0.01, (
+                f"MAE inconsistent: mae={trade['mae']}, entry={entry}, exit={exit_}"
+            )
+            assert (trade["mfe"] or 0) + entry >= upper_bound - 0.01, (
+                f"MFE inconsistent: mfe={trade['mfe']}, entry={entry}, exit={exit_}"
+            )
+
+
+def test_r_multiple_populated_when_stop_defined(sample_bars: pd.DataFrame) -> None:
+    """When the strategy has an ATR stop, R multiple must be calculated."""
+
+    spec = _spec()
+    result = run_backtest(spec, sample_bars, strategy_version="r-mult@1.0.0")
+    assert result.trades, "need at least one trade"
+    for trade in result.trades:
+        assert trade["r_multiple"] is not None, (
+            f"R multiple is None despite stop_loss_atr_multiple being defined: {trade}"
+        )
+        assert isinstance(trade["r_multiple"], float)
+
+
+def test_r_multiple_sign_matches_pnl(sample_bars: pd.DataFrame) -> None:
+    """Winning trade → positive R; losing trade → negative R."""
+
+    spec = _spec()
+    result = run_backtest(spec, sample_bars, strategy_version="r-sign@1.0.0")
+    for trade in result.trades:
+        if trade["r_multiple"] is None or trade["pnl"] is None:
+            continue
+        if trade["pnl"] > 0:
+            assert trade["r_multiple"] > 0, (
+                f"pnl={trade['pnl']} but r={trade['r_multiple']}: sign mismatch"
+            )
+        elif trade["pnl"] < 0:
+            assert trade["r_multiple"] < 0, (
+                f"pnl={trade['pnl']} but r={trade['r_multiple']}: sign mismatch"
+            )

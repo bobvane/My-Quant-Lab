@@ -19,14 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Additional notes (not part of the license terms above):
-
-- This project is a quantitative RESEARCH tool. It does not constitute
-  investment advice. All investment decisions, gains and losses are solely
-  the user's responsibility.
-- This project never places real orders and has no broker integration.
-- Third-party components this project depends on remain under their
-  original licenses.

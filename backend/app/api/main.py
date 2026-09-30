@@ -34,6 +34,9 @@ from app.api.routers import (
     research as research_router,
 )
 from app.api.routers import (
+    resources as resources_router,
+)
+from app.api.routers import (
     settings as settings_router,
 )
 from app.api.routers import (
@@ -111,6 +114,7 @@ def create_app() -> FastAPI:
         strategies_router.router,
         backtests_router.router,
         research_router.router,
+        resources_router.router,
         paper_router.router,
         signals_router.router,
         settings_router.router,

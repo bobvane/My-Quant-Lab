@@ -16,3 +16,5 @@ cryptography>=43.0
 # image so MARKET_DATA_PROVIDER=yahoo_finance works out of the box; the whole
 # dependency set adds only ~25 MB to the image.
 yfinance>=0.2.50
+# Lightweight system resource monitor (NAS CPU/RAM/disk + own container). ~2 MB.
+psutil>=5.9

@@ -119,6 +119,28 @@ def create_backtest(payload: BacktestCreate, db: Session = Depends(get_db)) -> B
     run.status = "completed"
     run.finished_at = dt.datetime.now(tz=dt.UTC)
 
+    # Resource event: window peaks come from the monitor's samples when they
+    # cover the run; a short run leaves them null rather than invented.
+    try:
+        from app.infrastructure.resource_store import record_resource_event
+
+        record_resource_event(
+            db,
+            event_key=f"backtest:{run.id}",
+            event_type="backtest_completed",
+            started_at=run.started_at,
+            ended_at=run.finished_at,
+            payload={
+                "backtest_run_id": run.id,
+                "strategy_version_id": run.strategy_version_id,
+                "dataset_version_id": run.dataset_version_id,
+                "trade_count": len(outcome.trades),
+                "result_hash": outcome.result_hash,
+            },
+        )
+    except Exception:  # pragma: no cover - monitoring must never break backtests
+        logger.warning("resource event recording failed", exc_info=True)
+
     result = BacktestResult(
         backtest_run_id=run.id,
         summary_json=_summary(outcome, series),

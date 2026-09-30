@@ -34,5 +34,15 @@ celery_app.conf.update(
             "task": "quantlab.sync_market_data",
             "schedule": crontab(minute=0, hour="*"),
         },
+        # System Resource Monitor: 1-minute raw samples, deliberately cheap.
+        "collect-resources": {
+            "task": "quantlab.collect_resources",
+            "schedule": crontab(minute="*"),
+        },
+        # Retention: raw 7d, rollups 30d (configurable in settings).
+        "purge-resources": {
+            "task": "quantlab.purge_resources",
+            "schedule": crontab(minute=17, hour=3),
+        },
     },
 )

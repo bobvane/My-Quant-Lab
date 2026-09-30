@@ -84,8 +84,31 @@ class Settings(BaseSettings):
         description="Celery beat crontab used by the signal scanner.",
     )
 
+    # --- System Resource Monitor ------------------------------------------
+    # Phase 1a needs no Docker access at all: host metrics come from /proc via
+    # psutil, and Quant Lab's own containers report through their cgroups.
+    # Phase 1b adds a *read-only filtered proxy* so the collector may also see
+    # every container on the NAS. The full Docker socket is never mounted into
+    # the api/worker (see ADR-024).
+    resource_collection_enabled: bool = True
+    resource_retention_raw_days: int = Field(default=7, ge=1, le=90)
+    resource_retention_rollup_days: int = Field(default=30, ge=1, le=365)
+    # Comma-separated container paths to stat for disk usage; defaults to the
+    # container's own filesystem (the NAS system disk via overlay).
+    resource_disk_paths: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["/app"])
+    # Read-only Docker stats proxy (phase 1b). Empty disables layer 2.
+    docker_proxy_url: str | None = None
+    docker_proxy_token: str | None = None
+    # How the collector identifies Quant Lab containers among all NAS containers.
+    quantlab_compose_project: str = "my-quant-lab"
+
     log_level: str = "INFO"
     log_json: bool = True
+
+    @field_validator("resource_disk_paths", mode="before")
+    @classmethod
+    def _split_disk_paths(cls, value: object) -> object:
+        return cls._split_origins(value)
 
     @field_validator("market_data_watchlist", mode="before")
     @classmethod

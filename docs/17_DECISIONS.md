@@ -164,3 +164,23 @@ GHCR 镜像保持公开供 NAS 直接拉取。
 
 **理由**：行情数据是整个研究链路的事实来源。数据源不可选择、未收盘 bar 被
 当成已收盘、或真实代码下挂着随机数据，都会让后续回测与信号结论失去意义。
+## ADR-024：内置轻量系统资源监控（docs/20_RESOURCE_MONITOR.md）
+
+**决策**：
+1. 不引入 Prometheus / Grafana / cAdvisor / InfluxDB / Elasticsearch 或任何
+   独立监控平台容器。监控挂在现有 Celery beat 上（每 60s 一个轻量任务）。
+2. 分两层权限：层 1（无 Docker 权限）覆盖 NAS 整体与 Quant Lab 自身，
+   用 psutil 读 /proc 与各自 cgroup；层 2 覆盖全 NAS 所有容器，
+   需要一个自写的只读过滤代理微容器。
+3. Docker socket（等价宿主机 root）**不挂载进 api/worker**。它只挂载进
+   独立的 quantlab-docker-proxy 容器，且该代理用白名单把请求限制在
+   GET /containers/json 与 GET /containers/<id>/stats?stream=false 两条，
+   其余一切（POST/DELETE/exec/build/stream）一律 403。
+4. 容器识别按 Docker label（com.docker.compose.project）自动发现，
+   不硬编码容器名，拓扑变化不影响监控。
+5. 数据保留：原始 60s 采样 7 天 → 5 分钟聚合 30 天 → 之后每日任务自动清理。
+   约 11 万行/周（数 MB），PostgreSQL 无压力，不引入时序扩展。
+6. 前端不做高频轮询：后台 60s 采集，页面 30–60s 刷新一次最近采样。
+
+**理由**：用户需要用实测数据判断 Quant Lab 是否值得做架构精简，
+而监控系统自身不能成为新的资源负担。

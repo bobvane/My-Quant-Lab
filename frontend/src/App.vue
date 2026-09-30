@@ -27,6 +27,7 @@ onMounted(async () => {
         <RouterLink to="/market">行情与策略</RouterLink>
         <RouterLink to="/backtest">回测实验室</RouterLink>
         <RouterLink to="/paper">模拟盘</RouterLink>
+        <RouterLink to="/resources">系统资源</RouterLink>
         <RouterLink to="/settings">系统与审计</RouterLink>
       </nav>
 

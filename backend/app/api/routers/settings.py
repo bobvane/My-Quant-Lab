@@ -89,40 +89,161 @@ def upsert_setting(payload: dict[str, Any], db: Session = Depends(get_db)) -> di
     return _serialize(row)
 
 
-@router.get("/ai/providers", summary="Configured AI providers (keys never returned)")
+@router.get("/ai/providers", summary="List AI providers (keys never returned)")
 def ai_providers(db: Session = Depends(get_db)) -> dict[str, Any]:
-    from app.domain.models import AIModel, AIProvider
+    from app.data.ai_provider_service import list_providers
 
-    providers = db.scalars(select(AIProvider).order_by(AIProvider.id)).all()
     return {
-        "providers": [
-            {
-                "id": p.id,
-                "name": p.name,
-                "provider_type": p.provider_type,
-                "base_url": p.base_url,
-                "default_model": p.default_model,
-                "is_active": p.is_active,
-                "daily_budget_usd": float(p.daily_budget_usd),
-                "api_key_set": bool(p.api_key_encrypted),
-                "models": [
-                    {
-                        "id": m.id,
-                        "model_name": m.model_name,
-                        "capability_tier": m.capability_tier,
-                        "input_cost_per_mtok": float(m.input_cost_per_mtok),
-                        "output_cost_per_mtok": float(m.output_cost_per_mtok),
-                    }
-                    for m in db.scalars(select(AIModel).where(AIModel.provider_id == p.id)).all()
-                ],
-            }
-            for p in providers
-        ],
+        "providers": list_providers(db),
         "note": (
             "The AI layer is advisory: it explains engine-computed facts and never "
             "produces prices, returns or statistics."
         ),
     }
+
+
+@router.post(
+    "/ai/providers",
+    status_code=201,
+    summary="Create an AI provider (key is encrypted and never returned)",
+)
+def create_ai_provider(payload: dict[str, Any], db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.api.schemas import AIProviderCreate
+    from app.data.ai_provider_service import (
+        ProviderConfigError,
+        create_provider,
+        serialize_provider,
+    )
+
+    try:
+        spec = AIProviderCreate.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        provider = create_provider(
+            db,
+            name=spec.name,
+            base_url=spec.base_url,
+            api_key=spec.api_key,
+            provider_type=spec.provider_type,
+            default_model=spec.default_model,
+            daily_budget_usd=spec.daily_budget_usd,
+            is_active=spec.is_active,
+            models=[m.model_dump() for m in spec.models],
+        )
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="ai_provider_created",
+        entity_type="ai_provider",
+        entity_id=str(provider.id),
+        action="create",
+        payload={"name": provider.name, "base_url": provider.base_url},
+    )
+    db.commit()
+    db.refresh(provider)
+    return serialize_provider(db, provider)
+
+
+@router.put("/ai/providers/{provider_id}", summary="Update an AI provider")
+def update_ai_provider(
+    provider_id: int, payload: dict[str, Any], db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    from app.api.schemas import AIProviderUpdate
+    from app.data.ai_provider_service import (
+        ProviderConfigError,
+        serialize_provider,
+        update_provider,
+    )
+
+    try:
+        spec = AIProviderUpdate.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        provider = update_provider(
+            db,
+            provider_id,
+            name=spec.name,
+            base_url=spec.base_url,
+            api_key=spec.api_key,
+            default_model=spec.default_model,
+            daily_budget_usd=spec.daily_budget_usd,
+            is_active=spec.is_active,
+        )
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="ai_provider_updated",
+        entity_type="ai_provider",
+        entity_id=str(provider.id),
+        action="update",
+        # Deliberately excludes the key: audit must never carry secrets.
+        payload={"name": provider.name, "base_url": provider.base_url},
+    )
+    db.commit()
+    db.refresh(provider)
+    return serialize_provider(db, provider)
+
+
+@router.delete("/ai/providers/{provider_id}", summary="Delete an unused AI provider")
+def delete_ai_provider(provider_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.data.ai_provider_service import ProviderConfigError, delete_provider
+
+    try:
+        name = delete_provider(db, provider_id)
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="ai_provider_deleted",
+        entity_type="ai_provider",
+        entity_id=str(provider_id),
+        action="delete",
+        payload={"name": name},
+    )
+    db.commit()
+    return {"deleted": provider_id, "name": name}
+
+
+@router.post("/ai/providers/{provider_id}/test", summary="Test a stored provider")
+def test_stored_provider(provider_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.data.ai_provider_service import ProviderConfigError, test_connection
+    from app.domain.models import AIProvider
+    from app.infrastructure.secrets import decrypt_secret
+
+    provider = db.get(AIProvider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="provider not found")
+    if not provider.api_key_encrypted:
+        return {"ok": False, "detail": "no API key stored for this provider", "models_found": []}
+    try:
+        api_key = decrypt_secret(provider.api_key_encrypted)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="stored key could not be decrypted") from exc
+    try:
+        return test_connection(provider.base_url, api_key)
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/ai/providers/test", summary="Test credentials before saving")
+def test_new_provider(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.api.schemas import AIProviderTestRequest
+    from app.data.ai_provider_service import test_connection
+
+    try:
+        spec = AIProviderTestRequest.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return test_connection(spec.base_url, spec.api_key)
 
 
 @router.get("/audit", summary="Recent audit events")

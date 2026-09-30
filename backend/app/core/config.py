@@ -13,6 +13,8 @@ from typing import Annotated
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app import __version__ as package_version
+
 
 class Settings(BaseSettings):
     """Runtime settings loaded from environment variables / `.env`."""
@@ -25,7 +27,10 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "My Quant Lab"
-    app_version: str = "0.0.1"
+    # Single source of truth: the package version, which `scripts/version.sh`
+    # keeps in step with the released git tag. Hard-coding it here meant the API
+    # reported 0.0.1 forever, so a running NAS could not be told apart by build.
+    app_version: str = package_version.lstrip("v")
     environment: str = Field(default="development")
 
     api_prefix: str = "/api/v1"

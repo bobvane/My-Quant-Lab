@@ -57,8 +57,8 @@ write_version() {
 }
 
 sync_env_example() {
-    # Keep .env.example aligned with the released tag so NAS deploys pull the
-    # matching image.
+    # Keep .env.example's documented MQL_VERSION aligned with the release.
+    # The tag keeps the "v" prefix; file contents must not (PEP 440 rejects it).
     local version="$1" version="${1#v}"
     if [ -f "${REPO_ROOT}/.env.example" ]; then
         sed -i.bak "s/^MQL_VERSION=.*/MQL_VERSION=${version}/" "${REPO_ROOT}/.env.example" \
@@ -67,9 +67,10 @@ sync_env_example() {
 }
 
 sync_version_references() {
-    # version.txt is the single source of truth; mirror it into the backend
-    # package so /api/v1/health reports the released version.
-    local version="$1"
+    # version.txt is the single source of truth. Mirror the version WITHOUT the
+    # "v" prefix into every package manifest: `pyproject.toml` must be valid
+    # PEP 440, and the API reads `app.__version__` to report the running build.
+    local version="${1#v}"
     sed -i.bak "s/^__version__ = \".*\"/__version__ = \"${version}\"/" \
         "${REPO_ROOT}/backend/app/__init__.py" 2>/dev/null && rm -f "${REPO_ROOT}/backend/app/__init__.py.bak"
     sed -i.bak "s/^version = \".*\"/version = \"${version}\"/" \

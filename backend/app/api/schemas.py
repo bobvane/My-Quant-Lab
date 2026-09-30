@@ -5,11 +5,17 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 __all__ = [
     "AIStatusOut",
     "AITaskOut",
+    "AIModelIn",
+    "AIProviderCreate",
+    "AIProviderOut",
+    "AIProviderTestOut",
+    "AIProviderTestRequest",
+    "AIProviderUpdate",
     "AssetCreate",
     "AssetOut",
     "BacktestCreate",
@@ -315,6 +321,96 @@ class AIStatusOut(BaseModel):
     spent_today_usd: float = 0.0
     tasks_today: int = 0
     note: str
+
+
+class AIModelIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_name: str = Field(min_length=1, max_length=128)
+    capability_tier: str = Field(default="standard", pattern="^(cheap|standard|high)$")
+    input_cost_per_mtok: float = Field(default=0.0, ge=0)
+    output_cost_per_mtok: float = Field(default=0.0, ge=0)
+
+
+class AIProviderCreate(BaseModel):
+    """Create an AI provider.
+
+    The API key is write-only: it is encrypted at rest and never returned.
+    ``base_url`` must point at an OpenAI-compatible ``/chat/completions``
+    endpoint, which covers OpenAI, DeepSeek, Qwen, Kimi, GLM, OpenRouter,
+    Gemini-compatible gateways and local vLLM alike.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+    provider_type: str = Field(
+        default="openai_compatible", pattern="^(openai_compatible|anthropic|google)$"
+    )
+    base_url: str = Field(min_length=8, max_length=512)
+    api_key: str = Field(min_length=4, max_length=512)
+    default_model: str | None = Field(default=None, max_length=128)
+    daily_budget_usd: float = Field(default=2.0, ge=0, le=1000)
+    is_active: bool = True
+    models: list[AIModelIn] = Field(default_factory=list)
+
+    @field_validator("base_url")
+    @classmethod
+    def _require_https(cls, value: str) -> str:
+        text = value.strip().rstrip("/")
+        if not text.startswith(("https://", "http://")):
+            raise ValueError("base_url must start with https:// (or http:// for a local endpoint)")
+        return text
+
+
+class AIProviderUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    base_url: str | None = Field(default=None, min_length=8, max_length=512)
+    # Omit to keep the stored key; send an empty string to clear it.
+    api_key: str | None = Field(default=None, max_length=512)
+    default_model: str | None = Field(default=None, max_length=128)
+    daily_budget_usd: float | None = Field(default=None, ge=0, le=1000)
+    is_active: bool | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _require_https(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip().rstrip("/")
+        if not text.startswith(("https://", "http://")):
+            raise ValueError("base_url must start with https:// (or http:// for a local endpoint)")
+        return text
+
+
+class AIProviderOut(BaseModel):
+    id: int
+    name: str
+    provider_type: str
+    base_url: str
+    default_model: str | None
+    is_active: bool
+    daily_budget_usd: float
+    api_key_set: bool
+    key_masked: str
+    models: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AIProviderTestOut(BaseModel):
+    ok: bool
+    detail: str
+    models_found: list[str] = Field(default_factory=list)
+
+
+class AIProviderTestRequest(BaseModel):
+    """Test connectivity before saving, or test an already stored provider."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str = Field(min_length=8, max_length=512)
+    api_key: str = Field(min_length=4, max_length=512)
 
 
 class ExplainOut(BaseModel):

@@ -57,3 +57,21 @@ def test_no_complex_field_is_json_decoded(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_settings_are_cached() -> None:
     assert get_settings() is get_settings()
+
+
+def test_app_version_comes_from_the_package() -> None:
+    """Regression: `app_version` used to be hard-coded to "0.0.1" in config.py,
+    so every running container reported the same version no matter which tag
+    built it. It must now track the package version that version.sh writes.
+    """
+
+    import app as app_package
+
+    settings = Settings(_env_file=None)
+    assert settings.app_version == app_package.__version__.lstrip("v")
+    assert not settings.app_version.startswith("v")
+
+
+def test_explicit_env_version_overrides_package_default(monkeypatch) -> None:
+    monkeypatch.setenv("APP_VERSION", "9.9.9")
+    assert Settings(_env_file=None).app_version == "9.9.9"

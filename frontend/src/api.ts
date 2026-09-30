@@ -184,6 +184,25 @@ export interface ExplainResult {
   cost_usd_estimated: number
 }
 
+export interface AIProviderRecord {
+  id: number
+  name: string
+  provider_type: string
+  base_url: string
+  default_model: string | null
+  is_active: boolean
+  daily_budget_usd: number
+  api_key_set: boolean
+  key_masked: string
+  models: Array<Record<string, unknown>>
+}
+
+export interface ProviderTestResult {
+  ok: boolean
+  detail: string
+  models_found: string[]
+}
+
 export interface SignalIntent {
   state: string
   direction: string
@@ -297,4 +316,27 @@ export const api = {
   explainBacktest: (runId: number) =>
     request<ExplainResult>(`/backtests/${runId}/explain`, { method: 'POST' }),
   aiTasks: (limit = 50) => request<Array<Record<string, unknown>>>(`/ai/tasks?limit=${limit}`),
+  aiProviders: () =>
+    request<{ providers: AIProviderRecord[]; note: string }>('/settings/ai/providers'),
+  createAiProvider: (payload: Record<string, unknown>) =>
+    request<AIProviderRecord>('/settings/ai/providers', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  updateAiProvider: (id: number, payload: Record<string, unknown>) =>
+    request<AIProviderRecord>(`/settings/ai/providers/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  deleteAiProvider: (id: number) =>
+    request<{ deleted: number; name: string }>(`/settings/ai/providers/${id}`, {
+      method: 'DELETE',
+    }),
+  testAiProvider: (id: number) =>
+    request<ProviderTestResult>(`/settings/ai/providers/${id}/test`, { method: 'POST' }),
+  testNewAiProvider: (baseUrl: string, apiKey: string) =>
+    request<ProviderTestResult>('/settings/ai/providers/test', {
+      method: 'POST',
+      body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
+    }),
 }

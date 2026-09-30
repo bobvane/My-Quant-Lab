@@ -55,6 +55,23 @@ def test_no_complex_field_is_json_decoded(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.ai_daily_budget_usd == pytest.approx(2.5)
 
 
+def test_app_environment_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: the field only looked at ENVIRONMENT, so APP_ENVIRONMENT
+    (what compose/.env set) was ignored and production detection never engaged."""
+
+    monkeypatch.setenv("APP_ENVIRONMENT", "production")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.environment == "production"
+    assert settings.is_production is True
+
+
+def test_plain_environment_env_also_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("APP_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    assert Settings(_env_file=None).is_production is True
+
+
 def test_settings_are_cached() -> None:
     assert get_settings() is get_settings()
 

@@ -11,7 +11,7 @@ import re
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app import __version__ as package_version
@@ -32,7 +32,14 @@ class Settings(BaseSettings):
     # keeps in step with the released git tag. Hard-coding it here meant the API
     # reported 0.0.1 forever, so a running NAS could not be told apart by build.
     app_version: str = package_version.lstrip("v")
-    environment: str = Field(default="development")
+    # The deployment sets APP_ENVIRONMENT (see .env.example / compose). Without
+    # an explicit alias pydantic-settings would only look at ENVIRONMENT, so
+    # production detection silently stayed "development" and 500 responses
+    # leaked exception details.
+    environment: str = Field(
+        default="development",
+        validation_alias=AliasChoices("APP_ENVIRONMENT", "ENVIRONMENT"),
+    )
 
     api_prefix: str = "/api/v1"
     host: str = "0.0.0.0"
@@ -70,6 +77,10 @@ class Settings(BaseSettings):
     # through the web proxy. Set it before exposing the API on the LAN; the
     # bundled web container then injects the same token when proxying /api.
     api_auth_token: str | None = None
+    # Per-IP limit for mutating API requests (POST/PUT/DELETE). 0 disables it;
+    # skipped entirely under APP_ENVIRONMENT=test. Read endpoints (GET) are not
+    # limited so dashboards and polling keep working.
+    rate_limit_per_minute: int = 60
     ghostfolio_base_url: str | None = None
     ghostfolio_api_key: str | None = None
     market_data_provider: str = "yahoo_finance"

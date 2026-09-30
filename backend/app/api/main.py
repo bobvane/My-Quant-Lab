@@ -54,6 +54,7 @@ from app.api.routers import (
 )
 from app.core.config import settings
 from app.core.logging import configure_logging
+from app.infrastructure.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,36 @@ def create_app() -> FastAPI:
             },
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Lightweight per-IP limit on mutating requests (docs/14 §4). Skipped in the
+    # test environment and when the limit is 0; read-only endpoints are never
+    # limited so the dashboard can keep polling.
+    @app.middleware("http")
+    async def enforce_rate_limit(request: Request, call_next):
+        limit = settings.rate_limit_per_minute
+        if (
+            limit <= 0
+            or settings.environment == "test"
+            or request.method in {"GET", "HEAD", "OPTIONS"}
+        ):
+            return await call_next(request)
+        path = request.url.path
+        if not path.startswith(settings.api_prefix) or path in open_paths:
+            return await call_next(request)
+        client = request.client.host if request.client else "unknown"
+        if not limiter.allow(f"{client}:{path}", limit):
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "code": "rate_limited",
+                        "message": "too many requests; slow down",
+                        "details": {},
+                    }
+                },
+                headers={"Retry-After": "60"},
+            )
+        return await call_next(request)
 
     # Added after auth so CORS is the outermost layer and 401s still carry the
     # CORS headers a cross-origin browser needs to read them.

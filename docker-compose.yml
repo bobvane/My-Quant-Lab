@@ -31,6 +31,8 @@ x-backend-env: &backend-env
   SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
   # Optional bearer auth for the API. Empty = open (loopback-only by default).
   API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
+  # Per-IP limit for mutating API requests (0 disables).
+  RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
   MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-synthetic}
   AI_PROVIDER_BASE_URL: ${AI_PROVIDER_BASE_URL:-}
   AI_PROVIDER_API_KEY: ${AI_PROVIDER_API_KEY:-}

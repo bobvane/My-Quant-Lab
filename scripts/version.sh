@@ -74,7 +74,7 @@ sync_version_references() {
         "${REPO_ROOT}/backend/app/__init__.py" 2>/dev/null && rm -f "${REPO_ROOT}/backend/app/__init__.py.bak"
     sed -i.bak "s/^version = \".*\"/version = \"${version}\"/" \
         "${REPO_ROOT}/backend/pyproject.toml" 2>/dev/null && rm -f "${REPO_ROOT}/backend/pyproject.toml.bak"
-    sed -i.bak "s/^version: \".*\"/version: \"${version}\"/" \
+    sed -i.bak 's/^\([[:space:]]*"version":[[:space:]]*"\)[^"]*\("\)/\1'"${version}"'\2/' \
         "${REPO_ROOT}/frontend/package.json" 2>/dev/null && rm -f "${REPO_ROOT}/frontend/package.json.bak"
 }
 

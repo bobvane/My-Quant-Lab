@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import zoneinfo
 from typing import Any, Protocol
 
 import pandas as pd
@@ -19,9 +20,16 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "PROVIDER_NAMES",
     "MarketDataProvider",
+    "ProviderError",
+    "SymbolNotServed",
     "YahooFinanceProvider",
+    "asset_metadata_for",
     "get_market_data_provider",
+    "infer_asset_class",
+    "mark_closed_bars",
+    "resolve_provider_name",
     "SyntheticProvider",
 ]
 
@@ -33,6 +41,83 @@ _TIMEFRAMES = {
     "1d": "1d",
     "1w": "1wk",
 }
+
+# Crypto pairs quote 24/7 and carry no exchange session.
+_CRYPTO_QUOTES = ("USD", "USDT", "USDC", "BTC", "ETH", "EUR", "BUSD")
+# Well-known ETF tickers, so a synced symbol is labelled honestly rather than
+# silently filed as a single stock.
+_KNOWN_ETFS = frozenset({"SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "GLD", "SLV", "TLT", "ARKK"})
+
+
+class ProviderError(RuntimeError):
+    """Raised for a provider-side problem the caller should surface."""
+
+
+class SymbolNotServed(ProviderError):
+    """The requested symbol is not served by this provider.
+
+    Kept distinct so the API can answer 400 (wrong provider chosen) instead of
+    502 (something upstream broke).
+    """
+
+
+def infer_asset_class(symbol: str) -> str:
+    """Best-effort asset class from the ticker shape.
+
+    ``BTC-USD`` → crypto, ``SPY`` → etf, ``^GSPC`` → index, else stock.
+    Guessing wrong is worse than being generic, so the default is ``stock``.
+    """
+
+    text = (symbol or "").strip().upper()
+    if text.startswith("^"):
+        return "index"
+    if "-" in text:
+        base, _, quote = text.partition("-")
+        if quote in _CRYPTO_QUOTES and base.isalpha():
+            return "crypto"
+    if text.endswith(("=F", "=X")):
+        return "future"
+    if text in _KNOWN_ETFS:
+        return "etf"
+    return "stock"
+
+
+def mark_closed_bars(
+    frame: pd.DataFrame, timeframe: str, timezone_name: str = "UTC", now: dt.datetime | None = None
+) -> pd.DataFrame:
+    """Flag whether the final bar has actually closed.
+
+    A provider happily returns today's still-forming daily candle. Treating it
+    as closed would let the strategy see an unfinished bar — exactly the
+    lookahead the project forbids. Intraday timeframes are always treated as
+    potentially open except when the bar timestamp is already in the past.
+    """
+
+    out = frame.copy()
+    if out.empty:
+        return out
+    out["is_closed"] = True
+
+    try:
+        tz = zoneinfo.ZoneInfo(timezone_name)
+    except Exception:
+        tz = dt.UTC
+    reference = (now or dt.datetime.now(tz=dt.UTC)).astimezone(tz)
+
+    last_ts = pd.Timestamp(out.index[-1])
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.tz_localize("UTC")
+    last_local = last_ts.tz_convert(tz)
+
+    if timeframe in {"1d", "1w"}:
+        # A daily/weekly bar covering today is not finished until the day ends.
+        if last_local.date() >= reference.date():
+            out.iloc[-1, out.columns.get_loc("is_closed")] = False
+    else:
+        # Intraday: the bar containing "now" is still forming.
+        if last_local >= reference.replace(second=0, microsecond=0):
+            out.iloc[-1, out.columns.get_loc("is_closed")] = False
+    return out
 
 
 def _midnight_utc(value: dt.datetime) -> dt.datetime:
@@ -62,13 +147,19 @@ class MarketDataProvider(Protocol):
 
 
 class SyntheticProvider:
-    """Deterministic offline provider used for tests and NAS smoke checks.
+    """Deterministic offline provider used for demos, tests and smoke checks.
 
-    It generates a reproducible random walk from a seed derived from the symbol
-    so the demo dashboard works even without external API keys.
+    It generates a reproducible random walk seeded from the symbol, so the
+    dashboard can be exercised without any API key.
+
+    It deliberately serves **only** its own ``DEMO-*`` tickers. Handing back a
+    random walk under the name ``AAPL`` would put fabricated prices behind a
+    real ticker — a research tool must never do that, however convenient.
     """
 
     name = "synthetic"
+
+    KNOWN_SYMBOLS = ("DEMO-AAPL", "DEMO-BTC")
 
     def list_assets(self) -> list[dict[str, Any]]:
         return [
@@ -103,6 +194,13 @@ class SyntheticProvider:
         request would return different bar timestamps on every call and repeated
         syncs would duplicate data.
         """
+
+        if symbol.upper() not in self.KNOWN_SYMBOLS:
+            raise SymbolNotServed(
+                f"the synthetic provider only serves {', '.join(self.KNOWN_SYMBOLS)}; "
+                f"'{symbol}' is not one of them. Set MARKET_DATA_PROVIDER=yahoo_finance "
+                "to fetch real market data."
+            )
 
         import zlib
 
@@ -157,9 +255,11 @@ class YahooFinanceProvider:
         if self._module is None:
             try:
                 import yfinance  # type: ignore
-            except ImportError as exc:  # pragma: no cover - optional dependency
-                raise RuntimeError(
-                    "yfinance is not installed; install the 'market-data' extra"
+            except ImportError as exc:
+                raise ProviderError(
+                    "yfinance is not installed in this image, so real market data "
+                    "is unavailable. Use MARKET_DATA_PROVIDER=synthetic, or install "
+                    "the 'market-data' extra."
                 ) from exc
             self._module = yfinance
         return self._module
@@ -205,24 +305,60 @@ class YahooFinanceProvider:
         *,
         adjusted: bool = True,
     ) -> pd.DataFrame:
+        """Fetch OHLCV from Yahoo Finance.
+
+        Robust against the shapes yfinance actually returns: a single ticker can
+        come back with flat columns or a MultiIndex, the date column may be named
+        ``Date`` or ``Datetime``, and an in-progress session yields NaN rows.
+        """
+
         yf = self._ensure()
         interval = _TIMEFRAMES.get(timeframe, "1d")
-        raw = yf.download(
-            symbol,
-            start=start.date().isoformat(),
-            end=(end + dt.timedelta(days=1)).date().isoformat(),
-            interval=interval,
-            auto_adjust=adjusted,
-            progress=False,
-        )
-        if raw is None or raw.empty:
+        try:
+            raw = yf.download(
+                symbol,
+                start=start.date().isoformat(),
+                end=(end + dt.timedelta(days=1)).date().isoformat(),
+                interval=interval,
+                auto_adjust=adjusted,
+                progress=False,
+                # No thread pool: this runs inside a NAS container, and yfinance
+                # otherwise spawns worker threads per request.
+                threads=False,
+            )
+        except Exception as exc:
+            raise ProviderError(
+                f"yahoo finance request failed for '{symbol}': {type(exc).__name__}: {exc}"
+            ) from exc
+
+        if raw is None or len(raw) == 0:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-        frame = raw.reset_index()
-        frame = frame.rename(columns=str.lower)
-        keep = ["timestamp", "open", "high", "low", "close", "volume"]
-        frame = frame[[c for c in keep if c in frame.columns]]
+
+        frame = raw.copy()
+        # Single-ticker downloads may carry MultiIndex columns like ('Close','AAPL').
+        if isinstance(frame.columns, pd.MultiIndex):
+            frame.columns = [str(col[0]).lower() for col in frame.columns]
+        else:
+            frame.columns = [str(col).lower() for col in frame.columns]
+
+        frame = frame.reset_index()
+        # The index column is 'Date' or 'Datetime' depending on the interval.
+        frame = frame.rename(columns={frame.columns[0]: "timestamp"})
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
-        return frame.set_index("timestamp").sort_index()
+
+        for column in ("open", "high", "low", "close", "volume"):
+            if column not in frame.columns:
+                frame[column] = 0.0 if column == "volume" else pd.NA
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+        # Drop rows where the candle is incomplete/garbage; Yahoo pads the
+        # current session with NaN when the market is closed.
+        frame = frame.dropna(subset=["open", "high", "low", "close"])
+        if frame.empty:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+        frame["volume"] = frame["volume"].fillna(0.0)
+        return frame.set_index("timestamp")[["open", "high", "low", "close", "volume"]].sort_index()
 
     def get_quote(self, symbol: str) -> dict[str, Any]:
         end = dt.datetime.now(tz=dt.UTC)
@@ -238,12 +374,57 @@ class YahooFinanceProvider:
         }
 
 
-def get_market_data_provider() -> MarketDataProvider:
-    """Return the configured provider instance."""
+_PROVIDER_ALIASES = {
+    "synthetic": "synthetic",
+    "demo": "synthetic",
+    "yahoo_finance": "yahoo_finance",
+    "yahoo": "yahoo_finance",
+    "yfinance": "yahoo_finance",
+}
 
-    name = settings.market_data_provider
-    if name in {"synthetic", "demo"}:
+PROVIDER_NAMES = tuple(sorted({"synthetic", "yahoo_finance"}))
+
+
+def resolve_provider_name(name: str | None = None) -> str:
+    """Map a user-supplied provider name onto a canonical provider name."""
+
+    raw = (name or settings.market_data_provider or "synthetic").strip().lower()
+    resolved = _PROVIDER_ALIASES.get(raw)
+    if resolved is None:
+        raise ProviderError(
+            f"unknown market data provider '{name}'. Supported: {', '.join(PROVIDER_NAMES)}."
+        )
+    return resolved
+
+
+def get_market_data_provider(name: str | None = None) -> MarketDataProvider:
+    """Return a provider instance.
+
+    ``name`` lets a caller override the configured default per request; when it
+    is omitted the setting ``MARKET_DATA_PROVIDER`` decides.
+    """
+
+    resolved = resolve_provider_name(name)
+    if resolved == "synthetic":
         return SyntheticProvider()
-    if name in {"yahoo_finance", "yahoo"}:
-        return YahooFinanceProvider()
-    raise ValueError(f"unknown market data provider '{name}'")
+    return YahooFinanceProvider()
+
+
+def asset_metadata_for(provider: MarketDataProvider, symbol: str) -> dict[str, Any]:
+    """Build asset metadata for a newly synced symbol.
+
+    Prefers what the provider declares, then falls back to ticker-shape
+    inference. Never invents an exchange.
+    """
+
+    text = (symbol or "").strip()
+    for entry in provider.list_assets():
+        if str(entry.get("symbol", "")).upper() == text.upper():
+            return dict(entry)
+    return {
+        "symbol": text,
+        "display_name": text,
+        "asset_class": infer_asset_class(text),
+        "currency": "USD",
+        "exchange": None,
+    }

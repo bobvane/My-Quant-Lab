@@ -56,8 +56,15 @@ def bars_to_frame(rows: Iterable[MarketDataBar]) -> pd.DataFrame:
 
 
 def frame_to_bars(frame: pd.DataFrame, source_name: str = "local") -> list[dict[str, object]]:
-    """Convert a DataFrame into insertable dicts with a per-bar source hash."""
+    """Convert a DataFrame into insertable dicts with a per-bar source hash.
 
+    ``is_closed`` comes from the frame when the provider/caller set it (see
+    ``mark_closed_bars``); the default is True so historical fixtures behave as
+    before. A still-forming bar must be persisted as ``is_closed=False`` rather
+    than dropped, so the record exists but strategies ignore it.
+    """
+
+    has_closed_flag = "is_closed" in frame.columns
     out: list[dict[str, object]] = []
     for timestamp, row in frame.iterrows():
         ts = pd.Timestamp(timestamp)
@@ -74,7 +81,7 @@ def frame_to_bars(frame: pd.DataFrame, source_name: str = "local") -> list[dict[
                 "low": float(row["low"]),
                 "close": float(row["close"]),
                 "volume": float(row["volume"]),
-                "is_closed": True,
+                "is_closed": bool(row["is_closed"]) if has_closed_flag else True,
                 "source_hash": hashlib.sha256(payload.encode()).hexdigest()[:32],
             }
         )

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import BarOut, MarketDataSyncRequest
+from app.core.config import settings
 from app.core.db import get_db
 from app.data.market_data_repo import (
     frame_to_bars,
@@ -18,7 +19,13 @@ from app.data.market_data_repo import (
     load_bars,
     upsert_bars,
 )
-from app.data.providers import get_market_data_provider
+from app.data.providers import (
+    ProviderError,
+    SymbolNotServed,
+    asset_metadata_for,
+    get_market_data_provider,
+    mark_closed_bars,
+)
 from app.domain.models import Asset, MarketDataSeries, MarketDataSource
 
 logger = logging.getLogger(__name__)
@@ -94,18 +101,26 @@ def list_bars(
 
 @router.post("/sync", summary="Sync OHLCV data for one symbol")
 def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_db)) -> dict:
-    provider_name = payload.provider or "synthetic"
+    # Resolve the provider from the request, falling back to the configured
+    # default. Previously the request field was accepted and then ignored, so a
+    # caller could not actually choose the source.
     try:
-        provider = get_market_data_provider()
-    except ValueError as exc:
+        provider = get_market_data_provider(payload.provider)
+    except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    provider_name = provider.name
 
     end = payload.end or dt.datetime.now(tz=dt.UTC)
     start = payload.start or (end - dt.timedelta(days=payload.lookback_days))
 
     try:
         frame: pd.DataFrame = provider.get_ohlcv(payload.symbol, payload.timeframe, start, end)
-    except Exception as exc:  # pragma: no cover - network/provider specific
+    except SymbolNotServed as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ProviderError as exc:
+        logger.warning("market data provider error for %s: %s", payload.symbol, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - unexpected provider failure
         logger.exception("market data sync failed for %s", payload.symbol)
         raise HTTPException(status_code=502, detail=f"provider error: {exc}") from exc
 
@@ -115,18 +130,29 @@ def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_d
             "timeframe": payload.timeframe,
             "provider": provider_name,
             "inserted": 0,
-            "message": "provider returned no bars",
+            "message": (
+                "provider returned no bars. Possible causes: (1) the ticker is wrong; "
+                "(2) the market has no data in this range; (3) the data provider is "
+                "rate-limiting this IP — yfinance reports that as an empty result "
+                "rather than an error, so retry later if the ticker is valid."
+            ),
         }
+
+    # Decide which bars have actually closed before persisting: a daily candle
+    # covering today is still forming and must not be treated as usable input.
+    frame = mark_closed_bars(frame, payload.timeframe, settings.default_timezone)
+    closed_bars = int(frame["is_closed"].sum())
+    forming_bars = int((~frame["is_closed"]).sum())
 
     asset = db.scalar(select(Asset).where(Asset.symbol == payload.symbol))
     if asset is None:
-        sample = next((a for a in provider.list_assets() if a["symbol"] == payload.symbol), None)
+        meta = asset_metadata_for(provider, payload.symbol)
         asset = Asset(
-            symbol=payload.symbol,
-            display_name=(sample or {}).get("display_name", payload.symbol),
-            asset_class=(sample or {}).get("asset_class", "stock"),
-            currency=(sample or {}).get("currency", "USD"),
-            exchange=(sample or {}).get("exchange"),
+            symbol=str(meta.get("symbol") or payload.symbol),
+            display_name=meta.get("display_name"),
+            asset_class=str(meta.get("asset_class") or "stock"),
+            currency=str(meta.get("currency") or "USD"),
+            exchange=meta.get("exchange"),
         )
         db.add(asset)
         db.flush()
@@ -142,6 +168,8 @@ def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_d
         "provider": provider_name,
         "series_id": series.id,
         "inserted": inserted,
+        "closed_bars_in_fetch": closed_bars,
+        "still_forming_bars": forming_bars,
         "series_start": series.series_start,
         "series_end": series.series_end,
     }

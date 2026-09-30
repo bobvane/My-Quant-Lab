@@ -1,24 +1,37 @@
 """Shared pytest fixtures.
 
 Tests run against an in-memory SQLite database so the suite needs no external
-services. PostgreSQL-specific behaviour (JSONB, partitioning) is exercised in CI
-through the Docker Compose smoke test instead.
+services. PostgreSQL-specific behaviour (triggers, timestamptz) is exercised by
+``test_postgres_triggers.py`` when ``TEST_POSTGRES_URL`` is set, and by the
+Docker Compose smoke test in CI.
+
+The environment is pinned here, *before* any application module is imported,
+so the suite is hermetic: it must not depend on whatever happens to be in the
+developer's shell or ``.env``. Without this, a machine whose default market
+data provider is ``yahoo_finance`` makes unrelated tests reach the network.
 """
 
 from __future__ import annotations
 
-import datetime as dt
+import os
 
-import numpy as np
-import pandas as pd
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+os.environ.setdefault("MARKET_DATA_PROVIDER", "synthetic")
+os.environ.setdefault("SECRET_KEY", "test-secret-key-0123456789abcdef")
+os.environ.setdefault("APP_ENVIRONMENT", "test")
 
-from app.core.db import Base, get_db
-from app.domain import models as _models  # noqa: F401  (register all tables)
+import datetime as dt  # noqa: E402
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+from app.core.db import Base, get_db  # noqa: E402
+from app.domain import models as _models  # noqa: E402, F401  (register all tables)
 
 
 @pytest.fixture()

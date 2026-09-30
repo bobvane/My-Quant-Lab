@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     ghostfolio_base_url: str | None = None
     ghostfolio_api_key: str | None = None
     market_data_provider: str = "yahoo_finance"
+    # Symbols the scheduled sync keeps warm. Empty means "use whatever the
+    # active provider declares", which avoids hard-coding DEMO-* tickers that
+    # only exist for the synthetic provider.
+    market_data_watchlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
     ai_provider_base_url: str | None = None
     ai_provider_api_key: str | None = None
     ai_default_model: str | None = None
@@ -82,6 +86,13 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     log_json: bool = True
+
+    @field_validator("market_data_watchlist", mode="before")
+    @classmethod
+    def _split_watchlist(cls, value: object) -> object:
+        """Accept a comma separated list or a JSON array, same as cors_origins."""
+
+        return cls._split_origins(value)
 
     @field_validator("cors_origins", mode="before")
     @classmethod

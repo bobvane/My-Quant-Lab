@@ -12,3 +12,7 @@ pandas>=2.2
 httpx>=0.27
 python-dotenv>=1.0
 cryptography>=43.0
+# Real market data (stocks / ETFs / crypto via Yahoo Finance). Included in the
+# image so MARKET_DATA_PROVIDER=yahoo_finance works out of the box; the whole
+# dependency set adds only ~25 MB to the image.
+yfinance>=0.2.50

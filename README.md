@@ -89,8 +89,17 @@ docker compose logs --tail 80 quantlab-api
 | `container quantlab-api is unhealthy` | 启动失败 | `docker compose logs --tail 100 quantlab-api`，日志会直接给出原因 |
 | 拉取镜像缓慢或超时 | 和 GitHub 之间的网络问题 | 多试几次，或换个时间段；也可以在有源码的机器上用 `docker-compose.build.yml` 本地构建 |
 
-> 想用真实行情：`.env` 中设置 `MARKET_DATA_PROVIDER=yahoo_finance`
-> （免费行情，无需密钥，但受上游限流影响）。
+> **想用真实行情**：`.env` 中设置 `MARKET_DATA_PROVIDER=yahoo_finance`
+> （美股 / ETF / 加密货币，如 AAPL、SPY、BTC-USD；无需密钥，镜像已内置 yfinance）。
+>
+> 也可以在单次同步时用 `provider` 参数临时指定，例如
+> `POST /api/v1/market-data/sync` 请求体带 `{"symbol": "AAPL", "provider": "yahoo_finance"}`。
+>
+> 两个注意点：
+> 1. `synthetic` 只服务 `DEMO-AAPL` / `DEMO-BTC` 两个演示代码。用随机数据冒充实盘代码
+>    会被明确拒绝（HTTP 4xx），避免研究结论建立在编造的价格之上。
+> 2. Yahoo 可能对同一出口 IP 限流，而它的表现是**返回 0 根 K 线而非报错**；
+>    若代码本身有效，稍后重试通常即可。
 
 ---
 

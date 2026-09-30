@@ -1,0 +1,234 @@
+"""Paper-trading execution tests (docs/08, docs/15 Phase 4).
+
+Paper accounts are virtual and isolated; these tests pin the accounting: a BUY
+spends cash and opens a position, a SELL realises P&L (net of both fees), and an
+empty or closed account refuses to trade.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+
+import pytest
+
+from app.domain.models import (
+    Asset,
+    PaperAccount,
+    PaperPosition,
+    PaperTrade,
+    Signal,
+    Strategy,
+    StrategyVersion,
+)
+from app.simulation.paper_engine import PaperError, PaperExecutionSettings, execute_signal
+
+
+def _seed(db, *, cash: float = 10_000, state: str = "BUY", price: float = 100.0):
+    strategy = Strategy(name="Paper", slug="paper-strat")
+    db.add(strategy)
+    db.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id, version="1.0.0", dsl_json={}, immutable_hash="p" * 64
+    )
+    db.add(version)
+    db.flush()
+    asset = Asset(symbol="PAPER", asset_class="stock")
+    db.add(asset)
+    db.flush()
+    account = PaperAccount(name="PA", initial_cash=cash, cash=cash)
+    db.add(account)
+    db.flush()
+    signal = Signal(
+        strategy_version_id=version.id,
+        asset_id=asset.id,
+        timeframe="1d",
+        bar_timestamp=dt.datetime(2026, 1, 2, tzinfo=dt.UTC),
+        state=state,
+        direction="LONG",
+        price_reference=price,
+        triggered_rules_json=["rule"],
+        feature_snapshot_hash="f" * 64,
+        data_source="test",
+    )
+    db.add(signal)
+    db.commit()
+    return account, signal, asset
+
+
+def test_buy_spends_cash_and_opens_position(db_session) -> None:
+    account, signal, asset = _seed(db_session)
+    result = execute_signal(
+        db_session, account, signal, settings=PaperExecutionSettings(fee_bps=10, slippage_bps=5)
+    )
+    assert result["side"] == "BUY"
+    # All-in: cash is (near) zero, and slippage makes the fill price above 100.
+    assert float(account.cash) == pytest.approx(0.0, abs=1e-6)
+    assert float(result["fill_price"]) == pytest.approx(100.05, abs=1e-6)
+    assert float(result["fees"]) > 0
+
+    position = db_session.query(PaperPosition).one()
+    assert float(position.quantity) > 0
+    assert float(position.avg_cost) == pytest.approx(100.05, abs=1e-6)
+
+    trade = db_session.query(PaperTrade).one()
+    assert trade.exit_time is None  # still open
+    assert trade.strategy_version is not None and trade.strategy_version.endswith("@1.0.0")
+
+
+def test_sell_closes_position_and_realises_pnl(db_session) -> None:
+    account, buy_signal, asset = _seed(db_session)
+    execute_signal(db_session, account, buy_signal, settings=PaperExecutionSettings())
+
+    sell = Signal(
+        strategy_version_id=buy_signal.strategy_version_id,
+        asset_id=asset.id,
+        timeframe="1d",
+        bar_timestamp=dt.datetime(2026, 1, 3, tzinfo=dt.UTC),
+        state="SELL",
+        direction="FLAT",
+        price_reference=110.0,
+        feature_snapshot_hash="g" * 64,
+        data_source="test",
+    )
+    db_session.add(sell)
+    db_session.commit()
+
+    result = execute_signal(db_session, account, sell, settings=PaperExecutionSettings())
+    assert result["side"] == "SELL"
+    assert float(result["realized_pnl"]) > 0
+    # Cash is back above zero (sold the full position at a profit).
+    assert float(account.cash) > 10_000
+    position = db_session.query(PaperPosition).one()
+    assert float(position.quantity) == 0
+
+    trade = db_session.query(PaperTrade).one()
+    assert trade.exit_time is not None
+    assert float(trade.pnl) == pytest.approx(float(result["realized_pnl"]), abs=1e-6)
+
+
+def test_sell_without_position_is_refused(db_session) -> None:
+    account, _signal, asset = _seed(db_session)
+    sell = Signal(
+        strategy_version_id=_signal.strategy_version_id,
+        asset_id=asset.id,
+        timeframe="1d",
+        bar_timestamp=dt.datetime(2026, 1, 3, tzinfo=dt.UTC),
+        state="SELL",
+        direction="FLAT",
+        price_reference=110.0,
+        feature_snapshot_hash="g" * 64,
+        data_source="test",
+    )
+    db_session.add(sell)
+    db_session.commit()
+    with pytest.raises(PaperError):
+        execute_signal(db_session, account, sell)
+
+
+def test_double_buy_is_refused(db_session) -> None:
+    account, signal, asset = _seed(db_session)
+    execute_signal(db_session, account, signal)
+    second = Signal(
+        strategy_version_id=signal.strategy_version_id,
+        asset_id=asset.id,
+        timeframe="1d",
+        bar_timestamp=dt.datetime(2026, 1, 4, tzinfo=dt.UTC),
+        state="BUY",
+        direction="LONG",
+        price_reference=101.0,
+        feature_snapshot_hash="h" * 64,
+        data_source="test",
+    )
+    db_session.add(second)
+    db_session.commit()
+    with pytest.raises(PaperError):
+        execute_signal(db_session, account, second)
+
+
+def test_closed_account_is_refused(db_session) -> None:
+    account, signal, _asset = _seed(db_session)
+    account.status = "closed"
+    db_session.commit()
+    with pytest.raises(PaperError):
+        execute_signal(db_session, account, signal)
+
+
+def test_audit_records_execution(db_session) -> None:
+    from app.domain.models import AuditLog
+
+    account, signal, _asset = _seed(db_session)
+    execute_signal(db_session, account, signal)
+    events = [
+        row for row in db_session.query(AuditLog).all() if row.event_type == "paper_order_executed"
+    ]
+    assert len(events) == 1
+    assert events[0].payload_json["side"] == "BUY"
+
+
+# --------------------------------------------------------------------------- #
+# API
+# --------------------------------------------------------------------------- #
+def test_api_execute_positions_and_status(client, db_session) -> None:
+    account = client.post(
+        "/api/v1/paper/accounts", json={"name": "API PA", "initial_cash": 5000}
+    ).json()
+    asset = client.post(
+        "/api/v1/assets", json={"symbol": "APIPAPER", "asset_class": "stock"}
+    ).json()
+
+    # The signal table has no public create endpoint, so seed the row directly
+    # through the same session the client is wired to.
+    strategy = Strategy(name="API Paper", slug="api-paper")
+    db_session.add(strategy)
+    db_session.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id, version="1.0.0", dsl_json={}, immutable_hash="q" * 64
+    )
+    db_session.add(version)
+    db_session.flush()
+    signal = Signal(
+        strategy_version_id=version.id,
+        asset_id=asset["id"],
+        timeframe="1d",
+        bar_timestamp=dt.datetime(2026, 1, 2, tzinfo=dt.UTC),
+        state="BUY",
+        direction="LONG",
+        price_reference=50.0,
+        feature_snapshot_hash="z" * 64,
+        data_source="test",
+    )
+    db_session.add(signal)
+    db_session.commit()
+    signal_id = signal.id
+
+    executed = client.post(
+        f"/api/v1/paper/accounts/{account['id']}/execute", json={"signal_id": signal_id}
+    )
+    assert executed.status_code == 200, executed.text
+    assert executed.json()["side"] == "BUY"
+
+    positions = client.get(f"/api/v1/paper/accounts/{account['id']}/positions").json()
+    assert len(positions) == 1
+
+    closed = client.post(f"/api/v1/paper/accounts/{account['id']}/close")
+    assert closed.json()["status"] == "closed"
+
+    blocked = client.post(
+        f"/api/v1/paper/accounts/{account['id']}/execute", json={"signal_id": signal_id}
+    )
+    assert blocked.status_code == 422
+
+    reopened = client.post(f"/api/v1/paper/accounts/{account['id']}/reopen")
+    assert reopened.json()["status"] == "active"
+
+
+def test_api_fund_and_withdraw_limits(client) -> None:
+    account = client.post(
+        "/api/v1/paper/accounts", json={"name": "Fund PA", "initial_cash": 1000}
+    ).json()
+    added = client.post(f"/api/v1/paper/accounts/{account['id']}/fund", json={"amount": 500})
+    assert added.status_code == 200
+    assert added.json()["cash"] == pytest.approx(1500)
+
+    too_much = client.post(f"/api/v1/paper/accounts/{account['id']}/fund", json={"amount": -9999})
+    assert too_much.status_code == 422

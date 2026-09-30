@@ -285,6 +285,27 @@ export interface PaperAccount {
   created_at: string
 }
 
+export interface PaperPosition {
+  id: number
+  account_id: number
+  asset_id: number
+  quantity: number
+  avg_cost: number
+  realized_pnl: number
+}
+
+export interface PaperExecution {
+  account_id: number
+  side: string
+  order_id: number
+  quantity: number
+  fill_price: number
+  fees: number
+  slippage: number
+  realized_pnl: number
+  cash: number
+}
+
 export const api = {
   health: () => request<HealthResponse>('/health'),
   systemInfo: () => request<SystemInfo>('/system/info'),
@@ -343,6 +364,26 @@ export const api = {
       { method: 'POST' },
     ),
   paperAccounts: () => request<PaperAccount[]>('/paper/accounts'),
+  paperPositions: (accountId: number) =>
+    request<PaperPosition[]>(`/paper/accounts/${accountId}/positions`),
+  executePaperSignal: (accountId: number, signalId: number) =>
+    request<PaperExecution>(`/paper/accounts/${accountId}/execute`, {
+      method: 'POST',
+      body: JSON.stringify({ signal_id: signalId }),
+    }),
+  closePaperAccount: (accountId: number) =>
+    request<{ account_id: number; status: string }>(`/paper/accounts/${accountId}/close`, {
+      method: 'POST',
+    }),
+  reopenPaperAccount: (accountId: number) =>
+    request<{ account_id: number; status: string }>(`/paper/accounts/${accountId}/reopen`, {
+      method: 'POST',
+    }),
+  fundPaperAccount: (accountId: number, amount: number) =>
+    request<{ account_id: number; cash: number }>(`/paper/accounts/${accountId}/fund`, {
+      method: 'POST',
+      body: JSON.stringify({ amount }),
+    }),
   createPaperAccount: (name: string, initialCash: number) =>
     request<PaperAccount>('/paper/accounts', {
       method: 'POST',

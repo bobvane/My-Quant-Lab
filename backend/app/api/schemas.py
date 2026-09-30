@@ -36,6 +36,10 @@ __all__ = [
     "NotificationTestOut",
     "PaperAccountCreate",
     "PaperAccountOut",
+    "PaperExecuteRequest",
+    "PaperExecutionOut",
+    "PaperFundRequest",
+    "PaperPositionOut",
     "SignalOut",
     "StrategyCreate",
     "StrategyLifecycleOut",
@@ -259,6 +263,45 @@ class PaperAccountOut(BaseModel):
     status: str
     reset_count: int
     created_at: dt.datetime
+
+
+class PaperExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    signal_id: int = Field(ge=1)
+    fee_bps: float | None = Field(default=None, ge=0, le=1000)
+    slippage_bps: float | None = Field(default=None, ge=0, le=1000)
+    max_position_pct: float | None = Field(default=None, gt=0, le=1)
+
+
+class PaperFundRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Positive adds virtual cash, negative withdraws it.
+    amount: float = Field(description="Signed virtual cash adjustment")
+
+
+class PaperPositionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    account_id: int
+    asset_id: int
+    quantity: float
+    avg_cost: float
+    realized_pnl: float
+
+
+class PaperExecutionOut(BaseModel):
+    account_id: int
+    side: str
+    order_id: int
+    quantity: float
+    fill_price: float
+    fees: float
+    slippage: float
+    realized_pnl: float
+    cash: float
 
 
 class SignalOut(BaseModel):

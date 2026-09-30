@@ -12,10 +12,22 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.schemas import PaperAccountCreate, PaperAccountOut
+from app.api.schemas import (
+    PaperAccountCreate,
+    PaperAccountOut,
+    PaperExecuteRequest,
+    PaperExecutionOut,
+    PaperFundRequest,
+    PaperPositionOut,
+)
 from app.core.db import get_db
 from app.data.strategy_service import record_audit
-from app.domain.models import PaperAccount, PaperPosition, PaperTrade
+from app.domain.models import PaperAccount, PaperPosition, PaperTrade, Signal
+from app.simulation.paper_engine import (
+    PaperError,
+    PaperExecutionSettings,
+    execute_signal,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/paper", tags=["paper-trading"])
@@ -119,6 +131,127 @@ def account_trades(account_id: int, db: Session = Depends(get_db)) -> list[dict]
         }
         for t in rows
     ]
+
+
+@router.get(
+    "/accounts/{account_id}/positions",
+    response_model=list[PaperPositionOut],
+    summary="List open positions",
+)
+def account_positions(account_id: int, db: Session = Depends(get_db)) -> list[PaperPosition]:
+    account = db.get(PaperAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    return list(
+        db.scalars(
+            select(PaperPosition)
+            .where(PaperPosition.account_id == account_id)
+            .order_by(PaperPosition.id)
+        ).all()
+    )
+
+
+@router.post(
+    "/accounts/{account_id}/execute",
+    response_model=PaperExecutionOut,
+    summary="Execute a persisted signal against a paper account (virtual fills)",
+)
+def execute(
+    account_id: int, payload: PaperExecuteRequest, db: Session = Depends(get_db)
+) -> PaperExecutionOut:
+    account = db.get(PaperAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    signal = db.get(Signal, payload.signal_id)
+    if signal is None:
+        raise HTTPException(status_code=404, detail="signal not found")
+    settings = PaperExecutionSettings(
+        fee_bps=payload.fee_bps if payload.fee_bps is not None else 10.0,
+        slippage_bps=payload.slippage_bps if payload.slippage_bps is not None else 5.0,
+        max_position_pct=(
+            payload.max_position_pct if payload.max_position_pct is not None else 1.0
+        ),
+    )
+    try:
+        result = execute_signal(db, account, signal, settings=settings)
+    except PaperError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return PaperExecutionOut(
+        account_id=account_id,
+        side=result["side"],
+        order_id=result["order_id"],
+        quantity=float(result["quantity"]),
+        fill_price=float(result["fill_price"]),
+        fees=float(result["fees"]),
+        slippage=float(result["slippage"]),
+        realized_pnl=float(result["realized_pnl"]),
+        cash=float(account.cash),
+    )
+
+
+@router.post("/accounts/{account_id}/close", summary="Close (freeze) a paper account")
+def close_account(account_id: int, db: Session = Depends(get_db)) -> dict:
+    account = db.get(PaperAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    account.status = "closed"
+    record_audit(
+        db,
+        event_type="paper_account_status_changed",
+        entity_type="paper_account",
+        entity_id=str(account_id),
+        action="close",
+        payload={"status": "closed"},
+    )
+    db.commit()
+    return {"account_id": account_id, "status": account.status}
+
+
+@router.post("/accounts/{account_id}/reopen", summary="Reopen a closed paper account")
+def reopen_account(account_id: int, db: Session = Depends(get_db)) -> dict:
+    account = db.get(PaperAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    account.status = "active"
+    record_audit(
+        db,
+        event_type="paper_account_status_changed",
+        entity_type="paper_account",
+        entity_id=str(account_id),
+        action="reopen",
+        payload={"status": "active"},
+    )
+    db.commit()
+    return {"account_id": account_id, "status": account.status}
+
+
+@router.post("/accounts/{account_id}/fund", summary="Add or withdraw virtual cash (audited)")
+def fund_account(account_id: int, payload: PaperFundRequest, db: Session = Depends(get_db)) -> dict:
+    from decimal import Decimal
+
+    account = db.get(PaperAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    amount = Decimal(str(payload.amount))
+    if amount == 0:
+        raise HTTPException(status_code=422, detail="amount must be non-zero")
+    new_cash = Decimal(str(account.cash)) + amount
+    if new_cash < 0:
+        raise HTTPException(status_code=422, detail="withdrawal exceeds available cash")
+    account.cash = new_cash
+    if amount > 0:
+        # Additional funding raises the baseline so the P&L percentage stays sane.
+        account.initial_cash = Decimal(str(account.initial_cash)) + amount
+    record_audit(
+        db,
+        event_type="paper_account_funded",
+        entity_type="paper_account",
+        entity_id=str(account_id),
+        action="fund",
+        payload={"amount": str(amount), "cash": str(new_cash)},
+    )
+    db.commit()
+    return {"account_id": account_id, "cash": float(account.cash)}
 
 
 @router.post("/accounts/{account_id}/reset", summary="Reset a paper account (audited)")

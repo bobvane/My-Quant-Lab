@@ -100,8 +100,11 @@ API base: `/api/v1`
 
 ## Paper Positions
 
-`GET /paper/positions`
-`GET /paper/positions/{id}`
+`GET /paper/accounts/{account_id}/positions`
+`POST /paper/accounts/{account_id}/execute`  (execute a persisted signal; virtual fill)
+`POST /paper/accounts/{account_id}/close`
+`POST /paper/accounts/{account_id}/reopen`
+`POST /paper/accounts/{account_id}/fund`
 
 ## Paper Orders
 

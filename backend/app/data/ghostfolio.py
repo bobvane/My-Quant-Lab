@@ -123,41 +123,76 @@ class GhostfolioAdapter:
         return self._get("/v1/export", jwt)
 
     def get_portfolio_summary(self) -> dict[str, Any]:
-        """Aggregate portfolio summary for the signal evidence layer."""
+        """Aggregate portfolio summary for the signal evidence layer.
+
+        Handles all known Ghostfolio export field name variations:
+        - Profile key: SymbolProfile / symbolProfile / AssetProfile
+        - Type key: type / Type / activityType
+        - Symbol key inside profile: symbol / dataSourceSymbol / ticker
+        """
 
         export = self.get_export()
         activities = export.get("activities", [])
         accounts = export.get("accounts", [])
 
+        logger.info(
+            "Ghostfolio export: %d activities, %d accounts",
+            len(activities),
+            len(accounts),
+        )
+        if activities:
+            first = activities[0]
+            logger.info(
+                "First activity keys: %s, type=%s",
+                list(first.keys()),
+                first.get("type") or first.get("Type") or first.get("activityType"),
+            )
+
         # Aggregate current holdings from activities
         holdings: dict[str, dict[str, Any]] = {}
         for activity in activities:
-            symbol = activity.get("SymbolProfile", {}).get("symbol", "")
+            # Try every known profile key variation
+            profile = (
+                activity.get("SymbolProfile")
+                or activity.get("symbolProfile")
+                or activity.get("AssetProfile")
+                or activity.get("assetProfile")
+                or {}
+            )
+            if not isinstance(profile, dict):
+                continue
+
+            # Try every known symbol key variation
+            symbol = (
+                profile.get("symbol")
+                or profile.get("dataSourceSymbol")
+                or profile.get("ticker")
+                or ""
+            )
             if not symbol:
                 continue
-            quantity = float(activity.get("quantity") or 0)
-            activity_type = activity.get("type", "").upper()
-            if activity_type in ("BUY", "DIVIDEND"):
-                entry = holdings.setdefault(
-                    symbol,
-                    {
-                        "symbol": symbol,
-                        "quantity": 0.0,
-                        "currency": activity.get("currency", "USD"),
-                    },
-                )
-                if activity_type == "BUY":
-                    entry["quantity"] += quantity
+
+            # Try every known type key variation
+            activity_type = (
+                activity.get("type") or activity.get("Type") or activity.get("activityType") or ""
+            ).upper()
+
+            quantity = float(activity.get("quantity") or activity.get("Quantity") or 0)
+
+            if symbol not in holdings:
+                name = profile.get("name") or profile.get("SymbolName") or symbol
+                currency = activity.get("currency") or profile.get("currency") or "USD"
+                holdings[symbol] = {
+                    "symbol": symbol,
+                    "name": name,
+                    "quantity": 0.0,
+                    "currency": currency,
+                }
+
+            if activity_type == "BUY":
+                holdings[symbol]["quantity"] += quantity
             elif activity_type == "SELL":
-                entry = holdings.setdefault(
-                    symbol,
-                    {
-                        "symbol": symbol,
-                        "quantity": 0.0,
-                        "currency": activity.get("currency", "USD"),
-                    },
-                )
-                entry["quantity"] -= quantity
+                holdings[symbol]["quantity"] -= quantity
 
         active = {k: v for k, v in holdings.items() if v["quantity"] > 0}
         return {

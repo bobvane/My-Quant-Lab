@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { api, type AIStatus, type ExplainResult, type HealthResponse, type PaperAccount, type SignalIntent, type SystemInfo } from '@/api'
 import StatCard from '@/components/StatCard.vue'
-import { formatNumber, formatPercent, toneOf } from '@/format'
+import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 
 const health = ref<HealthResponse | null>(null)
 const info = ref<SystemInfo | null>(null)
@@ -14,20 +14,27 @@ const aiStatus = ref<AIStatus | null>(null)
 const explaining = ref<number | null>(null)
 const explanation = ref<ExplainResult | null>(null)
 const explainedFor = ref('')
+const gfHoldings = ref<Array<Record<string, any>>>([])
+const gfConnected = ref(false)
 
 async function load() {
   error.value = ''
   try {
-    const [h, i, a, ai] = await Promise.all([
+    const [h, i, a, ai, gf] = await Promise.all([
       api.health(),
       api.systemInfo(),
       api.paperAccounts(),
       api.aiStatus().catch(() => null),
+      api.getGhostfolioHoldings().catch(() => null),
     ])
     health.value = h
     info.value = i
     accounts.value = a
     aiStatus.value = ai
+    if (gf?.holdings) {
+      gfHoldings.value = gf.holdings
+      gfConnected.value = true
+    }
   } catch (e) {
     error.value = (e as Error).message
   }
@@ -98,6 +105,30 @@ onMounted(load)
         :value="signals.length ? waiting() : '—'"
         sub="WAIT：条件未确认，不追单"
       />
+    </div>
+
+    <div v-if="gfConnected && gfHoldings.length" class="card" style="margin-top: 14px">
+      <h3>我的 Ghostfolio 持仓</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>代码</th>
+            <th>名称</th>
+            <th>数量</th>
+            <th>市值</th>
+            <th>占比</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="h in gfHoldings" :key="h.symbol">
+            <td>{{ h.symbol }}</td>
+            <td>{{ h.name }}</td>
+            <td>{{ formatNumber(h.quantity, 4) }}</td>
+            <td>{{ formatNumber(h.value) }}</td>
+            <td>{{ formatNumber(h.allocation_pct, 1) }}%</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <div class="grid cols-2" style="margin-top: 14px">

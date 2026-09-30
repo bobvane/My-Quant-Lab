@@ -347,6 +347,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
     }),
+  getGhostfolioHoldings: () =>
+    request<{ holdings: Array<Record<string, any>> }>('/settings/ghostfolio/holdings'),
+  testGhostfolio: () => request<Record<string, any>>('/settings/ghostfolio/test'),
   resourcesCurrent: () => request<Record<string, any>>('/resources/current'),
   resourcesHistory: (metric: 'cpu' | 'ram', range: '1h' | '24h' | '7d' | '30d') =>
     request<Record<string, any>>(`/resources/history?metric=${metric}&range=${range}`),

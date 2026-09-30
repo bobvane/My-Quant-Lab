@@ -288,6 +288,10 @@ def ghostfolio_holdings() -> dict[str, Any]:
 
     try:
         adapter = GhostfolioAdapter()
-        return {"holdings": adapter.get_holdings()}
+        summary = adapter.get_portfolio_summary()
+        return {
+            "holdings": summary.get("holdings", []),
+            "accounts_count": summary.get("accounts_count"),
+        }
     except GhostfolioError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

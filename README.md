@@ -103,6 +103,28 @@ docker compose logs --tail 80 quantlab-api
 
 ---
 
+## 安全与暴露面（可选）
+
+默认情况下 API 只绑定 `127.0.0.1`，由 Web 容器代理 `/api`，局域网无法直连。
+如果你要把 API 暴露出去，建议在 `.env` 里开启鉴权：
+
+```ini
+# 至少 8 位，仅允许 A-Z a-z 0-9 . _ ~ + / = -；留空 = 不鉴权
+# 生成方式：openssl rand -hex 24
+API_AUTH_TOKEN=
+# 每个 IP 对写请求（POST/PUT/DELETE）的每分钟上限，0 = 关闭
+RATE_LIMIT_PER_MINUTE=60
+```
+
+- 开启后，除 `/api/v1/healthz` 与 `/api/v1/health` 两个探针外，所有 API 请求
+  都需要 `Authorization: Bearer <token>`；**内置 Web 容器会自动带上它**，
+  浏览器端无需任何配置。
+- 通知渠道（Webhook / 飞书 / Telegram / PushPlus / Email）的密钥、AI API Key
+  均**加密存储、只写入不回显**；审计日志也绝不包含密钥。
+- 更稳妥的做法仍是：不直接暴露 API 端口，在反向代理层再加一层认证。
+
+---
+
 ## 可选：从源码构建（开发者）
 
 生产 compose 不含 `build:` 段。需要本地构建时叠加

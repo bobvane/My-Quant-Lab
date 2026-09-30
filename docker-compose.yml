@@ -99,6 +99,11 @@ services:
     image: ghcr.io/bobvane/my-quant-lab-docker-proxy:${MQL_VERSION:-latest}
     container_name: quantlab-docker-proxy
     restart: unless-stopped
+    # Run as root: the Docker socket is owned by root:docker on most systems
+    # and the GID varies across NAS platforms, making static group_add fragile.
+    # This is safe because the proxy's whitelist limits it to two GET endpoints,
+    # the port is never published, and container root ≠ host root.
+    user: root
     environment:
       QUANTLAB_PROXY_TOKEN: ${DOCKER_PROXY_TOKEN:-}
     volumes:

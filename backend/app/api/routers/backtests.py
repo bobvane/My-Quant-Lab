@@ -179,6 +179,8 @@ def create_backtest(payload: BacktestCreate, db: Session = Depends(get_db)) -> B
                 pnl=trade["pnl"],
                 pnl_pct=trade["pnl_pct"],
                 r_multiple=trade["r_multiple"],
+                mae=trade["mae"],
+                mfe=trade["mfe"],
                 entry_reason="entry_long",
                 exit_reason=trade["exit_reason"],
                 ambiguous_fill=trade["ambiguous_fill"],
@@ -294,6 +296,9 @@ def get_backtest(run_id: int, db: Session = Depends(get_db)) -> BacktestOut:
             "slippage": float(t.slippage),
             "pnl": float(t.pnl) if t.pnl is not None else None,
             "pnl_pct": float(t.pnl_pct) if t.pnl_pct is not None else None,
+            "r_multiple": float(t.r_multiple) if t.r_multiple is not None else None,
+            "mae": float(t.mae) if t.mae is not None else None,
+            "mfe": float(t.mfe) if t.mfe is not None else None,
             "exit_reason": t.exit_reason,
             "ambiguous_fill": t.ambiguous_fill,
         }
@@ -322,6 +327,9 @@ def list_trades(run_id: int, db: Session = Depends(get_db)) -> list[dict]:
             "exit_time": t.exit_time,
             "exit_price": float(t.exit_price) if t.exit_price is not None else None,
             "pnl": float(t.pnl) if t.pnl is not None else None,
+            "r_multiple": float(t.r_multiple) if t.r_multiple is not None else None,
+            "mae": float(t.mae) if t.mae is not None else None,
+            "mfe": float(t.mfe) if t.mfe is not None else None,
             "exit_reason": t.exit_reason,
             "ambiguous_fill": t.ambiguous_fill,
         }

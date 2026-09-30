@@ -8,12 +8,18 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "AIStatusOut",
+    "AITaskOut",
     "AssetCreate",
     "AssetOut",
     "BacktestCreate",
     "BacktestOut",
     "BacktestSummaryOut",
     "BarOut",
+    "ExplainOut",
+    "GithubAnalyzeRequest",
+    "GithubAnalyzeOut",
+    "GithubImportRequest",
     "HealthOut",
     "MarketDataSyncRequest",
     "PaperAccountCreate",
@@ -259,3 +265,75 @@ class SignalOut(BaseModel):
     status: str
     generated_at: dt.datetime
     explanation: dict[str, Any] | None = None
+
+
+class GithubAnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repo_url: str = Field(min_length=10, max_length=512)
+    ref: str | None = Field(default=None, max_length=128)
+    token: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Optional GitHub token to raise API rate limits; never stored",
+    )
+    max_files: int = Field(default=12, ge=1, le=30, description="Cap on fetched files (.py first)")
+
+
+class GithubAnalyzeOut(BaseModel):
+    owner: str
+    repo: str
+    ref: str
+    description: str | None = None
+    license: str | None = None
+    files_scanned: list[str]
+    files_skipped: list[str]
+    indicators: list[dict[str, Any]]
+    rules: list[dict[str, Any]]
+    params: list[dict[str, Any]]
+    unknowns: list[dict[str, Any]]
+    unsafe_flags: list[dict[str, Any]]
+    draft_dsl: dict[str, Any]
+    warnings: list[str]
+
+
+class GithubImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repo_url: str = Field(min_length=10, max_length=512)
+    ref: str | None = Field(default=None, max_length=128)
+    name: str = Field(min_length=1, max_length=128)
+    version: str = Field(default="1.0.0", min_length=1, max_length=32)
+    dsl: dict[str, Any]
+
+
+class AIStatusOut(BaseModel):
+    configured: bool
+    provider_name: str | None = None
+    model: str | None = None
+    daily_budget_usd: float | None = None
+    spent_today_usd: float = 0.0
+    tasks_today: int = 0
+    note: str
+
+
+class ExplainOut(BaseModel):
+    explanation: dict[str, Any]
+    cached: bool = False
+    task_id: int | None = None
+    model: str | None = None
+    cost_usd_estimated: float = 0.0
+
+
+class AITaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_type: str
+    prompt_name: str
+    prompt_version: str
+    status: str
+    cost_usd: float | None = None
+    created_at: dt.datetime
+    completed_at: dt.datetime | None = None
+    error_message: str | None = None

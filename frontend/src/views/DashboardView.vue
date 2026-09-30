@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api, type HealthResponse, type PaperAccount, type SignalIntent, type SystemInfo } from '@/api'
+import { api, type AIStatus, type ExplainResult, type HealthResponse, type PaperAccount, type SignalIntent, type SystemInfo } from '@/api'
 import StatCard from '@/components/StatCard.vue'
 import { formatNumber, formatPercent, toneOf } from '@/format'
 
@@ -10,14 +10,24 @@ const signals = ref<SignalIntent[]>([])
 const accounts = ref<PaperAccount[]>([])
 const scanning = ref(false)
 const error = ref('')
+const aiStatus = ref<AIStatus | null>(null)
+const explaining = ref<number | null>(null)
+const explanation = ref<ExplainResult | null>(null)
+const explainedFor = ref('')
 
 async function load() {
   error.value = ''
   try {
-    const [h, i, a] = await Promise.all([api.health(), api.systemInfo(), api.paperAccounts()])
+    const [h, i, a, ai] = await Promise.all([
+      api.health(),
+      api.systemInfo(),
+      api.paperAccounts(),
+      api.aiStatus().catch(() => null),
+    ])
     health.value = h
     info.value = i
     accounts.value = a
+    aiStatus.value = ai
   } catch (e) {
     error.value = (e as Error).message
   }
@@ -38,6 +48,26 @@ async function runScan() {
 
 const actionable = () => signals.value.filter((s) => s.state === 'BUY' || s.state === 'SELL').length
 const waiting = () => signals.value.filter((s) => s.state === 'WAIT').length
+
+async function explainRow(index: number) {
+  const s = signals.value[index]
+  if (!s || s.strategy_version_id == null) return
+  explaining.value = index
+  error.value = ''
+  try {
+    explanation.value = await api.explainSignalPreview(
+      s.strategy_version_id,
+      s.symbol ?? undefined,
+      s.timeframe ?? '1d',
+    )
+    explainedFor.value = `${s.symbol ?? ''} ${s.timeframe ?? ''} ${s.state}`
+  } catch (e) {
+    error.value = (e as Error).message
+    explanation.value = null
+  } finally {
+    explaining.value = null
+  }
+}
 
 onMounted(load)
 </script>
@@ -89,6 +119,7 @@ onMounted(load)
               <th>参考价</th>
               <th>止损</th>
               <th>目标</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -100,10 +131,35 @@ onMounted(load)
               <td>{{ formatNumber(s.price_reference) }}</td>
               <td>{{ formatNumber(s.stop_reference) }}</td>
               <td>{{ formatNumber(s.target_reference) }}</td>
+              <td>
+                <button
+                  v-if="s.strategy_version_id != null"
+                  class="ghost"
+                  :disabled="explaining !== null"
+                  @click="explainRow(i)"
+                >
+                  {{ explaining === i ? '解释中…' : 'AI 解释' }}
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
         <p v-else class="muted">还没有扫描结果。先到「行情与策略」同步数据并创建策略，再回来扫描。</p>
+        <p v-if="aiStatus && !aiStatus.configured" class="muted" style="margin-top: 8px">
+          AI 未配置：解释按钮不可用（{{ aiStatus.note }}）。量化功能不受影响。
+        </p>
+        <div v-if="explanation" class="notice" style="margin-top: 10px">
+          <strong>AI 解释 · {{ explainedFor }}</strong>
+          <span v-if="explanation.cached" class="muted">（缓存命中，未产生费用）</span>
+          <p>{{ explanation.explanation.summary }}</p>
+          <p class="muted">{{ explanation.explanation.plain_language }}</p>
+          <ul v-if="explanation.explanation.why?.length" class="muted">
+            <li v-for="(w, idx) in explanation.explanation.why" :key="idx">{{ w }}</li>
+          </ul>
+          <p v-if="explanation.explanation.risk_notes?.length" class="muted">
+            风险提示：{{ explanation.explanation.risk_notes.join('；') }}
+          </p>
+        </div>
       </div>
 
       <div class="card">

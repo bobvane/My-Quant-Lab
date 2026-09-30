@@ -129,6 +129,61 @@ export interface BacktestDetail extends BacktestSummary {
   warnings: string[]
 }
 
+export interface GithubAnalysis {
+  owner: string
+  repo: string
+  ref: string
+  description: string | null
+  license: string | null
+  files_scanned: string[]
+  files_skipped: string[]
+  indicators: Array<Record<string, unknown>>
+  rules: Array<Record<string, unknown>>
+  params: Array<Record<string, unknown>>
+  unknowns: Array<Record<string, unknown>>
+  unsafe_flags: Array<Record<string, unknown>>
+  draft_dsl: Record<string, unknown>
+  warnings: string[]
+}
+
+export interface GithubImportResult {
+  strategy_id: number
+  strategy_version_id: number
+  version: string
+  validation_status: string
+  immutable_hash: string
+  warnings: Array<Record<string, unknown>>
+}
+
+export interface AIStatus {
+  configured: boolean
+  provider_name: string | null
+  model: string | null
+  daily_budget_usd: number | null
+  spent_today_usd: number
+  tasks_today: number
+  note: string
+}
+
+export interface AIExplanation {
+  summary: string
+  why?: string[]
+  key_drivers?: string[]
+  risks?: string[]
+  risk_notes?: string[]
+  what_could_invalidate?: string[]
+  what_to_watch_next: string[]
+  plain_language: string
+}
+
+export interface ExplainResult {
+  explanation: AIExplanation
+  cached: boolean
+  task_id: number | null
+  model: string | null
+  cost_usd_estimated: number
+}
+
 export interface SignalIntent {
   state: string
   direction: string
@@ -216,4 +271,30 @@ export const api = {
     }),
   settings: () => request<Record<string, unknown>>('/settings'),
   audit: () => request<{ total: number; events: Array<Record<string, unknown>> }>('/settings/audit'),
+  analyzeGithubRepo: (repoUrl: string, ref?: string, token?: string, maxFiles = 12) =>
+    request<GithubAnalysis>('/importer/github/analyze', {
+      method: 'POST',
+      body: JSON.stringify({
+        repo_url: repoUrl,
+        ref: ref || undefined,
+        token: token || undefined,
+        max_files: maxFiles,
+      }),
+    }),
+  importGithubStrategy: (repoUrl: string, name: string, version: string, dsl: Record<string, unknown>, ref?: string) =>
+    request<GithubImportResult>('/importer/github/import', {
+      method: 'POST',
+      body: JSON.stringify({ repo_url: repoUrl, name, version, dsl, ref: ref || undefined }),
+    }),
+  aiStatus: () => request<AIStatus>('/ai/status'),
+  explainSignalPreview: (strategyVersionId: number, symbol?: string, timeframe = '1d') =>
+    request<ExplainResult>('/signals/preview-explain', {
+      method: 'POST',
+      body: JSON.stringify({ strategy_version_id: strategyVersionId, symbol, timeframe }),
+    }),
+  explainSignal: (signalId: number) =>
+    request<ExplainResult>(`/signals/${signalId}/explain`, { method: 'POST' }),
+  explainBacktest: (runId: number) =>
+    request<ExplainResult>(`/backtests/${runId}/explain`, { method: 'POST' }),
+  aiTasks: (limit = 50) => request<Array<Record<string, unknown>>>(`/ai/tasks?limit=${limit}`),
 }

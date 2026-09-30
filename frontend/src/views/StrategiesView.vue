@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api, type Asset, type SignalIntent, type Strategy } from '@/api'
+import { api, type Asset, type GithubAnalysis, type SignalIntent, type Strategy } from '@/api'
 import { formatDateTime, formatNumber } from '@/format'
 
 const assets = ref<Asset[]>([])
@@ -95,6 +95,66 @@ async function createStrategy() {
   }
 }
 
+const repoUrl = ref('')
+const repoRef = ref('')
+const repoToken = ref('')
+const importName = ref('')
+const analyzing = ref(false)
+const importing = ref(false)
+const analysis = ref<GithubAnalysis | null>(null)
+
+async function analyzeRepo() {
+  error.value = ''
+  info.value = ''
+  analysis.value = null
+  if (!repoUrl.value.trim()) {
+    error.value = '请填写 GitHub 仓库地址'
+    return
+  }
+  analyzing.value = true
+  try {
+    analysis.value = await api.analyzeGithubRepo(
+      repoUrl.value.trim(),
+      repoRef.value.trim() || undefined,
+      repoToken.value.trim() || undefined,
+    )
+    importName.value = analysis.value.repo
+    dslText.value = JSON.stringify(analysis.value.draft_dsl, null, 2)
+    strategyName.value = analysis.value.repo
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    analyzing.value = false
+  }
+}
+
+async function importReviewed() {
+  error.value = ''
+  info.value = ''
+  if (!analysis.value) {
+    error.value = '请先分析仓库'
+    return
+  }
+  importing.value = true
+  try {
+    const dsl = JSON.parse(dslText.value)
+    const result = await api.importGithubStrategy(
+      repoUrl.value.trim(),
+      importName.value.trim() || analysis.value.repo,
+      '1.0.0',
+      dsl,
+      analysis.value.ref,
+    )
+    info.value = `已导入策略 #${result.strategy_id}（版本 ${result.version}，${result.validation_status}）`
+    analysis.value = null
+    await load()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    importing.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -185,6 +245,75 @@ onMounted(load)
           </li>
         </ul>
       </div>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>从 GitHub 导入（只读分析，不执行仓库代码）</h3>
+      <div class="row" style="margin-bottom: 10px">
+        <input v-model="repoUrl" style="max-width: 340px" placeholder="https://github.com/owner/repo" />
+        <input v-model="repoRef" style="max-width: 140px" placeholder="分支/tag（可选）" />
+        <button :disabled="analyzing" @click="analyzeRepo">
+          {{ analyzing ? '分析中…（视网络情况可能需要一两分钟）' : '分析仓库' }}
+        </button>
+      </div>
+      <div class="row" style="margin-bottom: 10px">
+        <input
+          v-model="repoToken"
+          type="password"
+          style="max-width: 340px"
+          placeholder="GitHub token（可选，仅提限额用，不存储）"
+        />
+      </div>
+      <div v-if="analysis">
+        <p class="muted">
+          {{ analysis.owner }}/{{ analysis.repo }} @ {{ analysis.ref }} ·
+          扫描 {{ analysis.files_scanned.length }} 个文件 ·
+          许可证 {{ analysis.license ?? '未知' }}
+        </p>
+        <ul v-if="analysis.warnings.length" class="error">
+          <li v-for="(w, idx) in analysis.warnings" :key="idx">{{ w }}</li>
+        </ul>
+        <table v-if="analysis.rules.length">
+          <thead>
+            <tr>
+              <th>识别出的规则</th>
+              <th>操作符</th>
+              <th>左值</th>
+              <th>右值</th>
+              <th>证据</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(r, idx) in analysis.rules" :key="idx">
+              <td>{{ idx + 1 }}</td>
+              <td>{{ r.op }}</td>
+              <td>{{ r.left }}</td>
+              <td>{{ r.right }}</td>
+              <td class="muted">{{ r.evidence_path }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="muted">没有识别出可映射的规则，请检查 unknowns。</p>
+        <p v-if="analysis.unsafe_flags.length" class="error">
+          发现 {{ analysis.unsafe_flags.length }} 个不安全构造（导入器不会执行它们，但请先审查）。
+        </p>
+        <p v-if="analysis.unknowns.length" class="muted">
+          另有 {{ analysis.unknowns.length }} 处无法映射的内容（已保留证据，未编造规则）。
+        </p>
+        <p class="notice">
+          草案已填入下方 DSL 编辑器（缺失的离场规则需手动补齐），确认无误后导入。
+        </p>
+        <div class="row" style="margin-top: 10px">
+          <input v-model="importName" style="max-width: 260px" placeholder="策略名称" />
+          <button :disabled="importing" @click="importReviewed">
+            {{ importing ? '导入中…' : '确认导入' }}
+          </button>
+        </div>
+      </div>
+      <p v-else class="muted">
+        输入公开仓库地址后，系统只下载文本做静态分析：识别指标、规则与参数，
+        无法确认的一律标记未知，绝不执行仓库里的任何代码。
+      </p>
     </div>
 
     <div class="card" style="margin-top: 14px">

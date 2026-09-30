@@ -10,6 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routers import (
+    ai as ai_router,
+)
+from app.api.routers import (
     assets as assets_router,
 )
 from app.api.routers import (
@@ -17,6 +20,9 @@ from app.api.routers import (
 )
 from app.api.routers import (
     health as health_router,
+)
+from app.api.routers import (
+    importer as importer_router,
 )
 from app.api.routers import (
     market_data as market_data_router,
@@ -108,6 +114,8 @@ def create_app() -> FastAPI:
         paper_router.router,
         signals_router.router,
         settings_router.router,
+        importer_router.router,
+        ai_router.router,
     ):
         app.include_router(router, prefix=settings.api_prefix)
 

@@ -29,6 +29,7 @@ __all__ = [
     "AIRouter",
     "SIGNAL_EXPLANATION_SCHEMA",
     "daily_spend_usd",
+    "validate_structured_dict",
 ]
 
 SIGNAL_EXPLANATION_SCHEMA: dict[str, Any] = {
@@ -170,10 +171,18 @@ def validate_structured_output(raw: str, schema: dict[str, Any]) -> dict[str, An
         if text.lower().startswith("json"):
             text = text[4:]
     data = json.loads(text)
+    return validate_structured_dict(data, schema)
+
+
+def validate_structured_dict(data: Any, schema: dict[str, Any]) -> dict[str, Any]:
+    """Shallow-validate an already-parsed mapping against the schema."""
+
+    if not isinstance(data, dict):
+        raise ValueError("model output must be a JSON object")
     for key in schema.get("required", []):
         if key not in data:
             raise ValueError(f"model output is missing required field '{key}'")
-    return data
+    return dict(data)
 
 
 def estimate_cost(

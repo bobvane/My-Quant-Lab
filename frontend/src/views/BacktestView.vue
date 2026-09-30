@@ -5,6 +5,7 @@ import {
   type Asset,
   type BacktestDetail,
   type BacktestSummary,
+  type ExplainResult,
   type Strategy,
   type StrategyVersion,
 } from '@/api'
@@ -62,6 +63,7 @@ async function open(id: number) {
   busy.value = true
   try {
     detail.value = await api.backtest(id)
+    btExplanation.value = null
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -80,10 +82,28 @@ async function runNew() {
     const result = await api.runBacktest(versionId.value, symbol.value.trim(), timeframe.value)
     runs.value = [result, ...runs.value]
     detail.value = result
+    btExplanation.value = null
   } catch (e) {
     error.value = (e as Error).message
   } finally {
     running.value = false
+  }
+}
+
+const btExplanation = ref<ExplainResult | null>(null)
+const explainingBt = ref(false)
+
+async function explainCurrent() {
+  if (!detail.value) return
+  explainingBt.value = true
+  error.value = ''
+  try {
+    btExplanation.value = await api.explainBacktest(detail.value.id)
+  } catch (e) {
+    error.value = (e as Error).message
+    btExplanation.value = null
+  } finally {
+    explainingBt.value = false
   }
 }
 
@@ -161,6 +181,27 @@ onMounted(async () => {
     <div v-if="detail" class="card" style="margin-top: 14px">
       <h3>权益曲线</h3>
       <EquityChart :points="detail.equity_curve" />
+    </div>
+
+    <div v-if="detail" class="card" style="margin-top: 14px">
+      <h3>AI 解读（只解释已有数字，不重新计算）</h3>
+      <div class="row" style="margin-bottom: 10px">
+        <button :disabled="explainingBt" @click="explainCurrent">
+          {{ explainingBt ? '解读中…' : '生成解读' }}
+        </button>
+        <span v-if="btExplanation?.cached" class="muted">缓存命中，未产生费用</span>
+      </div>
+      <div v-if="btExplanation">
+        <p>{{ btExplanation.explanation.summary }}</p>
+        <p class="muted">{{ btExplanation.explanation.plain_language }}</p>
+        <ul v-if="btExplanation.explanation.key_drivers?.length" class="muted">
+          <li v-for="(d, idx) in btExplanation.explanation.key_drivers" :key="idx">{{ d }}</li>
+        </ul>
+        <p v-if="btExplanation.explanation.risks?.length" class="muted">
+          风险提示：{{ btExplanation.explanation.risks.join('；') }}
+        </p>
+      </div>
+      <p v-else class="muted">尚未生成解读。未配置 AI 时此按钮不可用，量化功能不受影响。</p>
     </div>
 
     <div class="grid cols-2" style="margin-top: 14px">

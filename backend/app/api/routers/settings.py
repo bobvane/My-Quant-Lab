@@ -268,3 +268,26 @@ def audit_log(db: Session = Depends(get_db), limit: int = 50, offset: int = 0) -
             for r in rows
         ],
     }
+
+
+@router.get("/ghostfolio/test", summary="Test Ghostfolio connection")
+def test_ghostfolio() -> dict[str, Any]:
+    from app.data.ghostfolio import GhostfolioAdapter, GhostfolioError
+
+    try:
+        adapter = GhostfolioAdapter()
+        result = adapter.test_connection()
+        return {**result, "base_url": adapter.base_url}
+    except GhostfolioError as exc:
+        return {"ok": False, "detail": str(exc), "base_url": settings.ghostfolio_base_url or ""}
+
+
+@router.get("/ghostfolio/holdings", summary="Ghostfolio holdings (read-only)")
+def ghostfolio_holdings() -> dict[str, Any]:
+    from app.data.ghostfolio import GhostfolioAdapter, GhostfolioError
+
+    try:
+        adapter = GhostfolioAdapter()
+        return {"holdings": adapter.get_holdings()}
+    except GhostfolioError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

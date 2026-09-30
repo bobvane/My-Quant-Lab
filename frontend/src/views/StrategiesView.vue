@@ -57,13 +57,22 @@ async function load() {
   }
 }
 
+function assetSymbol(assetId: number): string {
+  const found = assets.value.find((a) => a.id === assetId)
+  return found?.symbol ?? `#${assetId}`
+}
+
 async function syncData() {
   syncing.value = true
   error.value = ''
   info.value = ''
   try {
-    const result = await api.syncMarketData(symbol.value)
-    info.value = `同步完成：新增 ${result.inserted} 根 K 线（series ${result.series_id}）`
+    const result = await api.syncMarketData(symbol.value.trim()) as Record<string, any>
+    if (result.inserted > 0) {
+      info.value = `✅ 同步完成：${symbol.value} 新增 ${result.inserted} 根 K 线（系列 #${result.series_id}，其中 ${result.closed_bars_in_fetch} 根已收盘）。现在可以去「回测实验室」用它跑回测了。`
+    } else {
+      info.value = `ℹ ${symbol.value} 数据已是最新（${result.message ?? '无新增'}）。可以到「回测实验室」用它跑回测。`
+    }
     await load()
   } catch (e) {
     error.value = (e as Error).message
@@ -169,40 +178,50 @@ onMounted(load)
     <div class="grid cols-2">
       <div class="card">
         <h3>行情同步</h3>
+        <p class="muted" style="margin-bottom: 8px">
+          输入 Yahoo Finance 代码（美股如 AAPL、MSFT，ETF 如 SPY、QQQ，加密货币如 BTC-USD），
+          点击同步获取真实日线。
+        </p>
         <div class="row" style="margin-bottom: 10px">
-          <select v-model="symbol" style="max-width: 220px">
-            <option v-for="a in assets" :key="a.id" :value="a.symbol">
-              {{ a.symbol }}（{{ a.asset_class }}）
-            </option>
-            <option v-if="!assets.length" value="DEMO-AAPL">DEMO-AAPL</option>
-          </select>
-          <button :disabled="syncing" @click="syncData">
-            {{ syncing ? '同步中…' : '同步日线数据' }}
+          <input
+            v-model="symbol"
+            list="symbol-suggestions"
+            style="max-width: 220px"
+            placeholder="输入代码，如 AAPL、QQQ、BTC-USD"
+            @keyup.enter="syncData"
+          />
+          <datalist id="symbol-suggestions">
+            <option v-for="a in assets" :key="a.id" :value="a.symbol" />
+            <option value="SPY" />
+            <option value="QQQ" />
+            <option value="MSFT" />
+            <option value="BTC-USD" />
+          </datalist>
+          <button :disabled="syncing || !symbol.trim()" @click="syncData">
+            {{ syncing ? '同步中…（可能需要几秒）' : '同步日线数据' }}
           </button>
         </div>
         <table v-if="series.length">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>资产</th>
+              <th>代码</th>
               <th>周期</th>
-              <th>数据版本</th>
+              <th>数据范围</th>
               <th>质量</th>
-              <th>最后更新</th>
+              <th>最后同步</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="s in series" :key="String(s.id)">
-              <td>{{ s.id }}</td>
-              <td>{{ s.asset_id }}</td>
+              <td>{{ assetSymbol(Number(s.asset_id)) }}</td>
               <td>{{ s.timeframe }}</td>
-              <td>{{ s.dataset_version }}</td>
+              <td class="muted">{{ String(s.series_start ?? '').slice(0, 10) }} → {{ String(s.series_end ?? '').slice(0, 10) }}</td>
               <td>{{ s.quality_status }}</td>
               <td>{{ formatDateTime(String(s.last_sync_at ?? '')) }}</td>
             </tr>
           </tbody>
         </table>
-        <p v-else class="muted">还没有数据序列，先同步一次。</p>
+        <p v-else class="muted">还没有数据，在上面输入代码点同步。</p>
       </div>
 
       <div class="card">

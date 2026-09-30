@@ -47,6 +47,11 @@ x-backend-env: &backend-env
   DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-UTC}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8081,http://localhost:5173}
+  # Outbound proxy for external API calls (Yahoo Finance, AI providers, etc.)
+  # Leave empty for direct access. NO_PROXY excludes internal services.
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,quantlab-postgres,quantlab-redis,quantlab-docker-proxy}
 
 x-backend-networks: &backend-networks
   - backend

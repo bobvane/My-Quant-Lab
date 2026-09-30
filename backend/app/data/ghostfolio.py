@@ -46,7 +46,12 @@ class GhostfolioAdapter:
     def _get(self, path: str) -> Any:
         url = f"{self.base_url}/api{path}"
         try:
-            response = httpx.get(url, headers=self._headers(), timeout=_TIMEOUT)
+            # Ghostfolio is always on the LAN (same NAS or same network).
+            # proxy=None explicitly bypasses any HTTP_PROXY env var, which
+            # would otherwise route a LAN request through the external proxy
+            # and strip the Authorization header.
+            with httpx.Client(proxy=None, timeout=_TIMEOUT) as client:
+                response = client.get(url, headers=self._headers())
         except Exception as exc:
             raise GhostfolioError(
                 f"cannot reach Ghostfolio at {self.base_url}: {type(exc).__name__}"

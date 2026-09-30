@@ -255,6 +255,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbol, timeframe, lookback_days: lookbackDays }),
     }),
+  deleteSeries: (seriesId: number) =>
+    request<{ deleted: number; symbol: string }>(`/market-data/series/${seriesId}`, {
+      method: 'DELETE',
+    }),
   series: () => request<Array<Record<string, unknown>>>('/market-data/series'),
   latestBars: (symbol: string, timeframe = '1d', limit = 120) =>
     request<{ bars: Array<{ timestamp: string; close: number; high: number; low: number; open: number }> }>(

@@ -212,3 +212,15 @@ def latest_bars(
             for ts, row in tail.iterrows()
         ],
     }
+
+
+@router.delete("/series/{series_id}", summary="Delete a series and all its bars")
+def delete_series(series_id: int, db: Session = Depends(get_db)) -> dict:
+    series = db.get(MarketDataSeries, series_id)
+    if series is None:
+        raise HTTPException(status_code=404, detail="series not found")
+    asset = db.get(Asset, series.asset_id)
+    symbol = asset.symbol if asset else str(series.asset_id)
+    db.delete(series)
+    db.commit()
+    return {"deleted": series_id, "symbol": symbol}

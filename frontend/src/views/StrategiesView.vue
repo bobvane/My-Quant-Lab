@@ -11,6 +11,7 @@ const signals = ref<SignalIntent[]>([])
 const error = ref('')
 const info = ref('')
 const syncing = ref(false)
+const lookbackDays = ref(400)
 
 const SAMPLE_DSL = {
   schema_version: '1.0',
@@ -62,12 +63,23 @@ function assetSymbol(assetId: number): string {
   return found?.symbol ?? `#${assetId}`
 }
 
+async function deleteSeries(id: number) {
+  error.value = ''
+  try {
+    const result = await api.deleteSeries(id)
+    info.value = `已删除 ${result.symbol} 的行情数据（系列 #${id}）`
+    await load()
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
 async function syncData() {
   syncing.value = true
   error.value = ''
   info.value = ''
   try {
-    const result = await api.syncMarketData(symbol.value.trim()) as Record<string, any>
+    const result = await api.syncMarketData(symbol.value.trim(), '1d', lookbackDays.value) as Record<string, any>
     if (result.inserted > 0) {
       info.value = `✅ 同步完成：${symbol.value} 新增 ${result.inserted} 根 K 线（系列 #${result.series_id}，其中 ${result.closed_bars_in_fetch} 根已收盘）。现在可以去「回测实验室」用它跑回测了。`
     } else {
@@ -197,6 +209,14 @@ onMounted(load)
             <option value="MSFT" />
             <option value="BTC-USD" />
           </datalist>
+          <select v-model.number="lookbackDays" style="max-width: 140px">
+            <option :value="90">近 3 个月</option>
+            <option :value="180">近 6 个月</option>
+            <option :value="365">近 1 年</option>
+            <option :value="730">近 2 年</option>
+            <option :value="1825">近 5 年</option>
+            <option :value="3650">近 10 年</option>
+          </select>
           <button :disabled="syncing || !symbol.trim()" @click="syncData">
             {{ syncing ? '同步中…（可能需要几秒）' : '同步日线数据' }}
           </button>
@@ -209,6 +229,7 @@ onMounted(load)
               <th>数据范围</th>
               <th>质量</th>
               <th>最后同步</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -218,6 +239,7 @@ onMounted(load)
               <td class="muted">{{ String(s.series_start ?? '').slice(0, 10) }} → {{ String(s.series_end ?? '').slice(0, 10) }}</td>
               <td>{{ s.quality_status }}</td>
               <td>{{ formatDateTime(String(s.last_sync_at ?? '')) }}</td>
+              <td><button class="ghost" @click="deleteSeries(Number(s.id))">删除</button></td>
             </tr>
           </tbody>
         </table>

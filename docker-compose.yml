@@ -51,7 +51,7 @@ x-backend-env: &backend-env
   # Leave empty for direct access. NO_PROXY excludes internal services.
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
-  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,quantlab-postgres,quantlab-redis,quantlab-docker-proxy}
+  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,quantlab-postgres,quantlab-redis,quantlab-docker-proxy,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.local,.internal}
 
 x-backend-networks: &backend-networks
   - backend

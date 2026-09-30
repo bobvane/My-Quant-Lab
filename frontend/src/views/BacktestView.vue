@@ -58,6 +58,22 @@ async function loadVersions() {
   }
 }
 
+async function removeRun(id: number) {
+  error.value = ''
+  busy.value = true
+  try {
+    await api.deleteBacktest(id)
+    runs.value = runs.value.filter((r) => r.id !== id)
+    if (detail.value?.id === id) {
+      detail.value = runs.value.length ? await api.backtest(runs.value[0].id) : null
+    }
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    busy.value = false
+  }
+}
+
 async function open(id: number) {
   error.value = ''
   busy.value = true
@@ -229,6 +245,7 @@ onMounted(async () => {
               <td>{{ r.number_of_trades ?? 'N/A' }}</td>
               <td>
                 <button class="ghost" :disabled="busy" @click="open(r.id)">查看</button>
+                <button class="ghost" :disabled="busy" @click="removeRun(r.id)">删除</button>
               </td>
             </tr>
           </tbody>

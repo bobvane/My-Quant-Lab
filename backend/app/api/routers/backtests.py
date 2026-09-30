@@ -337,6 +337,30 @@ def list_trades(run_id: int, db: Session = Depends(get_db)) -> list[dict]:
     ]
 
 
+@router.delete("/{run_id}", summary="Delete a backtest run and its results")
+def delete_backtest(run_id: int, db: Session = Depends(get_db)) -> dict:
+    run = db.get(BacktestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+
+    # Resource events are observational, safe to keep even after deletion.
+    # The cascade on BacktestResult and BacktestTrade handles the rest.
+    db.delete(run)
+
+    from app.data.strategy_service import record_audit
+
+    record_audit(
+        db,
+        event_type="backtest_deleted",
+        entity_type="backtest_run",
+        entity_id=str(run_id),
+        action="delete",
+        payload={"strategy_version_id": run.strategy_version_id},
+    )
+    db.commit()
+    return {"deleted": run_id}
+
+
 def _to_summary(run: BacktestRun) -> BacktestSummaryOut:
     summary = run.result.summary_json if run.result else {}
     return BacktestSummaryOut(

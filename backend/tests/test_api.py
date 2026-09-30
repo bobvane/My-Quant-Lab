@@ -213,7 +213,7 @@ def test_signal_scan_and_preview(client) -> None:
     assert evidence.status_code == 200
     body = evidence.json()
     assert "layer_1_rule_match" in body
-    assert body["layer_5_ai_explanation"] is None
+    assert body["layer_4_portfolio_context"]["ghostfolio_connected"] in (True, False)
 
 
 def test_paper_account_lifecycle(client) -> None:
@@ -259,6 +259,57 @@ def test_no_broker_endpoint_exists(client) -> None:
 
     for path in ("/api/v1/broker/orders", "/api/v1/orders", "/api/v1/trades/execute"):
         assert client.post(path, json={}).status_code in {404, 405}
+
+
+def test_delete_strategy_without_backtests(client) -> None:
+    client.post("/api/v1/strategies", json={"name": "Deletable"})
+    strategies = client.get("/api/v1/strategies").json()
+    sid = next(s["id"] for s in strategies if s["name"] == "Deletable")
+    response = client.delete(f"/api/v1/strategies/{sid}")
+    assert response.status_code == 200
+    assert client.get(f"/api/v1/strategies/{sid}").status_code == 404
+
+
+def test_delete_strategy_with_backtests_refused(client) -> None:
+    """A strategy with backtest history must not be silently deleted."""
+
+    client.post(
+        "/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol="DEMO-AAPL").model_dump()
+    )
+    strategy = client.post("/api/v1/strategies", json={"name": "HasBT"}).json()
+    client.post(
+        f"/api/v1/strategies/{strategy['id']}/versions",
+        json=StrategyVersionCreate(version="1.0.0", dsl=DSL).model_dump(),
+    )
+    client.post(
+        "/api/v1/backtests",
+        json=BacktestCreate(strategy_version_id=strategy["id"], symbol="DEMO-AAPL").model_dump(
+            mode="json"
+        ),
+    )
+    response = client.delete(f"/api/v1/strategies/{strategy['id']}")
+    assert response.status_code == 409
+    assert "回测" in response.json()["detail"]
+
+
+def test_delete_backtest(client) -> None:
+    client.post(
+        "/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol="DEMO-AAPL").model_dump()
+    )
+    strategy = client.post("/api/v1/strategies", json={"name": "DelBT"}).json()
+    version = client.post(
+        f"/api/v1/strategies/{strategy['id']}/versions",
+        json=StrategyVersionCreate(version="1.0.0", dsl=DSL).model_dump(),
+    ).json()
+    backtest = client.post(
+        "/api/v1/backtests",
+        json=BacktestCreate(strategy_version_id=version["id"], symbol="DEMO-AAPL").model_dump(
+            mode="json"
+        ),
+    ).json()
+    response = client.delete(f"/api/v1/backtests/{backtest['id']}")
+    assert response.status_code == 200
+    assert client.get(f"/api/v1/backtests/{backtest['id']}").status_code == 404
 
 
 def test_openapi_schema_generated(client) -> None:

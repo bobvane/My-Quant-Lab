@@ -251,10 +251,43 @@ def evidence(
         "paper_trades": len(paper),
         "realized_pnl": sum(float(t.pnl or 0) for t in paper if t.exit_time is not None),
     }
-    layer_4 = {
+
+    # Layer 4: Ghostfolio portfolio context (real holdings)
+    layer_4: dict[str, Any] = {
         "ghostfolio_connected": False,
-        "note": "Portfolio context is not configured yet; signals are unaffected.",
+        "holdings_for_symbol": None,
+        "note": "Ghostfolio is not configured or unreachable.",
     }
+    symbol_name = asset.symbol if asset else None
+    if symbol_name:
+        try:
+            from app.data.ghostfolio import GhostfolioAdapter
+
+            adapter = GhostfolioAdapter()
+            portfolio = adapter.get_portfolio_summary()
+            layer_4["ghostfolio_connected"] = True
+            layer_4["total_value"] = portfolio.get("total_value")
+            layer_4["holdings_count"] = portfolio.get("holdings_count")
+            matching = next(
+                (
+                    h
+                    for h in portfolio.get("holdings", [])
+                    if h.get("symbol", "").upper() == symbol_name.upper()
+                ),
+                None,
+            )
+            if matching:
+                layer_4["holdings_for_symbol"] = matching
+                layer_4["note"] = (
+                    f"你在 Ghostfolio 中持有 {matching['symbol']} "
+                    f"{matching['quantity']} 股（占比 {matching.get('allocation_pct', 0):.1f}%）"
+                )
+            else:
+                layer_4["note"] = f"Ghostfolio 已连接，但未持有 {symbol_name}。"
+        except Exception:
+            logger.debug("Ghostfolio portfolio context unavailable", exc_info=True)
+            layer_4["note"] = "Ghostfolio 连接失败，信号不受影响。"
+
     return {
         "strategy_version_id": version.id,
         "symbol": asset.symbol if asset else None,
@@ -263,7 +296,6 @@ def evidence(
         "layer_2_empirical_stats": layer_2,
         "layer_3_paper_stats": layer_3,
         "layer_4_portfolio_context": layer_4,
-        "layer_5_ai_explanation": None,
         "signal_intent": intent,
     }
 

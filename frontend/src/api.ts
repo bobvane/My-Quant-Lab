@@ -327,6 +327,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  deleteStrategy: (id: number) =>
+    request<{ deleted: number; name: string }>(`/strategies/${id}`, { method: 'DELETE' }),
+  deleteBacktest: (id: number) =>
+    request<{ deleted: number }>(`/backtests/${id}`, { method: 'DELETE' }),
   updateAiProvider: (id: number, payload: Record<string, unknown>) =>
     request<AIProviderRecord>(`/settings/ai/providers/${id}`, {
       method: 'PUT',

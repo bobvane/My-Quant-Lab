@@ -21,7 +21,7 @@ from app.data.strategy_service import (
     parse_spec,
     slugify,
 )
-from app.domain.models import Strategy, StrategyVersion
+from app.domain.models import BacktestRun, Strategy, StrategyVersion
 from app.strategies.validator import validate_strategy
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,41 @@ def get_strategy(strategy_id: int, db: Session = Depends(get_db)) -> StrategyOut
         or 0
     )
     return payload
+
+
+@router.delete("/{strategy_id}", summary="Delete a strategy and all its versions")
+def delete_strategy(strategy_id: int, db: Session = Depends(get_db)) -> dict:
+    from app.data.strategy_service import record_audit
+
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="strategy not found")
+
+    # Refuse to delete if any version has backtest results (audit trail)
+    has_backtests = db.scalar(
+        select(BacktestRun.id)
+        .join(StrategyVersion, StrategyVersion.id == BacktestRun.strategy_version_id)
+        .where(StrategyVersion.strategy_id == strategy_id)
+        .limit(1)
+    )
+    if has_backtests is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="此策略有回测记录关联，不能直接删除。请先删除相关回测记录。",
+        )
+
+    name = strategy.name
+    db.delete(strategy)
+    record_audit(
+        db,
+        event_type="strategy_deleted",
+        entity_type="strategy",
+        entity_id=str(strategy_id),
+        action="delete",
+        payload={"name": name},
+    )
+    db.commit()
+    return {"deleted": strategy_id, "name": name}
 
 
 @router.get(

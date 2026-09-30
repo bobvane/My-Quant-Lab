@@ -63,6 +63,23 @@ function assetSymbol(assetId: number): string {
   return found?.symbol ?? `#${assetId}`
 }
 
+const deletingStrategy = ref<number | null>(null)
+
+async function deleteStrategy(id: number) {
+  error.value = ''
+  info.value = ''
+  deletingStrategy.value = id
+  try {
+    const result = await api.deleteStrategy(id)
+    info.value = `已删除策略「${result.name}」`
+    await load()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    deletingStrategy.value = null
+  }
+}
+
 async function deleteSeries(id: number) {
   error.value = ''
   try {
@@ -263,6 +280,11 @@ onMounted(load)
               <td>{{ s.name }}</td>
               <td>{{ s.version_count }}</td>
               <td>{{ s.source_type }}</td>
+              <td>
+                <button class="ghost" :disabled="deletingStrategy === s.id" @click="deleteStrategy(s.id)">
+                  {{ deletingStrategy === s.id ? '删除中…' : '删除' }}
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>

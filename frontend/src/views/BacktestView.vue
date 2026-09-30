@@ -1,6 +1,13 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { api, type BacktestDetail, type BacktestSummary } from '@/api'
+import { onMounted, ref, watch } from 'vue'
+import {
+  api,
+  type Asset,
+  type BacktestDetail,
+  type BacktestSummary,
+  type Strategy,
+  type StrategyVersion,
+} from '@/api'
 import EquityChart from '@/components/EquityChart.vue'
 import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
@@ -10,13 +17,41 @@ const detail = ref<BacktestDetail | null>(null)
 const error = ref('')
 const busy = ref(false)
 
+const strategies = ref<Strategy[]>([])
+const versions = ref<StrategyVersion[]>([])
+const assets = ref<Asset[]>([])
+const strategyId = ref<number | null>(null)
+const versionId = ref<number | null>(null)
+const symbol = ref('DEMO-AAPL')
+const timeframe = ref('1d')
+const running = ref(false)
+
 async function load() {
   error.value = ''
   try {
-    runs.value = await api.backtests()
+    const [r, s, a] = await Promise.all([api.backtests(), api.strategies(), api.assets()])
+    runs.value = r
+    strategies.value = s
+    assets.value = a
     if (runs.value.length) {
       detail.value = await api.backtest(runs.value[0].id)
     }
+    if (strategies.value.length && strategyId.value === null) {
+      strategyId.value = strategies.value[0].id
+    }
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
+async function loadVersions() {
+  versions.value = []
+  versionId.value = null
+  if (strategyId.value === null) return
+  try {
+    versions.value = await api.strategyVersions(strategyId.value)
+    const current = versions.value.find((v) => v.is_current) ?? versions.value[0]
+    if (current) versionId.value = current.id
   } catch (e) {
     error.value = (e as Error).message
   }
@@ -34,7 +69,29 @@ async function open(id: number) {
   }
 }
 
-onMounted(load)
+async function runNew() {
+  error.value = ''
+  if (versionId.value === null || !symbol.value.trim()) {
+    error.value = '请先选择策略版本并填写标的代码'
+    return
+  }
+  running.value = true
+  try {
+    const result = await api.runBacktest(versionId.value, symbol.value.trim(), timeframe.value)
+    runs.value = [result, ...runs.value]
+    detail.value = result
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    running.value = false
+  }
+}
+
+watch(strategyId, loadVersions)
+onMounted(async () => {
+  await load()
+  await loadVersions()
+})
 </script>
 
 <template>
@@ -46,7 +103,36 @@ onMounted(load)
 
     <p v-if="error" class="error">{{ error }}</p>
 
-    <div v-if="detail" class="grid cols-4">
+    <div class="card">
+      <h3>运行新回测</h3>
+      <div class="row">
+        <select v-model="strategyId" style="max-width: 220px">
+          <option v-for="s in strategies" :key="s.id" :value="s.id">
+            #{{ s.id }} {{ s.name }}
+          </option>
+        </select>
+        <select v-model="versionId" style="max-width: 200px">
+          <option v-for="v in versions" :key="v.id" :value="v.id">
+            {{ v.version }}{{ v.is_current ? '（当前）' : '' }} · {{ v.validation_status }}
+          </option>
+        </select>
+        <input v-model="symbol" list="asset-list" style="max-width: 160px" placeholder="标的代码" />
+        <datalist id="asset-list">
+          <option v-for="a in assets" :key="a.id" :value="a.symbol" />
+        </datalist>
+        <select v-model="timeframe" style="max-width: 110px">
+          <option value="1d">日线</option>
+        </select>
+        <button :disabled="running || versionId === null" @click="runNew">
+          {{ running ? '计算中…' : '开始回测' }}
+        </button>
+      </div>
+      <p class="muted" style="margin-bottom: 0">
+        先到「行情与策略」同步该标的的数据；同一版本重复运行会得到相同结果（结果哈希可验证）。
+      </p>
+    </div>
+
+    <div v-if="detail" class="grid cols-4" style="margin-top: 14px">
       <StatCard
         label="总收益率"
         :value="formatPercent(detail.total_return)"

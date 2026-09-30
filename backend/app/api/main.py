@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -86,6 +87,39 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Optional bearer auth. Off by default: the API binds to 127.0.0.1 and is
+    # reached through the web proxy, so the default deployment is unaffected.
+    # When API_AUTH_TOKEN is set, every /api/v1 route except the two health
+    # probes requires `Authorization: Bearer <token>` (the bundled web container
+    # injects it while proxying /api).
+    open_paths = {f"{settings.api_prefix}/healthz", f"{settings.api_prefix}/health"}
+
+    @app.middleware("http")
+    async def enforce_api_auth(request: Request, call_next):
+        token = settings.api_auth_token
+        if not token or request.method == "OPTIONS":
+            return await call_next(request)
+        path = request.url.path
+        if not path.startswith(settings.api_prefix) or path in open_paths:
+            return await call_next(request)
+        scheme, _, presented = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() == "bearer" and secrets.compare_digest(presented, token):
+            return await call_next(request)
+        logger.warning("rejected unauthenticated request to %s", path)
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": {
+                    "code": "unauthorized",
+                    "message": "missing or invalid API token",
+                    "details": {},
+                }
+            },
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Added after auth so CORS is the outermost layer and 401s still carry the
+    # CORS headers a cross-origin browser needs to read them.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

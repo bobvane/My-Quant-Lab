@@ -7,6 +7,7 @@ used in every environment. Secrets are never logged and never returned by the AP
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from typing import Annotated
 
@@ -64,6 +65,11 @@ class Settings(BaseSettings):
     # Secrets are write-only. They are stored encrypted at rest by
     # `app.infrastructure.secrets` and are never echoed back by the API.
     secret_key: str = Field(default="change-me-in-production")
+    # Optional bearer token for the REST API. Empty (default) leaves the API
+    # open, which is safe only because it binds to 127.0.0.1 and is reached
+    # through the web proxy. Set it before exposing the API on the LAN; the
+    # bundled web container then injects the same token when proxying /api.
+    api_auth_token: str | None = None
     ghostfolio_base_url: str | None = None
     ghostfolio_api_key: str | None = None
     market_data_provider: str = "yahoo_finance"
@@ -109,6 +115,23 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     log_json: bool = True
+
+    @field_validator("api_auth_token", mode="before")
+    @classmethod
+    def _normalise_auth_token(cls, value: object) -> object:
+        """Reject tokens whose characters would be unsafe in an HTTP header
+        (and, for the bundled nginx proxy, unsafe inside an nginx config)."""
+
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if len(text) < 8:
+            raise ValueError("API_AUTH_TOKEN must be at least 8 characters")
+        if not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", text):
+            raise ValueError("API_AUTH_TOKEN contains unsupported characters")
+        return text
 
     @field_validator("resource_disk_paths", mode="before")
     @classmethod

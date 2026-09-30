@@ -29,6 +29,8 @@ x-backend-env: &backend-env
   CELERY_BROKER_URL: redis://quantlab-redis:6379/1
   CELERY_RESULT_BACKEND: redis://quantlab-redis:6379/2
   SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+  # Optional bearer auth for the API. Empty = open (loopback-only by default).
+  API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
   MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-synthetic}
   AI_PROVIDER_BASE_URL: ${AI_PROVIDER_BASE_URL:-}
   AI_PROVIDER_API_KEY: ${AI_PROVIDER_API_KEY:-}
@@ -204,6 +206,9 @@ services:
     image: ghcr.io/bobvane/my-quant-lab-web:${MQL_VERSION:-latest}
     container_name: quantlab-web
     restart: unless-stopped
+    environment:
+      # Injected into the /api proxy so the UI keeps working when auth is on.
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
     ports:
       - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8081}:80"
     depends_on:

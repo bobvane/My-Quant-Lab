@@ -1,21 +1,25 @@
 """Notification configuration (M11 / M13, docs/03_MODULES.md).
 
 Configuration lives in ``system_settings`` so it is editable from the UI and
-survives restarts, exactly like the runtime proxy setting. Two values are
-secrets (the webhook URL may embed a token; the signing secret always is): they
-are stored in the settings table and only ever exposed masked.
+survives restarts, exactly like the runtime proxy setting.
 
-Alert noise control (docs/09_SIGNAL_ENGINE.md §7) is part of the same block:
+Shape:
 
-* which states are notified (BUY/SELL by default, WAIT optionally),
-* quiet hours,
-* a daily notification cap,
-* a per-symbol cooldown.
+* **global**: on/off, which states are notified, quiet hours, daily cap,
+  per-series cooldown, optional base URL for links;
+* **channels**: one or more delivery destinations (webhook / feishu / telegram
+  / pushplus / email). Secret fields are encrypted at rest and only ever
+  exposed masked.
+
+The original single-webhook keys (``notification_webhook_url`` /
+``notification_webhook_secret``) are still read for backward compatibility: if
+no channel list is stored, a webhook channel is synthesized from them.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -25,11 +29,16 @@ from sqlalchemy.orm import Session
 
 from app.domain.models import SystemSetting
 from app.infrastructure.secrets import decrypt_secret, encrypt_secret
-from app.notifications.provider import (
-    NotificationConfigError,
-    mask_webhook_url,
-    validate_webhook_url,
+from app.notifications.channels import (
+    NotificationChannel,
+    channel_from_storage,
+    channel_to_storage,
+    normalize_channel,
+    serialize_channel,
 )
+from app.notifications.provider import NotificationConfigError, validate_webhook_url
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "NOTIFICATION_FIELDS",
@@ -41,32 +50,33 @@ __all__ = [
 ]
 
 KEY_ENABLED = "notification_enabled"
-KEY_WEBHOOK_URL = "notification_webhook_url"
-KEY_WEBHOOK_SECRET = "notification_webhook_secret"
 KEY_INCLUDE_WAIT = "notification_include_wait"
 KEY_QUIET_HOURS = "notification_quiet_hours"
 KEY_DAILY_MAX = "notification_daily_max"
 KEY_COOLDOWN_MINUTES = "notification_cooldown_minutes"
 KEY_BASE_URL = "notification_base_url"
-# Internal watermark (not user-editable): when notifications were last enabled,
-# so turning the feature on does not dump months of backlog in one run.
+KEY_CHANNELS = "notification_channels"
+# Legacy single-webhook keys, still read for backward compatibility.
+KEY_WEBHOOK_URL = "notification_webhook_url"
+KEY_WEBHOOK_SECRET = "notification_webhook_secret"
+# Internal watermark (not user-editable).
 KEY_ENABLED_AT = "notification_enabled_at"
 
-# field name -> (setting key, is_secret, description)
-NOTIFICATION_FIELDS: dict[str, tuple[str, bool, str]] = {
-    "enabled": (KEY_ENABLED, False, "Send notifications for eligible signals"),
-    "webhook_url": (KEY_WEBHOOK_URL, True, "Generic webhook URL (POST, JSON)"),
-    "webhook_secret": (KEY_WEBHOOK_SECRET, True, "Optional HMAC-SHA256 signing secret"),
-    "include_wait": (KEY_INCLUDE_WAIT, False, "Also notify WAIT signals"),
-    "quiet_hours": (KEY_QUIET_HOURS, False, "Quiet window, e.g. 22:00-07:00 (UTC)"),
-    "daily_max": (KEY_DAILY_MAX, False, "Max notifications per day (0 = unlimited)"),
-    "cooldown_minutes": (KEY_COOLDOWN_MINUTES, False, "Min minutes between alerts per series"),
-    "base_url": (KEY_BASE_URL, False, "Public base URL used to build signal links"),
+# Global (channel-independent) field name -> (setting key, description)
+NOTIFICATION_FIELDS: dict[str, tuple[str, str]] = {
+    "enabled": (KEY_ENABLED, "Send notifications for eligible signals"),
+    "include_wait": (KEY_INCLUDE_WAIT, "Also notify WAIT signals"),
+    "quiet_hours": (KEY_QUIET_HOURS, "Quiet window, e.g. 22:00-07:00 (UTC)"),
+    "daily_max": (KEY_DAILY_MAX, "Max notifications per day (0 = unlimited)"),
+    "cooldown_minutes": (KEY_COOLDOWN_MINUTES, "Min minutes between alerts per series"),
+    "base_url": (KEY_BASE_URL, "Public base URL used to build signal links"),
 }
-
-ALL_KEYS = [meta[0] for meta in NOTIFICATION_FIELDS.values()] + [KEY_ENABLED_AT]
-_KEY_TO_FIELD = {meta[0]: field for field, meta in NOTIFICATION_FIELDS.items()}
-_SECRET_FIELDS = {field for field, meta in NOTIFICATION_FIELDS.items() if meta[1]}
+ALL_KEYS = [key for key, _ in NOTIFICATION_FIELDS.values()] + [
+    KEY_CHANNELS,
+    KEY_WEBHOOK_URL,
+    KEY_WEBHOOK_SECRET,
+    KEY_ENABLED_AT,
+]
 
 
 @dataclass(frozen=True)
@@ -74,18 +84,21 @@ class NotificationConfig:
     """Immutable snapshot of the notification settings."""
 
     enabled: bool = False
-    webhook_url: str = ""
-    webhook_secret: str = ""
     include_wait: bool = False
     quiet_hours: str = ""
     daily_max: int = 0
     cooldown_minutes: int = 0
     base_url: str = ""
+    channels: tuple[NotificationChannel, ...] = ()
     enabled_at: dt.datetime | None = None
 
     @property
+    def enabled_channels(self) -> tuple[NotificationChannel, ...]:
+        return tuple(channel for channel in self.channels if channel.enabled)
+
+    @property
     def configured(self) -> bool:
-        return bool(self.enabled and self.webhook_url)
+        return bool(self.enabled and self.enabled_channels)
 
     @property
     def eligible_states(self) -> tuple[str, ...]:
@@ -180,26 +193,50 @@ def _parse_enabled_at(value: Any) -> dt.datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
 
 
+def _load_channels(raw_channels: Any) -> list[NotificationChannel]:
+    channels: list[NotificationChannel] = []
+    if isinstance(raw_channels, list):
+        for item in raw_channels:
+            if not isinstance(item, dict):
+                continue
+            try:
+                channels.append(channel_from_storage(item))
+            except NotificationConfigError:
+                logger.warning("ignoring malformed stored notification channel")
+    return channels
+
+
+def _legacy_webhook_channel(values: dict[str, Any]) -> list[NotificationChannel]:
+    url = _decode_secret(values.get(KEY_WEBHOOK_URL))
+    if not url:
+        return []
+    return [
+        NotificationChannel(
+            id="webhook",
+            type="webhook",
+            enabled=True,
+            config={"url": url, "secret": _decode_secret(values.get(KEY_WEBHOOK_SECRET))},
+        )
+    ]
+
+
 def get_notification_config(db: Session) -> NotificationConfig:
     rows = db.scalars(select(SystemSetting).where(SystemSetting.key.in_(ALL_KEYS))).all()
-    values: dict[str, Any] = {}
-    enabled_at_raw: Any = None
-    for row in rows:
-        raw = (row.value_json or {}).get("value")
-        if row.key == KEY_ENABLED_AT:
-            enabled_at_raw = raw
-        elif row.key in _KEY_TO_FIELD:
-            values[_KEY_TO_FIELD[row.key]] = raw
+    values: dict[str, Any] = {row.key: (row.value_json or {}).get("value") for row in rows}
+
+    channels = _load_channels(values.get(KEY_CHANNELS))
+    if not channels:
+        channels = _legacy_webhook_channel(values)
+
     return NotificationConfig(
-        enabled=_as_bool(values.get("enabled")),
-        webhook_url=_decode_secret(values.get("webhook_url")),
-        webhook_secret=_decode_secret(values.get("webhook_secret")),
-        include_wait=_as_bool(values.get("include_wait")),
-        quiet_hours=str(values.get("quiet_hours") or "").strip(),
-        daily_max=max(0, _as_int(values.get("daily_max"))),
-        cooldown_minutes=max(0, _as_int(values.get("cooldown_minutes"))),
-        base_url=str(values.get("base_url") or "").strip(),
-        enabled_at=_parse_enabled_at(enabled_at_raw),
+        enabled=_as_bool(values.get(KEY_ENABLED)),
+        include_wait=_as_bool(values.get(KEY_INCLUDE_WAIT)),
+        quiet_hours=str(values.get(KEY_QUIET_HOURS) or "").strip(),
+        daily_max=max(0, _as_int(values.get(KEY_DAILY_MAX))),
+        cooldown_minutes=max(0, _as_int(values.get(KEY_COOLDOWN_MINUTES))),
+        base_url=str(values.get(KEY_BASE_URL) or "").strip(),
+        channels=tuple(channels),
+        enabled_at=_parse_enabled_at(values.get(KEY_ENABLED_AT)),
     )
 
 
@@ -211,8 +248,6 @@ def _coerce(field: str, value: Any) -> Any:
         if number < 0:
             raise NotificationConfigError(f"{field} must be a non-negative integer")
         return number
-    if field == "webhook_url":
-        return validate_webhook_url(str(value or ""))
     if field == "base_url":
         text = str(value or "").strip().rstrip("/")
         if text and not text.startswith(("http://", "https://")):
@@ -223,23 +258,69 @@ def _coerce(field: str, value: Any) -> Any:
     return str(value or "").strip()
 
 
+def _coerce_channels(raw: Any, previous: list[NotificationChannel]) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        raise NotificationConfigError("channels must be a list")
+    previous_by_id = {channel.id: channel for channel in previous}
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise NotificationConfigError("each channel must be an object")
+        channel = normalize_channel(item, previous=previous_by_id.get(str(item.get("id") or "")))
+        if channel.id in seen:
+            raise NotificationConfigError(f"duplicate channel id '{channel.id}'")
+        seen.add(channel.id)
+        normalized.append(channel_to_storage(channel))
+    return normalized
+
+
 def update_notification_config(db: Session, changes: Mapping[str, Any]) -> NotificationConfig:
     """Validate and persist the provided fields, leaving the rest untouched."""
 
-    unknown = set(changes) - set(NOTIFICATION_FIELDS)
+    allowed = set(NOTIFICATION_FIELDS) | {"channels", "webhook_url", "webhook_secret"}
+    unknown = set(changes) - allowed
     if unknown:
         joined = ", ".join(sorted(unknown))
         raise NotificationConfigError(f"unknown notification field(s): {joined}")
 
     current = get_notification_config(db)
     for field, raw in changes.items():
-        value = _coerce(field, raw)
-        key, is_secret, description = NOTIFICATION_FIELDS[field]
-        stored: Any = value
-        if field in _SECRET_FIELDS and value:
-            # Secrets are encrypted at rest, unlike the plain noise-control keys.
-            stored = encrypt_secret(str(value))
-        _upsert(db, key, stored, is_secret=is_secret, description=description)
+        if field in NOTIFICATION_FIELDS:
+            key, description = NOTIFICATION_FIELDS[field]
+            _upsert(
+                db,
+                key,
+                _coerce(field, raw),
+                is_secret=False,
+                description=description,
+            )
+
+    if "channels" in changes:
+        stored = _coerce_channels(changes["channels"], list(current.channels))
+        _upsert(db, KEY_CHANNELS, stored, is_secret=True, description="Notification channels")
+        # The channel list supersedes the legacy single-webhook keys.
+        _upsert(db, KEY_WEBHOOK_URL, None, is_secret=True, description="Legacy webhook URL")
+        _upsert(db, KEY_WEBHOOK_SECRET, None, is_secret=True, description="Legacy webhook secret")
+
+    if "webhook_url" in changes:
+        value = validate_webhook_url(str(changes["webhook_url"] or ""))
+        _upsert(
+            db,
+            KEY_WEBHOOK_URL,
+            encrypt_secret(value) if value else None,
+            is_secret=True,
+            description="Legacy webhook URL",
+        )
+    if "webhook_secret" in changes:
+        value = str(changes["webhook_secret"] or "").strip()
+        _upsert(
+            db,
+            KEY_WEBHOOK_SECRET,
+            encrypt_secret(value) if value else None,
+            is_secret=True,
+            description="Legacy webhook secret",
+        )
 
     # Watermark so enabling the feature never dumps a backlog of old signals.
     if "enabled" in changes:
@@ -274,14 +355,11 @@ def _upsert(db: Session, key: str, value: Any, *, is_secret: bool, description: 
 
 
 def serialize_notification_config(config: NotificationConfig) -> dict[str, Any]:
-    """Public shape: secrets masked, plus an explicit ``configured`` flag."""
+    """Public shape: channel secrets masked, plus an explicit ``configured`` flag."""
 
     return {
         "enabled": config.enabled,
         "configured": config.configured,
-        "webhook_url_set": bool(config.webhook_url),
-        "webhook_url_masked": mask_webhook_url(config.webhook_url),
-        "webhook_secret_set": bool(config.webhook_secret),
         "include_wait": config.include_wait,
         "quiet_hours": config.quiet_hours,
         "daily_max": config.daily_max,
@@ -289,4 +367,5 @@ def serialize_notification_config(config: NotificationConfig) -> dict[str, Any]:
         "base_url": config.base_url,
         "enabled_at": config.enabled_at,
         "eligible_states": list(config.eligible_states),
+        "channels": [serialize_channel(channel) for channel in config.channels],
     }

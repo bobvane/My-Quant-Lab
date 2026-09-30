@@ -203,23 +203,29 @@ export interface ProviderTestResult {
   models_found: string[]
 }
 
+export interface NotificationChannelRecord {
+  id: string
+  type: string
+  enabled: boolean
+  [key: string]: unknown
+}
+
 export interface NotificationConfig {
   enabled: boolean
   configured: boolean
-  webhook_url_set: boolean
-  webhook_url_masked: string
-  webhook_secret_set: boolean
   include_wait: boolean
   quiet_hours: string
   daily_max: number
   cooldown_minutes: number
   base_url: string
   eligible_states: string[]
+  channels: NotificationChannelRecord[]
 }
 
 export interface NotificationTestResult {
   ok: boolean
   detail: string
+  results: Array<Record<string, unknown>>
 }
 
 export interface LifecycleStage {

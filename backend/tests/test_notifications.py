@@ -50,16 +50,29 @@ class _Resp:
 
 
 def _patch_post(monkeypatch, calls: list[dict], status: int = 200) -> None:
-    def _post(url, content=None, headers=None, timeout=None, follow_redirects=None):  # noqa: ANN001
+    def _post(  # noqa: ANN001
+        url, content=None, headers=None, timeout=None, follow_redirects=None, **kwargs
+    ):
         calls.append(
             {
                 "url": url,
                 "content": content,
+                "json": kwargs.get("json"),
                 "headers": headers,
                 "follow_redirects": follow_redirects,
             }
         )
         return _Resp(status)
+
+    monkeypatch.setattr(httpx, "post", _post)
+
+
+def _patch_post_by_url(monkeypatch, calls: list[dict], status_fn) -> None:
+    def _post(  # noqa: ANN001
+        url, content=None, headers=None, timeout=None, follow_redirects=None, **kwargs
+    ):
+        calls.append({"url": url, "json": kwargs.get("json"), "content": content})
+        return _Resp(status_fn(url))
 
     monkeypatch.setattr(httpx, "post", _post)
 
@@ -122,10 +135,17 @@ def test_config_round_trip_masks_secrets(client) -> None:
         "/api/v1/notifications/config",
         json={
             "enabled": True,
-            "webhook_url": URL,
-            "webhook_secret": "top-secret-signing-key",
             "include_wait": True,
             "daily_max": 5,
+            "channels": [
+                {
+                    "id": "hook",
+                    "type": "webhook",
+                    "enabled": True,
+                    "url": URL,
+                    "secret": "top-secret-signing-key",
+                }
+            ],
         },
     )
     assert created.status_code == 200, created.text
@@ -133,10 +153,14 @@ def test_config_round_trip_masks_secrets(client) -> None:
 
     assert body["enabled"] is True
     assert body["configured"] is True
-    assert body["webhook_url_set"] is True
-    assert body["webhook_secret_set"] is True
     assert body["include_wait"] is True
     assert body["eligible_states"] == ["BUY", "SELL", "WAIT"]
+    channel = body["channels"][0]
+    assert channel["id"] == "hook"
+    assert channel["type"] == "webhook"
+    assert channel["url_set"] is True
+    assert channel["secret_set"] is True
+    assert channel["url_masked"].startswith("https://hooks.example.com")
     # No secret value may appear anywhere in the response.
     assert URL not in created.text
     assert "top-secret-signing-key" not in created.text
@@ -144,6 +168,19 @@ def test_config_round_trip_masks_secrets(client) -> None:
     # A second read stays masked too.
     again = client.get("/api/v1/notifications/config").json()
     assert URL not in json.dumps(again)
+
+
+def test_legacy_single_webhook_still_works(client) -> None:
+    created = client.put(
+        "/api/v1/notifications/config",
+        json={"enabled": True, "webhook_url": URL, "webhook_secret": "s3cret"},
+    )
+    assert created.status_code == 200, created.text
+    channels = created.json()["channels"]
+    assert len(channels) == 1
+    assert channels[0]["type"] == "webhook"
+    assert channels[0]["url_set"] is True
+    assert URL not in created.text
 
 
 def test_update_rejects_bad_url_and_quiet_hours(client) -> None:
@@ -517,3 +554,302 @@ def test_scheduled_scan_skips_no_signal_rows(db_session) -> None:
     result = scan_and_persist(db_session)
     assert result["created"] == 0
     assert db_session.query(Signal).count() == 0
+
+
+# --------------------------------------------------------------------------- #
+# P1 channels: feishu / telegram / pushplus / email
+# --------------------------------------------------------------------------- #
+def test_feishu_payload_and_signature(monkeypatch) -> None:
+    from app.notifications.providers import FeishuProvider
+
+    calls: list[dict] = []
+    _patch_post(monkeypatch, calls, status=200)
+    provider = FeishuProvider("https://open.feishu.cn/open-apis/bot/v2/hook/abc", secret="key")
+    assert provider.send("NQ BUY", "rules matched", meta={"symbol": "NQ"}) is True
+
+    payload = calls[0]["json"]
+    assert payload["msg_type"] == "text"
+    assert "NQ BUY" in payload["content"]["text"]
+    assert payload["sign"]  # signed when a secret is configured
+    assert "key" not in json.dumps(calls[0])
+
+
+def test_telegram_targets_bot_api(monkeypatch) -> None:
+    from app.notifications.providers import TelegramProvider
+
+    calls: list[dict] = []
+    _patch_post(monkeypatch, calls, status=200)
+    provider = TelegramProvider("123:ABC", "-100999")
+    provider.send("t", "b")
+
+    assert calls[0]["url"] == "https://api.telegram.org/bot123:ABC/sendMessage"
+    assert calls[0]["json"]["chat_id"] == "-100999"
+    assert "t" in calls[0]["json"]["text"]
+
+
+def test_pushplus_payload(monkeypatch) -> None:
+    from app.notifications.providers import PushPlusProvider
+
+    calls: list[dict] = []
+    _patch_post(monkeypatch, calls, status=200)
+    provider = PushPlusProvider("pp-token", topic="lab")
+    provider.send("t", "b")
+
+    assert calls[0]["url"] == "https://www.pushplus.plus/send"
+    assert calls[0]["json"]["token"] == "pp-token"
+    assert calls[0]["json"]["topic"] == "lab"
+    assert calls[0]["json"]["template"] == "txt"
+
+
+def test_email_uses_smtp(monkeypatch) -> None:
+    import smtplib
+
+    from app.notifications.providers import EmailProvider
+
+    sent: list = []
+
+    class _FakeSMTP:
+        def __init__(self, host, port, timeout=None, context=None) -> None:  # noqa: ANN001
+            self.host = host
+            self.port = port
+            self.started_tls = False
+            self.logged_in = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def starttls(self, context=None) -> None:  # noqa: ANN001
+            self.started_tls = True
+
+        def login(self, username, password) -> None:  # noqa: ANN001
+            self.logged_in = (username, password)
+
+        def send_message(self, message) -> None:  # noqa: ANN001
+            sent.append(message)
+
+    monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
+    provider = EmailProvider(
+        "smtp.example.com", "ops@example.com", username="bot", password="pw", port=587
+    )
+    assert provider.send("signal", "body", meta={"link": "https://lab/"}) is True
+    assert sent[0]["Subject"] == "signal"
+    assert sent[0]["To"] == "ops@example.com"
+    assert "https://lab/" in sent[0].get_content()
+
+
+def test_smtp_credentials_require_encryption() -> None:
+    from app.notifications.providers import EmailProvider
+
+    with pytest.raises(NotificationConfigError):
+        EmailProvider(
+            "smtp.example.com", "a@b.com", username="u", password="p", use_tls=False, use_ssl=False
+        )
+
+
+def test_email_metadata_and_link_local_host_rejected(client) -> None:
+    for host in ("169.254.169.254", "metadata.google.internal"):
+        response = client.put(
+            "/api/v1/notifications/config",
+            json={
+                "channels": [
+                    {
+                        "id": "mail",
+                        "type": "email",
+                        "enabled": True,
+                        "host": host,
+                        "to_address": "ops@example.com",
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 422, host
+
+
+def test_email_port_must_be_a_valid_integer() -> None:
+    from app.notifications.channels import normalize_channel
+
+    with pytest.raises(NotificationConfigError):
+        normalize_channel(
+            {
+                "type": "email",
+                "enabled": True,
+                "host": "smtp.example.com",
+                "to_address": "ops@example.com",
+                "port": "abc",
+            }
+        )
+
+
+def test_channel_field_length_is_capped(client) -> None:
+    response = client.put(
+        "/api/v1/notifications/config",
+        json={"channels": [{"id": "pp", "type": "pushplus", "enabled": True, "token": "x" * 5000}]},
+    )
+    assert response.status_code == 422
+
+
+def test_channel_secrets_are_encrypted_at_rest(client, db_session) -> None:
+    from app.domain.models import SystemSetting
+
+    client.put(
+        "/api/v1/notifications/config",
+        json={
+            "channels": [
+                {
+                    "id": "tg",
+                    "type": "telegram",
+                    "enabled": True,
+                    "bot_token": "123456:SECRET",
+                    "chat_id": "9",
+                }
+            ]
+        },
+    )
+    row = db_session.query(SystemSetting).filter(SystemSetting.key == "notification_channels").one()
+    stored = str(row.value_json)
+    assert "123456:SECRET" not in stored
+    # `...set` flags are exposed, the value itself is not.
+    body = client.get("/api/v1/notifications/config").json()
+    assert body["channels"][0]["bot_token_set"] is True
+    assert "123456:SECRET" not in client.get("/api/v1/notifications/config").text
+
+
+def test_enabled_channel_with_missing_fields_rejected(client) -> None:
+    response = client.put(
+        "/api/v1/notifications/config",
+        json={"channels": [{"type": "telegram", "enabled": True, "bot_token": "", "chat_id": ""}]},
+    )
+    assert response.status_code == 422
+
+
+def test_duplicate_channel_ids_rejected(client) -> None:
+    response = client.put(
+        "/api/v1/notifications/config",
+        json={
+            "channels": [
+                {"id": "dup", "type": "pushplus", "enabled": False},
+                {"id": "dup", "type": "pushplus", "enabled": False},
+            ]
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_omitted_secret_keeps_stored_value(client) -> None:
+    client.put(
+        "/api/v1/notifications/config",
+        json={
+            "channels": [
+                {
+                    "id": "tg",
+                    "type": "telegram",
+                    "enabled": True,
+                    "bot_token": "tok-1",
+                    "chat_id": "5",
+                }
+            ]
+        },
+    )
+    updated = client.put(
+        "/api/v1/notifications/config",
+        json={"channels": [{"id": "tg", "type": "telegram", "enabled": True, "chat_id": "6"}]},
+    )
+    assert updated.status_code == 200
+    channel = updated.json()["channels"][0]
+    assert channel["chat_id"] == "6"
+    assert channel["bot_token_set"] is True  # kept
+
+
+def test_multi_channel_routing_sends_to_all(db_session, monkeypatch) -> None:
+    calls: list[dict] = []
+    _patch_post(monkeypatch, calls, status=200)
+    from app.notifications.config import update_notification_config
+
+    update_notification_config(
+        db_session,
+        {
+            "enabled": True,
+            "channels": [
+                {"id": "hook", "type": "webhook", "enabled": True, "url": URL},
+                {
+                    "id": "tg",
+                    "type": "telegram",
+                    "enabled": True,
+                    "bot_token": "1:A",
+                    "chat_id": "9",
+                },
+            ],
+        },
+    )
+    _seed_signal(db_session)
+    result = notify_pending_signals(db_session)
+    assert result["sent"] == 1
+    assert len(calls) == 2
+    urls = {call["url"] for call in calls}
+    assert URL in urls
+    assert any("api.telegram.org" in url for url in urls)
+
+
+def test_partial_channel_failure_still_marks_signal_sent(db_session, monkeypatch) -> None:
+    calls: list[dict] = []
+    _patch_post_by_url(monkeypatch, calls, lambda url: 500 if "telegram" in url else 200)
+    from app.notifications.config import update_notification_config
+
+    update_notification_config(
+        db_session,
+        {
+            "enabled": True,
+            "channels": [
+                {"id": "hook", "type": "webhook", "enabled": True, "url": URL},
+                {
+                    "id": "tg",
+                    "type": "telegram",
+                    "enabled": True,
+                    "bot_token": "1:A",
+                    "chat_id": "9",
+                },
+            ],
+        },
+    )
+    _seed_signal(db_session)
+    result = notify_pending_signals(db_session)
+    assert result["sent"] == 1
+
+    from app.domain.models import AuditLog
+
+    failed = [
+        r for r in db_session.query(AuditLog).all() if r.event_type == "signal_notification_failed"
+    ]
+    assert failed and failed[0].payload_json["channel"] == "tg"
+
+
+def test_all_channels_failing_leaves_signal_pending(db_session, monkeypatch) -> None:
+    calls: list[dict] = []
+    _patch_post(monkeypatch, calls, status=503)
+    from app.notifications.config import update_notification_config
+
+    update_notification_config(
+        db_session,
+        {
+            "enabled": True,
+            "channels": [
+                {"id": "hook", "type": "webhook", "enabled": True, "url": URL},
+                {
+                    "id": "tg",
+                    "type": "telegram",
+                    "enabled": True,
+                    "bot_token": "1:A",
+                    "chat_id": "9",
+                },
+            ],
+        },
+    )
+    signal = _seed_signal(db_session)
+    result = notify_pending_signals(db_session)
+    assert result["failed"] == 1
+    assert result["sent"] == 0
+    db_session.refresh(signal)
+    assert signal.notified_at is None

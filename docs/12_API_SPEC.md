@@ -125,8 +125,10 @@ API base: `/api/v1`
 
 ## Notifications
 
-Generic webhook channel (V1). Secrets (URL, signing key) are write-only and
-only ever returned masked.
+Multi-channel delivery: `webhook`, `feishu`, `telegram`, `pushplus`, `email`.
+Channel secrets are write-only and only ever returned masked. `PUT` with
+`channels` replaces the whole list; omitting a secret field keeps the stored
+value.
 
 `GET /notifications/config`
 `PUT /notifications/config`

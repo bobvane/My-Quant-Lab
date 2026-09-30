@@ -242,3 +242,26 @@ GHCR 镜像保持公开供 NAS 直接拉取。
 **理由**：docs/15 Phase 8 要求晋级/降级有证据且排除 AI 干预。把规则写成固定
 阈值 + 只读事实 + 审计快照，既满足验收，也让用户随时能看清一个策略为什么
 停在某个阶段。
+
+## ADR-027：通知升级为多渠道（docs/03 M11 P1）
+
+**决策**：
+1. 把「单个 webhook」抽象为**渠道列表**：Generic Webhook、飞书、Telegram、
+   PushPlus、Email(SMTP) 五类，每个渠道可独立启用；全局降噪（状态过滤、
+   免打扰、每日上限、冷却）对所有渠道统一生效。
+2. 所有渠道实现同一个 `NotificationProvider.send(title, body, meta)` 协议，
+   统一从引擎已算字段构造文案；AI 文案不作为收益承诺。
+3. 渠道配置存在 `system_settings.notification_channels`（JSON 列表）；渠道内
+   的密钥字段（webhook/飞书 URL 与签名、Telegram bot_token、PushPlus token、
+   Email 密码）逐字段加密存储，读取只回显掩码 + `*_set` 标记。
+4. 旧版单 webhook 的两个键（`notification_webhook_url` / `_secret`）继续读取：
+   当没有渠道列表时，自动合成一个 webhook 渠道（向后兼容）。
+5. Email 用标准库 `smtplib`，不新增依赖；其余渠道复用 `httpx`，统一固定超时、
+   不跟随重定向，并沿用出站 URL 的 SSRF 校验。
+6. 传递语义：一条信号在**任一渠道成功**即视为已送达（写 `notified_at`），
+   失败的渠道单独记 `signal_notification_failed` 审计但不重发到已成功渠道，
+   避免重复；全部失败则保留待下次重试。
+
+**理由**：P1 要求接入飞书/Telegram/Email/PushPlus。把渠道做成可扩展的适配器
+列表，既满足该清单，又保持「一次事件、一次通知」与「密钥不回显」两条既有
+约束；不引入新依赖也符合 NAS 部署的轻量目标。

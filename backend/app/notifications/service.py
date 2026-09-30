@@ -24,15 +24,12 @@ from sqlalchemy.orm import Session
 
 from app.data.strategy_service import record_audit
 from app.domain.models import Asset, AuditLog, Signal, Strategy, StrategyVersion
+from app.notifications.channels import build_provider
 from app.notifications.config import (
     NotificationConfig,
     get_notification_config,
 )
-from app.notifications.provider import (
-    NotificationConfigError,
-    NotificationError,
-    WebhookNotificationProvider,
-)
+from app.notifications.provider import NotificationConfigError, NotificationError
 
 logger = logging.getLogger(__name__)
 
@@ -170,28 +167,35 @@ def _audit(
     signal: Signal,
     *,
     symbol: str | None,
+    channel: str | None = None,
+    channels: list[str] | None = None,
     detail: str | None = None,
 ) -> None:
     action = {
         EVENT_NOTIFIED: "notify",
         EVENT_SUPPRESSED: "notify_suppressed",
     }.get(event_type, "notify_failed")
+    payload: dict[str, Any] = {
+        "signal_id": signal.id,
+        "strategy_version_id": signal.strategy_version_id,
+        "asset_id": signal.asset_id,
+        "symbol": symbol,
+        "state": signal.state,
+        "timeframe": signal.timeframe,
+    }
+    if channel:
+        payload["channel"] = channel
+    if channels:
+        payload["channels"] = channels
+    if detail:
+        payload["detail"] = detail
     record_audit(
         db,
         event_type=event_type,
         entity_type="signal",
         entity_id=str(signal.id),
         action=action,
-        payload={
-            "signal_id": signal.id,
-            "strategy_version_id": signal.strategy_version_id,
-            "asset_id": signal.asset_id,
-            "symbol": symbol,
-            "state": signal.state,
-            "timeframe": signal.timeframe,
-            "channel": "webhook",
-            **({"detail": detail} if detail else {}),
-        },
+        payload=payload,
     )
 
 
@@ -233,12 +237,17 @@ def notify_pending_signals(db: Session, *, now: dt.datetime | None = None) -> di
     if not pending:
         return summary
 
-    try:
-        provider = WebhookNotificationProvider(config.webhook_url, config.webhook_secret)
-    except NotificationConfigError as exc:
-        # A bad stored URL must never crash the scanner.
-        logger.warning("notification webhook is misconfigured: %s", exc)
-        summary["error"] = str(exc)
+    providers: list[tuple[Any, Any]] = []
+    for channel in config.enabled_channels:
+        try:
+            providers.append((channel, build_provider(channel)))
+        except NotificationConfigError as exc:
+            # A bad stored channel must never crash the scanner.
+            logger.warning("notification channel %s is misconfigured: %s", channel.id, exc)
+            summary.setdefault("channel_errors", []).append(
+                {"channel": channel.id, "detail": str(exc)}
+            )
+    if not providers:
         return summary
 
     cooldown_since = (
@@ -267,62 +276,85 @@ def notify_pending_signals(db: Session, *, now: dt.datetime | None = None) -> di
 
         try:
             message = build_signal_payload(db, signal, config)
-            symbol = message.meta.get("symbol")
-            provider.send(message.title, message.body, meta=message.meta)
-        except (NotificationError, NotificationConfigError) as exc:
-            # Leave notified_at unset so the next scan can retry.
-            db.rollback()
-            _audit(db, EVENT_FAILED, signal, symbol=None, detail=str(exc))
-            db.commit()
-            summary["failed"] += 1
-            continue
         except Exception as exc:  # noqa: BLE001 - a notification must never kill the worker
-            logger.exception("unexpected notification failure for signal %s", signal.id)
+            logger.exception("could not build notification for signal %s", signal.id)
             db.rollback()
             _audit(db, EVENT_FAILED, signal, symbol=None, detail=type(exc).__name__)
             db.commit()
             summary["failed"] += 1
             continue
 
-        # Commit the receipt immediately after the send so a crash between the
-        # HTTP call and the batch commit can never cause a duplicate.
-        signal.notified_at = moment
-        _audit(db, EVENT_NOTIFIED, signal, symbol=symbol)
-        db.commit()
-        index[(signal.strategy_version_id, signal.asset_id)] = moment
-        sent_today += 1
-        summary["sent"] += 1
+        symbol = message.meta.get("symbol")
+        sent_channels: list[str] = []
+        failures: list[tuple[str, str]] = []
+        for channel, provider in providers:
+            try:
+                provider.send(message.title, message.body, meta=message.meta)
+                sent_channels.append(channel.id)
+            except (NotificationError, NotificationConfigError) as exc:
+                failures.append((channel.id, str(exc)))
+            except Exception as exc:  # noqa: BLE001 - one bad channel must not stop the rest
+                logger.exception("channel %s failed for signal %s", channel.id, signal.id)
+                failures.append((channel.id, type(exc).__name__))
+
+        if sent_channels:
+            # The event is considered surfaced once at least one channel took it;
+            # a channel that failed while another succeeded is not retried (it is
+            # audited instead) so no successful channel can be duplicated.
+            signal.notified_at = moment
+            _audit(db, EVENT_NOTIFIED, signal, symbol=symbol, channels=sent_channels)
+            for channel_id, detail in failures:
+                _audit(db, EVENT_FAILED, signal, symbol=symbol, channel=channel_id, detail=detail)
+            db.commit()
+            index[(signal.strategy_version_id, signal.asset_id)] = moment
+            sent_today += 1
+            summary["sent"] += 1
+        else:
+            for channel_id, detail in failures:
+                _audit(db, EVENT_FAILED, signal, symbol=symbol, channel=channel_id, detail=detail)
+            db.commit()
+            summary["failed"] += 1
 
     return summary
 
 
 def send_test_notification(db: Session) -> dict[str, Any]:
-    """Send one test message so the operator can verify their webhook."""
+    """Send one test message through every enabled channel."""
 
     config = get_notification_config(db)
     if not config.configured:
-        return {"ok": False, "detail": "通知未启用或未配置 webhook URL"}
-    try:
-        provider = WebhookNotificationProvider(config.webhook_url, config.webhook_secret)
-    except NotificationConfigError as exc:
-        return {"ok": False, "detail": str(exc)}
+        return {"ok": False, "detail": "通知未启用或未配置任何渠道", "results": []}
+
     link = f"{config.base_url.rstrip('/')}/" if config.base_url else "/"
     message = NotificationMessage(
         title="[TEST] My Quant Lab 通知测试",
         body=f"这是一条测试通知。{DISCLAIMER}",
         meta={"event": "test", "link": link},
     )
-    try:
-        provider.send(message.title, message.body, meta=message.meta)
-    except NotificationError as exc:
-        return {"ok": False, "detail": str(exc)}
+
+    results: list[dict[str, Any]] = []
+    for channel in config.enabled_channels:
+        try:
+            provider = build_provider(channel)
+            provider.send(message.title, message.body, meta=message.meta)
+            results.append(
+                {"channel": channel.id, "type": channel.type, "ok": True, "detail": "已发送"}
+            )
+        except (NotificationError, NotificationConfigError) as exc:
+            results.append(
+                {"channel": channel.id, "type": channel.type, "ok": False, "detail": str(exc)}
+            )
+
+    ok = any(item["ok"] for item in results)
     record_audit(
         db,
         event_type="notification_test",
         entity_type="notification",
-        entity_id="webhook",
+        entity_id="channels",
         action="test",
-        payload={"channel": "webhook"},
+        payload={"results": [{"channel": r["channel"], "ok": r["ok"]} for r in results]},
     )
     db.commit()
-    return {"ok": True, "detail": "测试通知已发送"}
+    if ok:
+        return {"ok": True, "detail": "至少一个渠道已发送测试通知", "results": results}
+    return {"ok": False, "detail": "所有渠道均发送失败", "results": results}

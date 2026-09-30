@@ -16,16 +16,106 @@ const info = ref('')
 
 const notify = ref<NotificationConfig | null>(null)
 const notifyEnabled = ref(false)
-const webhookUrl = ref('')
-const webhookSecret = ref('')
 const notifyIncludeWait = ref(false)
 const quietHours = ref('')
 const dailyMax = ref(0)
 const cooldown = ref(0)
 const notifyBaseUrl = ref('')
+const channels = ref<Array<Record<string, any>>>([])
 const savingNotify = ref(false)
 const testingNotify = ref(false)
 const notifyResult = ref<NotificationTestResult | null>(null)
+
+// Channel type metadata: which fields to render and whether they are secret.
+interface ChannelField {
+  key: string
+  label: string
+  secret?: boolean
+  optional?: boolean
+  kind?: 'text' | 'number' | 'bool'
+}
+const CHANNEL_TYPES: Record<string, { label: string; fields: ChannelField[] }> = {
+  webhook: {
+    label: 'Generic Webhook',
+    fields: [
+      { key: 'url', label: 'Webhook URL', secret: true },
+      { key: 'secret', label: '签名密钥（可选）', secret: true, optional: true },
+    ],
+  },
+  feishu: {
+    label: '飞书',
+    fields: [
+      { key: 'url', label: '机器人 Webhook', secret: true },
+      { key: 'secret', label: '签名校验（可选）', secret: true, optional: true },
+    ],
+  },
+  telegram: {
+    label: 'Telegram',
+    fields: [
+      { key: 'bot_token', label: 'Bot Token', secret: true },
+      { key: 'chat_id', label: 'Chat ID' },
+    ],
+  },
+  pushplus: {
+    label: 'PushPlus',
+    fields: [
+      { key: 'token', label: 'Token', secret: true },
+      { key: 'topic', label: 'Topic（可选）', optional: true },
+    ],
+  },
+  email: {
+    label: 'Email (SMTP)',
+    fields: [
+      { key: 'host', label: 'SMTP 主机' },
+      { key: 'port', label: '端口', kind: 'number' },
+      { key: 'username', label: '用户名（可选）', optional: true },
+      { key: 'password', label: '密码（可选）', secret: true, optional: true },
+      { key: 'from_address', label: '发件人（可选）', optional: true },
+      { key: 'to_address', label: '收件人（逗号分隔）' },
+      { key: 'use_tls', label: 'STARTTLS', kind: 'bool' },
+      { key: 'use_ssl', label: 'SSL', kind: 'bool' },
+    ],
+  },
+}
+const CHANNEL_ORDER = ['webhook', 'feishu', 'telegram', 'pushplus', 'email']
+
+function channelFields(channel: Record<string, any>): ChannelField[] {
+  return CHANNEL_TYPES[channel.type]?.fields ?? []
+}
+
+function channelLabel(type: string): string {
+  return CHANNEL_TYPES[type]?.label ?? type
+}
+
+function fieldPlaceholder(channel: Record<string, any>, field: ChannelField): string {
+  if (field.secret && channel[`${field.key}_set`]) {
+    const masked = channel[`${field.key}_masked`]
+    return masked ? `已设置（${masked}），留空保持` : '已设置，留空保持'
+  }
+  return field.label
+}
+
+function defaultChannel(type: string): Record<string, any> {
+  const channel: Record<string, any> = {
+    id: `${type}-${Math.random().toString(36).slice(2, 8)}`,
+    type,
+    enabled: true,
+  }
+  for (const field of channelFields(channel)) {
+    if (field.kind === 'bool') channel[field.key] = field.key !== 'use_ssl'
+    else if (field.kind === 'number') channel[field.key] = 587
+    else channel[field.key] = ''
+  }
+  return channel
+}
+
+function addChannel(type: string) {
+  channels.value.push(defaultChannel(type))
+}
+
+function removeChannel(index: number) {
+  channels.value.splice(index, 1)
+}
 
 const providers = ref<AIProviderRecord[]>([])
 const providerName = ref('')
@@ -66,9 +156,28 @@ function applyNotification(config: NotificationConfig) {
   dailyMax.value = config.daily_max
   cooldown.value = config.cooldown_minutes
   notifyBaseUrl.value = config.base_url
-  // Secrets are write-only: never prefill them, only show whether they are set.
-  webhookUrl.value = ''
-  webhookSecret.value = ''
+  // Secrets are write-only: keep the *_set/*_masked flags for placeholders but
+  // never prefill the value itself.
+  channels.value = (config.channels ?? []).map((channel) => ({ ...channel }))
+}
+
+function channelPayload(channel: Record<string, any>): Record<string, unknown> {
+  const out: Record<string, unknown> = { id: channel.id, type: channel.type, enabled: channel.enabled }
+  for (const field of channelFields(channel)) {
+    const value = channel[field.key]
+    if (field.secret) {
+      // Only send a secret when the operator typed a new one, so an untouched
+      // field keeps the stored value.
+      if (typeof value === 'string' && value.trim()) out[field.key] = value.trim()
+    } else if (field.kind === 'bool') {
+      out[field.key] = Boolean(value)
+    } else if (field.kind === 'number') {
+      out[field.key] = Number(value)
+    } else {
+      out[field.key] = typeof value === 'string' ? value.trim() : value
+    }
+  }
+  return out
 }
 
 async function saveNotification() {
@@ -83,14 +192,7 @@ async function saveNotification() {
       daily_max: dailyMax.value,
       cooldown_minutes: cooldown.value,
       base_url: notifyBaseUrl.value.trim(),
-    }
-    // Only send secrets when the operator typed something, so an untouched
-    // field keeps the stored value. An explicit "-" clears it.
-    if (webhookUrl.value.trim()) {
-      payload.webhook_url = webhookUrl.value.trim() === '-' ? '' : webhookUrl.value.trim()
-    }
-    if (webhookSecret.value.trim()) {
-      payload.webhook_secret = webhookSecret.value.trim() === '-' ? '' : webhookSecret.value.trim()
+      channels: channels.value.map(channelPayload),
     }
     const saved = await api.updateNotificationConfig(payload)
     applyNotification(saved)
@@ -295,11 +397,11 @@ onMounted(load)
     </div>
 
     <div class="card" style="margin-top: 14px">
-      <h3>信号通知（Generic Webhook）</h3>
+      <h3>信号通知（多渠道）</h3>
       <p class="muted">
-        当扫描产生 BUY/SELL（可选 WAIT）信号时，向你的 webhook 发送一条 JSON 通知。
-        URL 与签名密钥只写入、永不回显；留空表示保持原值，填 <code>-</code> 表示清空。
-        通知仅在已收盘 K 线评估后触发，且同一事件不会重复发送。
+        当扫描产生 BUY/SELL（可选 WAIT）信号时，向所有启用的渠道发送：Generic Webhook、飞书、
+        Telegram、PushPlus、Email(SMTP)。密钥字段只写入、永不回显（留空表示保持原值）。
+        通知仅在已收盘 K 线评估后触发，同一事件不会重复发送；AI 文案不会作为收益承诺。
       </p>
 
       <div class="row" style="margin-bottom: 8px">
@@ -307,20 +409,6 @@ onMounted(load)
           <input v-model="notifyEnabled" type="checkbox" style="width: auto" />
           启用通知
         </label>
-        <input
-          v-model="webhookUrl"
-          type="password"
-          style="max-width: 360px"
-          :placeholder="notify?.webhook_url_set ? `已设置（${notify.webhook_url_masked}），留空保持` : 'https://hooks.example.com/quantlab'"
-        />
-        <input
-          v-model="webhookSecret"
-          type="password"
-          style="max-width: 240px"
-          :placeholder="notify?.webhook_secret_set ? '签名密钥已设置，留空保持' : '签名密钥（可选）'"
-        />
-      </div>
-      <div class="row" style="margin-bottom: 8px">
         <label class="muted" style="display: flex; align-items: center; gap: 6px">
           <input v-model="notifyIncludeWait" type="checkbox" style="width: auto" />
           同时通知 WAIT
@@ -339,11 +427,53 @@ onMounted(load)
         </button>
       </div>
 
+      <div
+        v-for="(ch, idx) in channels"
+        :key="ch.id"
+        class="card"
+        style="margin: 6px 0; padding: 8px 12px"
+      >
+        <div class="row" style="align-items: center">
+          <strong>{{ channelLabel(ch.type) }}</strong>
+          <label class="muted" style="display: flex; align-items: center; gap: 6px">
+            <input v-model="ch.enabled" type="checkbox" style="width: auto" />
+            启用
+          </label>
+          <span class="muted">{{ ch.id }}</span>
+          <button class="ghost" @click="removeChannel(idx)">移除</button>
+        </div>
+        <div class="row" style="margin-top: 6px">
+          <template v-for="f in channelFields(ch)" :key="f.key">
+            <label
+              v-if="f.kind === 'bool'"
+              class="muted"
+              style="display: flex; align-items: center; gap: 6px"
+            >
+              <input v-model="ch[f.key]" type="checkbox" style="width: auto" />
+              {{ f.label }}
+            </label>
+            <input
+              v-else
+              v-model="ch[f.key]"
+              :type="f.secret ? 'password' : f.kind === 'number' ? 'number' : 'text'"
+              style="max-width: 240px"
+              :placeholder="fieldPlaceholder(ch, f)"
+            />
+          </template>
+        </div>
+      </div>
+      <p v-if="!channels.length" class="muted">还没有渠道，用下面的按钮添加。</p>
+      <div class="row" style="margin-top: 8px">
+        <button v-for="t in CHANNEL_ORDER" :key="t" class="ghost" @click="addChannel(t)">
+          + {{ channelLabel(t) }}
+        </button>
+      </div>
+
       <p v-if="notifyResult" :class="notifyResult.ok ? 'notice' : 'error'">
         测试通知{{ notifyResult.ok ? '已发送' : '失败' }}：{{ notifyResult.detail }}
       </p>
       <p v-else-if="notify && !notify.configured" class="muted">
-        当前未启用或未配置 webhook，所有量化功能不受影响，只是不会外发通知。
+        当前未启用或未配置任何渠道，所有量化功能不受影响，只是不会外发通知。
       </p>
     </div>
 

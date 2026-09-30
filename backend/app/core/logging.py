@@ -60,6 +60,10 @@ def configure_logging() -> None:
     root.addHandler(handler)
 
     logging.getLogger("uvicorn.access").addFilter(RedactingFilter())
+    # Outbound request URLs may embed credentials (e.g. the Telegram bot token),
+    # so never let httpx log them even when LOG_LEVEL=DEBUG is misconfigured.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(max(logging.INFO, root.level))
 
 
 configure_logging()

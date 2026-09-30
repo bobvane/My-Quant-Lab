@@ -36,6 +36,7 @@ __all__ = [
     "NotificationError",
     "WebhookNotificationProvider",
     "mask_webhook_url",
+    "validate_smtp_host",
     "validate_webhook_url",
 ]
 
@@ -114,6 +115,22 @@ def _reject_link_local(host: str) -> None:
             continue
         if _ip_is_forbidden(ip):
             raise NotificationConfigError("webhook url resolves to a link-local address")
+
+
+def validate_smtp_host(host: str) -> str:
+    """Validate an SMTP host the same way as an outbound webhook target.
+
+    An SMTP target is user-supplied egress too, so reject cloud metadata hosts
+    and link-local addresses (private/LAN relays stay allowed, as with webhooks).
+    """
+
+    text = (host or "").strip()
+    if not text:
+        raise NotificationConfigError("smtp host is required")
+    if text.lower() in _BLOCKED_HOSTS:
+        raise NotificationConfigError("smtp host points at a cloud metadata endpoint")
+    _reject_link_local(text)
+    return text
 
 
 def mask_webhook_url(url: str) -> str:

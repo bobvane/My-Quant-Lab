@@ -17,6 +17,9 @@ from app.api.routers import (
     assets as assets_router,
 )
 from app.api.routers import (
+    audit as audit_router,
+)
+from app.api.routers import (
     backtest_metrics as backtest_metrics_router,
 )
 from app.api.routers import (
@@ -209,6 +212,7 @@ def create_app() -> FastAPI:
         settings_router.router,
         importer_router.router,
         ai_router.router,
+        audit_router.router,
     ):
         app.include_router(router, prefix=settings.api_prefix)
 

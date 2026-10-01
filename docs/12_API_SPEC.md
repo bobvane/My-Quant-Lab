@@ -126,6 +126,13 @@ API base: `/api/v1`
 `POST /signals/{id}/explain`
 `POST /signals/{id}/acknowledge`
 
+## Feature Snapshots
+
+The exact feature row each signal was computed from (reproducible evidence).
+
+`GET /feature-snapshots/{series_id}`
+`GET /feature-snapshots/{series_id}/latest`
+
 ## Notifications
 
 Multi-channel delivery: `webhook`, `feishu`, `telegram`, `pushplus`, `email`.

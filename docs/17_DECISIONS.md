@@ -339,3 +339,23 @@ ADR，保证结果可复现、可解释。
 **理由**：此前 `indicators` 只被校验器接受、从未被计算，声明式指标一用即
 `KeyError`；`parameters` 也不参与计算。这使 DSL「声明式、可参数化」的核心承诺
 落空。物化声明式指标后，用户才能真正定义自定义周期指标并参数化策略。
+
+## ADR-032：WAIT 状态与 FeatureSnapshot 证据落地
+
+**决策**：
+1. **WAIT**：`all` 型入场组「部分条件满足、尚未全部满足」时输出 WAIT（候选可
+   观察但入场未确认）。执行器 `_eval_state` 同时返回 `satisfied` 与 `partial`
+   两种掩码；`any` 组不产生 partial。WAIT 在最新已收盘 bar 上判定。
+2. **只评估最新收盘 bar**：`_last_intent` 不再回溯历史命中并把它投影到最新
+   bar（此前的「旧信号反复出现」问题的根因）。在最新 bar 上没有命中即
+   NO_SIGNAL。这使扫描结果语义正确，也让 `is_fresh` 判定可靠。
+3. **FeatureSnapshot**：每次持久化信号时，把该 bar 的特征行写入
+   `feature_snapshots`（唯一键 series+bar+feature_version，`input_hash` 与
+   `Signal.feature_snapshot_hash` 一致），使信号可复现、可审计（docs/09 §5）。
+4. **读接口**：新增 `GET /feature-snapshots/{series_id}` 与 `.../latest`。
+5. BUY/SELL/WAIT 都可在最新 bar 上持久化；NO_SIGNAL 不落库。通知默认仍只发
+   BUY/SELL（`include_wait` 可开）。
+
+**理由**：docs/09 §1 要求 WAIT 作为输出状态，§5 要求特征快照证据；此前 WAIT
+永不产生、快照表空转，扫描还把历史命中当作今日信号。补齐后「状态语义 + 证据
+链 + 去重」三者一致。

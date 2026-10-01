@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import logging
+import math
 from typing import Any
 
 import pandas as pd
@@ -20,7 +21,13 @@ from sqlalchemy.orm import Session
 
 from app.data.market_data_repo import load_bars
 from app.data.strategy_service import load_spec
-from app.domain.models import Asset, MarketDataSeries, Signal, StrategyVersion
+from app.domain.models import (
+    Asset,
+    FeatureSnapshot,
+    MarketDataSeries,
+    Signal,
+    StrategyVersion,
+)
 from app.features.engine import FEATURE_VERSION, build_features
 from app.strategies.executor import run_strategy
 
@@ -46,6 +53,21 @@ def _feature_hash(bars: pd.DataFrame) -> str:
     return hasher.hexdigest()
 
 
+def _feature_values(frame: pd.DataFrame, ts: Any) -> dict[str, float | None]:
+    """JSON-safe snapshot of the feature row the signal was computed from."""
+
+    if ts not in frame.index:
+        return {}
+    values: dict[str, float | None] = {}
+    for key, raw in frame.loc[ts].items():
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            continue
+        values[str(key)] = None if math.isnan(number) else number
+    return values
+
+
 def latest_intent_for_series(
     db: Session, strategy_version: StrategyVersion, series: MarketDataSeries
 ) -> ScanResult:
@@ -67,20 +89,25 @@ def latest_intent_for_series(
     last_ts = feature_frame.frame.index[-1]
     input_hash = _feature_hash(feature_frame.frame.tail(1))
 
-    # ``event_bar_time`` is the bar the rules actually fired on; ``bar_time`` is
-    # the latest closed bar this scan was run against. ``is_fresh`` means the
-    # event really happened on that latest bar (docs/09 §4: one event, one
-    # signal — an old match must not be re-persisted and re-notified each bar).
+    # ``event_bar_time`` is the bar the intent refers to; ``bar_time`` is the
+    # latest closed bar this scan was run against. The executor now evaluates
+    # only the latest bar, so a non-NO_SIGNAL state is always fresh. This is what
+    # stops an old match from being re-persisted and re-notified every bar
+    # (docs/09 §4: one event, one signal).
+    state = intent.get("state", "NO_SIGNAL")
+    direction = intent.get("direction", "FLAT")
+    triggered = intent.get("triggered_rules", [])
     event_bar_time = intent.get("bar_time")
-    is_fresh = event_bar_time is not None and event_bar_time == last_ts
+    is_fresh = state != "NO_SIGNAL" and event_bar_time is not None
 
-    if intent.get("bar_time") is None:
-        state, direction, triggered = "NO_SIGNAL", "FLAT", []
+    if state == "NO_SIGNAL":
         reason = f"no rule matched on the last closed bar ({last_ts.isoformat()})"
+    elif state == "WAIT":
+        reason = (
+            f"entry conditions partially met on the last closed bar ({last_ts.isoformat()}); "
+            "waiting for the remaining conditions"
+        )
     else:
-        state = intent["state"]
-        direction = intent["direction"]
-        triggered = intent.get("triggered_rules", [])
         reason = f"rules matched on the last closed bar ({last_ts.isoformat()})"
 
     return ScanResult(
@@ -96,6 +123,7 @@ def latest_intent_for_series(
         target_reference=intent.get("target_reference"),
         feature_snapshot_hash=input_hash,
         feature_version=FEATURE_VERSION,
+        feature_values=_feature_values(feature_frame.frame, last_ts),
         strategy_version_id=strategy_version.id,
         series_id=series.id,
         asset_id=series.asset_id,
@@ -153,9 +181,46 @@ def persist_signal(
         status="new",
     )
     db.add(signal)
+
+    _persist_feature_snapshot(db, series, bar_time, intent)
+
     db.commit()
     db.refresh(signal)
     return signal, True
+
+
+def _persist_feature_snapshot(
+    db: Session, series: MarketDataSeries, bar_time: Any, intent: ScanResult
+) -> None:
+    """Store the feature row behind a signal as reproducible evidence (docs/09 §5).
+
+    Keyed uniquely by (series, bar, feature_version); re-running does not create
+    duplicates. ``input_hash`` matches ``Signal.feature_snapshot_hash``.
+    """
+
+    values = intent.get("feature_values")
+    feature_version = intent.get("feature_version") or FEATURE_VERSION
+    if not values:
+        return
+    existing = db.scalar(
+        select(FeatureSnapshot).where(
+            FeatureSnapshot.series_id == series.id,
+            FeatureSnapshot.bar_timestamp == bar_time,
+            FeatureSnapshot.feature_version == feature_version,
+        )
+    )
+    if existing is not None:
+        return
+    db.add(
+        FeatureSnapshot(
+            series_id=series.id,
+            bar_timestamp=bar_time,
+            feature_version=feature_version,
+            values_json=values,
+            input_hash=intent.get("feature_snapshot_hash", ""),
+            available_at=bar_time,
+        )
+    )
 
 
 def scan_series(db: Session, strategy_version: StrategyVersion, series: MarketDataSeries) -> Signal:

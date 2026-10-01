@@ -266,6 +266,22 @@ def validate_strategy(
                 "execution",
             )
         )
+    if spec.execution.entry_order_type != "market":
+        offset = (
+            spec.execution.limit_offset_atr
+            if spec.execution.entry_order_type == "limit"
+            else spec.execution.stop_offset_atr
+        )
+        if not offset or offset <= 0:
+            report.issues.append(
+                ValidationIssue(
+                    "error",
+                    "order_needs_offset",
+                    f"entry_order_type '{spec.execution.entry_order_type}' needs a "
+                    "positive ATR offset",
+                    "execution",
+                )
+            )
     if spec.schema_version != "1.0":
         report.issues.append(
             ValidationIssue(

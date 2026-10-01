@@ -159,10 +159,17 @@ class RiskSpec(BaseModel):
         return self
 
 
+OrderType = Literal["market", "limit", "stop"]
+
+
 class ExecutionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fill_model: FillModel = "next_bar_open"
+    entry_order_type: OrderType = "market"
+    limit_offset_atr: float | None = Field(default=None, ge=0)
+    stop_offset_atr: float | None = Field(default=None, ge=0)
+    order_valid_bars: int = Field(default=1, ge=1, le=100)
     fee_bps: float = Field(default=0.0, ge=0)
     slippage_bps: float = Field(default=0.0, ge=0)
     allow_fractional: bool = True

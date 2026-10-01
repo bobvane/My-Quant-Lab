@@ -149,6 +149,9 @@ def run_backtest(
     trade_high = 0.0
     trade_low = 0.0
     entry_stop: float | None = None
+    pending: dict[str, Any] | None = None
+    atr_col = "atr14" if "atr14" in frame.columns else None
+    order_type = spec.execution.entry_order_type
 
     for i in range(len(frame)):
         bar_time = index[i]
@@ -212,45 +215,106 @@ def run_backtest(
                     {"bar_time": bar_time.isoformat(), "state": "SELL", "direction": "FLAT"}
                 )
 
-        # 2) Open a new position on the *next* bar open.
+        # 2) Generate an entry order: market fills at the *next* bar open; a
+        #    limit/stop order is placed and filled by step 2.5.
         if quantity == 0 and i + 1 < len(frame):
             want_long = bool(entry_flag[i]) and not _warmup(i, feature_frame.warmup_bars)
             want_short = bool(entry_short_flag[i]) and spec.market.allow_short
             if want_long or want_short:
-                fill_ref = float(opens[i + 1])
-                slip = fill_ref * slippage_rate
-                fill = fill_ref + slip if want_long else fill_ref - slip
-                budget = cash * float(max_position_pct)
-                if budget > 0:
-                    qty = budget / fill
-                    if not spec.execution.allow_fractional:
-                        qty = float(int(qty))
-                    if qty > 0:
-                        fee = abs(fill * qty) * fee_rate
-                        if want_long:
-                            cash -= fill * qty + fee
-                            direction = "LONG"
-                        else:
-                            cash += fill * qty - fee
-                            direction = "SHORT"
-                        quantity = qty
-                        entry_price = fill
-                        entry_fee = fee
-                        entry_slippage = abs(slip)
-                        entry_index = i + 1
-                        trade_high = fill
-                        trade_low = fill
-                        raw_stop = stop_line[i] if want_long else stop_short_line[i]
-                        entry_stop = float(raw_stop) if not np.isnan(float(raw_stop)) else None
-                        signals.append(
-                            {
-                                "bar_time": index[i].isoformat(),
-                                "state": "BUY" if want_long else "SELL",
-                                "direction": direction,
-                                "fill_time": index[i + 1].isoformat(),
-                                "fill_price": fill,
-                            }
-                        )
+                if order_type == "market":
+                    fill_ref = float(opens[i + 1])
+                    slip = fill_ref * slippage_rate
+                    fill = fill_ref + slip if want_long else fill_ref - slip
+                    budget = cash * float(max_position_pct)
+                    if budget > 0:
+                        qty = budget / fill
+                        if not spec.execution.allow_fractional:
+                            qty = float(int(qty))
+                        if qty > 0:
+                            fee = abs(fill * qty) * fee_rate
+                            if want_long:
+                                cash -= fill * qty + fee
+                                direction = "LONG"
+                            else:
+                                cash += fill * qty - fee
+                                direction = "SHORT"
+                            quantity = qty
+                            entry_price = fill
+                            entry_fee = fee
+                            entry_slippage = abs(slip)
+                            entry_index = i + 1
+                            trade_high = fill
+                            trade_low = fill
+                            raw_stop = stop_line[i] if want_long else stop_short_line[i]
+                            entry_stop = float(raw_stop) if not np.isnan(float(raw_stop)) else None
+                            signals.append(
+                                {
+                                    "bar_time": index[i].isoformat(),
+                                    "state": "BUY" if want_long else "SELL",
+                                    "direction": direction,
+                                    "fill_time": index[i + 1].isoformat(),
+                                    "fill_price": fill,
+                                }
+                            )
+                elif atr_col is not None:
+                    atr_value = float(frame[atr_col].iloc[i])
+                    price = _order_price(
+                        order_type,
+                        float(closes[i]),
+                        atr_value,
+                        spec.execution.limit_offset_atr,
+                        spec.execution.stop_offset_atr,
+                        want_long,
+                    )
+                    if not np.isnan(price):
+                        pending = {
+                            "long": want_long,
+                            "kind": order_type,
+                            "price": price,
+                            "created": i,
+                            "expire": i + spec.execution.order_valid_bars,
+                        }
+
+        # 2.5) Fill a pending limit/stop order against this bar's range.
+        if pending is not None and quantity == 0 and i > pending["created"]:
+            if i > pending["expire"]:
+                pending = None
+            else:
+                fill = _pending_fill(pending, float(opens[i]), float(highs[i]), float(lows[i]))
+                if fill is not None:
+                    slip = fill * slippage_rate
+                    budget = cash * float(max_position_pct)
+                    if budget > 0:
+                        qty = budget / fill
+                        if not spec.execution.allow_fractional:
+                            qty = float(int(qty))
+                        if qty > 0:
+                            fee = abs(fill * qty) * fee_rate
+                            if pending["long"]:
+                                cash -= fill * qty + fee
+                                direction = "LONG"
+                            else:
+                                cash += fill * qty - fee
+                                direction = "SHORT"
+                            quantity = qty
+                            entry_price = fill
+                            entry_fee = fee
+                            entry_slippage = abs(slip)
+                            entry_index = i
+                            trade_high = fill
+                            trade_low = fill
+                            raw_stop = stop_line[i] if pending["long"] else stop_short_line[i]
+                            entry_stop = float(raw_stop) if not np.isnan(float(raw_stop)) else None
+                            signals.append(
+                                {
+                                    "bar_time": index[i].isoformat(),
+                                    "state": "BUY" if pending["long"] else "SELL",
+                                    "direction": direction,
+                                    "fill_time": index[i].isoformat(),
+                                    "fill_price": fill,
+                                }
+                            )
+                            pending = None
 
         # 3) Mark to market.
         position_value = quantity * close * direction_sign(direction)
@@ -340,6 +404,48 @@ def direction_sign(direction: str) -> float:
 
 def _warmup(index: int, warmup_bars: int) -> bool:
     return index < warmup_bars
+
+
+def _order_price(
+    kind: str,
+    close: float,
+    atr: float,
+    limit_k: float | None,
+    stop_k: float | None,
+    is_long: bool,
+) -> float:
+    """Order price for a limit/stop entry, derived from the signal bar close."""
+
+    if np.isnan(atr):
+        return float("nan")
+    k = (limit_k if kind == "limit" else stop_k) or 0.0
+    offset = k * atr
+    # Only a long limit buy rests below the close; every other entry prices
+    # above the close (long stop = breakout, short orders = strength).
+    if kind == "limit" and is_long:
+        return close - offset
+    return close + offset
+
+
+def _pending_fill(
+    pending: dict[str, Any], open_price: float, high: float, low: float
+) -> float | None:
+    """Fill a pending order against a bar's OHLC, or None when not triggered.
+
+    A long limit buy fills when the bar dips to the limit (fill = min(open,
+    limit)); a long stop buy fills when the bar breaks the stop (fill = max(open,
+    stop)). Short orders mirror the logic.
+    """
+
+    price = float(pending["price"])
+    is_long = bool(pending["long"])
+    if pending["kind"] == "limit":
+        if is_long:
+            return min(open_price, price) if low <= price else None
+        return max(open_price, price) if high >= price else None
+    if is_long:
+        return max(open_price, price) if high >= price else None
+    return min(open_price, price) if low <= price else None
 
 
 def _resolve_exit(

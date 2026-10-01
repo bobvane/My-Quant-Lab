@@ -27,8 +27,10 @@ __all__ = [
     "BudgetExceeded",
     "OpenAICompatibleProvider",
     "AIRouter",
+    "ModelOption",
     "SIGNAL_EXPLANATION_SCHEMA",
     "daily_spend_usd",
+    "task_capability",
     "validate_structured_dict",
 ]
 
@@ -195,18 +197,91 @@ def daily_spend_usd(rows: list[dict[str, Any]]) -> float:
     return sum(float(r.get("total_cost_usd") or 0) for r in rows)
 
 
-class AIRouter:
-    """Route an AI task by capability, cost, availability and budget."""
+@dataclass(frozen=True)
+class ModelOption:
+    """One routable model: provider + name + capability tier + cost (per Mtok)."""
 
-    def __init__(self, providers: dict[str, OpenAICompatibleProvider], budget_usd: float) -> None:
+    provider: str
+    model: str
+    tier: str = "standard"
+    input_cost: float = 0.0
+    output_cost: float = 0.0
+
+    @property
+    def total_cost(self) -> float:
+        return self.input_cost + self.output_cost
+
+
+def _tier_rank(tier: str) -> int:
+    return {"cheap": 0, "standard": 1, "high": 2}.get(tier, 1)
+
+
+_TASK_CAPABILITY = {
+    "daily_summary": "cheap",
+    "strategy_explanation": "cheap",
+    "signal_explanation": "cheap",
+    "backtest_analysis": "standard",
+    "strategy_review": "high",
+    "research_report": "high",
+    "repository_analysis": "high",
+}
+
+
+def task_capability(task_type: str) -> str:
+    return _TASK_CAPABILITY.get(task_type, "standard")
+
+
+class AIRouter:
+    """Route an AI task by capability, cost, availability and budget (ADR-014)."""
+
+    def __init__(
+        self,
+        providers: dict[str, OpenAICompatibleProvider],
+        budget_usd: float,
+        *,
+        models: list[ModelOption] | None = None,
+        budgets: dict[str, float] | None = None,
+    ) -> None:
         self.providers = providers
         self.budget_usd = budget_usd
+        self.models = models or []
+        # Remaining budget per provider; empty means "unlimited" (backwards
+        # compatible with the single-provider callers).
+        self.budgets = budgets or {}
 
     def pick(self, task_type: str, preferred_model: str | None = None) -> tuple[str, str]:
         if not self.providers:
             raise BudgetExceeded("no AI provider configured")
-        name = next(iter(self.providers))
-        return name, preferred_model or "default"
+        if not self.models:
+            name = next(iter(self.providers))
+            return name, preferred_model or "default"
+
+        available = [m for m in self.models if m.provider in self.providers]
+        if not available:
+            name = next(iter(self.providers))
+            return name, preferred_model or "default"
+
+        if preferred_model:
+            wanted = [m for m in available if m.model == preferred_model]
+            if wanted:
+                return wanted[0].provider, wanted[0].model
+
+        required = task_capability(task_type)
+
+        def in_budget(option: ModelOption) -> bool:
+            return self.budgets.get(option.provider, float("inf")) > 0
+
+        ranked = sorted(available, key=lambda m: (m.total_cost, m.provider, m.model))
+
+        # Prefer the cheapest model that meets the task's capability tier and
+        # is still in budget; fall back to any in-budget model, then any model.
+        candidates = (
+            [m for m in ranked if _tier_rank(m.tier) >= _tier_rank(required) and in_budget(m)]
+            or [m for m in ranked if in_budget(m)]
+            or ranked
+        )
+        chosen = candidates[0]
+        return chosen.provider, chosen.model
 
     def explain_signal(
         self,

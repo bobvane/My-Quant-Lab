@@ -123,6 +123,41 @@ function assetSymbol(assetId: number): string {
 }
 
 const deletingStrategy = ref<number | null>(null)
+const versions = ref<Array<Record<string, any>>>([])
+const expandedId = ref<number | null>(null)
+const activating = ref<number | null>(null)
+
+async function toggleVersions(s: Strategy) {
+  error.value = ''
+  if (expandedId.value === s.id) {
+    expandedId.value = null
+    return
+  }
+  try {
+    versions.value = await api.strategyVersions(s.id)
+    expandedId.value = s.id
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
+async function activateVersion(v: Record<string, any>) {
+  error.value = ''
+  info.value = ''
+  activating.value = Number(v.id)
+  try {
+    await api.activateVersion(Number(v.id))
+    info.value = `已切换策略 #${v.strategy_id} 到版本 v${v.version}`
+    if (expandedId.value !== null) {
+      versions.value = await api.strategyVersions(expandedId.value)
+    }
+    await load()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    activating.value = null
+  }
+}
 
 async function deleteStrategy(id: number) {
   error.value = ''
@@ -331,6 +366,7 @@ onMounted(load)
               <th>名称</th>
               <th>版本数</th>
               <th>来源</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -344,9 +380,50 @@ onMounted(load)
                   {{ deletingStrategy === s.id ? '删除中…' : '删除' }}
                 </button>
               </td>
+              <td>
+                <button class="ghost" @click="toggleVersions(s)">
+                  {{ expandedId === s.id ? '收起版本' : '版本' }}
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
+        <div v-if="expandedId !== null" class="card" style="margin-top: 10px">
+          <h3>策略 #{{ expandedId }} 版本</h3>
+          <table v-if="versions.length">
+            <thead>
+              <tr>
+                <th>版本</th>
+                <th>状态</th>
+                <th>哈希</th>
+                <th>创建时间</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="v in versions" :key="v.id">
+                <td>{{ v.version }}</td>
+                <td>
+                  <span v-if="v.is_current" class="badge BUY">当前</span>
+                  <span v-else class="muted">—</span>
+                </td>
+                <td class="muted">{{ v.immutable_hash.slice(0, 12) }}…</td>
+                <td class="muted">{{ formatDateTime(v.created_at) }}</td>
+                <td>
+                  <button
+                    v-if="!v.is_current"
+                    class="ghost"
+                    :disabled="activating === v.id"
+                    @click="activateVersion(v)"
+                  >
+                    {{ activating === v.id ? '切换中…' : '设为当前' }}
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">该策略还没有版本。</p>
+        </div>
         <p v-else class="muted">还没有策略。</p>
       </div>
     </div>

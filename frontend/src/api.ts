@@ -334,6 +334,8 @@ export const api = {
   assets: () => request<Asset[]>('/assets'),
   strategies: () => request<Strategy[]>('/strategies'),
   strategyVersions: (id: number) => request<StrategyVersion[]>(`/strategies/${id}/versions`),
+  activateVersion: (versionId: number) =>
+    request<StrategyVersion>(`/strategy-versions/${versionId}/activate`, { method: 'PUT' }),
   createStrategy: (name: string, description?: string) =>
     request<Strategy>('/strategies', {
       method: 'POST',

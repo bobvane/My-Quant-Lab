@@ -132,14 +132,16 @@ def _open_long(
     moment: dt.datetime,
     version_label: str | None,
 ) -> dict[str, Any]:
+    # A closed position keeps its row (quantity 0) so its realised P&L survives;
+    # a later BUY must reuse that row, never insert a second one for the same
+    # (account, asset) — the table has a unique constraint on that pair.
     existing = db.scalar(
         select(PaperPosition).where(
             PaperPosition.account_id == account.id,
             PaperPosition.asset_id == signal.asset_id,
-            PaperPosition.quantity > 0,
         )
     )
-    if existing is not None:
+    if existing is not None and _dec(existing.quantity) > 0:
         raise PaperError("already holding this asset (V1 is long-only)")
 
     fill_price = base_price * (1 + slip)
@@ -155,15 +157,19 @@ def _open_long(
         raise PaperError("insufficient cash")
 
     account.cash = _dec(account.cash) - cash_out
-    db.add(
-        PaperPosition(
-            account_id=account.id,
-            asset_id=signal.asset_id,
-            quantity=quantity,
-            avg_cost=fill_price,
-            realized_pnl=Decimal(0),
+    if existing is None:
+        db.add(
+            PaperPosition(
+                account_id=account.id,
+                asset_id=signal.asset_id,
+                quantity=quantity,
+                avg_cost=fill_price,
+                realized_pnl=Decimal(0),
+            )
         )
-    )
+    else:
+        existing.quantity = quantity
+        existing.avg_cost = fill_price
     order = PaperOrder(
         account_id=account.id,
         signal_id=signal.id,

@@ -145,6 +145,54 @@ def test_double_buy_is_refused(db_session) -> None:
         execute_signal(db_session, account, second)
 
 
+def test_rebuy_after_sell_reuses_position_row(db_session) -> None:
+    """Regression: buy → sell → buy used to insert a second position row for
+    the same (account, asset), violating the unique constraint (HTTP 500)."""
+
+    account, buy_signal, asset = _seed(db_session)
+    execute_signal(db_session, account, buy_signal)
+    first_row = db_session.query(PaperPosition).one()
+    first_id = first_row.id
+
+    sell = Signal(
+        strategy_version_id=buy_signal.strategy_version_id,
+        asset_id=asset.id,
+        timeframe="1d",
+        bar_timestamp=dt.datetime(2026, 1, 3, tzinfo=dt.UTC),
+        state="SELL",
+        direction="FLAT",
+        price_reference=110.0,
+        feature_snapshot_hash="g" * 64,
+        data_source="test",
+    )
+    db_session.add(sell)
+    db_session.commit()
+    execute_signal(db_session, account, sell)
+    assert float(db_session.query(PaperPosition).one().quantity) == 0
+
+    rebuy = Signal(
+        strategy_version_id=buy_signal.strategy_version_id,
+        asset_id=asset.id,
+        timeframe="1d",
+        bar_timestamp=dt.datetime(2026, 1, 5, tzinfo=dt.UTC),
+        state="BUY",
+        direction="LONG",
+        price_reference=105.0,
+        feature_snapshot_hash="r" * 64,
+        data_source="test",
+    )
+    db_session.add(rebuy)
+    db_session.commit()
+
+    result = execute_signal(db_session, account, rebuy)
+    assert result["side"] == "BUY"
+    assert db_session.query(PaperPosition).count() == 1  # reused, not duplicated
+    reused = db_session.query(PaperPosition).one()
+    assert reused.id == first_id
+    assert float(reused.quantity) > 0
+    assert float(reused.avg_cost) > 0
+
+
 def test_closed_account_is_refused(db_session) -> None:
     account, signal, _asset = _seed(db_session)
     account.status = "closed"

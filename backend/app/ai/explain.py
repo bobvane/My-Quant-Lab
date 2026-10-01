@@ -30,6 +30,7 @@ from app.ai.provider import (
     AIRequest,
     AIRouter,
     BudgetExceeded,
+    ModelOption,
     OpenAICompatibleProvider,
     validate_structured_dict,
 )
@@ -120,6 +121,38 @@ def get_active_provider(
     if not api_key:
         return None
     return provider, model, api_key
+
+
+def get_active_providers(db: Session) -> list[tuple[AIProvider, str, list[AIModel]]]:
+    """All routable providers: ``(provider, decrypted_key, active_models)``.
+
+    Used to build the multi-provider routing catalog (ADR-014). Providers whose
+    stored key cannot be decrypted are skipped; the API key is never surfaced.
+    """
+
+    rows = db.scalars(
+        select(AIProvider)
+        .where(AIProvider.is_active.is_(True), AIProvider.api_key_encrypted.is_not(None))
+        .order_by(AIProvider.id)
+    ).all()
+    out: list[tuple[AIProvider, str, list[AIModel]]] = []
+    for provider in rows:
+        try:
+            api_key = decrypt_secret(provider.api_key_encrypted or "")
+        except Exception:
+            logger.warning("stored AI key failed to decrypt for %s", provider.name, exc_info=True)
+            continue
+        if not api_key:
+            continue
+        models = list(
+            db.scalars(
+                select(AIModel)
+                .where(AIModel.provider_id == provider.id, AIModel.is_active.is_(True))
+                .order_by(AIModel.id)
+            ).all()
+        )
+        out.append((provider, api_key, models))
+    return out
 
 
 def spent_today_usd(db: Session, provider_id: int) -> tuple[float, int]:
@@ -250,10 +283,9 @@ def explain_signal_facts(
     The AITask row is still persisted for audit and cache purposes.
     """
 
-    configured = get_active_provider(db)
-    if configured is None:
+    providers = get_active_providers(db)
+    if not providers:
         raise RuntimeError(AI_UNCONFIGURED)
-    provider, model, api_key = configured
 
     request = AIRequest(
         task_type="signal_explanation",
@@ -263,16 +295,9 @@ def explain_signal_facts(
         user_prompt=f"Explain this {state} signal in plain language.",
         structured_facts=facts,
         schema=SIGNAL_EXPLANATION_SCHEMA,
-        model=model.model_name if model else provider.default_model,
+        model=None,  # the router picks provider/model by capability + cost
     )
-    return _run_explain(
-        db,
-        request,
-        provider=provider,
-        model=model,
-        api_key=api_key,
-        router_factory=router_factory,
-    )
+    return _run_explain(db, request, providers, router_factory=router_factory)
 
 
 def explain_backtest(
@@ -289,10 +314,9 @@ def explain_backtest(
     if run.status != "completed":
         raise ValueError(f"backtest run {run_id} is '{run.status}', not completed")
 
-    configured = get_active_provider(db)
-    if configured is None:
+    providers = get_active_providers(db)
+    if not providers:
         raise RuntimeError(AI_UNCONFIGURED)
-    provider, model, api_key = configured
 
     facts = build_backtest_facts(db, run)
     request = AIRequest(
@@ -303,34 +327,72 @@ def explain_backtest(
         user_prompt="Explain these backtest results in plain language.",
         structured_facts=facts,
         schema=BACKTEST_EXPLANATION_SCHEMA,
-        model=model.model_name if model else provider.default_model,
+        model=None,  # the router picks provider/model by capability + cost
     )
-    return _run_explain(
-        db,
-        request,
-        provider=provider,
-        model=model,
-        api_key=api_key,
-        router_factory=router_factory,
-    )
+    return _run_explain(db, request, providers, router_factory=router_factory)
 
 
 def _run_explain(
     db: Session,
     request: AIRequest,
+    providers: list[tuple[AIProvider, str, list[AIModel]]],
     *,
-    provider: AIProvider,
-    model: AIModel | None,
-    api_key: str,
     router_factory: Callable[[dict[str, OpenAICompatibleProvider], float], AIRouter] | None,
 ) -> dict[str, Any]:
-    budget = float(provider.daily_budget_usd or 0)
-    spent, _ = spent_today_usd(db, provider.id)
-    if spent >= budget:
-        raise BudgetExceeded(
-            f"daily AI budget exhausted ({spent:.4f}/{budget:.2f} USD); "
-            "quantitative features keep working"
+    if not providers:
+        raise RuntimeError(AI_UNCONFIGURED)
+
+    live: dict[str, OpenAICompatibleProvider] = {}
+    by_name: dict[str, AIProvider] = {}
+    provider_models: dict[str, list[AIModel]] = {}
+    models: list[ModelOption] = []
+    budgets: dict[str, float] = {}
+    total_budget = 0.0
+    for provider, api_key, pmodels in providers:
+        live[provider.name] = OpenAICompatibleProvider(
+            base_url=provider.base_url, api_key=api_key, name=provider.name
         )
+        by_name[provider.name] = provider
+        provider_models[provider.name] = pmodels
+        spent, _ = spent_today_usd(db, provider.id)
+        total_budget += float(provider.daily_budget_usd or 0)
+        budgets[provider.name] = max(0.0, float(provider.daily_budget_usd or 0) - spent)
+        for model in pmodels:
+            if not model.model_name:
+                continue
+            models.append(
+                ModelOption(
+                    provider.name,
+                    model.model_name,
+                    model.capability_tier or "standard",
+                    float(model.input_cost_per_mtok or 0),
+                    float(model.output_cost_per_mtok or 0),
+                )
+            )
+        if not pmodels:
+            models.append(
+                ModelOption(
+                    provider.name, provider.default_model or "default", "standard", 0.0, 0.0
+                )
+            )
+
+    if router_factory is not None:
+        # Test seam: the injected factory only receives the live-provider map
+        # and the budget, keeping its contract unchanged.
+        router = router_factory(live, total_budget)
+    else:
+        router = AIRouter(live, total_budget, models=models, budgets=budgets)
+
+    pick = getattr(router, "pick", None)
+    if callable(pick):
+        provider_name, model_name = pick(request.task_type, request.model)
+    else:
+        # A fake router (tests) has no pick(): fall back to the first provider.
+        provider_name = next(iter(by_name))
+        model_name = request.model or "default"
+    provider = by_name[provider_name]
+    chosen_models = provider_models.get(provider_name, [])
+    model = next((m for m in chosen_models if m.model_name == model_name), None)
 
     input_hash = request.input_hash()
     cached = db.scalar(
@@ -345,12 +407,16 @@ def _run_explain(
             "explanation": dict(cached.output_json),
             "cached": True,
             "task_id": cached.id,
-            "model": request.model,
+            "model": model_name,
             "cost_usd_estimated": 0.0,
         }
 
-    live = OpenAICompatibleProvider(base_url=provider.base_url, api_key=api_key, name=provider.name)
-    router = (router_factory or AIRouter)({provider.name: live}, budget)
+    spent, _ = spent_today_usd(db, provider.id)
+    if spent >= float(provider.daily_budget_usd or 0):
+        raise BudgetExceeded(
+            f"daily AI budget exhausted ({spent:.4f}/{provider.daily_budget_usd:.2f} USD); "
+            "quantitative features keep working"
+        )
 
     task = AITask(
         task_type=request.task_type,
@@ -408,7 +474,7 @@ def _run_explain(
         "explanation": dict(validated),
         "cached": False,
         "task_id": task.id,
-        "model": request.model,
+        "model": model_name,
         "cost_usd_estimated": cost,
     }
 

@@ -19,6 +19,7 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.data.market_data_repo import load_bars
 from app.data.strategy_service import load_spec
 from app.domain.models import (
@@ -51,6 +52,53 @@ def _feature_hash(bars: pd.DataFrame) -> str:
     hasher = hashlib.sha256()
     hasher.update(bars.to_csv(float_format="%.10g").encode("utf-8"))
     return hasher.hexdigest()
+
+
+def load_portfolio_holdings() -> list[dict[str, Any]] | None:
+    """Best-effort read-only Ghostfolio holdings; ``None`` when not configured.
+
+    Never raises and never blocks a scan: a missing/broken Ghostfolio must leave
+    signal generation unaffected (docs/09 §3, docs/14).
+    """
+
+    if not settings.ghostfolio_base_url or not settings.ghostfolio_api_key:
+        return None
+    try:
+        from app.data.ghostfolio import GhostfolioAdapter
+
+        return GhostfolioAdapter().get_portfolio_summary().get("holdings", [])
+    except Exception:  # noqa: BLE001 - advisory context only
+        logger.warning("Ghostfolio portfolio context unavailable", exc_info=True)
+        return None
+
+
+def portfolio_context_for(
+    symbol: str | None, holdings: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """Portfolio context for one symbol (docs/09 §3): quantity / value / weight."""
+
+    if holdings is None:
+        return {
+            "ghostfolio_connected": False,
+            "note": "Ghostfolio 未配置或不可达，信号不受影响。",
+        }
+    if not symbol:
+        return {"ghostfolio_connected": True, "holding": None, "note": "未知标的。"}
+    match = next((h for h in holdings if str(h.get("symbol", "")).upper() == symbol.upper()), None)
+    if match is None:
+        return {
+            "ghostfolio_connected": True,
+            "holding": None,
+            "note": f"Ghostfolio 已连接，但未持有 {symbol}。",
+        }
+    weight = match.get("allocation_pct")
+    held = f"{match.get('quantity')} 股" if match.get("quantity") is not None else "已持有"
+    weight_text = f"，占比 {weight:.2f}%" if isinstance(weight, (int, float)) else ""
+    return {
+        "ghostfolio_connected": True,
+        "holding": match,
+        "note": f"你在 Ghostfolio 中持有 {symbol} {held}{weight_text}。",
+    }
 
 
 def _feature_values(frame: pd.DataFrame, ts: Any) -> dict[str, float | None]:
@@ -137,6 +185,8 @@ def persist_signal(
     strategy_version: StrategyVersion,
     series: MarketDataSeries,
     intent: ScanResult,
+    *,
+    holdings: list[dict[str, Any]] | None = None,
 ) -> tuple[Signal, bool]:
     """Persist one evaluated intent, respecting the de-duplication rule.
 
@@ -165,6 +215,8 @@ def persist_signal(
         )
         return existing, False
 
+    asset = db.get(Asset, series.asset_id)
+    context = portfolio_context_for(asset.symbol if asset else None, holdings)
     signal = Signal(
         strategy_version_id=strategy_version.id,
         asset_id=series.asset_id,
@@ -178,6 +230,7 @@ def persist_signal(
         triggered_rules_json=intent.get("triggered_rules", []),
         feature_snapshot_hash=intent["feature_snapshot_hash"],
         data_source=f"series:{series.id}/{series.dataset_version}",
+        portfolio_context_json=context,
         status="new",
     )
     db.add(signal)
@@ -227,7 +280,9 @@ def scan_series(db: Session, strategy_version: StrategyVersion, series: MarketDa
     """Evaluate and persist a signal, respecting the de-duplication rule."""
 
     intent = latest_intent_for_series(db, strategy_version, series)
-    signal, _created = persist_signal(db, strategy_version, series, intent)
+    signal, _created = persist_signal(
+        db, strategy_version, series, intent, holdings=load_portfolio_holdings()
+    )
     return signal
 
 
@@ -279,6 +334,7 @@ def scan_and_persist(db: Session, *, asset_ids: list[int] | None = None) -> dict
 
     created = 0
     evaluated = 0
+    holdings = load_portfolio_holdings()  # fetched once per scan, not per signal
     versions = db.scalars(select(StrategyVersion).where(StrategyVersion.is_current.is_(True))).all()
     series_stmt = select(MarketDataSeries).where(MarketDataSeries.is_archived.is_(False))
     if asset_ids:
@@ -300,7 +356,9 @@ def scan_and_persist(db: Session, *, asset_ids: list[int] | None = None) -> dict
             if not intent.get("is_fresh"):
                 continue
             try:
-                _signal, was_created = persist_signal(db, version, series, intent)
+                _signal, was_created = persist_signal(
+                    db, version, series, intent, holdings=holdings
+                )
             except Exception:  # pragma: no cover - defensive
                 db.rollback()
                 logger.exception("persist failed for version=%s series=%s", version.id, series.id)

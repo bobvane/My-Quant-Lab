@@ -294,27 +294,6 @@ def ghostfolio_holdings() -> dict[str, Any]:
     from app.data.ghostfolio import GhostfolioAdapter, GhostfolioError
 
     try:
-        adapter = GhostfolioAdapter()
-        export = adapter.get_export()
-        activities = export.get("activities", [])
-        # Debug: return raw structure info to diagnose empty holdings
-        sample_keys = list(activities[0].keys()) if activities else []
-        first_profile = {}
-        if activities:
-            first_profile = (
-                activities[0].get("SymbolProfile") or activities[0].get("symbolProfile") or {}
-            )
-        summary = adapter.get_portfolio_summary()
-        return {
-            "holdings": summary.get("holdings", []),
-            "accounts_count": summary.get("accounts_count"),
-            "debug": {
-                "activities_count": len(activities),
-                "sample_keys": sample_keys,
-                "sample_profile_keys": list(first_profile.keys()),
-                "sample_type": activities[0].get("type") if activities else None,
-                "sample_SymbolProfile": first_profile,
-            },
-        }
+        return GhostfolioAdapter().get_portfolio_summary()
     except GhostfolioError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

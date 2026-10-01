@@ -359,3 +359,24 @@ ADR，保证结果可复现、可解释。
 **理由**：docs/09 §1 要求 WAIT 作为输出状态，§5 要求特征快照证据；此前 WAIT
 永不产生、快照表空转，扫描还把历史命中当作今日信号。补齐后「状态语义 + 证据
 链 + 去重」三者一致。
+
+## ADR-033：Ghostfolio 持仓解析健壮化 + 信号组合上下文
+
+**决策**：
+1. 修复 `get_portfolio_summary` 的真实缺陷：活动聚合里 `profile` 只在部分分支
+   赋值，遇到「活动带直接 symbol」时抛 `UnboundLocalError`，导致
+   `/settings/ghostfolio/holdings` 在真实组合上 500。
+2. 优先使用 Ghostfolio 的 `/api/v1/portfolio/holdings`（含当前价与市值）；
+   不可用时回退到 export 的活动聚合。两条路径都做「字段名多写法」容错
+   （symbol/dataSourceSymbol、marketPrice/price、valueInBaseCurrency、
+   allocationInPercentage 0–1 或 0–100 自动归一）。
+3. `portfolio_context_for(symbol, holdings)` 产出 docs/09 §3 的组合上下文
+   （持有数量/市值/占比 + 人类可读说明），扫描时**每轮只取一次**持仓，
+   写入 `Signal.portfolio_context_json`；Ghostfolio 未配置或不可达时诚实标注
+   `ghostfolio_connected=false`，绝不影响信号生成。
+4. `/settings/ghostfolio/holdings` 不再返回原始 debug 快照，只返回聚合摘要。
+5. Ghostfolio 始终只读；无任何写入或本地镜像表（本地镜像列为后续 P1）。
+
+**理由**：Phase 3 的验收是「能测试连接 / 能同步活动与资产 / 原数据不被修改 /
+失败有明确错误」。此前持仓聚合在真实数据上直接崩，`Signal.portfolio_context_json`
+从不写入，证据层占比恒为 0。修好解析并落地组合上下文后，这三项才成立。

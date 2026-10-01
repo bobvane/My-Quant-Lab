@@ -122,70 +122,143 @@ class GhostfolioAdapter:
         jwt = self._get_jwt()
         return self._get("/v1/export", jwt)
 
-    def get_portfolio_summary(self) -> dict[str, Any]:
-        """Aggregate portfolio summary for the signal evidence layer.
+    def get_holdings(self) -> dict[str, Any]:
+        """Raw ``GET /api/v1/portfolio/holdings`` (current positions + prices)."""
 
-        Handles all known Ghostfolio export field name variations:
-        - Profile key: SymbolProfile / symbolProfile / AssetProfile
-        - Type key: type / Type / activityType
-        - Symbol key inside profile: symbol / dataSourceSymbol / ticker
+        jwt = self._get_jwt()
+        return self._get("/v1/portfolio/holdings", jwt)
+
+    def get_portfolio_summary(self) -> dict[str, Any]:
+        """Current holdings with market value and weight, for the evidence layer.
+
+        Prefers Ghostfolio's ``/portfolio/holdings`` endpoint (it carries the
+        current price and value); falls back to aggregating the export's
+        activities when that endpoint is unavailable. Never trusts a single field
+        name: Ghostfolio has shipped several spellings across versions.
         """
 
-        export = self.get_export()
-        activities = export.get("activities", [])
-        accounts = export.get("accounts", [])
+        try:
+            payload = self.get_holdings()
+            holdings = self._parse_holdings_payload(payload)
+        except GhostfolioError as exc:
+            logger.warning("portfolio/holdings unavailable (%s); aggregating activities", exc)
+            export = self.get_export()
+            holdings = self._parse_activities(export.get("activities", []))
+            accounts = export.get("accounts", [])
+            return self._summarise(holdings, accounts_count=len(accounts), source="activities")
 
-        logger.info(
-            "Ghostfolio export: %d activities, %d accounts",
-            len(activities),
-            len(accounts),
-        )
-        if activities:
-            first = activities[0]
-            logger.info(
-                "First activity keys: %s, type=%s",
-                list(first.keys()),
-                first.get("type") or first.get("Type") or first.get("activityType"),
-            )
+        accounts = payload.get("accounts") if isinstance(payload, dict) else None
+        accounts_count = len(accounts) if isinstance(accounts, list) else 0
+        return self._summarise(holdings, accounts_count=accounts_count, source="holdings")
 
-        # Aggregate current holdings from activities.
-        # Ghostfolio puts the symbol DIRECTLY on the activity object (flat),
-        # not nested in a SymbolProfile. The symbol field can also be a
-        # CoinGecko identifier for crypto (e.g. "bitcoin" instead of "BTC").
-        holdings: dict[str, dict[str, Any]] = {}
-        for activity in activities:
-            # Try direct symbol on activity first, then nested profile
-            symbol = activity.get("symbol") or activity.get("dataSourceSymbol") or ""
-            if not symbol:
-                profile = activity.get("SymbolProfile") or activity.get("symbolProfile") or {}
-                if isinstance(profile, dict):
-                    symbol = profile.get("symbol") or ""
+    # -- parsing helpers -------------------------------------------------- #
+    def _parse_holdings_payload(self, payload: Any) -> list[dict[str, Any]]:
+        raw = payload.get("holdings") if isinstance(payload, dict) else None
+        items: list[tuple[str, dict[str, Any]]] = []
+        if isinstance(raw, dict):
+            items = [(key, value) for key, value in raw.items() if isinstance(value, dict)]
+        elif isinstance(raw, list):
+            items = [
+                (str(item.get("symbol") or ""), item) for item in raw if isinstance(item, dict)
+            ]
+
+        holdings: list[dict[str, Any]] = []
+        for key, item in items:
+            symbol = str(item.get("symbol") or key or "").upper()
             if not symbol:
                 continue
-
-            activity_type = (activity.get("type") or activity.get("Type") or "").upper()
-
-            quantity = float(activity.get("quantity") or 0)
-
-            if symbol not in holdings:
-                name = profile.get("name") or profile.get("SymbolName") or symbol
-                currency = activity.get("currency") or profile.get("currency") or "USD"
-                holdings[symbol] = {
+            quantity = _to_float(item.get("quantity"))
+            price = _to_float(
+                item.get("marketPrice")
+                or item.get("marketPriceInBaseCurrency")
+                or item.get("price")
+            )
+            value = _to_float(item.get("valueInBaseCurrency") or item.get("value"))
+            if value is None and price is not None:
+                value = quantity * price
+            allocation = _to_float(item.get("allocationInPercentage") or item.get("allocation"))
+            holdings.append(
+                {
                     "symbol": symbol,
-                    "name": name,
-                    "quantity": 0.0,
-                    "currency": currency,
+                    "name": str(item.get("name") or item.get("asset") or symbol),
+                    "quantity": quantity,
+                    "price": price,
+                    "value": value,
+                    "investment": _to_float(item.get("investment")),
+                    "currency": str(item.get("currency") or "USD"),
+                    "allocation_pct": _as_pct(allocation),
                 }
+            )
+        return holdings
 
+    def _parse_activities(self, activities: list[Any]) -> list[dict[str, Any]]:
+        """Fallback: net quantity per symbol from the export's activities."""
+
+        agg: dict[str, dict[str, Any]] = {}
+        for activity in activities:
+            if not isinstance(activity, dict):
+                continue
+            profile = activity.get("SymbolProfile") or activity.get("symbolProfile") or {}
+            if not isinstance(profile, dict):
+                profile = {}
+            symbol = str(
+                activity.get("symbol")
+                or profile.get("symbol")
+                or activity.get("dataSourceSymbol")
+                or ""
+            ).upper()
+            if not symbol:
+                continue
+            entry = agg.setdefault(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "name": str(profile.get("name") or symbol),
+                    "quantity": 0.0,
+                    "price": None,
+                    "value": None,
+                    "investment": 0.0,
+                    "currency": str(activity.get("currency") or profile.get("currency") or "USD"),
+                    "allocation_pct": None,
+                },
+            )
+            quantity = _to_float(activity.get("quantity")) or 0.0
+            activity_type = str(
+                activity.get("type") or activity.get("Type") or activity.get("activityType") or ""
+            ).upper()
             if activity_type == "BUY":
-                holdings[symbol]["quantity"] += quantity
+                entry["quantity"] += quantity
             elif activity_type == "SELL":
-                holdings[symbol]["quantity"] -= quantity
+                entry["quantity"] -= quantity
+        return [entry for entry in agg.values() if entry["quantity"] > 0]
 
-        active = {k: v for k, v in holdings.items() if v["quantity"] > 0}
+    def _summarise(
+        self, holdings: list[dict[str, Any]], *, accounts_count: int, source: str
+    ) -> dict[str, Any]:
+        active = [h for h in holdings if (h.get("quantity") or 0) > 0]
+        total_value = sum(h["value"] for h in active if h.get("value") is not None)
+        for holding in active:
+            if holding.get("allocation_pct") is None and total_value > 0 and holding.get("value"):
+                holding["allocation_pct"] = round(holding["value"] / total_value * 100, 4)
         return {
-            "accounts_count": len(accounts),
-            "activities_count": len(activities),
-            "holdings": list(active.values()),
+            "accounts_count": accounts_count,
+            "holdings": active,
             "holdings_count": len(active),
+            "total_value": round(total_value, 2) if total_value else None,
+            "source": source,
         }
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_pct(value: float | None) -> float | None:
+    if value is None:
+        return None
+    # Ghostfolio reports allocation as a 0-1 fraction in some versions and as a
+    # percentage in others; normalise to 0-100.
+    return round(value * 100, 4) if value <= 1 else round(value, 4)

@@ -113,11 +113,21 @@ def get_signal(signal_id: int, db: Session = Depends(get_db)) -> SignalOut:
 def acknowledge(signal_id: int, db: Session = Depends(get_db)) -> dict:
     import datetime as dt
 
+    from app.data.strategy_service import record_audit
+
     row = db.get(Signal, signal_id)
     if row is None:
         raise HTTPException(status_code=404, detail="signal not found")
     row.status = "acknowledged"
     row.acknowledged_at = dt.datetime.now(tz=dt.UTC)
+    record_audit(
+        db,
+        event_type="signal_status_changed",
+        entity_type="signal",
+        entity_id=str(signal_id),
+        action="acknowledge",
+        payload={"status": "acknowledged", "symbol": None},
+    )
     db.commit()
     return {"id": signal_id, "status": row.status}
 

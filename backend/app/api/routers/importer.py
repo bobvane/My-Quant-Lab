@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import GithubAnalyzeOut, GithubAnalyzeRequest, GithubImportRequest
 from app.core.db import get_db
-from app.data.strategy_service import create_strategy_version, parse_spec, slugify
+from app.data.strategy_service import create_strategy_version, parse_spec, record_audit, slugify
 from app.domain.models import Strategy
 from app.importer import (
     GitHubClient,
@@ -137,6 +137,21 @@ def import_strategy(payload: GithubImportRequest, db: Session = Depends(get_db))
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="strategy_imported",
+        entity_type="strategy",
+        entity_id=str(strategy.id),
+        action="import",
+        payload={
+            "repository": f"{owner}/{repo}",
+            "ref": payload.ref,
+            "version": version_row.version,
+            "immutable_hash": version_row.immutable_hash,
+        },
+    )
+    db.commit()
 
     return {
         "strategy_id": strategy.id,

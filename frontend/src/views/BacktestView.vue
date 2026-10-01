@@ -26,6 +26,35 @@ const versionId = ref<number | null>(null)
 const symbol = ref('DEMO-AAPL')
 const timeframe = ref('1d')
 const running = ref(false)
+const oosResult = ref<Record<string, any> | null>(null)
+const oosPct = ref(0.2)
+const oosRunning = ref(false)
+
+async function runOos() {
+  error.value = ''
+  oosResult.value = null
+  if (versionId.value === null) {
+    error.value = '请先选择策略版本'
+    return
+  }
+  if (!symbol.value.trim()) {
+    error.value = '请填写标的代码'
+    return
+  }
+  oosRunning.value = true
+  try {
+    oosResult.value = await api.runOos(
+      versionId.value,
+      symbol.value.trim(),
+      oosPct.value,
+      timeframe.value,
+    )
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    oosRunning.value = false
+  }
+}
 
 async function load() {
   error.value = ''
@@ -166,6 +195,54 @@ onMounted(async () => {
       <p class="muted" style="margin-bottom: 0">
         先到「行情与策略」同步该标的的数据；同一版本重复运行会得到相同结果（结果哈希可验证）。
       </p>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>样本外验证（OOS）</h3>
+      <div class="row">
+        <input
+          v-model.number="oosPct"
+          type="number"
+          min="0.05"
+          max="0.95"
+          step="0.05"
+          style="max-width: 130px"
+          placeholder="样本外比例"
+        />
+        <button :disabled="oosRunning || versionId === null" @click="runOos">
+          {{ oosRunning ? '计算中…' : '运行 OOS' }}
+        </button>
+        <span class="muted">
+          前 {{ formatPercent(1 - oosPct) }} 训练、后 {{ formatPercent(oosPct) }} 检验；同一策略不做参数拟合。
+        </span>
+      </div>
+      <div v-if="oosResult" style="margin-top: 10px">
+        <table>
+          <thead>
+            <tr>
+              <th>指标</th>
+              <th>样本内</th>
+              <th>样本外</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="k in ['total_return', 'max_drawdown', 'sharpe', 'win_rate', 'number_of_trades']" :key="k">
+              <td>{{ k }}</td>
+              <td :class="oosResult.in_sample[k] != null ? toneOf(oosResult.in_sample[k]) : ''">
+                {{ oosResult.in_sample[k] != null ? formatNumber(oosResult.in_sample[k], 4) : '—' }}
+              </td>
+              <td :class="oosResult.out_of_sample[k] != null ? toneOf(oosResult.out_of_sample[k]) : ''">
+                {{ oosResult.out_of_sample[k] != null ? formatNumber(oosResult.out_of_sample[k], 4) : '—' }}
+              </td>
+            </tr>
+            <tr>
+              <td>样本数</td>
+              <td>{{ oosResult.in_sample_bars }}</td>
+              <td>{{ oosResult.out_of_sample_bars }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <div v-if="detail" class="grid cols-4" style="margin-top: 14px">

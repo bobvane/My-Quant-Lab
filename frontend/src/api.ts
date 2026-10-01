@@ -372,6 +372,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ strategy_version_id: strategyVersionId, symbol, timeframe }),
     }),
+  runOos: (strategyVersionId: number, symbol: string, oosPct = 0.2, timeframe = '1d') =>
+    request<{
+      split_time: string
+      in_sample_bars: number
+      out_of_sample_bars: number
+      in_sample: Record<string, number | null>
+      out_of_sample: Record<string, number | null>
+    }>('/research/oos', {
+      method: 'POST',
+      body: JSON.stringify({
+        strategy_version_id: strategyVersionId,
+        symbol,
+        timeframe,
+        oos_pct: oosPct,
+      }),
+    }),
   walkForward: (strategyVersionId: number, symbol: string, trainBars = 200, testBars = 60) =>
     request<Record<string, unknown>>('/research/walk-forward', {
       method: 'POST',

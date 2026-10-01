@@ -199,3 +199,127 @@ def purge_resources() -> dict:
     with session_scope() as db:
         deleted = purge_expired(db)
     return {"deleted": deleted}
+
+
+def _bump_version(version: str) -> str:
+    """1.0.9 -> 1.0.10, 1.0.10 -> 1.1.0 (project scheme)."""
+
+    parts = [int(p) for p in str(version).split(".")]
+    while len(parts) < 3:
+        parts.append(0)
+    major, minor, patch = parts[:3]
+    patch += 1
+    if patch >= 10:
+        patch = 0
+        minor += 1
+        if minor >= 10:
+            minor = 0
+            major += 1
+    return f"{major}.{minor}.{patch}"
+
+
+def check_source(db: Any, source: Any) -> str:
+    """Check one watched GitHub source and re-import on a new commit.
+
+    Returns ``"unchanged"`` / ``"imported"`` / ``"no_change"`` / ``"error"``.
+    Only creates a new StrategyVersion when the extracted DSL actually differs
+    from the linked strategy's latest version (docs/05 §7, Phase 6).
+    """
+
+    from sqlalchemy import select
+
+    from app.data.strategy_service import create_strategy_version, immutable_hash
+    from app.domain.models import GitHubSnapshot, Strategy, StrategyVersion
+    from app.importer import (
+        GitHubClient,
+        analyze_repository_files,
+        build_draft_dsl,
+        parse_repo_url,
+    )
+
+    source.last_checked_at = dt.datetime.now(tz=dt.UTC)
+    try:
+        owner, repo = parse_repo_url(source.repository_url)
+        client = GitHubClient()
+        head = client.get_head_commit(owner, repo)
+    except Exception as exc:  # noqa: BLE001 - never let the watcher die
+        logger.warning("github watch failed for %s: %s", source.repository_url, exc)
+        source.last_import_status = "error"
+        return "error"
+    if not head or head == source.current_commit:
+        source.last_import_status = "checked"
+        return "unchanged"
+
+    try:
+        meta, files = client.fetch_repository(source.repository_url, head, max_files=30)
+        findings = analyze_repository_files(files)
+        draft, _warnings = build_draft_dsl(meta, findings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("github fetch/analyze failed for %s: %s", source.repository_url, exc)
+        source.last_import_status = "error"
+        return "error"
+    if not draft:
+        source.current_commit = head
+        source.last_import_status = "checked"
+        return "no_change"
+
+    strategies = db.scalars(
+        select(Strategy).where(Strategy.source_url == source.repository_url)
+    ).all()
+    imported = False
+    next_version = "1.0.0"
+    for strategy in strategies:
+        latest = db.scalars(
+            select(StrategyVersion)
+            .where(StrategyVersion.strategy_id == strategy.id)
+            .order_by(StrategyVersion.id.desc())
+            .limit(1)
+        ).first()
+        if latest and latest.dsl_json == draft:
+            continue
+        next_version = _bump_version(latest.version) if latest else "1.0.0"
+        create_strategy_version(
+            db,
+            strategy,
+            version=next_version,
+            dsl=draft,
+            source_commit=head,
+            source_url=source.repository_url,
+            evidence={"importer": "github-watch", "repository": source.repository_url, "ref": head},
+            make_current=True,
+        )
+        imported = True
+
+    source.current_commit = head
+    source.last_import_status = "imported" if imported else "checked"
+    db.add(
+        GitHubSnapshot(
+            source_id=source.id,
+            commit=head,
+            content_hash=immutable_hash(draft, next_version),
+            manifest_json={},
+            extraction_json={"imported": imported},
+        )
+    )
+    return "imported" if imported else "no_change"
+
+
+@celery_app.task(name="quantlab.check_github_sources")
+def check_github_sources() -> dict:
+    """Watch GitHub sources and re-import strategies when a new commit lands."""
+
+    from sqlalchemy import select
+
+    from app.domain.models import GitHubSource
+
+    summary: dict[str, int] = {"checked": 0, "imported": 0, "error": 0}
+    with session_scope() as db:
+        sources = db.scalars(select(GitHubSource).where(GitHubSource.is_watched.is_(True))).all()
+        for source in sources:
+            summary["checked"] += 1
+            status = check_source(db, source)
+            if status == "imported":
+                summary["imported"] += 1
+            elif status == "error":
+                summary["error"] += 1
+    return summary

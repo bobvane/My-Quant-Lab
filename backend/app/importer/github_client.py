@@ -179,6 +179,15 @@ class GitHubClient:
 
     # -- high-level API ----------------------------------------------------
 
+    def get_head_commit(self, owner: str, repo: str) -> str:
+        """Latest commit SHA on the default branch (used by the watcher)."""
+
+        url = f"https://api.github.com/repos/{owner}/{repo}/commits?per_page=1"
+        payload = self.get_json(url)
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            return str(payload[0].get("sha") or "")
+        return ""
+
     def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
         data = self.get_json(f"https://api.github.com/repos/{owner}/{repo}")
         if not isinstance(data, dict):

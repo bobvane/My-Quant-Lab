@@ -60,5 +60,10 @@ celery_app.conf.update(
             "task": "quantlab.evaluate_strategy_lifecycle",
             "schedule": crontab(minute=30, hour=3),
         },
+        # GitHub watcher: re-import watched strategies when a new commit lands.
+        "check-github-sources": {
+            "task": "quantlab.check_github_sources",
+            "schedule": crontab(minute=10, hour=4),
+        },
     },
 )

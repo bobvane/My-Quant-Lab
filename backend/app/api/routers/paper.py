@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,11 +18,12 @@ from app.api.schemas import (
     PaperExecuteRequest,
     PaperExecutionOut,
     PaperFundRequest,
+    PaperOrderOut,
     PaperPositionOut,
 )
 from app.core.db import get_db
 from app.data.strategy_service import record_audit
-from app.domain.models import PaperAccount, PaperPosition, PaperTrade, Signal
+from app.domain.models import PaperAccount, PaperOrder, PaperPosition, PaperTrade, Signal
 from app.simulation.paper_engine import (
     PaperError,
     PaperExecutionSettings,
@@ -149,6 +150,56 @@ def account_positions(account_id: int, db: Session = Depends(get_db)) -> list[Pa
             .order_by(PaperPosition.id)
         ).all()
     )
+
+
+@router.get("/orders", response_model=list[PaperOrderOut], summary="List paper orders")
+def list_orders(
+    db: Session = Depends(get_db),
+    account_id: int | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[PaperOrder]:
+    stmt = select(PaperOrder)
+    if account_id is not None:
+        stmt = stmt.where(PaperOrder.account_id == account_id)
+    return list(db.scalars(stmt.order_by(PaperOrder.id.desc()).limit(limit)).all())
+
+
+@router.get("/orders/{order_id}", response_model=PaperOrderOut, summary="Get a paper order")
+def get_order(order_id: int, db: Session = Depends(get_db)) -> PaperOrder:
+    order = db.get(PaperOrder, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="paper order not found")
+    return order
+
+
+@router.get("/trades", summary="List paper trades across accounts")
+def list_trades(
+    db: Session = Depends(get_db),
+    account_id: int | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict]:
+    stmt = select(PaperTrade)
+    if account_id is not None:
+        stmt = stmt.where(PaperTrade.account_id == account_id)
+    rows = db.scalars(stmt.order_by(PaperTrade.id.desc()).limit(limit)).all()
+    return [
+        {
+            "id": t.id,
+            "account_id": t.account_id,
+            "asset_id": t.asset_id,
+            "direction": t.direction,
+            "entry_time": t.entry_time,
+            "entry_price": float(t.entry_price),
+            "exit_time": t.exit_time,
+            "exit_price": float(t.exit_price) if t.exit_price is not None else None,
+            "quantity": float(t.quantity),
+            "pnl": float(t.pnl) if t.pnl is not None else None,
+            "r_multiple": float(t.r_multiple) if t.r_multiple is not None else None,
+            "reason": t.reason,
+            "strategy_version": t.strategy_version,
+        }
+        for t in rows
+    ]
 
 
 @router.post(

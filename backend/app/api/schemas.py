@@ -41,6 +41,7 @@ __all__ = [
     "PaperExecuteRequest",
     "PaperExecutionOut",
     "PaperFundRequest",
+    "PaperOrderOut",
     "PaperPositionOut",
     "SignalOut",
     "StrategyCreate",
@@ -312,6 +313,24 @@ class PaperPositionOut(BaseModel):
     quantity: float
     avg_cost: float
     realized_pnl: float
+
+
+class PaperOrderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    account_id: int
+    signal_id: int | None = None
+    asset_id: int
+    side: str
+    status: str
+    quantity: float
+    fill_price: float | None = None
+    fees: float
+    slippage: float
+    reason: str | None = None
+    created_at: dt.datetime
+    filled_at: dt.datetime | None = None
 
 
 class PaperExecutionOut(BaseModel):

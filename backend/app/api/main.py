@@ -55,6 +55,9 @@ from app.api.routers import (
 from app.api.routers import (
     strategies as strategies_router,
 )
+from app.api.routers import (
+    strategy_versions as strategy_versions_router,
+)
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.infrastructure.rate_limit import limiter
@@ -186,6 +189,7 @@ def create_app() -> FastAPI:
         assets_router.router,
         market_data_router.router,
         strategies_router.router,
+        strategy_versions_router.router,
         feature_snapshots_router.router,
         lifecycle_router.router,
         backtests_router.router,

@@ -212,8 +212,8 @@ def evidence(
         raise HTTPException(status_code=404, detail="no matching market data series")
 
     bars = load_bars(db, series, only_closed=True, limit=800)
-    feature_frame = build_features(bars)
     spec = load_spec(version)
+    feature_frame = build_features(bars, spec=spec)
     decisions, intent = run_strategy(spec, feature_frame.frame)
 
     last_ts = feature_frame.frame.index[-1]

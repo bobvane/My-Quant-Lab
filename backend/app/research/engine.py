@@ -96,7 +96,7 @@ def run_backtest(
         max_position_pct = 1.0
     symbol = str(bars["symbol"].iloc[0]) if "symbol" in bars.columns else ""
 
-    feature_frame = build_features(bars)
+    feature_frame = build_features(bars, spec=spec)
     frame = feature_frame.frame
     dataset_hash = feature_input_hash(bars)
 

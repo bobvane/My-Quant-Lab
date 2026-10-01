@@ -11,7 +11,13 @@ from typing import Any
 
 from app.strategies.dsl import Condition, ConditionGroup, StrategySpec
 
-__all__ = ["ValidationIssue", "ValidationReport", "validate_strategy", "RESERVED_COLUMNS"]
+__all__ = [
+    "RESERVED_COLUMNS",
+    "SUPPORTED_INDICATORS",
+    "ValidationIssue",
+    "ValidationReport",
+    "validate_strategy",
+]
 
 # Columns that are always available in the feature frame.
 BASE_COLUMNS = {
@@ -25,6 +31,10 @@ BASE_COLUMNS = {
 
 # Guard against a strategy referencing something it can never know.
 RESERVED_COLUMNS = {"future_close", "next_close", "tomorrow", "label", "target"}
+
+# Indicator types the feature engine can materialise.
+SUPPORTED_INDICATORS = {"EMA", "SMA", "RSI", "ATR", "MACD", "BOLLINGER", "BB", "BOLLINGER_BANDS"}
+_PERIODIC_INDICATORS = {"EMA", "SMA", "RSI", "ATR", "BOLLINGER", "BB", "BOLLINGER_BANDS"}
 
 KNOWN_OPERATORS = {
     "gt",
@@ -142,11 +152,50 @@ def validate_strategy(
     known = set(BASE_COLUMNS) | KNOWN_DERIVED
     if available_columns:
         known |= set(available_columns)
-    report.available_columns = sorted(known)
 
-    # The engine can compute declared indicators; add them to the known set.
+    # Declared indicators are materialised by the feature engine; add their id
+    # (and any derived columns) to the known set, and flag unusable ones.
     for indicator in spec.indicators:
+        kind = str(indicator.type).upper()
         known.add(indicator.id)
+        if kind == "MACD":
+            known.update({f"{indicator.id}_signal", f"{indicator.id}_hist"})
+        if kind in {"BOLLINGER", "BB", "BOLLINGER_BANDS"}:
+            known.update({f"{indicator.id}_upper", f"{indicator.id}_lower"})
+        if kind not in SUPPORTED_INDICATORS:
+            report.issues.append(
+                ValidationIssue(
+                    "error",
+                    "unsupported_indicator",
+                    f"indicator '{indicator.id}' has unsupported type '{indicator.type}'",
+                    f"indicators.{indicator.id}",
+                )
+            )
+        elif (
+            kind in _PERIODIC_INDICATORS
+            and indicator.period is None
+            and not getattr(indicator, "period_ref", None)
+        ):
+            report.issues.append(
+                ValidationIssue(
+                    "error",
+                    "indicator_needs_period",
+                    f"indicator '{indicator.id}' needs a 'period' or 'period_ref'",
+                    f"indicators.{indicator.id}",
+                )
+            )
+        ref = getattr(indicator, "period_ref", None)
+        if ref and ref not in spec.parameters:
+            report.issues.append(
+                ValidationIssue(
+                    "error",
+                    "unknown_parameter",
+                    f"indicator '{indicator.id}' references unknown parameter '{ref}'",
+                    f"indicators.{indicator.id}",
+                )
+            )
+
+    report.available_columns = sorted(known)
 
     groups = {
         "entry.long": spec.entry.long,

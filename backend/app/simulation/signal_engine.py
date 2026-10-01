@@ -62,7 +62,7 @@ def latest_intent_for_series(
         )
 
     spec = load_spec(strategy_version)
-    feature_frame = build_features(bars)
+    feature_frame = build_features(bars, spec=spec)
     decisions, intent = run_strategy(spec, feature_frame.frame)
     last_ts = feature_frame.frame.index[-1]
     input_hash = _feature_hash(feature_frame.frame.tail(1))

@@ -70,11 +70,19 @@ ConditionNode = Condition | ConditionGroup
 
 
 class IndicatorSpec(BaseModel):
+    """A declared indicator that the feature engine materialises as a column.
+
+    ``period`` may be given directly or looked up from ``parameters`` via
+    ``period_ref`` (e.g. ``period_ref: fast_period``), which makes strategies
+    parameterisable without editing the rule set.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     id: str
     type: str
     period: int | None = None
+    period_ref: str | None = None
     input: str = "close"
     params: dict[str, Any] = Field(default_factory=dict)
 

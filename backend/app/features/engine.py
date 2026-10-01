@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from app.features.indicators import INDICATOR_VERSION, atr, bollinger_bands, ema, macd, rsi, sma
 from app.features.price_action import PA_FEATURE_VERSION, add_price_action_features
+
+if TYPE_CHECKING:  # avoids a features -> strategies runtime import
+    from app.strategies.dsl import StrategySpec
 
 __all__ = [
     "FEATURE_VERSION",
@@ -46,6 +50,7 @@ class FeatureFrame:
 def build_features(
     bars: pd.DataFrame,
     *,
+    spec: StrategySpec | None = None,
     ema_periods: tuple[int, ...] = (20, 50),
     sma_periods: tuple[int, ...] = (20,),
     atr_period: int = 14,
@@ -59,6 +64,11 @@ def build_features(
     The returned frame keeps the same index (UTC timestamps) as ``bars`` and one
     row per input bar. Warm-up rows contain ``NaN`` and must be excluded from
     trading decisions.
+
+    When a ``spec`` is supplied, every indicator it declares is materialised as
+    a column named by the indicator ``id`` (period may come from ``period_ref``
+    into ``spec.parameters``). This is what makes the DSL's declarative
+    ``indicators`` block actually take effect.
     """
 
     missing = [c for c in OHLCV_COLUMNS if c not in bars.columns]
@@ -100,7 +110,77 @@ def build_features(
         bollinger_period,
         breakout_lookback,
     )
+
+    if spec is not None:
+        for indicator in spec.indicators:
+            warmup = max(warmup, _materialize_indicator(frame, indicator, spec.parameters))
+
     return FeatureFrame(frame=frame, feature_version=FEATURE_VERSION, warmup_bars=warmup)
+
+
+def _indicator_period(indicator: Any, parameters: dict[str, Any]) -> int:
+    period = indicator.period
+    ref = getattr(indicator, "period_ref", None)
+    if ref:
+        if ref not in parameters:
+            raise ValueError(f"indicator '{indicator.id}' references unknown parameter '{ref}'")
+        period = parameters[ref]
+    if period is None:
+        raise ValueError(f"indicator '{indicator.id}' needs a 'period' or 'period_ref'")
+    period = int(period)
+    if period < 1:
+        raise ValueError(f"indicator '{indicator.id}' period must be >= 1")
+    return period
+
+
+def _materialize_indicator(frame: pd.DataFrame, indicator: Any, parameters: dict[str, Any]) -> int:
+    """Write one declared indicator into ``frame``; return its warm-up period."""
+
+    kind = str(indicator.type).upper()
+    column = indicator.id
+    source = indicator.input or "close"
+    params = dict(indicator.params or {})
+    if source not in frame.columns:
+        raise ValueError(f"indicator '{column}' input '{source}' is not a known column")
+
+    if kind == "EMA":
+        period = _indicator_period(indicator, parameters)
+        frame[column] = ema(frame[source], period)
+        return period
+    if kind == "SMA":
+        period = _indicator_period(indicator, parameters)
+        frame[column] = sma(frame[source], period)
+        return period
+    if kind == "RSI":
+        period = _indicator_period(indicator, parameters)
+        frame[column] = rsi(frame[source], period)
+        return period
+    if kind == "ATR":
+        period = _indicator_period(indicator, parameters)
+        frame[column] = atr(frame["high"], frame["low"], frame["close"], period)
+        return period
+    if kind == "MACD":
+        fast = int(params.get("fast", indicator.period or 12))
+        slow = int(params.get("slow", 26))
+        signal = int(params.get("signal", 9))
+        bands = macd(frame[source], fast, slow, signal)
+        frame[column] = bands["macd"]
+        frame[f"{column}_signal"] = bands["macd_signal"]
+        frame[f"{column}_hist"] = bands["macd_hist"]
+        return max(fast, slow, signal)
+    if kind in {"BOLLINGER", "BB", "BOLLINGER_BANDS"}:
+        period = (
+            int(parameters.get(indicator.period_ref, indicator.period) or params.get("period", 20))
+            if (indicator.period or getattr(indicator, "period_ref", None))
+            else int(params.get("period", 20))
+        )
+        bands = bollinger_bands(frame[source], period, float(params.get("num_std", 2.0)))
+        frame[column] = bands["bb_middle"]
+        frame[f"{column}_upper"] = bands["bb_upper"]
+        frame[f"{column}_lower"] = bands["bb_lower"]
+        return period
+
+    raise ValueError(f"unsupported indicator type '{indicator.type}' (id '{column}')")
 
 
 def feature_input_hash(bars: pd.DataFrame, columns: tuple[str, ...] = OHLCV_COLUMNS) -> str:

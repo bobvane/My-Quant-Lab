@@ -321,3 +321,21 @@ GHCR 镜像保持公开供 NAS 直接拉取。
 docs/15 Phase 4 的「买卖后现金/持仓正确、费用/滑点进入结果」实际无法成立。
 补上执行引擎后 Phase 4 才真正闭环；同时把成交语义固定为「参考价±滑点」并写入
 ADR，保证结果可复现、可解释。
+
+## ADR-031：DSL 声明式指标真正物化 + 参数化 period_ref
+
+**决策**：
+1. `build_features(bars, spec=...)` 会遍历 `spec.indicators`，按 `id` 物化成特征列；
+   支持 EMA / SMA / RSI / ATR / MACD / Bollinger。MACD 另出
+   `<id>_signal`/`<id>_hist`，Bollinger 另出 `<id>_upper`/`<id>_lower`。
+2. 指标周期可写死 `period`，也可用 `period_ref` 指向 `spec.parameters` 中的参数
+   （如 `period_ref: fast_period`），使同一策略可参数化而无需改规则。
+3. 校验器同步：把 `id` 及派生列加入已知列集合，并对「未知指标类型 / 缺周期 /
+   `period_ref` 指向不存在的参数」报错。
+4. 引擎对所有调用方（回测、信号扫描、证据、AI 预览）统一传入 `spec`，保证
+   「声明 → 计算 → 执行」使用同一套列。
+5. 固定列（`ema20/ema50/atr14/rsi14/macd*/bb*`）继续保留，向后兼容既有策略。
+
+**理由**：此前 `indicators` 只被校验器接受、从未被计算，声明式指标一用即
+`KeyError`；`parameters` 也不参与计算。这使 DSL「声明式、可参数化」的核心承诺
+落空。物化声明式指标后，用户才能真正定义自定义周期指标并参数化策略。

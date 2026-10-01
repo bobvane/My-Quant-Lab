@@ -134,8 +134,8 @@ def explain_preview(payload: dict[str, Any], db: Session = Depends(get_db)) -> E
     bars = load_bars(db, series, only_closed=True, limit=800)
     if bars.empty:
         raise HTTPException(status_code=422, detail="no closed bars available")
-    feature_frame = build_features(bars)
     spec = load_spec(version)
+    feature_frame = build_features(bars, spec=spec)
     _decisions, intent = run_strategy(spec, feature_frame.frame)
 
     from app.ai.explain import explain_signal_facts

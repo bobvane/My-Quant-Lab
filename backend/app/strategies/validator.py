@@ -81,6 +81,14 @@ KNOWN_DERIVED = {
     "distance_to_ema",
     "ema_relation",
     "ema_slope",
+    "volume_sma_20",
+    # docs/04 synonym names that the executor maps onto the engine's columns.
+    "previous_high",
+    "previous_low",
+    "rolling_high_prev",
+    "rolling_low_prev",
+    "highest_high_20",
+    "lowest_low_20",
 }
 
 

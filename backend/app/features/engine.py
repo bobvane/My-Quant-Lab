@@ -85,6 +85,9 @@ def build_features(
     for period in sma_periods:
         frame[f"sma{period}"] = sma(frame["close"], period)
 
+    if "volume" in frame.columns:
+        frame["volume_sma_20"] = sma(frame["volume"], 20)
+
     frame[f"atr{atr_period}"] = atr(frame["high"], frame["low"], frame["close"], atr_period)
     frame[f"rsi{rsi_period}"] = rsi(frame["close"], rsi_period)
 

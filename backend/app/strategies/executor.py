@@ -42,9 +42,21 @@ class SignalIntent:
         }
 
 
+# Docs/04 used a few synonym column names; map them to the engine's actual ones.
+_COLUMN_ALIASES = {
+    "previous_high": "prior_high",
+    "previous_low": "prior_low",
+    "rolling_high_prev": "prior_high",
+    "rolling_low_prev": "prior_low",
+    "highest_high_20": "prior_high",
+    "lowest_low_20": "prior_low",
+}
+
+
 def _series(frame: pd.DataFrame, name: str) -> pd.Series:
-    if name in frame.columns:
-        return frame[name].astype(float)
+    resolved = _COLUMN_ALIASES.get(name, name)
+    if resolved in frame.columns:
+        return frame[resolved].astype(float)
     try:
         return pd.Series(float(name), index=frame.index, dtype=float)
     except ValueError as exc:  # pragma: no cover - guarded by validator

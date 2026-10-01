@@ -105,6 +105,34 @@ def test_unknown_parameter_reference_is_rejected() -> None:
     assert any(i.code == "unknown_parameter" for i in report.errors)
 
 
+def test_doc_column_aliases_are_valid_and_executable(sample_bars: pd.DataFrame) -> None:
+    """docs/04 synonym names (previous_high, volume_sma_20) must validate and run."""
+
+    dsl = {
+        "schema_version": "1.0",
+        "strategy": {"id": "alias", "name": "Alias", "version": "1.0.0"},
+        "market": {"asset_classes": ["stock"], "timeframes": ["1d"]},
+        "entry": {
+            "long": {
+                "all": [
+                    {"op": "gt", "left": "close", "right": "previous_high"},
+                    {"op": "gt", "left": "volume_sma_20", "right": "0"},
+                ]
+            }
+        },
+        "exit": {"long": {"any": [{"op": "lt", "left": "close", "right": "previous_low"}]}},
+        "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5},
+    }
+    spec = _spec(dsl)
+    report = validate_strategy(spec)
+    assert report.is_valid, [i.as_dict() for i in report.errors]
+
+    frame = build_features(sample_bars, spec=spec).frame
+    assert "volume_sma_20" in frame.columns
+    decisions, _intent = run_strategy(spec, frame)
+    assert "entry_long" in decisions.columns
+
+
 def test_run_backtest_with_custom_indicators(sample_bars: pd.DataFrame) -> None:
     from app.research.engine import run_backtest
 

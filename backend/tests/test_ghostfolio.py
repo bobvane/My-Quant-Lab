@@ -41,6 +41,30 @@ def test_holdings_payload_with_fraction_allocation() -> None:
     assert summary["total_value"] == 1800.0
 
 
+def test_holdings_payload_handles_wrapped_root() -> None:
+    payload = {"data": {"holdings": {"MSFT": {"symbol": "MSFT", "quantity": 1, "price": 100}}}}
+    holdings = ADAPTER._parse_holdings_payload(payload)
+    assert holdings[0]["symbol"] == "MSFT"
+    assert holdings[0]["value"] == 100.0
+
+
+def test_summary_falls_back_to_activities_when_holdings_empty(monkeypatch) -> None:
+    adapter = GhostfolioAdapter(base_url="http://ghostfolio.local", token="y" * 32)
+    monkeypatch.setattr(adapter, "get_holdings", lambda: {"holdings": {}})
+    monkeypatch.setattr(
+        adapter,
+        "get_export",
+        lambda: {
+            "accounts": {"a": {"name": "main"}},
+            "activities": [{"symbol": "AAPL", "type": "BUY", "quantity": 3, "currency": "USD"}],
+        },
+    )
+    summary = adapter.get_portfolio_summary()
+    assert summary["source"] == "activities"
+    assert summary["holdings_count"] == 1
+    assert summary["accounts_count"] == 1
+
+
 def test_holdings_value_derived_from_price_when_absent() -> None:
     payload = {"holdings": [{"symbol": "BTC-USD", "quantity": 0.5, "price": 60000}]}
     holdings = ADAPTER._parse_holdings_payload(payload)

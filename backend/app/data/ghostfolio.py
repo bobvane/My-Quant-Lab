@@ -140,20 +140,32 @@ class GhostfolioAdapter:
         try:
             payload = self.get_holdings()
             holdings = self._parse_holdings_payload(payload)
+            accounts_count = _count_accounts(payload)
         except GhostfolioError as exc:
-            logger.warning("portfolio/holdings unavailable (%s); aggregating activities", exc)
+            logger.warning("portfolio/holdings unavailable (%s); using activities", exc)
+            holdings, accounts_count = [], None
+
+        if not holdings:
+            # The holdings endpoint shape varies between Ghostfolio versions; the
+            # export is the long-standing, documented source. Always fall back so
+            # the caller never gets an empty portfolio when activities exist.
             export = self.get_export()
             holdings = self._parse_activities(export.get("activities", []))
-            accounts = export.get("accounts", [])
-            return self._summarise(holdings, accounts_count=len(accounts), source="activities")
+            accounts_count = _count_accounts(export)
+            return self._summarise(holdings, accounts_count=accounts_count, source="activities")
 
-        accounts = payload.get("accounts") if isinstance(payload, dict) else None
-        accounts_count = len(accounts) if isinstance(accounts, list) else 0
-        return self._summarise(holdings, accounts_count=accounts_count, source="holdings")
+        return self._summarise(holdings, accounts_count=accounts_count or 0, source="holdings")
 
     # -- parsing helpers -------------------------------------------------- #
     def _parse_holdings_payload(self, payload: Any) -> list[dict[str, Any]]:
         raw = payload.get("holdings") if isinstance(payload, dict) else None
+        # Some versions wrap the payload (e.g. {"data": {"holdings": ...}}).
+        if raw is None and isinstance(payload, dict):
+            for wrapper in ("data", "portfolio", "result"):
+                inner = payload.get(wrapper)
+                if isinstance(inner, dict) and isinstance(inner.get("holdings"), (dict, list)):
+                    raw = inner["holdings"]
+                    break
         items: list[tuple[str, dict[str, Any]]] = []
         if isinstance(raw, dict):
             items = [(key, value) for key, value in raw.items() if isinstance(value, dict)]
@@ -164,6 +176,8 @@ class GhostfolioAdapter:
 
         holdings: list[dict[str, Any]] = []
         for key, item in items:
+            if isinstance(item.get("holding"), dict):
+                item = {**item, **item["holding"]}
             symbol = str(item.get("symbol") or key or "").upper()
             if not symbol:
                 continue
@@ -262,3 +276,14 @@ def _as_pct(value: float | None) -> float | None:
     # Ghostfolio reports allocation as a 0-1 fraction in some versions and as a
     # percentage in others; normalise to 0-100.
     return round(value * 100, 4) if value <= 1 else round(value, 4)
+
+
+def _count_accounts(payload: Any) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    accounts = payload.get("accounts")
+    if isinstance(accounts, dict):
+        return len(accounts)
+    if isinstance(accounts, list):
+        return len(accounts)
+    return 0

@@ -290,10 +290,30 @@ def test_ghostfolio() -> dict[str, Any]:
 
 
 @router.get("/ghostfolio/holdings", summary="Ghostfolio holdings (read-only)")
-def ghostfolio_holdings() -> dict[str, Any]:
+def ghostfolio_holdings(debug: bool = False) -> dict[str, Any]:
     from app.data.ghostfolio import GhostfolioAdapter, GhostfolioError
 
+    adapter = GhostfolioAdapter()
     try:
-        return GhostfolioAdapter().get_portfolio_summary()
+        if debug:
+            # Shape introspection only: key names / container types, never values.
+            payload = adapter.get_holdings()
+            root = payload if isinstance(payload, dict) else {}
+            holdings = root.get("holdings")
+            if isinstance(holdings, dict):
+                sample: Any = sorted(holdings.keys())[:10]
+            elif isinstance(holdings, list):
+                sample = (
+                    sorted(holdings[0].keys()) if holdings and isinstance(holdings[0], dict) else []
+                )
+            else:
+                sample = None
+            return {
+                "root_keys": sorted(root.keys()),
+                "accounts_type": type(root.get("accounts")).__name__,
+                "holdings_type": type(holdings).__name__,
+                "holdings_sample": sample,
+            }
+        return adapter.get_portfolio_summary()
     except GhostfolioError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

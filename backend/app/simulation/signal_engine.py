@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.data.market_data_repo import load_bars
 from app.data.strategy_service import load_spec
+from app.data.symbols import canonical_symbol
 from app.domain.models import (
     Asset,
     FeatureSnapshot,
@@ -84,7 +85,16 @@ def portfolio_context_for(
         }
     if not symbol:
         return {"ghostfolio_connected": True, "holding": None, "note": "未知标的。"}
-    match = next((h for h in holdings if str(h.get("symbol", "")).upper() == symbol.upper()), None)
+    key = canonical_symbol(symbol)
+    match = next(
+        (
+            h
+            for h in holdings
+            if canonical_symbol(str(h.get("symbol"))) == key
+            or canonical_symbol(str(h.get("name"))) == key
+        ),
+        None,
+    )
     if match is None:
         return {
             "ghostfolio_connected": True,

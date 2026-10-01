@@ -121,6 +121,25 @@ def test_portfolio_context_for_match_and_miss() -> None:
     assert "未持有" in missing["note"]
 
 
+def test_canonical_symbol_aligns_crypto_and_keeps_equities() -> None:
+    from app.data.symbols import canonical_symbol
+
+    assert canonical_symbol("BTC-USD") == canonical_symbol("BITCOIN") == "BTC"
+    assert canonical_symbol("bitcoin") == "BTC"
+    assert canonical_symbol("ETH-USD") == canonical_symbol("ETHEREUM") == "ETH"
+    assert canonical_symbol("BNB-USD") == canonical_symbol("BINANCECOIN") == "BNB"
+    assert canonical_symbol("BTCUSDT") == "BTC"
+    assert canonical_symbol("QQQ") == "QQQ"
+    assert canonical_symbol(None) == ""
+
+
+def test_portfolio_context_matches_crypto_alias() -> None:
+    holdings = [{"symbol": "BITCOIN", "name": "Bitcoin", "quantity": 0.15, "allocation_pct": 11.3}]
+    context = portfolio_context_for("BTC-USD", holdings)
+    assert context["holding"]["symbol"] == "BITCOIN"
+    assert "11.30%" in context["note"]
+
+
 def test_portfolio_context_when_ghostfolio_unconfigured() -> None:
     context = portfolio_context_for("AAPL", None)
     assert context["ghostfolio_connected"] is False

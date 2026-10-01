@@ -17,21 +17,37 @@ const explainedFor = ref('')
 const gfHoldings = ref<Array<Record<string, any>>>([])
 const gfSummary = ref<Record<string, any> | null>(null)
 const gfConnected = ref(false)
+const assets = ref<Array<Record<string, any>>>([])
+const seriesList = ref<Array<Record<string, any>>>([])
+
+function assetSymbol(assetId: number): string {
+  return assets.value.find((a) => Number(a.id) === assetId)?.symbol ?? `#${assetId}`
+}
+
+function qualityTone(status: string): string {
+  if (status === 'valid') return 'pos'
+  if (status === 'invalid') return 'neg'
+  return ''
+}
 
 async function load() {
   error.value = ''
   try {
-    const [h, i, a, ai, gf] = await Promise.all([
+    const [h, i, a, ai, gf, assetsList, sList] = await Promise.all([
       api.health(),
       api.systemInfo(),
       api.paperAccounts(),
       api.aiStatus().catch(() => null),
       api.getGhostfolioHoldings().catch(() => null),
+      api.assets().catch(() => []),
+      api.series().catch(() => []),
     ])
     health.value = h
     info.value = i
     accounts.value = a
     aiStatus.value = ai
+    assets.value = assetsList
+    seriesList.value = sList
     if (gf?.holdings) {
       gfHoldings.value = gf.holdings
       gfSummary.value = gf
@@ -186,6 +202,32 @@ onMounted(load)
           </div>
         </div>
       </div>
+    </div>
+
+    <div v-if="seriesList.length" class="card" style="margin-top: 14px">
+      <h3>数据健康</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>代码</th>
+            <th>周期</th>
+            <th>质量</th>
+            <th>数据范围</th>
+            <th>最后同步</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="s in seriesList" :key="String(s.id)">
+            <td>{{ assetSymbol(Number(s.asset_id)) }}</td>
+            <td>{{ s.timeframe }}</td>
+            <td :class="qualityTone(String(s.quality_status))">{{ s.quality_status }}</td>
+            <td class="muted">
+              {{ String(s.series_start ?? '').slice(0, 10) }} → {{ String(s.series_end ?? '').slice(0, 10) }}
+            </td>
+            <td class="muted">{{ formatDateTime(String(s.last_sync_at ?? '')) }}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <div class="grid cols-2" style="margin-top: 14px">

@@ -13,6 +13,29 @@
   color-scheme: dark;
 }
 
+:root[data-theme='light'] {
+  --bg: #f6f8fa;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --muted: #656d76;
+  --accent: #0969da;
+  --buy: #1a7f37;
+  --sell: #cf222e;
+  --wait: #9a6700;
+  color-scheme: light;
+}
+
+.theme-toggle {
+  position: fixed;
+  top: 14px;
+  right: 18px;
+  z-index: 100;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
 * {
   box-sizing: border-box;
 }

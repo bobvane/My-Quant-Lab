@@ -5,6 +5,32 @@ import { formatNumber } from '@/format'
 
 const health = ref<HealthResponse | null>(null)
 
+type Theme = 'dark' | 'light'
+const theme = ref<Theme>('dark')
+
+function applyTheme(value: Theme) {
+  theme.value = value
+  document.documentElement.dataset.theme = value
+  try {
+    localStorage.setItem('mql-theme', value)
+  } catch {
+    /* storage may be unavailable (private mode) */
+  }
+}
+
+function toggleTheme() {
+  applyTheme(theme.value === 'dark' ? 'light' : 'dark')
+}
+
+// Initial theme: saved choice, else the OS preference.
+try {
+  const saved = localStorage.getItem('mql-theme') as Theme | null
+  const prefersLight = window.matchMedia?.('(prefers-color-scheme: light)').matches
+  applyTheme(saved ?? (prefersLight ? 'light' : 'dark'))
+} catch {
+  applyTheme('dark')
+}
+
 onMounted(async () => {
   try {
     health.value = await api.health()
@@ -16,6 +42,15 @@ onMounted(async () => {
 
 <template>
   <div class="app-shell">
+    <button
+      class="theme-toggle ghost"
+      type="button"
+      :title="theme === 'dark' ? '切换到浅色' : '切换到深色'"
+      @click="toggleTheme"
+    >
+      {{ theme === 'dark' ? '浅色' : '深色' }}
+    </button>
+
     <aside class="sidebar">
       <div class="brand">
         My Quant Lab

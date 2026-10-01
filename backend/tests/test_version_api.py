@@ -53,6 +53,44 @@ def test_version_lookup_and_parameters(client) -> None:
     assert params and params[0]["parameters"] == {"fast": 10}
 
 
+def test_signal_list_is_enriched(client, db_session) -> None:
+    from app.domain.models import Asset, Signal, Strategy, StrategyVersion
+
+    strategy = Strategy(name="Enrich", slug="enrich-strat")
+    db_session.add(strategy)
+    db_session.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id, version="2.0.0", dsl_json={}, immutable_hash="e" * 64
+    )
+    db_session.add(version)
+    db_session.flush()
+    asset = Asset(symbol="ENR", asset_class="stock")
+    db_session.add(asset)
+    db_session.flush()
+    db_session.add(
+        Signal(
+            strategy_version_id=version.id,
+            asset_id=asset.id,
+            timeframe="1d",
+            bar_timestamp=dt.datetime(2026, 1, 2, tzinfo=dt.UTC),
+            state="BUY",
+            direction="LONG",
+            price_reference=12.5,
+            triggered_rules_json=["gt:close:ema20"],
+            feature_snapshot_hash="e" * 64,
+            data_source="test",
+        )
+    )
+    db_session.commit()
+
+    rows = client.get("/api/v1/signals").json()
+    assert rows
+    row = rows[0]
+    assert row["symbol"] == "ENR"
+    assert row["strategy_name"] == "Enrich"
+    assert row["strategy_version"] == "2.0.0"
+
+
 def test_paper_orders_and_trades_are_queryable(client, db_session) -> None:
     from app.domain.models import Asset, Signal, Strategy, StrategyVersion
 

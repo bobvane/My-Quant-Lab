@@ -17,7 +17,7 @@ from app.api.schemas import SignalOut
 from app.core.db import get_db
 from app.data.market_data_repo import load_bars
 from app.data.strategy_service import load_spec
-from app.domain.models import Asset, MarketDataSeries, Signal, StrategyVersion
+from app.domain.models import Asset, MarketDataSeries, Signal, Strategy, StrategyVersion
 from app.features.engine import build_features
 from app.simulation.signal_engine import latest_intent_for_series, scan_all, scan_series
 from app.strategies.executor import run_strategy
@@ -39,25 +39,34 @@ def list_signals(
     if asset_id:
         stmt = stmt.where(Signal.asset_id == asset_id)
     rows = db.scalars(stmt.order_by(Signal.id.desc()).limit(limit)).all()
-    return [
-        SignalOut(
-            id=row.id,
-            strategy_version_id=row.strategy_version_id,
-            asset_id=row.asset_id,
-            timeframe=row.timeframe,
-            bar_timestamp=row.bar_timestamp,
-            state=row.state,
-            direction=row.direction,
-            price_reference=float(row.price_reference) if row.price_reference else None,
-            stop_reference=float(row.stop_reference) if row.stop_reference else None,
-            target_reference=float(row.target_reference) if row.target_reference else None,
-            triggered_rules=row.triggered_rules_json or [],
-            status=row.status,
-            generated_at=row.generated_at,
-            explanation=row.explanation_json,
-        )
-        for row in rows
-    ]
+    return [_serialize_signal(db, row) for row in rows]
+
+
+def _serialize_signal(db: Session, row: Signal) -> SignalOut:
+    asset = db.get(Asset, row.asset_id)
+    version = db.get(StrategyVersion, row.strategy_version_id)
+    strategy = db.get(Strategy, version.strategy_id) if version else None
+    return SignalOut(
+        id=row.id,
+        strategy_version_id=row.strategy_version_id,
+        asset_id=row.asset_id,
+        symbol=asset.symbol if asset else None,
+        strategy_name=strategy.name if strategy else None,
+        strategy_version=version.version if version else None,
+        timeframe=row.timeframe,
+        bar_timestamp=row.bar_timestamp,
+        state=row.state,
+        direction=row.direction,
+        price_reference=float(row.price_reference) if row.price_reference else None,
+        stop_reference=float(row.stop_reference) if row.stop_reference else None,
+        target_reference=float(row.target_reference) if row.target_reference else None,
+        triggered_rules=row.triggered_rules_json or [],
+        portfolio_context=row.portfolio_context_json,
+        status=row.status,
+        generated_at=row.generated_at,
+        notified_at=row.notified_at,
+        explanation=row.explanation_json,
+    )
 
 
 @router.get("/outcomes", summary="Signal outcome tracking (did signals work?)")
@@ -97,22 +106,7 @@ def get_signal(signal_id: int, db: Session = Depends(get_db)) -> SignalOut:
     row = db.get(Signal, signal_id)
     if row is None:
         raise HTTPException(status_code=404, detail="signal not found")
-    return SignalOut(
-        id=row.id,
-        strategy_version_id=row.strategy_version_id,
-        asset_id=row.asset_id,
-        timeframe=row.timeframe,
-        bar_timestamp=row.bar_timestamp,
-        state=row.state,
-        direction=row.direction,
-        price_reference=float(row.price_reference) if row.price_reference else None,
-        stop_reference=float(row.stop_reference) if row.stop_reference else None,
-        target_reference=float(row.target_reference) if row.target_reference else None,
-        triggered_rules=row.triggered_rules_json or [],
-        status=row.status,
-        generated_at=row.generated_at,
-        explanation=row.explanation_json,
-    )
+    return _serialize_signal(db, row)
 
 
 @router.post("/{signal_id}/acknowledge", summary="Acknowledge a signal")

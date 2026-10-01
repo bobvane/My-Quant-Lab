@@ -60,6 +60,7 @@ onMounted(async () => {
       <nav class="nav">
         <RouterLink to="/">研究仪表盘</RouterLink>
         <RouterLink to="/market">行情与策略</RouterLink>
+        <RouterLink to="/signals">信号</RouterLink>
         <RouterLink to="/backtest">回测实验室</RouterLink>
         <RouterLink to="/paper">模拟盘</RouterLink>
         <RouterLink to="/resources">系统资源</RouterLink>

@@ -259,6 +259,28 @@ export interface LifecycleApplyResult {
   detail: string
 }
 
+export interface SignalRecord {
+  id: number
+  strategy_version_id: number
+  asset_id: number
+  symbol: string | null
+  strategy_name: string | null
+  strategy_version: string | null
+  timeframe: string
+  bar_timestamp: string
+  state: string
+  direction: string
+  price_reference: number | null
+  stop_reference: number | null
+  target_reference: number | null
+  triggered_rules: string[]
+  portfolio_context: Record<string, any> | null
+  status: string
+  generated_at: string
+  notified_at: string | null
+  explanation: Record<string, any> | null
+}
+
 export interface SignalIntent {
   state: string
   direction: string
@@ -358,6 +380,12 @@ export const api = {
         test_bars: testBars,
       }),
     }),
+  signals: (state?: string, limit = 100) =>
+    request<SignalRecord[]>(
+      `/signals?limit=${limit}${state ? `&state=${encodeURIComponent(state)}` : ''}`,
+    ),
+  acknowledgeSignal: (id: number) =>
+    request<Record<string, unknown>>(`/signals/${id}/acknowledge`, { method: 'POST' }),
   scanSignals: () =>
     request<{ evaluated: number; created: number; signals: SignalIntent[]; disclaimer: string }>(
       '/signals/scan',

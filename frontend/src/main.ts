@@ -6,6 +6,7 @@ import BacktestView from './views/BacktestView.vue'
 import StrategiesView from './views/StrategiesView.vue'
 import PaperView from './views/PaperView.vue'
 import SettingsView from './views/SettingsView.vue'
+import SignalsView from './views/SignalsView.vue'
 import ResourcesView from './views/ResourcesView.vue'
 import './style.css'
 
@@ -14,6 +15,7 @@ const router = createRouter({
   routes: [
     { path: '/', name: 'dashboard', component: DashboardView },
     { path: '/market', name: 'market', component: StrategiesView },
+    { path: '/signals', name: 'signals', component: SignalsView },
     { path: '/backtest', name: 'backtest', component: BacktestView },
     { path: '/paper', name: 'paper', component: PaperView },
     { path: '/resources', name: 'resources', component: ResourcesView },

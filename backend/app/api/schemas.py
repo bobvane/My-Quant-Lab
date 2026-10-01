@@ -351,6 +351,9 @@ class SignalOut(BaseModel):
     id: int
     strategy_version_id: int
     asset_id: int
+    symbol: str | None = None
+    strategy_name: str | None = None
+    strategy_version: str | None = None
     timeframe: str
     bar_timestamp: dt.datetime
     state: str
@@ -359,8 +362,10 @@ class SignalOut(BaseModel):
     stop_reference: float | None
     target_reference: float | None
     triggered_rules: list[Any] = Field(default_factory=list)
+    portfolio_context: dict[str, Any] | None = None
     status: str
     generated_at: dt.datetime
+    notified_at: dt.datetime | None = None
     explanation: dict[str, Any] | None = None
 
 

@@ -463,7 +463,15 @@ export const api = {
   notificationEvents: (limit = 50) =>
     request<{ events: Array<Record<string, unknown>> }>(`/notifications/events?limit=${limit}`),
   getGhostfolioHoldings: () =>
-    request<{ holdings: Array<Record<string, any>> }>('/settings/ghostfolio/holdings'),
+    request<{
+      holdings: Array<Record<string, any>>
+      holdings_count?: number
+      total_value?: number | null
+      total_cost?: number | null
+      total_pnl?: number | null
+      total_pnl_pct?: number | null
+      source?: string
+    }>('/settings/ghostfolio/holdings'),
   testGhostfolio: () => request<Record<string, any>>('/settings/ghostfolio/test'),
   resourcesCurrent: () => request<Record<string, any>>('/resources/current'),
   resourcesHistory: (metric: 'cpu' | 'ram', range: '1h' | '24h' | '7d' | '30d') =>

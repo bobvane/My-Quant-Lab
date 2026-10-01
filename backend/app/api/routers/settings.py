@@ -314,6 +314,6 @@ def ghostfolio_holdings(debug: bool = False) -> dict[str, Any]:
                 "holdings_type": type(holdings).__name__,
                 "holdings_sample": sample,
             }
-        return adapter.get_portfolio_summary()
+        return adapter.get_portfolio_summary(include_dividends=True)
     except GhostfolioError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

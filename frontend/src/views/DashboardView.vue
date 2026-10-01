@@ -15,6 +15,7 @@ const explaining = ref<number | null>(null)
 const explanation = ref<ExplainResult | null>(null)
 const explainedFor = ref('')
 const gfHoldings = ref<Array<Record<string, any>>>([])
+const gfSummary = ref<Record<string, any> | null>(null)
 const gfConnected = ref(false)
 
 async function load() {
@@ -33,6 +34,7 @@ async function load() {
     aiStatus.value = ai
     if (gf?.holdings) {
       gfHoldings.value = gf.holdings
+      gfSummary.value = gf
       gfConnected.value = true
     }
   } catch (e) {
@@ -109,14 +111,24 @@ onMounted(load)
 
     <div v-if="gfConnected && gfHoldings.length" class="card" style="margin-top: 14px">
       <h3>我的 Ghostfolio 持仓</h3>
+      <div class="row" style="align-items: flex-start; gap: 18px; flex-wrap: nowrap">
+        <div style="flex: 1 1 auto; min-width: 0; overflow-x: auto">
       <table>
         <thead>
           <tr>
             <th>代码</th>
             <th>名称</th>
             <th>数量</th>
+            <th>成本价</th>
+            <th>现价</th>
             <th>市值</th>
             <th>占比</th>
+            <th>未实现盈亏</th>
+            <th>盈亏%</th>
+            <th>首次建仓</th>
+            <th>年化股息</th>
+            <th>股息率</th>
+            <th>最近派息日</th>
           </tr>
         </thead>
         <tbody>
@@ -124,11 +136,56 @@ onMounted(load)
             <td>{{ h.symbol }}</td>
             <td>{{ h.name }}</td>
             <td>{{ formatNumber(h.quantity, 4) }}</td>
+            <td>{{ h.cost_per_share != null ? formatNumber(h.cost_per_share) : '—' }}</td>
+            <td>{{ h.price != null ? formatNumber(h.price) : '—' }}</td>
             <td>{{ formatNumber(h.value) }}</td>
             <td>{{ formatNumber(h.allocation_pct, 1) }}%</td>
+            <td :class="toneOf(h.unrealized_pnl)">
+              {{ h.unrealized_pnl != null ? formatNumber(h.unrealized_pnl) : '—' }}
+            </td>
+            <td :class="toneOf(h.unrealized_pnl_pct)">
+              {{ h.unrealized_pnl_pct != null ? formatNumber(h.unrealized_pnl_pct, 2) + '%' : '—' }}
+            </td>
+            <td class="muted">{{ h.first_activity_date ? String(h.first_activity_date).slice(0, 10) : '—' }}</td>
+            <td>{{ h.annual_dividend_per_share != null ? formatNumber(h.annual_dividend_per_share) : '—' }}</td>
+            <td>{{ h.dividend_yield_pct != null ? formatNumber(h.dividend_yield_pct, 2) + '%' : '—' }}</td>
+            <td class="muted">{{ h.last_dividend_date ? String(h.last_dividend_date).slice(0, 10) : '—' }}</td>
           </tr>
         </tbody>
       </table>
+        </div>
+        <div style="flex: 0 0 230px">
+          <div class="card" style="padding: 10px 12px">
+            <h3 style="margin-bottom: 8px">组合概览</h3>
+            <div class="row" style="justify-content: space-between">
+              <span class="muted">总市值</span>
+              <span class="stat small">
+                {{ gfSummary?.total_value != null ? formatNumber(gfSummary.total_value) : '—' }}
+              </span>
+            </div>
+            <div class="row" style="justify-content: space-between">
+              <span class="muted">总成本</span>
+              <span>{{ gfSummary?.total_cost != null ? formatNumber(gfSummary.total_cost) : '—' }}</span>
+            </div>
+            <div class="row" style="justify-content: space-between">
+              <span class="muted">总体盈利</span>
+              <span :class="toneOf(gfSummary?.total_pnl)">
+                {{ gfSummary?.total_pnl != null ? formatNumber(gfSummary.total_pnl) : '—' }}
+              </span>
+            </div>
+            <div class="row" style="justify-content: space-between">
+              <span class="muted">总涨幅</span>
+              <span :class="toneOf(gfSummary?.total_pnl_pct)">
+                {{
+                  gfSummary?.total_pnl_pct != null
+                    ? formatNumber(gfSummary.total_pnl_pct, 2) + '%'
+                    : '—'
+                }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="grid cols-2" style="margin-top: 14px">

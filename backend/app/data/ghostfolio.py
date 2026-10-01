@@ -128,7 +128,7 @@ class GhostfolioAdapter:
         jwt = self._get_jwt()
         return self._get("/v1/portfolio/holdings", jwt)
 
-    def get_portfolio_summary(self) -> dict[str, Any]:
+    def get_portfolio_summary(self, *, include_dividends: bool = False) -> dict[str, Any]:
         """Current holdings with market value and weight, for the evidence layer.
 
         Prefers Ghostfolio's ``/portfolio/holdings`` endpoint (it carries the
@@ -151,10 +151,30 @@ class GhostfolioAdapter:
             # the caller never gets an empty portfolio when activities exist.
             export = self.get_export()
             holdings = self._parse_activities(export.get("activities", []))
-            accounts_count = _count_accounts(export)
-            return self._summarise(holdings, accounts_count=accounts_count, source="activities")
+            summary = self._summarise(
+                holdings, accounts_count=_count_accounts(export), source="activities"
+            )
+        else:
+            summary = self._summarise(
+                holdings, accounts_count=accounts_count or 0, source="holdings"
+            )
 
-        return self._summarise(holdings, accounts_count=accounts_count or 0, source="holdings")
+        if include_dividends:
+            self._merge_dividends(summary)
+        return summary
+
+    def _merge_dividends(self, summary: dict[str, Any]) -> None:
+        from app.data.symbols import canonical_symbol
+
+        history = self.get_dividend_history()
+        if not history:
+            return
+        for holding in summary.get("holdings", []):
+            info = history.get(canonical_symbol(str(holding.get("symbol"))))
+            if info:
+                holding["last_dividend_date"] = info.get("last_dividend_date")
+                holding["last_dividend_per_share"] = info.get("last_dividend_per_share")
+                holding["dividends_total"] = round(info.get("dividends_total", 0.0), 2)
 
     # -- parsing helpers -------------------------------------------------- #
     def _parse_holdings_payload(self, payload: Any) -> list[dict[str, Any]]:
@@ -202,19 +222,78 @@ class GhostfolioAdapter:
             if value is None and price is not None:
                 value = quantity * price
             allocation = _to_float(item.get("allocationInPercentage") or item.get("allocation"))
+            cost_total = _to_float(item.get("investment"))
+            cost_per_share = cost_total / quantity if cost_total is not None and quantity else None
+            annual_dividend = _to_float(item.get("dividend"))
+            dividend_yield = (
+                annual_dividend / price * 100 if annual_dividend is not None and price else None
+            )
             holdings.append(
                 {
                     "symbol": symbol,
                     "name": str(item.get("name") or profile.get("name") or symbol),
+                    "asset_class": profile.get("assetClass") or profile.get("assetSubClass"),
                     "quantity": quantity,
+                    "cost_per_share": cost_per_share,
                     "price": price,
                     "value": value,
-                    "investment": _to_float(item.get("investment")),
-                    "currency": str(item.get("currency") or profile.get("currency") or "USD"),
+                    "investment": cost_total,
                     "allocation_pct": _as_pct(allocation),
+                    "unrealized_pnl": _to_float(item.get("netPerformance")),
+                    "unrealized_pnl_pct": _as_pct(_to_float(item.get("netPerformancePercent"))),
+                    "first_activity_date": item.get("dateOfFirstActivity"),
+                    "annual_dividend_per_share": annual_dividend,
+                    "dividend_yield_pct": dividend_yield,
+                    "currency": str(item.get("currency") or profile.get("currency") or "USD"),
                 }
             )
         return holdings
+
+    def get_dividend_history(self) -> dict[str, dict[str, Any]]:
+        """Per-symbol dividend info derived from the export's DIVIDEND activities.
+
+        Holdings themselves do not carry a pay date; the activity log does. Keys
+        are canonical symbols so they line up with our market tickers.
+        """
+
+        from app.data.symbols import canonical_symbol
+
+        try:
+            export = self.get_export()
+        except GhostfolioError as exc:
+            logger.warning("dividend history unavailable (%s)", exc)
+            return {}
+
+        out: dict[str, dict[str, Any]] = {}
+        for activity in export.get("activities", []):
+            if not isinstance(activity, dict):
+                continue
+            if str(activity.get("type") or activity.get("Type") or "").upper() != "DIVIDEND":
+                continue
+            profile = activity.get("SymbolProfile") or activity.get("symbolProfile") or {}
+            symbol = str(activity.get("symbol") or (profile or {}).get("symbol") or "").upper()
+            if not symbol:
+                continue
+            key = canonical_symbol(symbol)
+            date = activity.get("date")
+            per_share = _to_float(activity.get("unitPrice"))
+            quantity = _to_float(activity.get("quantity")) or 0.0
+            entry = out.setdefault(
+                key,
+                {
+                    "last_dividend_date": None,
+                    "last_dividend_per_share": None,
+                    "dividends_total": 0.0,
+                },
+            )
+            if date and (
+                entry["last_dividend_date"] is None or str(date) > str(entry["last_dividend_date"])
+            ):
+                entry["last_dividend_date"] = date
+                entry["last_dividend_per_share"] = per_share
+            if per_share is not None:
+                entry["dividends_total"] += per_share * quantity
+        return out
 
     def _parse_activities(self, activities: list[Any]) -> list[dict[str, Any]]:
         """Fallback: net quantity per symbol from the export's activities."""
@@ -265,11 +344,22 @@ class GhostfolioAdapter:
         for holding in active:
             if holding.get("allocation_pct") is None and total_value > 0 and holding.get("value"):
                 holding["allocation_pct"] = round(holding["value"] / total_value * 100, 4)
+
+        total_cost = sum(h["investment"] for h in active if h.get("investment") is not None)
+        realized = sum(h["unrealized_pnl"] for h in active if h.get("unrealized_pnl") is not None)
+        has_pnl = any(h.get("unrealized_pnl") is not None for h in active)
+        total_pnl = realized if has_pnl else (total_value - total_cost if total_cost else None)
+        total_pnl_pct = (
+            round(total_pnl / total_cost * 100, 4) if total_pnl is not None and total_cost else None
+        )
         return {
             "accounts_count": accounts_count,
             "holdings": active,
             "holdings_count": len(active),
             "total_value": round(total_value, 2) if total_value else None,
+            "total_cost": round(total_cost, 2) if total_cost else None,
+            "total_pnl": round(total_pnl, 2) if total_pnl is not None else None,
+            "total_pnl_pct": total_pnl_pct,
             "source": source,
         }
 

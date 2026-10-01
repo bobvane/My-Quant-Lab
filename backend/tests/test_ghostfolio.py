@@ -65,6 +65,91 @@ def test_holdings_list_items_with_asset_profile() -> None:
     assert summary["total_value"] == 7500.0
 
 
+def test_holdings_enriched_fields() -> None:
+    payload = {
+        "holdings": [
+            {
+                "assetProfile": {"symbol": "QQQ", "name": "Invesco QQQ"},
+                "quantity": 10,
+                "marketPrice": 500,
+                "valueInBaseCurrency": 5000,
+                "investment": 4000,
+                "allocationInPercentage": 0.5,
+                "netPerformance": 1000,
+                "netPerformancePercent": 0.25,
+                "dateOfFirstActivity": "2024-01-05",
+                "dividend": 3.0,
+                "currency": "USD",
+            }
+        ]
+    }
+    holding = ADAPTER._parse_holdings_payload(payload)[0]
+    assert holding["cost_per_share"] == 400.0
+    assert holding["unrealized_pnl"] == 1000.0
+    assert holding["unrealized_pnl_pct"] == 25.0
+    assert holding["first_activity_date"] == "2024-01-05"
+    assert abs(holding["dividend_yield_pct"] - 0.6) < 1e-9
+
+
+def test_dividend_history_and_merge(monkeypatch) -> None:
+    adapter = GhostfolioAdapter(base_url="http://ghostfolio.local", token="z" * 32)
+    monkeypatch.setattr(
+        adapter,
+        "get_holdings",
+        lambda: {
+            "holdings": [
+                {
+                    "assetProfile": {"symbol": "QQQ"},
+                    "quantity": 10,
+                    "marketPrice": 500,
+                    "valueInBaseCurrency": 5000,
+                    "investment": 4000,
+                    "allocationInPercentage": 0.5,
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        adapter,
+        "get_export",
+        lambda: {
+            "activities": [
+                {
+                    "type": "DIVIDEND",
+                    "symbol": "QQQ",
+                    "date": "2025-06-20",
+                    "unitPrice": 0.7,
+                    "quantity": 10,
+                },
+                {
+                    "type": "DIVIDEND",
+                    "symbol": "QQQ",
+                    "date": "2026-03-20",
+                    "unitPrice": 0.8,
+                    "quantity": 10,
+                },
+            ]
+        },
+    )
+    summary = adapter.get_portfolio_summary(include_dividends=True)
+    qqq = summary["holdings"][0]
+    assert qqq["last_dividend_date"] == "2026-03-20"
+    assert qqq["last_dividend_per_share"] == 0.8
+    assert qqq["dividends_total"] == 15.0
+
+
+def test_summary_totals() -> None:
+    holdings = [
+        {"symbol": "A", "quantity": 1, "value": 150.0, "investment": 100.0, "unrealized_pnl": 50.0},
+        {"symbol": "B", "quantity": 1, "value": 50.0, "investment": 100.0, "unrealized_pnl": -50.0},
+    ]
+    summary = ADAPTER._summarise(holdings, accounts_count=0, source="holdings")
+    assert summary["total_value"] == 200.0
+    assert summary["total_cost"] == 200.0
+    assert summary["total_pnl"] == 0.0
+    assert summary["total_pnl_pct"] == 0.0
+
+
 def test_holdings_payload_handles_wrapped_root() -> None:
     payload = {"data": {"holdings": {"MSFT": {"symbol": "MSFT", "quantity": 1, "price": 100}}}}
     holdings = ADAPTER._parse_holdings_payload(payload)

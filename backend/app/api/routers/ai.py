@@ -247,6 +247,42 @@ def list_models(db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
 
+@router.get("/ai/usage", summary="AI usage rows (by date / provider)")
+def ai_usage(
+    db: Session = Depends(get_db),
+    date: str | None = None,
+    provider_id: int | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    from app.domain.models import AIUsage
+
+    stmt = select(AIUsage).order_by(AIUsage.id.desc())
+    if date:
+        try:
+            parsed_date = dt.date.fromisoformat(date)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD") from exc
+        stmt = stmt.where(AIUsage.usage_date == parsed_date)
+    if provider_id is not None:
+        stmt = stmt.where(AIUsage.provider_id == provider_id)
+    rows = db.scalars(stmt.limit(limit)).all()
+    return {
+        "usage": [
+            {
+                "id": r.id,
+                "usage_date": r.usage_date,
+                "provider_id": r.provider_id,
+                "model_id": r.model_id,
+                "task_type": r.task_type,
+                "call_count": r.call_count,
+                "total_tokens": r.total_tokens,
+                "total_cost_usd": float(r.total_cost_usd),
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.get("/ai/prompts", summary="AI prompt templates")
 def list_prompts(db: Session = Depends(get_db)) -> dict[str, Any]:
     from app.domain.models import AIPrompt

@@ -223,3 +223,45 @@ def usage_today(db: Session = Depends(get_db)) -> dict[str, Any]:
         entry["tokens_estimated"] += int(row.total_tokens or 0)
         entry["cost_usd_estimated"] += float(row.total_cost_usd or 0)
     return {"date": today.isoformat(), "providers": by_provider}
+
+
+@router.get("/ai/models", summary="AI models across providers")
+def list_models(db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.domain.models import AIModel, AIProvider
+
+    rows = db.scalars(select(AIModel).order_by(AIModel.id)).all()
+    providers = {p.id: p.name for p in db.scalars(select(AIProvider)).all()}
+    return {
+        "models": [
+            {
+                "id": m.id,
+                "provider": providers.get(m.provider_id),
+                "model_name": m.model_name,
+                "capability_tier": m.capability_tier,
+                "input_cost_per_mtok": float(m.input_cost_per_mtok),
+                "output_cost_per_mtok": float(m.output_cost_per_mtok),
+                "is_active": m.is_active,
+            }
+            for m in rows
+        ]
+    }
+
+
+@router.get("/ai/prompts", summary="AI prompt templates")
+def list_prompts(db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.domain.models import AIPrompt
+
+    rows = db.scalars(select(AIPrompt).order_by(AIPrompt.name, AIPrompt.version)).all()
+    return {
+        "prompts": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "version": p.version,
+                "task_type": p.task_type,
+                "capability_tier": p.capability_tier,
+                "is_active": p.is_active,
+            }
+            for p in rows
+        ]
+    }

@@ -17,10 +17,16 @@ from app.api.routers import (
     assets as assets_router,
 )
 from app.api.routers import (
+    backtest_metrics as backtest_metrics_router,
+)
+from app.api.routers import (
     backtests as backtests_router,
 )
 from app.api.routers import (
     feature_snapshots as feature_snapshots_router,
+)
+from app.api.routers import (
+    features as features_router,
 )
 from app.api.routers import (
     health as health_router,
@@ -191,8 +197,10 @@ def create_app() -> FastAPI:
         strategies_router.router,
         strategy_versions_router.router,
         feature_snapshots_router.router,
+        features_router.router,
         lifecycle_router.router,
         backtests_router.router,
+        backtest_metrics_router.router,
         research_router.router,
         resources_router.router,
         paper_router.router,

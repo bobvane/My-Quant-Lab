@@ -41,6 +41,30 @@ def test_holdings_payload_with_fraction_allocation() -> None:
     assert summary["total_value"] == 1800.0
 
 
+def test_holdings_list_items_with_asset_profile() -> None:
+    """Real Ghostfolio shape: a list of items whose symbol lives in assetProfile."""
+
+    payload = {
+        "holdings": [
+            {
+                "assetProfile": {"symbol": "QQQ", "name": "Invesco QQQ", "currency": "USD"},
+                "quantity": 15,
+                "marketPrice": 500.0,
+                "valueInBaseCurrency": 7500.0,
+                "investment": 6000.0,
+                "allocationInPercentage": 0.2,
+            }
+        ]
+    }
+    holdings = ADAPTER._parse_holdings_payload(payload)
+    assert holdings[0]["symbol"] == "QQQ"
+    assert holdings[0]["name"] == "Invesco QQQ"
+    assert holdings[0]["value"] == 7500.0
+    assert holdings[0]["allocation_pct"] == 20.0
+    summary = ADAPTER._summarise(holdings, accounts_count=0, source="holdings")
+    assert summary["total_value"] == 7500.0
+
+
 def test_holdings_payload_handles_wrapped_root() -> None:
     payload = {"data": {"holdings": {"MSFT": {"symbol": "MSFT", "quantity": 1, "price": 100}}}}
     holdings = ADAPTER._parse_holdings_payload(payload)

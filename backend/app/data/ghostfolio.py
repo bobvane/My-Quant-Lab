@@ -178,7 +178,18 @@ class GhostfolioAdapter:
         for key, item in items:
             if isinstance(item.get("holding"), dict):
                 item = {**item, **item["holding"]}
-            symbol = str(item.get("symbol") or key or "").upper()
+            # Ghostfolio keeps the identity in a nested profile; the symbol is
+            # not a top-level field on holdings items.
+            profile = (
+                item.get("assetProfile")
+                or item.get("symbolProfile")
+                or item.get("SymbolProfile")
+                or item.get("profile")
+                or {}
+            )
+            if not isinstance(profile, dict):
+                profile = {}
+            symbol = str(item.get("symbol") or profile.get("symbol") or key or "").upper()
             if not symbol:
                 continue
             quantity = _to_float(item.get("quantity"))
@@ -194,12 +205,12 @@ class GhostfolioAdapter:
             holdings.append(
                 {
                     "symbol": symbol,
-                    "name": str(item.get("name") or item.get("asset") or symbol),
+                    "name": str(item.get("name") or profile.get("name") or symbol),
                     "quantity": quantity,
                     "price": price,
                     "value": value,
                     "investment": _to_float(item.get("investment")),
-                    "currency": str(item.get("currency") or "USD"),
+                    "currency": str(item.get("currency") or profile.get("currency") or "USD"),
                     "allocation_pct": _as_pct(allocation),
                 }
             )

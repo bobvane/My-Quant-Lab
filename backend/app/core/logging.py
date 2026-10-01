@@ -12,17 +12,27 @@ from app.core.config import settings
 _SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|authorization)\s*[=:]\s*['\"]?([^\s'\",}]+)"
 )
+# Also catches JSON-style "key":"value" with quotes between keyword and colon.
+_SECRET_JSON_PATTERN = re.compile(
+    r"(?i)\"(api[_-]?key|token|secret|password|authorization)\"\s*:\s*\"[^\"]+\""
+)
+
+
+def _redact(text: str) -> str:
+    text = _SECRET_PATTERN.sub(lambda m: f"{m.group(1)}=***", text)
+    return _SECRET_JSON_PATTERN.sub(r'"\1": "***"', text)
 
 
 class RedactingFilter(logging.Filter):
     """Remove secret-looking values from every log record."""
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
-        message = record.getMessage()
-        redacted = _SECRET_PATTERN.sub(lambda m: f"{m.group(1)}=***", message)
-        if redacted != message:
-            record.msg = redacted
+        message = _redact(record.getMessage())
+        if isinstance(record.args, (tuple, dict)) and record.args:
+            record.msg = message
             record.args = ()
+        else:
+            record.msg = message
         return True
 
 
@@ -39,7 +49,7 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = _redact(self.formatException(record.exc_info))
         return json.dumps(payload, ensure_ascii=False)
 
 

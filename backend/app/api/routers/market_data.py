@@ -14,6 +14,7 @@ from app.api.schemas import BarOut, MarketDataSyncRequest
 from app.core.config import settings
 from app.core.db import get_db
 from app.data.market_data_repo import (
+    assess_bars_quality,
     frame_to_bars,
     get_or_create_series,
     load_bars,
@@ -160,7 +161,8 @@ def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_d
     source = _ensure_source(db, provider_name)
     series = get_or_create_series(db, asset=asset, timeframe=payload.timeframe, source_id=source.id)
     inserted = upsert_bars(db, series, frame_to_bars(frame))
-    series.quality_status = "valid" if inserted else series.quality_status
+    quality_status, quality = assess_bars_quality(frame)
+    series.quality_status = quality_status
     db.commit()
     return {
         "symbol": payload.symbol,
@@ -172,6 +174,8 @@ def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_d
         "still_forming_bars": forming_bars,
         "series_start": series.series_start,
         "series_end": series.series_end,
+        "quality_status": quality_status,
+        "quality": quality,
     }
 
 

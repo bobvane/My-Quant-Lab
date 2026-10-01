@@ -12,7 +12,12 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.db import session_scope
-from app.data.market_data_repo import frame_to_bars, get_or_create_series, upsert_bars
+from app.data.market_data_repo import (
+    assess_bars_quality,
+    frame_to_bars,
+    get_or_create_series,
+    upsert_bars,
+)
 from app.data.providers import asset_metadata_for, get_market_data_provider, mark_closed_bars
 from app.domain.models import Asset, MarketDataSource
 from app.notifications.service import notify_pending_signals
@@ -91,7 +96,7 @@ def sync_market_data(symbols: list[str] | None = None) -> dict:
                 db.flush()
             series = get_or_create_series(db, asset=asset, timeframe="1d", source_id=source.id)
             summary[symbol] = upsert_bars(db, series, frame_to_bars(frame))
-            series.quality_status = "valid"
+            series.quality_status, _ = assess_bars_quality(frame)
     return {"provider": provider.name, "watchlist": targets, "inserted": summary}
 
 

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.domain.models import Asset, MarketDataBar, MarketDataSeries
 
 __all__ = [
+    "assess_bars_quality",
     "bars_to_frame",
     "frame_to_bars",
     "get_or_create_series",
@@ -27,6 +28,49 @@ __all__ = [
 ]
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "amount", "is_closed", "source_hash"]
+
+# Daily bars with a bigger jump than this are treated as a data gap. Weekends
+# (2 days) and most holidays (<=4 days) stay below it.
+GAP_THRESHOLD_DAYS = 5
+
+
+def assess_bars_quality(
+    frame: pd.DataFrame, *, gap_threshold_days: int = GAP_THRESHOLD_DAYS
+) -> tuple[str, dict[str, object]]:
+    """Classify a bar frame as ``valid`` / ``partial`` / ``invalid`` (docs/11).
+
+    * invalid  — any bar with non-positive or NaN OHLC, or high < low.
+    * partial  — a hole larger than ``gap_threshold_days`` between consecutive bars.
+    * valid    — everything else.
+    """
+
+    if frame is None or frame.empty:
+        return "unknown", {"bars": 0}
+
+    ohlc = frame[["open", "high", "low", "close"]].astype(float)
+    non_positive = (ohlc <= 0).any(axis=1)
+    high_lt_low = frame["high"].astype(float) < frame["low"].astype(float)
+    nan_rows = ohlc.isna().any(axis=1)
+    invalid_bars = int((non_positive | high_lt_low | nan_rows).sum())
+
+    index = pd.DatetimeIndex(frame.index)
+    if len(index) > 1:
+        deltas = index.to_series().diff().dt.total_seconds() / 86_400.0
+        gaps = int((deltas > gap_threshold_days).sum())
+    else:
+        gaps = 0
+
+    details: dict[str, object] = {
+        "bars": int(len(frame)),
+        "invalid_bars": invalid_bars,
+        "gaps": gaps,
+        "gap_threshold_days": gap_threshold_days,
+    }
+    if invalid_bars:
+        return "invalid", details
+    if gaps:
+        return "partial", details
+    return "valid", details
 
 
 def bars_to_frame(rows: Iterable[MarketDataBar]) -> pd.DataFrame:

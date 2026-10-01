@@ -34,6 +34,8 @@ __all__ = [
     "NotificationConfigOut",
     "NotificationConfigUpdate",
     "NotificationTestOut",
+    "OOSOut",
+    "OOSRequest",
     "PaperAccountCreate",
     "PaperAccountOut",
     "PaperExecuteRequest",
@@ -239,6 +241,26 @@ class WalkForwardOut(BaseModel):
     test_bars: int
     segments: list[dict[str, Any]]
     summary: dict[str, Any]
+
+
+class OOSRequest(BaseModel):
+    """Single train/test split for out-of-sample validation (docs/07 §11)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_version_id: int
+    symbol: str | None = None
+    timeframe: str = "1d"
+    oos_pct: float | None = Field(default=0.2, gt=0.0, lt=1.0)
+    oos_start: str | None = None
+
+
+class OOSOut(BaseModel):
+    split_time: str
+    in_sample_bars: int
+    out_of_sample_bars: int
+    in_sample: dict[str, Any]
+    out_of_sample: dict[str, Any]
 
 
 class PaperAccountCreate(BaseModel):

@@ -86,6 +86,8 @@ API base: `/api/v1`
 
 ## Walk-forward/OOS
 
+`POST /research/oos`  (single holdout split: last N% or from a date)
+
 `POST /research/walk-forward`
 `GET /research/runs/{id}`
 

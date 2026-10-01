@@ -10,7 +10,7 @@ import pandas as pd
 from app.research.engine import run_backtest
 from app.strategies.dsl import StrategySpec
 
-__all__ = ["WalkForwardWindow", "run_walk_forward"]
+__all__ = ["WalkForwardWindow", "run_holdout", "run_walk_forward"]
 
 
 @dataclass(frozen=True)
@@ -116,6 +116,58 @@ def run_walk_forward(
                 sum(1 for r in oos_returns if r > 0) / len(oos_returns) if oos_returns else None
             ),
         },
+    }
+
+
+def run_holdout(
+    spec: StrategySpec,
+    bars: pd.DataFrame,
+    *,
+    oos_pct: float | None = None,
+    oos_start: str | None = None,
+    strategy_version: str = "unversioned",
+    timeframe: str = "1d",
+) -> dict[str, Any]:
+    """Single train/test split for out-of-sample validation (docs/07 §11).
+
+    The test window is either the last ``oos_pct`` of the bars (default 20%) or
+    everything from ``oos_start`` onwards. The same spec is used for both sides;
+    parameters are never fitted on the test window.
+    """
+
+    frame = bars.copy()
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        frame.index = pd.DatetimeIndex(frame["timestamp"])
+    frame = frame.sort_index()
+    total = len(frame)
+    if total < 2:
+        raise ValueError("need at least 2 bars for an out-of-sample split")
+
+    if oos_start:
+        split_ts = pd.Timestamp(oos_start)
+        if split_ts.tzinfo is None and frame.index.tz is not None:
+            split_ts = split_ts.tz_localize(frame.index.tz)
+        train = frame.loc[frame.index < split_ts]
+        test = frame.loc[frame.index >= split_ts]
+    else:
+        pct = 0.2 if oos_pct is None else float(oos_pct)
+        if not 0.0 < pct < 1.0:
+            raise ValueError("oos_pct must be between 0 and 1 (exclusive)")
+        cut = max(1, int(round(total * (1.0 - pct))))
+        train = frame.iloc[:cut]
+        test = frame.iloc[cut:]
+
+    if len(train) == 0 or len(test) == 0:
+        raise ValueError("the out-of-sample split leaves an empty train or test window")
+
+    in_sample = run_backtest(spec, train, strategy_version=strategy_version, timeframe=timeframe)
+    out_sample = run_backtest(spec, test, strategy_version=strategy_version, timeframe=timeframe)
+    return {
+        "split_time": test.index[0].isoformat(),
+        "in_sample_bars": len(train),
+        "out_of_sample_bars": len(test),
+        "in_sample": _summarise(in_sample),
+        "out_of_sample": _summarise(out_sample),
     }
 
 

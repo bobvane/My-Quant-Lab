@@ -380,3 +380,19 @@ ADR，保证结果可复现、可解释。
 **理由**：Phase 3 的验收是「能测试连接 / 能同步活动与资产 / 原数据不被修改 /
 失败有明确错误」。此前持仓聚合在真实数据上直接崩，`Signal.portfolio_context_json`
 从不写入，证据层占比恒为 0。修好解析并落地组合上下文后，这三项才成立。
+
+## ADR-034：OOS 单次留出（最后 N% 或指定日期）
+
+**决策**：
+1. 新增 `research/walk_forward.run_holdout`：把序列切成 in-sample 与
+   out-of-sample 两段。测试窗 = 最后 `oos_pct`（默认 20%）或 `oos_start` 之后
+   的全部 bar（两者取其一，`oos_start` 优先）。
+2. 两段都跑同一份策略 spec（不做参数拟合），分别返回各段摘要
+   （total_return / max_drawdown / sharpe / win_rate / trades / result_hash）。
+3. 新增 `POST /research/oos`；切分不合法（空窗、pct 越界）返回 422；
+   写入 `oos_completed` 审计事件。
+4. 与滚动 walk-forward 并存：walk-forward 看稳健性，holdout 看「最后一段」的
+   样本外表现。
+
+**理由**：docs/07 §11 要求「用户可以指定最后 N% 或指定日期为 OOS」。此前只有
+滚动 walk-forward，无法按用户指定的时间点做单次留出。补齐后研究流程完整。

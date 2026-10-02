@@ -228,6 +228,8 @@ onMounted(load)
             <th>方向</th>
             <th>周期</th>
             <th>K 线时间</th>
+            <th>入场时间</th>
+            <th>出场时间</th>
             <th>结果</th>
             <th>PnL%</th>
             <th>MAE%</th>
@@ -241,6 +243,8 @@ onMounted(load)
             <td>{{ o.direction }}</td>
             <td>{{ o.timeframe }}</td>
             <td class="muted">{{ formatDateTime(String(o.bar_timestamp)) }}</td>
+            <td class="muted">{{ o.entry_time ? formatDateTime(String(o.entry_time)) : '—' }}</td>
+            <td class="muted">{{ o.exit_time ? formatDateTime(String(o.exit_time)) : '—' }}</td>
             <td>{{ o.outcome_state }}</td>
             <td :class="toneOf(o.pnl_pct)">{{ o.pnl_pct != null ? formatNumber(o.pnl_pct, 3) + '%' : '—' }}</td>
             <td class="muted">{{ o.mae_pct != null ? formatNumber(o.mae_pct, 3) + '%' : '—' }}</td>

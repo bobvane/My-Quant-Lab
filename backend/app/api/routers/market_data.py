@@ -7,7 +7,7 @@ import logging
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import BarOut, MarketDataSyncRequest
@@ -27,7 +27,7 @@ from app.data.providers import (
     get_market_data_provider,
     mark_closed_bars,
 )
-from app.domain.models import Asset, MarketDataSeries, MarketDataSource
+from app.domain.models import Asset, MarketDataBar, MarketDataSeries, MarketDataSource
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/market-data", tags=["market-data"])
@@ -87,6 +87,36 @@ def list_series(
         }
         for row in rows
     ]
+
+
+@router.get("/series/{series_id}", summary="Get one market data series")
+def get_series(series_id: int, db: Session = Depends(get_db)) -> dict:
+    row = db.get(MarketDataSeries, series_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="market data series not found")
+    bars = (
+        db.scalar(
+            select(func.count())
+            .select_from(MarketDataBar)
+            .where(MarketDataBar.series_id == series_id)
+        )
+        or 0
+    )
+    return {
+        "id": row.id,
+        "asset_id": row.asset_id,
+        "timeframe": row.timeframe,
+        "source_id": row.source_id,
+        "dataset_version": row.dataset_version,
+        "quality_status": row.quality_status,
+        "adjusted": row.adjusted,
+        "timezone": row.timezone,
+        "series_start": row.series_start,
+        "series_end": row.series_end,
+        "last_sync_at": row.last_sync_at,
+        "content_hash": row.content_hash,
+        "bar_count": int(bars),
+    }
 
 
 @router.get("/series/{series_id}/bars", response_model=list[BarOut], summary="List bars")

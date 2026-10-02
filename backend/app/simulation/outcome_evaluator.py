@@ -108,6 +108,8 @@ def evaluate_pending_outcomes(
         outcome = SignalOutcome(
             signal_id=signal.id,
             outcome_state=outcome_state,
+            entry_time=signal_ts,
+            exit_time=future.index[-1],
             entry_price=signal_close,
             exit_price=close_end,
             pnl_pct=round(pnl_pct, 8),

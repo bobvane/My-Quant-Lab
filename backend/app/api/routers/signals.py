@@ -95,6 +95,8 @@ def list_outcomes(
             "direction": signal.direction,
             "timeframe": signal.timeframe,
             "bar_timestamp": signal.bar_timestamp,
+            "entry_time": outcome.entry_time,
+            "exit_time": outcome.exit_time,
             "entry_price": float(outcome.entry_price) if outcome.entry_price else None,
             "exit_price": float(outcome.exit_price) if outcome.exit_price else None,
             "pnl_pct": float(outcome.pnl_pct) if outcome.pnl_pct is not None else None,

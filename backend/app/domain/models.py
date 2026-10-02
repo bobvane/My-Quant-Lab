@@ -466,6 +466,8 @@ class SignalOutcome(Base):
         ForeignKey("signals.id", ondelete="CASCADE"), unique=True, nullable=False
     )
     outcome_state: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    entry_time: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_time: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     entry_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     exit_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     pnl_pct: Mapped[Decimal | None] = mapped_column(Numeric(16, 8))

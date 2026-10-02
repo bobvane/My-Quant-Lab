@@ -88,6 +88,10 @@ def test_outcome_evaluates_after_enough_bars(db_session) -> None:
     assert outcome.mae is not None and outcome.mae >= 0
     assert outcome.mfe is not None and outcome.mfe >= 0
     assert outcome.outcome_state == "profitable"
+    # docs/11: the outcome records when the window opened and closed.
+    assert outcome.entry_time is not None
+    assert outcome.exit_time is not None
+    assert outcome.exit_time > outcome.entry_time
 
 
 def test_second_call_is_idempotent(db_session) -> None:

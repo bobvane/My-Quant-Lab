@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import (
+    MonteCarloOut,
+    MonteCarloRequest,
     OOSOut,
     OOSRequest,
     SensitivityOut,
@@ -19,7 +21,14 @@ from app.api.schemas import (
 from app.core.db import get_db
 from app.data.market_data_repo import load_bars
 from app.data.strategy_service import load_spec, record_audit
-from app.domain.models import Asset, MarketDataSeries, StrategyVersion
+from app.domain.models import (
+    Asset,
+    BacktestRun,
+    BacktestTrade,
+    MarketDataSeries,
+    StrategyVersion,
+)
+from app.research.monte_carlo import run_monte_carlo
 from app.research.sensitivity import run_sensitivity
 from app.research.walk_forward import run_holdout, run_walk_forward
 
@@ -205,3 +214,81 @@ def sensitivity(payload: SensitivityRequest, db: Session = Depends(get_db)) -> S
     )
     db.commit()
     return SensitivityOut(**outcome)
+
+
+@router.post(
+    "/monte-carlo",
+    response_model=MonteCarloOut,
+    summary="Resample a backtest's trades (Monte Carlo)",
+)
+def monte_carlo(payload: MonteCarloRequest, db: Session = Depends(get_db)) -> MonteCarloOut:
+    """Bootstrap a completed backtest's trades into a distribution (docs/22).
+
+    Reads the trades already stored for the run — it does **not** re-run the
+    backtest, so the distribution is anchored to the exact result being examined.
+    This is a resampling of history, not a forecast.
+    """
+
+    run = db.get(BacktestRun, payload.backtest_run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+    if run.status != "completed":
+        raise HTTPException(
+            status_code=422,
+            detail=f"backtest run {run.id} is '{run.status}'; only completed runs can be resampled",
+        )
+
+    rows = db.scalars(select(BacktestTrade).where(BacktestTrade.backtest_run_id == run.id)).all()
+    trades = [{"pnl": float(r.pnl)} for r in rows if r.pnl is not None]
+    if not trades:
+        raise HTTPException(
+            status_code=422,
+            detail="this backtest produced no closed trades, so there is nothing to resample",
+        )
+
+    execution = run.execution_model_json or {}
+    try:
+        initial_capital = float(execution.get("initial_capital") or 0.0)
+    except (TypeError, ValueError):
+        initial_capital = 0.0
+    if initial_capital <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="the backtest run does not record a positive initial_capital",
+        )
+
+    # Annualisation must use the timeframe the run actually used, not something the
+    # caller asserts — BacktestRun has no timeframe column, so read it from the
+    # dataset series it ran against.
+    series = db.get(MarketDataSeries, run.dataset_version_id)
+    timeframe = series.timeframe if series is not None else "1d"
+
+    try:
+        outcome = run_monte_carlo(
+            trades,
+            initial_capital=initial_capital,
+            runs=payload.runs,
+            trades_per_run=payload.trades_per_run,
+            seed=payload.seed,
+            timeframe=timeframe,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="monte_carlo_completed",
+        entity_type="backtest_run",
+        entity_id=str(run.id),
+        action="run",
+        payload={
+            "runs": payload.runs,
+            "seed": payload.seed,
+            "method": outcome["method"],
+            "timeframe": timeframe,
+            "observed_trades": outcome["summary"]["observed_trades"],
+            "probability_of_profit": outcome["summary"]["probability_of_profit"],
+        },
+    )
+    db.commit()
+    return MonteCarloOut(**outcome)

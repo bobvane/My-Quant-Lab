@@ -477,3 +477,35 @@ ADR，保证结果可复现、可解释。
 4. **`backend/pyproject.toml` 与镜像的关系**：该文件是 pytest/ruff/mypy 配置的唯一来源，但 `Dockerfile.backend` 只装 `requirements.txt`。明确它是开发期配置并写入文档，避免"改了 pyproject 以为镜像行为会变"。
 
 **理由**：v1.0.0 是一个已验证的稳定基线。继续推进时先修一致性与体验问题、再开结构性能力，且每个大版本都停在 NAS 上做一次真实端到端验证（用户明确要求的节奏）。
+
+## ADR-043：Monte Carlo 采用交易级 IID Bootstrap（docs/22）
+
+**背景**：docs/15 把 Monte Carlo 列入 P2。一次回测只是**一条**历史路径，报告里的收益率是单次抽样而不是期望值；结构性上看不到「同一批交易换个顺序会不会回撤更深」。
+
+**决策**：
+
+1. 新增 `app/research/monte_carlo.py` + `POST /research/monte-carlo`：从一次**已完成**回测已落库的交易中有放回抽样，复利成权益路径，回报分位数、盈利概率、清零概率与尾部风险。
+2. **不重跑回测**：只读该次运行已有的交易，使分布锚定在被考察的那份结果上。也因此不需要行情数据，接口是纯计算。
+3. **方法在响应里自述**：`method = "trade_level_iid_bootstrap"`。这是对历史的再抽样，不是价格模型也不是预测，消费方不应把它当成预测。
+4. **复利语义写清楚**：一笔 `+100` 在 10,000 本金上视为 +1%，路径是这些收益率按抽到的顺序累乘。（早期草稿写成 `prev * (1 + pnl/prev)`，代数上退化为 `prev + pnl`，即完全不复利——已修正并用「只有盈利交易时收益必须等于各笔收益率的乘积」的测试锁死。）
+5. **样本过小必须自曝**：观测交易少于 `MIN_TRADES_FOR_CONFIDENCE = 20` 时写入 `warnings`。只交易过 2 次的策略，其分布就是基于 2 个观测构建的，报告不能装作有精度。
+6. `runs` 上限 `MAX_RUNS = 5000`，超出 → 422；相同 `seed` 必然得到相同分布。
+7. 年化周期取自该次回测实际使用的数据集（`MarketDataSeries.timeframe`），**不接受调用方声明**——`BacktestRun` 没有 timeframe 列，让调用方传入只会让 Sharpe 与实际不一致。
+8. 每次运行写审计事件 `monte_carlo_completed`。
+
+**理由**：交易级 bootstrap 的假设少、成本可控（毫秒级，适合 NAS 同步请求），并且直接回答「这个结果有多脆弱」。它明确承认低估连续亏损（交易并非独立），这一点写进 `docs/22` 而不是藏在实现里。
+
+## ADR-044：可选监控写入失败不得破坏主流程
+
+**背景**：回测成功后会记录一条 `resource_events` 资源事件。`record_resource_event` 内部 `db.flush()`，一旦失败（例如 SQLite 下 `resource_events.id` 为 `BIGINT` 不自增而触发 NOT NULL），会话进入 rollback-pending。原代码 `except Exception: logger.warning(...)` **吞掉异常却不回滚**，于是整个请求随后抛 `PendingRollbackError`，一次本已完成的回测被报成 500。
+
+**决策**：
+
+1. 资源事件的写入**移到回测提交之后**，并拥有自己的提交/回滚边界。
+2. 失败时显式 `db.rollback()`，把影响面限制在那一条监控记录上。
+3. 提交先行的意义：rollback 最多只丢弃监控行，**永远不可能丢弃回测结果**（原先若直接在结果写入前 rollback，会连本次运行一起丢掉）。
+4. 新增回归测试：monkeypatch 让 `record_resource_event` 抛错，断言回测仍返回 200 `completed`，且**后续请求的会话依然可用**。
+
+**理由**：可观测性是可选装饰，不能成为关键路径的故障点。原实现的失败模式恰好相反：最不重要的一次写入决定了整个请求的成败。
+
+**已知的独立问题**：`alembic/versions/0004_resource_monitor_tables.py` 用裸 `sa.BigInteger()` 建 `resource_events.id`，在 SQLite 上 `BIGINT PRIMARY KEY` 不自增（模型侧 `_BigIntegerPK` 用 `with_variant(Integer, "sqlite")`，但迁移没有），因此**纯 SQLite 环境**下资源事件必然写入失败；生产是 PostgreSQL，未触发。ADR-044 让该失败不再扩散。迁移一旦执行便不应改写（会与已存在的库产生分叉），故不动 0004。

@@ -296,6 +296,30 @@ class SensitivityOut(BaseModel):
     stable: bool | None = None
 
 
+class MonteCarloRequest(BaseModel):
+    """Resample a completed backtest's trades (docs/22, ADR-043).
+
+    Uses the trades already stored for ``backtest_run_id`` — no new backtest is run.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    backtest_run_id: int
+    runs: int = Field(default=1000, ge=1, le=5000)
+    trades_per_run: int | None = Field(default=None, ge=1)
+    seed: int = 0
+
+
+class MonteCarloOut(BaseModel):
+    monte_carlo_version: str
+    seed: int
+    timeframe: str
+    method: str
+    summary: dict[str, Any]
+    sample_equity_paths: list[list[float]]
+    warnings: list[str]
+
+
 class PaperAccountCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

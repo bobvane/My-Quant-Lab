@@ -40,7 +40,11 @@ boundary and the no-lookahead / immutability guarantees.
 | Windows/UNC 开发脚本 | DONE | `scripts/Invoke-Tests.ps1`、`Invoke-FrontendChecks.ps1`、`Test-NasDeployment.ps1` |
 | 真实浏览器验证脚本 | DONE | `scripts/Test-WebUi.ps1` 用无头 Chrome 断言 Vue 实际挂载与视图渲染（服务端返回 index.html 不能证明 SPA 能跑） |
 | 清理 `StarletteDeprecationWarning`（httpx） | DONE | 加 `httpx2` 为**测试期**依赖（starlette TestClient 首选它）；应用自身 HTTP 调用仍用 httpx |
-| v2 结构性能力（Monte Carlo / 组合级仓位 / Ensemble） | TODO | 需新增 ADR 与 fixtures（ADR-037 §4） |
+| CI action 版本对齐 | DONE | `upload-artifact` v4→v7（消除 Node 20 弃用告警）、`checkout` v5→v7；其余已是各自最新大版本 |
+| v2：Monte Carlo 重采样 | DONE | ADR-043 / `docs/22`。交易级 IID bootstrap、分位数与概率、扇形图；纯描述、非预测 |
+| 监控写入失败不再破坏主流程 | DONE | ADR-044。可选监控写入失败会污染会话，导致已完成的回测被报 500；已改为提交后独立事务并回滚 |
+| v2：组合级仓位管理（Portfolio-aware sizing） | TODO | 需新增 ADR 与 fixtures |
+| v2：策略 Ensemble | TODO | 需新增 ADR 与 fixtures |
 
 
 ## Phase 0 — Foundation

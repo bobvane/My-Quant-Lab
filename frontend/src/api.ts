@@ -155,8 +155,43 @@ export interface GithubImportResult {
   warnings: Array<Record<string, unknown>>
 }
 
-/** One evaluated grid point of a sensitivity sweep (docs/21). */
-export interface SensitivityPoint {
+/** Percentile block of a Monte Carlo distribution (docs/22). */
+export interface MonteCarloPercentiles {
+  p5: number | null
+  p25: number | null
+  p50: number | null
+  p75: number | null
+  p95: number | null
+}
+
+export interface MonteCarloResult {
+  monte_carlo_version: string
+  seed: number
+  timeframe: string
+  /** Named so consumers cannot mistake resampling for a forecast. */
+  method: string
+  summary: {
+    runs: number
+    observed_trades: number
+    trades_per_run: number
+    initial_capital: number
+    final_equity: MonteCarloPercentiles
+    total_return: MonteCarloPercentiles
+    max_drawdown: MonteCarloPercentiles
+    sharpe: MonteCarloPercentiles
+    sortino: MonteCarloPercentiles
+    probability_of_profit: number
+    probability_of_loss: number
+    probability_of_ruin: number
+    expected_total_return: number
+    expected_max_drawdown: number
+    worst_max_drawdown: number
+  }
+  sample_equity_paths: number[][]
+  warnings: string[]
+}
+
+/** One evaluated grid point of a sensitivity sweep (docs/21). */export interface SensitivityPoint {
   parameters: Record<string, number | string>
   objective: number | null
   metrics: Record<string, number | null>
@@ -457,6 +492,18 @@ export const api = {
         timeframe,
         grid,
         metric,
+      }),
+    }),
+  // Monte Carlo resampling of a stored backtest's trades (docs/22). Resamples
+  // history; it is not a forecast, and it never re-runs the backtest.
+  monteCarlo: (backtestRunId: number, runs = 1000, seed = 0, tradesPerRun?: number) =>
+    request<MonteCarloResult>('/research/monte-carlo', {
+      method: 'POST',
+      body: JSON.stringify({
+        backtest_run_id: backtestRunId,
+        runs,
+        seed,
+        trades_per_run: tradesPerRun,
       }),
     }),
   signals: (state?: string, limit = 100, symbol?: string, offset = 0) =>

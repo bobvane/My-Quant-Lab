@@ -6,11 +6,13 @@ import {
   type BacktestDetail,
   type BacktestSummary,
   type ExplainResult,
+  type MonteCarloResult,
   type SensitivityResult,
   type Strategy,
   type StrategyVersion,
 } from '@/api'
 import EquityChart from '@/components/EquityChart.vue'
+import MonteCarloChart from '@/components/MonteCarloChart.vue'
 import MultiLineChart from '@/components/MultiLineChart.vue'
 import SensitivityChart from '@/components/SensitivityChart.vue'
 import StatCard from '@/components/StatCard.vue'
@@ -103,6 +105,34 @@ function seedGridFromVersion() {
 // Re-seed whenever the selection changes so the default grid always matches the
 // strategy in play; a stale default would just produce a 422 ("not declared").
 watch(versionId, seedGridFromVersion)
+
+// Monte Carlo resampling of the selected backtest (docs/22).
+const mcResult = ref<MonteCarloResult | null>(null)
+const mcRuns = ref(1000)
+const mcSeed = ref(0)
+const mcRunning = ref(false)
+
+async function runMonteCarlo() {
+  error.value = ''
+  mcResult.value = null
+  const runId = detail.value?.id
+  if (runId === undefined || runId === null) {
+    error.value = '请先在「回测记录」里选择一次已完成回测'
+    return
+  }
+  if (mcRuns.value < 1 || mcRuns.value > 5000) {
+    error.value = '重采样次数需在 1–5000 之间'
+    return
+  }
+  mcRunning.value = true
+  try {
+    mcResult.value = await api.monteCarlo(runId, mcRuns.value, mcSeed.value)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    mcRunning.value = false
+  }
+}
 function exportTradesCsv() {
   const trades = detail.value?.trades ?? []
   if (!trades.length) return
@@ -684,6 +714,122 @@ onMounted(async () => {
         <p class="muted" style="margin-top: 6px">
           标绿 = 目标指标最高的点，标红 = 最低的点，均为排序结果而非推荐。
           <code>N/A</code> 表示该点样本不足以计算该指标。
+        </p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>Monte Carlo 重采样</h3>
+      <p class="muted">
+        把当前所选回测的<b>已成交交易</b>有放回地重采样许多次，看结果的分布而不是单条历史路径。
+        同一批交易换个顺序就可能回撤更深——这正是单次回测看不到的东西。
+        <b>这是对历史的再抽样，不是预测</b>：它假定交易互相独立、同分布（真实交易存在自相关，
+        因此会低估连续亏损的概率），且只用该策略自己已实现的交易。
+      </p>
+      <div class="row">
+        <input
+          v-model.number="mcRuns"
+          type="number"
+          min="1"
+          max="5000"
+          step="100"
+          style="max-width: 150px"
+          placeholder="重采样次数"
+        />
+        <input
+          v-model.number="mcSeed"
+          type="number"
+          step="1"
+          style="max-width: 150px"
+          placeholder="随机种子"
+        />
+        <button :disabled="mcRunning || !detail" @click="runMonteCarlo">
+          {{ mcRunning ? '计算中…' : '运行 Monte Carlo' }}
+        </button>
+        <span class="muted">
+          {{ detail ? `基于回测 #${detail.id}` : '先选择一次已完成回测' }} ·
+          相同种子必然得到相同分布
+        </span>
+      </div>
+
+      <div v-if="mcResult" style="margin-top: 12px">
+        <p v-for="w in mcResult.warnings" :key="w" class="notice">{{ w }}</p>
+
+        <div class="grid cols-4">
+          <StatCard
+            label="盈利概率"
+            :value="formatPercent(mcResult.summary.probability_of_profit)"
+            :tone="mcResult.summary.probability_of_profit >= 0.5 ? 'pos' : 'neg'"
+            :sub="`亏损失概率 ${formatPercent(mcResult.summary.probability_of_loss)}`"
+          />
+          <StatCard
+            label="收益中位数"
+            :value="formatPercent(mcResult.summary.total_return.p50)"
+            :tone="toneOf(mcResult.summary.total_return.p50)"
+            :sub="`p5 ${formatPercent(mcResult.summary.total_return.p5)} · p95 ${formatPercent(mcResult.summary.total_return.p95)}`"
+          />
+          <StatCard
+            label="回撤中位数"
+            :value="formatPercent(mcResult.summary.max_drawdown.p50)"
+            :tone="toneOf(mcResult.summary.max_drawdown.p50)"
+            :sub="`最差路径 ${formatPercent(mcResult.summary.worst_max_drawdown)}`"
+          />
+          <StatCard
+            label="清零概率"
+            :value="formatPercent(mcResult.summary.probability_of_ruin)"
+            :tone="mcResult.summary.probability_of_ruin > 0 ? 'neg' : 'plain'"
+            sub="权益归零的路径占比"
+          />
+        </div>
+
+        <MonteCarloChart
+          :paths="mcResult.sample_equity_paths"
+          :initial-capital="mcResult.summary.initial_capital"
+          height="320px"
+        />
+
+        <table style="margin-top: 10px">
+          <thead>
+            <tr>
+              <th>指标</th>
+              <th>p5</th>
+              <th>p25</th>
+              <th>p50</th>
+              <th>p75</th>
+              <th>p95</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="muted">总收益</td>
+              <td>{{ formatPercent(mcResult.summary.total_return.p5) }}</td>
+              <td>{{ formatPercent(mcResult.summary.total_return.p25) }}</td>
+              <td>{{ formatPercent(mcResult.summary.total_return.p50) }}</td>
+              <td>{{ formatPercent(mcResult.summary.total_return.p75) }}</td>
+              <td>{{ formatPercent(mcResult.summary.total_return.p95) }}</td>
+            </tr>
+            <tr>
+              <td class="muted">最大回撤</td>
+              <td>{{ formatPercent(mcResult.summary.max_drawdown.p5) }}</td>
+              <td>{{ formatPercent(mcResult.summary.max_drawdown.p25) }}</td>
+              <td>{{ formatPercent(mcResult.summary.max_drawdown.p50) }}</td>
+              <td>{{ formatPercent(mcResult.summary.max_drawdown.p75) }}</td>
+              <td>{{ formatPercent(mcResult.summary.max_drawdown.p95) }}</td>
+            </tr>
+            <tr>
+              <td class="muted">夏普</td>
+              <td>{{ formatNumber(mcResult.summary.sharpe.p5) }}</td>
+              <td>{{ formatNumber(mcResult.summary.sharpe.p25) }}</td>
+              <td>{{ formatNumber(mcResult.summary.sharpe.p50) }}</td>
+              <td>{{ formatNumber(mcResult.summary.sharpe.p75) }}</td>
+              <td>{{ formatNumber(mcResult.summary.sharpe.p95) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted" style="margin-top: 6px">
+          方法 <code>{{ mcResult.method }}</code> · 观测交易 {{ mcResult.summary.observed_trades }} 笔 ·
+          每次 {{ mcResult.summary.trades_per_run }} 笔 · {{ mcResult.summary.runs }} 条路径 ·
+          seed {{ mcResult.seed }} · 时间周期 {{ mcResult.timeframe }}
         </p>
       </div>
     </div>

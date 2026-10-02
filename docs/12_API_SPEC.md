@@ -110,6 +110,29 @@ API base: `/api/v1`
 - 目标指标未定义时该点 `objective = null`，并从排序与统计中剔除（未知不当 0）。
 - 每次扫描写审计事件 `sensitivity_completed`。
 
+## Monte Carlo
+
+`POST /research/monte-carlo`
+
+对一次**已完成**回测已落库的交易做有放回重采样，报告结果分布。
+
+参数：`backtest_run_id`（已存储的回测运行）、`runs`（1–5000，默认 1000）、
+`seed`（默认 0）、`trades_per_run`（可选，默认等于观测笔数）。
+
+返回：`method`、`summary`（`final_equity`/`total_return`/`max_drawdown`/`sharpe`/`sortino`
+的 p5/p25/p50/p75/p95，以及 `probability_of_profit`/`probability_of_loss`/
+`probability_of_ruin`/`expected_total_return`/`expected_max_drawdown`/`worst_max_drawdown`）、
+`sample_equity_paths`（最多 100 条，供扇形图）、`warnings`。
+
+约束与语义：
+
+- **不重跑回测**：只读该次运行已有的交易，所以分布锚定在被考察的那份结果上。
+- `method = trade_level_iid_bootstrap`：对历史的再抽样，**不是预测**。
+- 交易假定独立同分布，因此**低估**连续亏损概率；观测笔数 < 20 时写入 `warnings`。
+- 运行不存在 → 404；状态非 completed / 无已成交交易 / 无正初始资金 / runs 越界 → 422。
+- 相同 seed 必然得到相同分布；每次运行写审计事件 `monte_carlo_completed`。
+- 年化周期取自该次回测的数据集周期，不接受调用方声明。
+
 ## Paper Accounts
 
 `GET /paper/accounts`

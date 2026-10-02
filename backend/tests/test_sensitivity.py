@@ -13,6 +13,7 @@ import json
 import pandas as pd
 import pytest
 
+from app.research.engine import run_backtest
 from app.research.sensitivity import (
     MAX_GRID_POINTS,
     expand_grid,
@@ -122,6 +123,45 @@ def test_sweep_over_multiple_axes(sample_bars: pd.DataFrame) -> None:
     )
     assert report["grid_points"] == 4
     assert set(report["axes"]) == {"trend_period", "slow_period"}
+
+    # Axis order is part of the contract: the *last* grid key varies fastest
+    # (itertools.product semantics). The UI derives its heatmap axes from this, so a
+    # silent reordering would transpose the chart.
+    assert [p["parameters"] for p in report["points"]] == [
+        {"trend_period": 10, "slow_period": 30},
+        {"trend_period": 10, "slow_period": 60},
+        {"trend_period": 20, "slow_period": 30},
+        {"trend_period": 20, "slow_period": 60},
+    ]
+
+
+def test_identical_metrics_with_different_parameters_still_change_the_hash(
+    sample_bars: pd.DataFrame,
+) -> None:
+    """A different configuration must hash differently even if the numbers match.
+
+    A coarse parameter can leave the trade list untouched (the same crossings happen
+    either way) while still being a different computation. The hash covers the
+    *effective parameters*, so it must distinguish them — otherwise two genuinely
+    different configurations would look like a single reproducible result.
+    """
+
+    dsl = copy.deepcopy(DSL)
+    dsl["indicators"].append({"id": "slow", "type": "SMA", "period_ref": "slow_period"})
+    dsl["parameters"]["slow_period"] = 30
+    spec = StrategySpec.model_validate(dsl)
+
+    report = run_sensitivity(
+        spec, sample_bars, grid={"trend_period": [2], "slow_period": [30, 31, 32]}
+    )
+    first = run_backtest(spec, sample_bars, parameters={"trend_period": 2, "slow_period": 30})
+    second = run_backtest(spec, sample_bars, parameters={"trend_period": 2, "slow_period": 31})
+
+    assert len({p["result_hash"] for p in report["points"]}) == 3, (
+        "distinct parameter sets collapsed to one hash"
+    )
+    assert first.result_hash != second.result_hash
+    assert report["points"][0]["result_hash"] == first.result_hash
 
 
 def test_sweep_rejects_unknown_grid_axis(sample_bars: pd.DataFrame) -> None:

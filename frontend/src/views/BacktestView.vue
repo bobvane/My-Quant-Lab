@@ -40,7 +40,7 @@ const wfRunning = ref(false)
 // Parameter sensitivity sweep (docs/21). Descriptive only — the UI ranks points but
 // never presents a "recommended" parameter set.
 const sensResult = ref<SensitivityResult | null>(null)
-const sensGridText = ref('trend_period:5,10,20,40,60')
+const sensGridText = ref('')
 const sensMetric = ref('sharpe')
 const sensRunning = ref(false)
 const SENS_METRICS = [
@@ -55,6 +55,54 @@ const SENS_METRICS = [
   'number_of_trades',
   'exposure',
 ]
+
+/**
+ * Parameters a strategy actually declares, with the values its indicators read via
+ * `period_ref`. A parameter no `period_ref` points at is decorative: sweeping it
+ * produces identical points, so it is deliberately excluded.
+ */
+const sweepableParams = computed<Array<{ name: string; current: number | null }>>(() => {
+  const v = versions.value.find((x) => x.id === versionId.value)
+  if (!v) return []
+  const dsl = (v.dsl ?? {}) as Record<string, any>
+  const declared = (dsl.parameters ?? {}) as Record<string, unknown>
+  const refs = new Set<string>()
+  for (const ind of (dsl.indicators ?? []) as Array<Record<string, any>>) {
+    if (typeof ind?.period_ref === 'string') refs.add(ind.period_ref)
+  }
+  return [...refs]
+    .filter((name) => name in declared)
+    .map((name) => {
+      const raw = declared[name]
+      return { name, current: typeof raw === 'number' ? raw : null }
+    })
+    .sort((a, b) => a.name.localeCompare(b.name))
+})
+
+/** A small sweep range that brackets the declared value; never goes below 2. */
+function sensitivityAxis(name: string, current: number | null, label: string): string {
+  if (current !== null && current >= 1) {
+    const base = Math.max(2, Math.round(current))
+    const values = [Math.max(2, base - 5), base, base + 5, base + 10]
+    return `${name}:${[...new Set(values)].sort((a, b) => a - b).join(',')}`
+  }
+  return `${name}:${label}`
+}
+
+function seedGridFromVersion() {
+  const params = sweepableParams.value
+  if (!params.length) {
+    sensGridText.value = ''
+    return
+  }
+  sensGridText.value = params
+    .map((p) => sensitivityAxis(p.name, p.current, '5,10,20,40'))
+    .join('; ')
+}
+
+// Re-seed whenever the selection changes so the default grid always matches the
+// strategy in play; a stale default would just produce a 422 ("not declared").
+watch(versionId, seedGridFromVersion)
 function exportTradesCsv() {
   const trades = detail.value?.trades ?? []
   if (!trades.length) return
@@ -540,18 +588,33 @@ onMounted(async () => {
         <input
           v-model="sensGridText"
           style="min-width: 280px; flex: 1 1 320px"
-          placeholder="trend_period:5,10,20,40,60（多轴用分号：fast:5,10; slow:20,40）"
+          :placeholder="sweepableParams.length ? '' : 'fast_period:5,10,20,40'"
         />
         <select v-model="sensMetric" style="max-width: 170px">
           <option v-for="m in SENS_METRICS" :key="m" :value="m">{{ m }}</option>
         </select>
-        <button :disabled="sensRunning || versionId === null" @click="runSensitivity">
+        <button
+          :disabled="sensRunning || versionId === null || !sensGridText.trim()"
+          @click="runSensitivity"
+        >
           {{ sensRunning ? '计算中…' : '运行敏感性分析' }}
         </button>
         <span class="muted">
           {{ sensPointCount }} 个网格点<template v-if="sensPointCount > 144">（超过上限 144）</template>
         </span>
       </div>
+      <p v-if="versionId !== null && !sweepableParams.length" class="muted" style="margin-top: 6px">
+        当前策略版本没有可扫描的参数：需要用 <code>period_ref</code> 引用
+        <code>parameters</code> 里的键（例如 <code>indicators[].period_ref = "fast_period"</code>
+        对应 <code>parameters.fast_period</code>）。上面的输入框可手动填写
+        <code>参数名:值1,值2</code>。
+      </p>
+      <p v-else-if="sweepableParams.length" class="muted" style="margin-top: 6px">
+        已按该版本声明的参数自动填入：
+        <code v-for="p in sweepableParams" :key="p.name" style="margin-right: 6px">
+          {{ p.name }}={{ p.current ?? '—' }}
+        </code>
+      </p>
 
       <div v-if="sensResult" style="margin-top: 12px">
         <div class="grid cols-4">

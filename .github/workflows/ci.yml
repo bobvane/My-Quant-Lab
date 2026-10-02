@@ -46,7 +46,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install "pytest>=8.3" "pytest-cov>=6.0" "ruff>=0.8"
+          # httpx2 is test-only: starlette's TestClient prefers it and otherwise
+          # emits a StarletteDeprecationWarning on every client-fixture run. The
+          # application's own HTTP calls keep using httpx.
+          pip install "pytest>=8.3" "pytest-cov>=6.0" "ruff>=0.8" "httpx2>=2.13"
 
       - name: Ruff lint
         run: ruff check app tests

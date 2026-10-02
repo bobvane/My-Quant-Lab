@@ -34,11 +34,12 @@ boundary and the no-lookahead / immutability guarantees.
 |---|---|---|
 | 参数覆盖真正生效 + 结果哈希只覆盖有效参数 | DONE | ADR-040。修复「哈希说谎」：override 曾被折进哈希却从未应用 |
 | 参数敏感性分析（后端 + API） | DONE | ADR-041 / `docs/21`。网格扫描、统计、稳健性判定、审计事件 |
-| 参数敏感性分析（前端热力图） | DONE | 回测实验室接入，1 轴折线 / 2 轴热力图，并列交易数防「靠不交易变好看」 |
+| 参数敏感性分析（前端热力图） | DONE | 回测实验室接入，1 轴折线 / 2 轴热力图，并列交易数防「靠不交易变好看」；网格按所选版本**已声明参数自动填入**（v1.1.x 补） |
 | 示例策略参数化（`period_ref`） | DONE | 两个示例原先的规则引用了**不存在的列**（`ema20`），实际被当作常量 20；已修正并加回归测试 |
 | 行情 provider 语义写入文档 | DONE | README 说明换 provider 后演示代码必然 0 根 K 线 |
 | Windows/UNC 开发脚本 | DONE | `scripts/Invoke-Tests.ps1`、`Invoke-FrontendChecks.ps1`、`Test-NasDeployment.ps1` |
-| 清理 `StarletteDeprecationWarning`（httpx） | TODO | CI 输出仍有 1 条告警 |
+| 真实浏览器验证脚本 | DONE | `scripts/Test-WebUi.ps1` 用无头 Chrome 断言 Vue 实际挂载与视图渲染（服务端返回 index.html 不能证明 SPA 能跑） |
+| 清理 `StarletteDeprecationWarning`（httpx） | DONE | 加 `httpx2` 为**测试期**依赖（starlette TestClient 首选它）；应用自身 HTTP 调用仍用 httpx |
 | v2 结构性能力（Monte Carlo / 组合级仓位 / Ensemble） | TODO | 需新增 ADR 与 fixtures（ADR-037 §4） |
 
 

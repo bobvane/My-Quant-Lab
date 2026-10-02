@@ -25,6 +25,7 @@ const channels = ref<Array<Record<string, any>>>([])
 const savingNotify = ref(false)
 const testingNotify = ref(false)
 const notifyResult = ref<NotificationTestResult | null>(null)
+const notifyEvents = ref<Array<Record<string, any>>>([])
 
 // Channel type metadata: which fields to render and whether they are secret.
 interface ChannelField {
@@ -148,14 +149,16 @@ const busyId = ref<number | null>(null)
 async function load() {
   error.value = ''
   try {
-    const [audit, settings, ai, notification, models, usage] = await Promise.all([
+    const [audit, settings, ai, notification, models, usage, notifyLog] = await Promise.all([
       api.audit(),
       api.settings(),
       api.aiProviders(),
       api.notificationConfig(),
       api.aiModels().catch(() => ({ models: [] })),
       api.aiUsage().catch(() => ({ usage: [] })),
+      api.notificationEvents().catch(() => ({ events: [] })),
     ])
+    notifyEvents.value = notifyLog.events
     events.value = audit.events
     environment.value = (settings.environment as Record<string, unknown>) ?? {}
     providers.value = ai.providers
@@ -559,6 +562,27 @@ onMounted(load)
       <p v-else-if="notify && !notify.configured" class="muted">
         当前未启用或未配置任何渠道，所有量化功能不受影响，只是不会外发通知。
       </p>
+
+      <h3 style="margin-top: 14px">最近通知（{{ notifyEvents.length }} 条）</h3>
+      <table v-if="notifyEvents.length">
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>事件</th>
+            <th>渠道/信号</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="e in notifyEvents" :key="String(e.id)">
+            <td class="muted">{{ formatDateTime(String(e.created_at)) }}</td>
+            <td>{{ e.event_type }}</td>
+            <td class="muted">
+              {{ (e.payload && (e.payload.channel || (e.payload.channels || []).join(','))) || (e.payload && e.payload.symbol) || '—' }}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">暂无通知记录。</p>
     </div>
 
     <div class="card" style="margin-top: 14px">

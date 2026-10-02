@@ -89,6 +89,65 @@ def test_ensemble_is_reproducible(client) -> None:
     assert first.json()["agreement"] == second.json()["agreement"]
 
 
+def test_ensemble_rejects_duplicate_members(client) -> None:
+    """The same version twice must be refused, not silently treated as agreement.
+
+    Two entries of one version normalise to 0.5 + 0.5, so the strict-majority threshold
+    is satisfied by that version's own signal alone — a "vote" with a single
+    participant. That silently misrepresents the result, so it is a 422.
+    """
+
+    a, _ = _seed(client)
+    response = client.post(
+        "/api/v1/research/ensemble",
+        json={
+            "members": [{"strategy_version_id": a}, {"strategy_version_id": a}],
+            "symbol": _SYMBOL,
+        },
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert "duplicate" in detail
+    assert str(a) in detail
+
+
+def test_ensemble_accepts_a_non_current_version(client) -> None:
+    """A superseded version must stay usable as a member.
+
+    Strategy versions are immutable snapshots, so an older DSL remains a legitimate
+    voting member after a newer version of the SAME strategy became current, and the
+    report labels it by its own version string. This path was previously untested.
+    """
+
+    client.post("/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol=_SYMBOL).model_dump())
+    strategy = client.post("/api/v1/strategies", json={"name": "supersede"}).json()
+
+    def add_version(version: str, fast: int) -> int:
+        response = client.post(
+            f"/api/v1/strategies/{strategy['id']}/versions",
+            json={"version": version, "dsl": copy.deepcopy(_dsl("super", fast, 20))},
+        )
+        assert response.status_code == 201, response.text
+        return int(response.json()["id"])
+
+    older = add_version("1.0.0", 5)
+    newer = add_version("2.0.0", 10)
+
+    assert client.get(f"/api/v1/strategy-versions/{older}").json()["is_current"] is False
+    assert client.get(f"/api/v1/strategy-versions/{newer}").json()["is_current"] is True
+
+    response = client.post(
+        "/api/v1/research/ensemble",
+        json={
+            "members": [{"strategy_version_id": older}, {"strategy_version_id": newer}],
+            "symbol": _SYMBOL,
+        },
+    )
+    assert response.status_code == 200, response.text
+    labels = [m["label"] for m in response.json()["members"]]
+    assert labels == ["1@1.0.0", "1@2.0.0"]
+
+
 def test_ensemble_unknown_member_is_404(client) -> None:
     _seed(client)
     response = client.post(

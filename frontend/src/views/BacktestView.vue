@@ -168,6 +168,34 @@ function toggleEnsMember(id: number) {
   }
 }
 
+/** Reset every selected member to weight 1 (equal say). */
+function ensEqualWeights() {
+  const next: Record<number, number> = {}
+  for (const id of ensSelected.value) next[id] = 1
+  ensWeights.value = next
+}
+
+/** Clear the selection entirely. */
+function ensClearSelection() {
+  ensSelected.value = []
+  ensWeights.value = {}
+}
+
+/**
+ * Versions present more than once. The API rejects duplicates because two entries of
+ * one version normalise to 0.5 + 0.5, making the "majority" threshold satisfiable by
+ * that single strategy — a vote with one participant. The picker prevents it up front.
+ */
+const ensDuplicateCount = computed(() => {
+  const seen = new Set<number>()
+  let dupes = 0
+  for (const id of ensSelected.value) {
+    if (seen.has(id)) dupes++
+    seen.add(id)
+  }
+  return dupes
+})
+
 /** Latest run per version, used to compare the ensemble against each member. */
 async function loadMemberMetrics() {
   const out: Array<{ label: string; versionId: number; metrics: Record<string, number | null> }> = []
@@ -1113,15 +1141,31 @@ onMounted(async () => {
           <button :disabled="ensRunning || ensSelected.length < 2" @click="runEnsemble">
             {{ ensRunning ? '计算中…' : '运行集成' }}
           </button>
+          <button class="ghost" :disabled="!ensSelected.length" @click="ensEqualWeights">
+            权重归一（全设为 1）
+          </button>
+          <button class="ghost" :disabled="!ensSelected.length" @click="ensClearSelection">
+            清空选择
+          </button>
           <span class="muted">
             已选 {{ ensSelected.length }} 个成员 ·
             阈值越高越保守（需要更多权重认同）
           </span>
         </div>
+        <p v-if="ensSelected.length === 1" class="muted" style="margin-top: 4px">
+          至少需要两个成员：只有一个成员时不存在「认同」这回事。若想让某个策略话语权更大，
+          请保留其他成员并调高它的权重，而不是把它重复添加。
+        </p>
       </div>
 
       <div v-if="ensResult" style="margin-top: 12px">
         <p v-for="w in ensResult.warnings" :key="w" class="notice">{{ w }}</p>
+
+        <p v-if="ensResult.trades.length === 0" class="notice">
+          成员之间在本次数据上<b>没有产生任何认同</b>（票数从未严格超过阈值），所以组合没有开过仓 ——
+          收益/回撤为 0 并非「稳健」，而是「没交易」。可以降低阈值、换用信号重叠更多的成员，
+          或放宽成员的入场条件。
+        </p>
 
         <div class="grid cols-4">
           <StatCard

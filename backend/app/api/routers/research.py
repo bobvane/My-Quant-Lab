@@ -310,6 +310,29 @@ def ensemble(payload: EnsembleRequest, db: Session = Depends(get_db)) -> Ensembl
     """
 
     # Resolve every member up front: a missing version is a 404 before any work happens.
+    #
+    # Duplicates are rejected rather than merged. Submitting the same version twice
+    # normalises to two 0.5 weights, which makes the strict-majority threshold
+    # trivially satisfiable by that one strategy — the report would show a "vote" that
+    # is really just a single member's own signal, which is precisely the deception an
+    # ensemble is supposed to avoid.
+    seen_versions: set[int] = set()
+    duplicates: list[int] = []
+    for entry in payload.members:
+        if entry.strategy_version_id in seen_versions:
+            duplicates.append(entry.strategy_version_id)
+        seen_versions.add(entry.strategy_version_id)
+    if duplicates:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "duplicate members: strategy version(s) "
+                + ", ".join(str(v) for v in sorted(set(duplicates)))
+                + " appear more than once. Voting with a single strategy against itself"
+                " is not an ensemble; give each version once (use its weight instead)."
+            ),
+        )
+
     labelled: list[tuple[StrategyVersion, EnsembleMember]] = []
     for entry in payload.members:
         version = db.get(StrategyVersion, entry.strategy_version_id)

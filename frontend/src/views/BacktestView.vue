@@ -486,15 +486,45 @@ async function open(id: number) {
   }
 }
 
+// Position sizing for the next run (docs/23). Defaults to the strategy's own
+// setting, so leaving this on "策略默认" changes nothing about existing behaviour.
+const sizeMode = ref<'strategy' | 'fixed_fraction' | 'risk_per_trade' | 'atr_risk'>('strategy')
+const sizeRiskPct = ref(0.01)
+const sizeFraction = ref(0.5)
+
+/** Execution overrides for the run button; empty means "use the strategy as stored". */
+function sizingOverrides(): Record<string, unknown> {
+  if (sizeMode.value === 'strategy') return {}
+  if (sizeMode.value === 'fixed_fraction') {
+    return { sizing: { mode: 'fixed_fraction', fraction: sizeFraction.value } }
+  }
+  return { sizing: { mode: sizeMode.value, risk_pct: sizeRiskPct.value } }
+}
+
 async function runNew() {
   error.value = ''
   if (versionId.value === null || !symbol.value.trim()) {
     error.value = '请先选择策略版本并填写标的代码'
     return
   }
+  if (sizeMode.value !== 'strategy') {
+    if (sizeRiskPct.value <= 0 || sizeRiskPct.value > 1) {
+      error.value = '单笔风险比例需在 0 与 1 之间'
+      return
+    }
+    if (sizeMode.value === 'fixed_fraction' && (sizeFraction.value <= 0 || sizeFraction.value > 1)) {
+      error.value = '投入比例需在 0 与 1 之间'
+      return
+    }
+  }
   running.value = true
   try {
-    const result = await api.runBacktest(versionId.value, symbol.value.trim(), timeframe.value)
+    const result = await api.runBacktest(
+      versionId.value,
+      symbol.value.trim(),
+      timeframe.value,
+      sizingOverrides(),
+    )
     runs.value = [result, ...runs.value]
     detail.value = result
     btExplanation.value = null
@@ -562,8 +592,58 @@ onMounted(async () => {
           {{ running ? '计算中…' : '开始回测' }}
         </button>
       </div>
+
+      <div class="row" style="margin-top: 8px">
+        <label class="muted" style="display: flex; align-items: center; gap: 6px">
+          仓位管理
+          <select v-model="sizeMode" style="max-width: 190px">
+            <option value="strategy">策略默认（不改动）</option>
+            <option value="fixed_fraction">固定比例</option>
+            <option value="risk_per_trade">按止损风险</option>
+            <option value="atr_risk">按 ATR 风险</option>
+          </select>
+        </label>
+        <label
+          v-if="sizeMode === 'fixed_fraction'"
+          class="muted"
+          style="display: flex; align-items: center; gap: 6px"
+        >
+          投入现金比例
+          <input
+            v-model.number="sizeFraction"
+            type="number"
+            min="0.01"
+            max="1"
+            step="0.05"
+            style="max-width: 90px"
+          />
+        </label>
+        <label
+          v-if="sizeMode === 'risk_per_trade' || sizeMode === 'atr_risk'"
+          class="muted"
+          style="display: flex; align-items: center; gap: 6px"
+        >
+          单笔风险占权益
+          <input
+            v-model.number="sizeRiskPct"
+            type="number"
+            min="0.001"
+            max="1"
+            step="0.005"
+            style="max-width: 90px"
+          />
+        </label>
+        <span class="muted">
+          <template v-if="sizeMode === 'strategy'">按策略版本里已保存的仓位设置执行。</template>
+          <template v-else-if="sizeMode === 'fixed_fraction'">投入当前现金的固定比例。</template>
+          <template v-else>
+            按「入场价到止损价的距离」反推数量，使止损距离与单笔风险解耦；无止损时回退为固定比例。
+          </template>
+        </span>
+      </div>
       <p class="muted" style="margin-bottom: 0">
         先到「行情与策略」同步该标的的数据；同一版本重复运行会得到相同结果（结果哈希可验证）。
+        仓位管理会写入本次回测的执行模型，因此改变它会让结果哈希随之变化。
       </p>
     </div>
 

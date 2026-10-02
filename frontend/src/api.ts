@@ -480,10 +480,24 @@ export const api = {
     request<{ metrics: string[]; runs: Array<Record<string, any>> }>(
       `/backtests/compare?ids=${ids.join(',')}`,
     ),
-  runBacktest: (strategyVersionId: number, symbol: string, timeframe = '1d') =>
+  runBacktest: (
+    strategyVersionId: number,
+    symbol: string,
+    timeframe = '1d',
+    /**
+     * Execution-level overrides (docs/23). Keys are execution fields, e.g.
+     * `{ sizing: { mode: 'risk_per_trade', risk_pct: 0.01 } }`.
+     */
+    executionOverrides: Record<string, unknown> = {},
+  ) =>
     request<BacktestDetail>('/backtests', {
       method: 'POST',
-      body: JSON.stringify({ strategy_version_id: strategyVersionId, symbol, timeframe }),
+      body: JSON.stringify({
+        strategy_version_id: strategyVersionId,
+        symbol,
+        timeframe,
+        execution_overrides: executionOverrides,
+      }),
     }),
   runOos: (strategyVersionId: number, symbol: string, oosPct = 0.2, timeframe = '1d') =>
     request<{

@@ -29,6 +29,32 @@ const running = ref(false)
 const oosResult = ref<Record<string, any> | null>(null)
 const oosPct = ref(0.2)
 const oosRunning = ref(false)
+const compareIds = ref<number[]>([])
+const compareResult = ref<{ metrics: string[]; runs: Array<Record<string, any>> } | null>(null)
+const comparing = ref(false)
+
+function toggleCompare(id: number) {
+  const idx = compareIds.value.indexOf(id)
+  if (idx >= 0) compareIds.value.splice(idx, 1)
+  else compareIds.value.push(id)
+}
+
+async function runCompare() {
+  error.value = ''
+  compareResult.value = null
+  if (compareIds.value.length < 2) {
+    error.value = '请至少勾选两条回测记录'
+    return
+  }
+  comparing.value = true
+  try {
+    compareResult.value = await api.compareBacktests(compareIds.value)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    comparing.value = false
+  }
+}
 
 async function runOos() {
   error.value = ''
@@ -297,12 +323,33 @@ onMounted(async () => {
       <p v-else class="muted">尚未生成解读。未配置 AI 时此按钮不可用，量化功能不受影响。</p>
     </div>
 
+    <div v-if="compareResult" class="card" style="margin-top: 14px">
+      <h3>回测对比</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>回测 #</th>
+            <th v-for="m in compareResult.metrics" :key="m">{{ m }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="r in compareResult.runs" :key="r.run_id">
+            <td>{{ r.run_id }}</td>
+            <td v-for="m in compareResult.metrics" :key="m" :class="toneOf(r[m])">
+              {{ r[m] != null ? formatNumber(r[m], 4) : '—' }}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <div class="grid cols-2" style="margin-top: 14px">
       <div class="card">
         <h3>回测记录</h3>
         <table v-if="runs.length">
           <thead>
             <tr>
+              <th>选</th>
               <th>#</th>
               <th>时间</th>
               <th>收益</th>
@@ -314,6 +361,7 @@ onMounted(async () => {
           </thead>
           <tbody>
             <tr v-for="r in runs" :key="r.id">
+              <td><input type="checkbox" style="width: auto" :checked="compareIds.includes(r.id)" @change="toggleCompare(r.id)" /></td>
               <td>{{ r.id }}</td>
               <td>{{ formatDateTime(r.created_at) }}</td>
               <td :class="toneOf(r.total_return)">{{ formatPercent(r.total_return) }}</td>
@@ -328,6 +376,11 @@ onMounted(async () => {
           </tbody>
         </table>
         <p v-else class="muted">还没有回测记录。到「行情与策略」创建策略后即可运行。</p>
+        <div class="row" style="margin-top: 8px">
+          <button :disabled="comparing || compareIds.length < 2" @click="runCompare">
+            {{ comparing ? '对比中…' : `对比选中（${compareIds.length}）` }}
+          </button>
+        </div>
       </div>
 
       <div class="card">

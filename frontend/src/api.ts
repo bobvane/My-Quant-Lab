@@ -369,6 +369,10 @@ export const api = {
     ),
   backtests: () => request<BacktestSummary[]>('/backtests'),
   backtest: (id: number) => request<BacktestDetail>(`/backtests/${id}`),
+  compareBacktests: (ids: number[]) =>
+    request<{ metrics: string[]; runs: Array<Record<string, any>> }>(
+      `/backtests/compare?ids=${ids.join(',')}`,
+    ),
   runBacktest: (strategyVersionId: number, symbol: string, timeframe = '1d') =>
     request<BacktestDetail>('/backtests', {
       method: 'POST',

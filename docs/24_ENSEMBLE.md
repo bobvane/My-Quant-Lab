@@ -1,0 +1,123 @@
+# 24 策略集成（Strategy Ensemble）
+
+> 状态：v1.3 已实现（后端 + API 部分）。决策见 `docs/17_DECISIONS.md` ADR-047。
+
+## 1. 它回答什么问题
+
+不是「哪个策略最好」，而是「**互相认同**的策略是否比其中任何一个都更稳」。
+
+两个入场信号很少同时出现的策略，其交集在历史上样本极少，但一旦出现往往是两边都
+认为有把握的时刻。反过来，如果两个策略几乎总是同时开仓，那它们并没有带来分散。
+
+## 2. 它是怎么算的
+
+1. 每个成员（一个策略版本）在**同一份行情**上各自算特征、各自评估规则，得到逐 bar 的
+   `entry_long` / `exit_long`（以及可能的多头反向信号）。
+2. 逐 bar **加权投票**，只有票数**严格超过**阈值才算数：
+   `sum(weight_i × flag_i) > vote_threshold`。
+3. 合并后的决策序列驱动**一个**组合，用与单策略完全相同的成交/成本/风控语义执行
+   （`next_bar_open` 成交、滑点手续费、保守的止损止盈同 bar 处理）。
+
+权重会被归一化，所以 `[2, 1]` 与 `[4, 2]` 是同一个集成。
+
+### 为什么是「决策合并」而不是「交易列表拼接」
+
+把各成员的成交记录拼在一起，会得到一个**同时持有多笔仓位**的组合。而本引擎是单仓位、
+单一现金账户，那样拼出来的结果它无法诚实地执行。投票得到的是**一条**决策序列，
+现有引擎本来就懂怎么执行。
+
+## 3. 阈值语义（这里踩过一次坑）
+
+投票判定用的是**严格大于**：
+
+```text
+sum(weight_i × flag_i) > vote_threshold      # 注意是 >，不是 >=
+```
+
+两成员等权时每票恰好 0.5，若用 `>= 0.5`，**单个成员就能单独通过**「多数」判定，
+集成会退化成各成员的**并集**（实测：两个交集为 0 的成员却产生了 11 个入场）。
+「多数」的意思是「超过一半」，不是「达到一半」。因此有效范围是 `[0, 1)`。
+
+- `vote_threshold = 0.5`、两个等权成员 → 需要**两个都**同意。
+- `vote_threshold = 0.1`、三个等权成员 → 任一成员即可。
+- 阈值越高越保守（可交易 bar 不会变多）。
+
+## 4. API
+
+```http
+POST /api/v1/research/ensemble
+```
+
+```json
+{
+  "members": [
+    { "strategy_version_id": 3, "weight": 1.0 },
+    { "strategy_version_id": 7, "weight": 1.0 }
+  ],
+  "symbol": "AAPL",
+  "timeframe": "1d",
+  "vote_threshold": 0.5,
+  "execution_overrides": { "initial_capital": 10000, "fee_bps": 10 }
+}
+```
+
+响应（节选）：
+
+```json
+{
+  "ensemble_version": "1.0.0",
+  "vote_threshold": 0.5,
+  "bars_evaluated": 400,
+  "members": [
+    { "label": "3@1.0.0", "weight": 0.5, "entry_bars": 10, "exit_bars": 9 },
+    { "label": "7@1.0.0", "weight": 0.5, "entry_bars": 4,  "exit_bars": 4 }
+  ],
+  "agreement": { "entry_bars": 1, "exit_bars": 1, "short_entry_bars": 0, "entries_taken": 1 },
+  "metrics": { "total_return": 0.013, "sharpe": 0.06, "max_drawdown": -0.016, "...": "..." },
+  "final_equity": 10129.2,
+  "trades": ["..."],
+  "warnings": ["member '3@1.0.0' has a 20-bar warm-up"]
+}
+```
+
+### `entry_bars` 与 `entries_taken` 的区别
+
+- `entry_bars`：**票数过阈值**的 bar 数。持仓期间再次触发也计入。
+- `entries_taken`：真正**开出仓位**的次数（投票通过 **且** 当时空仓）。
+
+只有 `entries_taken` 与成员的 `entry_bars` 可比，且必然 `<= min(成员 entry_bars)`。
+把两者混为一谈会高估集成的信号质量。
+
+## 5. 成本与风控从哪来
+
+组合需要一个成本模型和一套止损规则。默认**继承第一个成员**的，并可用
+`execution_overrides` 覆盖（成本、初始资金、仓位管理都属于**组合**，不属于单个成员）。
+风险线取「第一个定义了它的成员」——一个组合只能带一个止损，逐 bar 混用各成员的止损
+是任意且不可解释的。
+
+## 6. 约束
+
+| 情况 | 行为 |
+|---|---|
+| 成员为空 / 超过 12 个 | `422` |
+| `vote_threshold` 不在 `[0, 1)` | `422` |
+| 权重为负 / 全为 0 | `422` |
+| 成员之间没有共同 bar（预热期完全不重叠） | `422` |
+| 预热期部分重叠 | 正常执行，但在共同 bar 上评估并写入 `warnings` |
+| 成员规则引用了该成员特征里没有的列 | 报错，**不静默丢弃该成员** |
+
+## 7. 可复现性
+
+同一组成员 + 权重 + 数据集 + 阈值 → 完全相同的决策与指标（无随机性）。
+成员权重会被归一化后记录在 `members[].weight`，便于事后核对。
+
+## 8. 实现位置
+
+| 位置 | 作用 |
+|---|---|
+| `backend/app/research/ensemble.py` | 投票、决策合并、组合执行 |
+| `backend/app/strategies/dsl.py` | `merge_spec_overrides`（唯一经过校验的覆盖合并入口） |
+| `backend/tests/test_ensemble.py` | 投票语义、阈值边界、权重归一化、成本/仓位覆盖、现金上限 |
+
+> 注：本节描述的 `POST /research/ensemble` 端点随 v1.3 提供；引擎与测试已在
+> `app/research/ensemble.py` 中完成。

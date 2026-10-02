@@ -36,6 +36,30 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 SCHEMA_VERSION = "1.0"
 
+
+def merge_spec_overrides(spec: StrategySpec, overrides: dict[str, Any] | None) -> StrategySpec:
+    """Return ``spec`` with ``overrides`` merged in, fully re-validated.
+
+    Use this instead of ``spec.model_copy(update=...)`` whenever an override may
+    contain a *nested* object. ``model_copy`` skips validation entirely, so handing it
+    ``{"execution": {"sizing": {...}}}`` stores a plain ``dict`` where a
+    ``SizingSpec`` is expected; the engine then reads ``sizing.mode`` off the dict,
+    gets ``None``, and silently falls back to the default sizing. The caller believes
+    the override applied. Merging as data and re-validating cannot fail that way.
+    """
+
+    if not overrides:
+        return spec
+
+    merged = spec.model_dump()
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key].update(value)
+        else:
+            merged[key] = value
+    return StrategySpec.model_validate(merged)
+
+
 ComparisonOp = Literal["gt", "gte", "lt", "lte", "eq", "ne", "crosses_above", "crosses_below"]
 FillModel = Literal["next_bar_open", "close_bar"]
 

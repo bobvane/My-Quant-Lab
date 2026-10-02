@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.api.schemas import (
     BacktestCreate,
     MarketDataSyncRequest,
@@ -20,6 +22,53 @@ DSL: dict = {
     "risk": {"stop_loss_atr_multiple": 2.0, "take_profit_r_multiple": 2.0},
     "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5},
 }
+
+
+def test_execution_overrides_apply_nested_sizing(client) -> None:
+    """A nested override must be validated, not kept as an unvalidated dict.
+
+    Regression: the endpoint used ``execution.model_copy(update=payload...)``, which
+    skips validation, so ``{"sizing": {...}}`` was stored as a plain dict. The engine
+    read ``sizing.mode`` off that dict, got ``None`` and silently used the default
+    sizing — the caller believed the override applied and it had not.
+    """
+
+    client.post(
+        "/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol="DEMO-AAPL").model_dump()
+    )
+    strategy = client.post("/api/v1/strategies", json={"name": "Overrides"}).json()
+    version = client.post(
+        f"/api/v1/strategies/{strategy['id']}/versions",
+        json=StrategyVersionCreate(version="1.0.0", dsl=DSL).model_dump(),
+    ).json()
+
+    base = client.post(
+        "/api/v1/backtests",
+        json=BacktestCreate(
+            strategy_version_id=version["id"], symbol="DEMO-AAPL", timeframe="1d"
+        ).model_dump(mode="json"),
+    )
+    assert base.status_code == 200, base.text
+
+    overridden = client.post(
+        "/api/v1/backtests",
+        json={
+            **BacktestCreate(
+                strategy_version_id=version["id"], symbol="DEMO-AAPL", timeframe="1d"
+            ).model_dump(mode="json"),
+            "execution_overrides": {
+                "sizing": {"mode": "risk_per_trade", "risk_pct": 0.001},
+                "initial_capital": 10_000.0,
+            },
+        },
+    )
+    assert overridden.status_code == 200, overridden.text
+    body = overridden.json()
+    # The override must be recorded as a validated object, with the mode preserved.
+    assert body["execution_model"]["sizing"]["mode"] == "risk_per_trade"
+    assert body["execution_model"]["sizing"]["risk_pct"] == pytest.approx(0.001)
+    # ...and it must actually change the computation.
+    assert base.json()["result_hash"] != body["result_hash"]
 
 
 def test_backtest_survives_a_monitoring_failure(client, monkeypatch) -> None:

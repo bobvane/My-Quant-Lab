@@ -28,6 +28,7 @@ from app.domain.models import (
     StrategyVersion,
 )
 from app.research.engine import run_backtest
+from app.strategies.dsl import merge_spec_overrides
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/backtests", tags=["backtests"])
@@ -79,9 +80,9 @@ def create_backtest(payload: BacktestCreate, db: Session = Depends(get_db)) -> B
 
     spec = load_spec(strategy_version)
     if payload.execution_overrides:
-        spec = spec.model_copy(
-            update={"execution": spec.execution.model_copy(update=payload.execution_overrides)}
-        )
+        # merge_spec_overrides (not model_copy) so a nested override such as
+        # {"sizing": {...}} is validated instead of silently kept as a dict.
+        spec = merge_spec_overrides(spec, {"execution": payload.execution_overrides})
 
     dataset_hash = series_content_hash(frame)
 

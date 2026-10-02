@@ -206,6 +206,31 @@ def list_ai_tasks(
     return out
 
 
+@router.get("/ai/tasks/{task_id}", summary="One AI task with its stored output")
+def get_ai_task(task_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.domain.models import AITask
+
+    row = db.get(AITask, task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="ai task not found")
+    return {
+        "id": row.id,
+        "task_type": row.task_type,
+        "provider_id": row.provider_id,
+        "model_id": row.model_id,
+        "prompt_name": row.prompt_name,
+        "prompt_version": row.prompt_version,
+        "status": row.status,
+        "input_hash": row.input_hash,
+        "output": row.output_json,
+        "token_usage": row.token_usage_json,
+        "cost_usd": float(row.cost_usd) if row.cost_usd is not None else None,
+        "error_message": row.error_message,
+        "created_at": row.created_at,
+        "completed_at": row.completed_at,
+    }
+
+
 @router.get("/ai/usage-today", summary="Today's AI spend (UTC)")
 def usage_today(db: Session = Depends(get_db)) -> dict[str, Any]:
     from app.domain.models import AIProvider, AIUsage

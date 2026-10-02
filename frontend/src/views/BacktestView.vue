@@ -1397,6 +1397,7 @@ onMounted(async () => {
           <b>不推荐阈值</b>。
         </p>
         <p v-if="ensSweepNote" class="muted">{{ ensSweepNote }}</p>
+        <p v-for="(w, i) in ensSweepResult.warnings" :key="i" class="notice">{{ w }}</p>
         <p class="muted">
           本次评估了 {{ ensSweepPoints.length }} 个阈值，一次扫描最多
           {{ ensSweepResult.max_thresholds }} 个。要更多台阶就自己填阈值列表；超过上限会被
@@ -1557,6 +1558,15 @@ onMounted(async () => {
           已完成回测并标注，缺失时显示 <code>—</code>。
         </p>
       </div>
+    </div>
+
+    <div v-if="detail && (detail.warnings?.length ?? 0) > 0" class="card" style="margin-top: 14px">
+      <h4>这次回测的提醒</h4>
+      <p class="muted">
+        引擎在算之前就想说的事。它们跟着结果一起存下来了，所以刷新页面也还在 ——
+        别把这些数字当成一次干净的回测。
+      </p>
+      <p v-for="(w, i) in detail.warnings" :key="i" class="notice">{{ w }}</p>
     </div>
 
     <div v-if="detail" class="grid cols-4" style="margin-top: 14px">

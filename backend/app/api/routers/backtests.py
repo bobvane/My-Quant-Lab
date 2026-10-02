@@ -125,6 +125,7 @@ def create_backtest(payload: BacktestCreate, db: Session = Depends(get_db)) -> B
         summary_json=_summary(outcome, series),
         equity_curve_json=outcome.equity_curve,
         metrics_json=outcome.metrics,
+        warnings_json=list(outcome.warnings),
         result_hash=outcome.result_hash,
     )
     db.add(result)
@@ -351,7 +352,7 @@ def get_backtest(run_id: int, db: Session = Depends(get_db)) -> BacktestOut:
         run.result.metrics_json,
         run.result.equity_curve_json,
         trades,
-        [],
+        list(run.result.warnings_json or []),
     )
 
 

@@ -79,6 +79,13 @@ API base: `/api/v1`
 回测是否可比（同一策略在不同标的/周期上的结果本就不同），集成对比表读这两个字段来标记
 「不同数据窗口」。
 
+`POST /backtests` 与 `GET /backtests/{id}` 都返回 `warnings`，且**是同一份**：引擎的警告
+（被忽略的参数覆盖、warm-up 长于数据）跟结果一起存进 `backtest_results.warnings_json`
+（迁移 `0007_backtest_result_warnings`，ADR-054）。此前 `GET` 硬编码返回空列表，警告只在创建
+响应里出现一次，刷新即消失。`warnings` 非空意味着下面的数字要打折扣阅读——例如
+`only 400 bars available, warm-up needs 900` 对应的就是一次 `number_of_trades = 0` 的
+「成功」回测。列表端点 `GET /backtests` 的摘要**不含** `warnings`。
+
 ## Backtest Results
 
 `GET /backtest-results`

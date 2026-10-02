@@ -806,3 +806,42 @@ schema，就可能不一致，而且只在其中一个方言上暴露。所以�
 `test_a_rounded_boundary_is_still_a_boundary`；`backend/tests/test_ensemble_sweep_api.py` 新增
 `test_sweep_reports_its_threshold_budget`、`test_the_widest_ensemble_can_use_its_default_grid`、
 `test_an_unaffordable_default_grid_is_a_422_that_says_what_to_do`。
+
+---
+
+## ADR-054：引擎的警告必须跟结果一起落库（`warnings_json`，docs/12）
+
+**背景**：`run_backtest` 一直在报告警告，但报告完就丢了。
+
+- `POST /backtests` 会返回 `warnings`，例如
+  `ignored unknown parameter override(s): typo_period; this strategy declares: fast_period, slow_period`，
+  或 `only 400 bars available, warm-up needs 900`。
+- `GET /backtests/{id}` 却**硬编码**返回 `warnings: []`（`backtests.py` 的 `_to_out(..., [])`）。
+  警告只在创建响应里存在过一次，刷新页面就消失。
+- 前端从来没有渲染过它——`BacktestView.vue` 只渲染了 Monte Carlo 与集成的警告。
+
+两条警告都真实可达：`create_backtest` 只校验 `len(frame) >= 60`，所以任何「数据够 60 根但不够
+策略 warm-up」的组合都会走到第二条；`BacktestCreate.parameters` 接受任意键，所以第一条对任何
+打错参数的调用都可达。第二条尤其危险——实测 `slow_period=900` 跑在 400 根上会返回
+`number_of_trades = 0`、`total_return = 0`，**一个毫无意义的结果被当成正常完成的结果返回**，
+而唯一的提示在刷新后就没了。
+
+**决策**：
+
+1. **警告跟结果一起存**。`backtest_results` 新增 `warnings_json`（JSON，`default=list`），
+   迁移 `0007_backtest_result_warnings` 用 `server_default='[]'` 补既有行。
+   理由：读一次回测有两条路径（创建响应 / `GET`），任何只挂在其中一条上的信息都不可靠。
+2. **`GET /backtests/{id}` 返回存下来的那份**，不再硬编码空列表。
+3. **前端渲染它**。单策略回测的详情面板在四个指标卡**上方**显示警告（先看到提醒再看数字），
+   扫描面板也显示自己的 `warnings`。集成与 Monte Carlo 早已渲染，本版只是把缺口补齐。
+4. **不因为「warm-up 长于数据」就拒绝请求**。引擎诚实地评估它能评估的部分，警告才是正确的
+   信号；把「数据太短」变成 422 会误伤那种「我就想看看窗口不够时会发生什么」的调用，而且
+   没有任何阈值能划清界限（warm-up 与数据长度的关系是策略属性，不是输入合法性）。
+
+**理由**：不落库就等于把「这次结果不可信」这件事变成了**一次性提示**，而一次性提示的价值恰好
+在用户最需要它的时候（事后回看某次回测）归零。警告属于**不可变结果载荷**的一部分，和
+`metrics_json`、`result_hash` 同级。
+
+**测试**：`backend/tests/test_api.py` 新增 `test_backtest_warnings_survive_a_reload`（同一份
+列表，逐项相等）、`test_a_warm_up_longer_than_the_data_is_persisted`（含 `number_of_trades == 0`）、
+`test_a_clean_run_reports_no_warnings`。

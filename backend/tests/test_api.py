@@ -248,6 +248,100 @@ def test_backtest_end_to_end(client) -> None:
     assert trades.status_code == 200
 
 
+# A strategy whose warm-up is a parameter, so a test can ask for more bars than exist.
+WARMUP_DSL: dict = {
+    "schema_version": "1.0",
+    "strategy": {"id": "api-test-warmup", "name": "Warm-up", "version": "1.0.0"},
+    "market": {"asset_classes": ["stock"], "timeframes": ["1d"]},
+    "parameters": {"fast_period": 5, "slow_period": 10},
+    "indicators": [
+        {"id": "ema_fast", "type": "EMA", "period_ref": "fast_period"},
+        {"id": "ema_slow", "type": "EMA", "period_ref": "slow_period"},
+    ],
+    "entry": {"long": {"all": [{"op": "crosses_above", "left": "ema_fast", "right": "ema_slow"}]}},
+    "exit": {"long": {"any": [{"op": "crosses_below", "left": "ema_fast", "right": "ema_slow"}]}},
+    "risk": {"stop_loss_atr_multiple": 2.0},
+    "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5},
+}
+
+
+def _warmup_version(client, name: str) -> int:
+    client.post(
+        "/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol="DEMO-AAPL").model_dump()
+    )
+    strategy = client.post("/api/v1/strategies", json={"name": name}).json()
+    version = client.post(
+        f"/api/v1/strategies/{strategy['id']}/versions",
+        json=StrategyVersionCreate(version="1.0.0", dsl=WARMUP_DSL).model_dump(),
+    ).json()
+    assert version["validation_status"] == "valid", version
+    return version["id"]
+
+
+def test_backtest_warnings_survive_a_reload(client) -> None:
+    """Warnings must be part of the stored result, not just of the create response.
+
+    Regression (ADR-054): ``POST /backtests`` reported "ignored unknown parameter
+    override(s)..." and nothing kept it, while ``GET /backtests/{id}`` answered
+    ``warnings: []`` unconditionally. Reloading the page erased the only notice that an
+    input the caller sent had been dropped.
+    """
+
+    version_id = _warmup_version(client, "WarnReload")
+    created = client.post(
+        "/api/v1/backtests",
+        json={
+            **BacktestCreate(
+                strategy_version_id=version_id, symbol="DEMO-AAPL", timeframe="1d"
+            ).model_dump(mode="json"),
+            "parameters": {"typo_period": 7},
+        },
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert any("typo_period" in w for w in body["warnings"]), body["warnings"]
+
+    detail = client.get(f"/api/v1/backtests/{body['id']}")
+    assert detail.status_code == 200, detail.text
+    # The same list, not merely a non-empty one: the warning text is the payload.
+    assert detail.json()["warnings"] == body["warnings"]
+
+
+def test_a_warm_up_longer_than_the_data_is_persisted(client) -> None:
+    """A run computed on too little data for the strategy must stay flagged."""
+
+    version_id = _warmup_version(client, "WarnWarmup")
+    created = client.post(
+        "/api/v1/backtests",
+        json={
+            **BacktestCreate(
+                strategy_version_id=version_id, symbol="DEMO-AAPL", timeframe="1d"
+            ).model_dump(mode="json"),
+            "parameters": {"fast_period": 5, "slow_period": 5000},
+        },
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert any("warm-up" in w for w in body["warnings"]), body["warnings"]
+    # The numbers under that warning are meaningless, which is exactly why it must persist.
+    assert body["metrics"]["number_of_trades"] == 0
+    assert client.get(f"/api/v1/backtests/{body['id']}").json()["warnings"] == body["warnings"]
+
+
+def test_a_clean_run_reports_no_warnings(client) -> None:
+    version_id = _warmup_version(client, "Clean")
+    created = client.post(
+        "/api/v1/backtests",
+        json=BacktestCreate(
+            strategy_version_id=version_id, symbol="DEMO-AAPL", timeframe="1d"
+        ).model_dump(mode="json"),
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["warnings"] == [], body["warnings"]
+    assert client.get(f"/api/v1/backtests/{body['id']}").json()["warnings"] == []
+
+
 def test_backtest_requires_sufficient_data(client) -> None:
     client.post(
         "/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol="DEMO-BTC").model_dump()

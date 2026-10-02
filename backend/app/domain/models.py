@@ -353,6 +353,12 @@ class BacktestResult(Base):
     summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     equity_curve_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # What the engine wanted the caller to know: parameters it had to ignore, a warm-up
+    # longer than the data. Stored with the immutable result (ADR-054) because the create
+    # response is not the only way to read a run -- ``GET /backtests/{id}`` used to answer
+    # an empty list no matter what the run had reported, which made the warning vanish the
+    # moment the page was reloaded.
+    warnings_json: Mapped[list[Any]] = mapped_column(JSON, default=list)
     result_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     calculated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=_now, server_default=func.now(), nullable=False

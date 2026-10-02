@@ -14,7 +14,7 @@
   },
   "indicators": [
     { "id": "trend", "type": "EMA", "period": 20, "input": "close" },
-    { "id": "vol", "type": "ATR", "period": 14, "input": "ohlc" }
+    { "id": "vol", "type": "ATR", "period": 14 }
   ],
   "features": [
     "body_ratio",

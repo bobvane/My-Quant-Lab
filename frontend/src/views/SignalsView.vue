@@ -28,7 +28,7 @@ async function toggleOutcomes() {
   }
   try {
     const [rows, summary] = await Promise.all([
-      api.signalOutcomes(),
+      api.signalOutcomes(50, symbolFilter.value.trim() || undefined),
       api.signalOutcomeSummary().catch(() => null),
     ])
     outcomes.value = rows

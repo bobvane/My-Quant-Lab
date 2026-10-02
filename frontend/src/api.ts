@@ -415,8 +415,10 @@ export const api = {
   acknowledgeSignal: (id: number) =>
     request<Record<string, unknown>>(`/signals/${id}/acknowledge`, { method: 'POST' }),
   signalEvidence: (id: number) => request<Record<string, any>>(`/signals/${id}/evidence`),
-  signalOutcomes: (limit = 50) =>
-    request<Array<Record<string, any>>>(`/signals/outcomes?limit=${limit}`),
+  signalOutcomes: (limit = 50, symbol?: string) =>
+    request<Array<Record<string, any>>>(
+      `/signals/outcomes?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''}`,
+    ),
   signalOutcomeSummary: () =>
     request<{ evaluated: number; groups: Record<string, Record<string, any>> }>(
       '/signals/outcome-summary',

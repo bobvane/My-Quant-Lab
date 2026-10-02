@@ -79,15 +79,22 @@ def _serialize_signal(db: Session, row: Signal) -> SignalOut:
 def list_outcomes(
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=500),
+    symbol: str | None = None,
 ) -> list[dict[str, Any]]:
     from app.domain.models import SignalOutcome
 
-    rows = db.scalars(
+    stmt = (
         select(SignalOutcome, Signal)
         .join(Signal, Signal.id == SignalOutcome.signal_id)
         .order_by(SignalOutcome.evaluated_at.desc())
         .limit(limit)
-    ).all()
+    )
+    if symbol:
+        asset = db.scalar(select(Asset).where(Asset.symbol == symbol))
+        if asset is None:
+            return []
+        stmt = stmt.where(Signal.asset_id == asset.id)
+    rows = db.execute(stmt).all()
     return [
         {
             "signal_id": outcome.signal_id,

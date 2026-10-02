@@ -55,3 +55,14 @@ def test_outcome_summary_groups(client, db_session) -> None:
     assert body["groups"]["direction:FLAT"]["count"] == 1
     # Each signal belongs to its own seeded strategy, so 3 strategy groups exist.
     assert len([k for k in body["groups"] if k.startswith("strategy:")]) == 3
+
+
+def test_list_outcomes_endpoint(client, db_session) -> None:
+    _seed(db_session, state="BUY", direction="LONG", pnl=1.25)
+    rows = client.get("/api/v1/signals/outcomes").json()
+    assert len(rows) == 1
+    assert rows[0]["pnl_pct"] == 1.25
+    assert rows[0]["outcome_state"] == "closed"
+
+    # Unknown symbol -> empty (not a crash).
+    assert client.get("/api/v1/signals/outcomes?symbol=NOPE").json() == []

@@ -406,9 +406,9 @@ export const api = {
         test_bars: testBars,
       }),
     }),
-  signals: (state?: string, limit = 100, symbol?: string) =>
+  signals: (state?: string, limit = 100, symbol?: string, offset = 0) =>
     request<SignalRecord[]>(
-      `/signals?limit=${limit}${state ? `&state=${encodeURIComponent(state)}` : ''}${
+      `/signals?limit=${limit}&offset=${offset}${state ? `&state=${encodeURIComponent(state)}` : ''}${
         symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
       }`,
     ),

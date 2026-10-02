@@ -9,6 +9,31 @@ const symbolFilter = ref('')
 const error = ref('')
 const info = ref('')
 const loading = ref(false)
+const pageOffset = ref(0)
+const PAGE = 50
+
+function resetAndLoad() {
+  pageOffset.value = 0
+  return load()
+}
+
+async function loadMore() {
+  pageOffset.value += PAGE
+  loading.value = true
+  try {
+    const more = await api.signals(
+      stateFilter.value || undefined,
+      PAGE,
+      symbolFilter.value.trim() || undefined,
+      pageOffset.value,
+    )
+    signals.value = [...signals.value, ...more]
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    loading.value = false
+  }
+}
 const acknowledging = ref<number | null>(null)
 const explaining = ref<number | null>(null)
 const explanation = ref<ExplainResult | null>(null)
@@ -60,8 +85,9 @@ async function load() {
   try {
     signals.value = await api.signals(
       stateFilter.value || undefined,
-      100,
+      PAGE,
       symbolFilter.value.trim() || undefined,
+      pageOffset.value,
     )
   } catch (e) {
     error.value = (e as Error).message
@@ -123,7 +149,7 @@ onMounted(load)
           v-for="s in STATES"
           :key="s || 'all'"
           :class="stateFilter === s ? '' : 'ghost'"
-          @click="stateFilter = s; load()"
+          @click="stateFilter = s; resetAndLoad()"
         >
           {{ s || '全部' }}
         </button>
@@ -131,9 +157,9 @@ onMounted(load)
           v-model="symbolFilter"
           style="max-width: 160px"
           placeholder="按代码过滤（如 AAPL）"
-          @keyup.enter="load"
+          @keyup.enter="resetAndLoad"
         />
-        <button class="ghost" @click="load">查询</button>
+        <button class="ghost" @click="resetAndLoad">查询</button>
         <button class="ghost" @click="toggleOutcomes">
           {{ showOutcomes ? '收起信号结果' : '信号结果' }}
         </button>
@@ -190,6 +216,11 @@ onMounted(load)
         </tbody>
       </table>
       <p v-else class="muted">没有信号。到「研究仪表盘」点「立即扫描」，或等待定时任务。</p>
+      <div v-if="signals.length && signals.length % PAGE === 0" class="row" style="margin-top: 8px">
+        <button class="ghost" :disabled="loading" @click="loadMore">
+          {{ loading ? '加载中…' : '加载更多' }}
+        </button>
+      </div>
     </div>
 
     <div v-if="showOutcomes" class="card" style="margin-top: 14px">

@@ -12,6 +12,22 @@ const acknowledging = ref<number | null>(null)
 const explaining = ref<number | null>(null)
 const explanation = ref<ExplainResult | null>(null)
 const explainedFor = ref('')
+const evidence = ref<Record<string, any> | null>(null)
+const evidenceFor = ref('')
+const evidencing = ref<number | null>(null)
+
+async function showEvidence(row: SignalRecord) {
+  error.value = ''
+  evidencing.value = row.id
+  try {
+    evidence.value = await api.signalEvidence(row.id)
+    evidenceFor.value = `#${row.id} ${row.symbol ?? ''} ${row.state}`
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    evidencing.value = null
+  }
+}
 
 const STATES = ['', 'BUY', 'SELL', 'WAIT', 'NO_SIGNAL']
 
@@ -118,6 +134,9 @@ onMounted(load)
             <td class="muted">{{ contextNote(s) }}</td>
             <td>{{ s.status }}{{ s.notified_at ? ' · 已通知' : '' }}</td>
             <td>
+              <button class="ghost" :disabled="evidencing === s.id" @click="showEvidence(s)">
+                {{ evidencing === s.id ? '读取中…' : '证据' }}
+              </button>
               <button class="ghost" :disabled="explaining === s.id" @click="explain(s)">
                 {{ explaining === s.id ? '解释中…' : 'AI 解释' }}
               </button>
@@ -134,6 +153,30 @@ onMounted(load)
         </tbody>
       </table>
       <p v-else class="muted">没有信号。到「研究仪表盘」点「立即扫描」，或等待定时任务。</p>
+    </div>
+
+    <div v-if="evidence" class="card" style="margin-top: 14px">
+      <h3>信号证据（{{ evidenceFor }}）</h3>
+      <p class="muted">
+        触发规则：{{ (evidence.triggered_rules || []).join(', ') || '—' }} ·
+        特征哈希 {{ String(evidence.feature_snapshot_hash || '').slice(0, 12) }}…
+        <span v-if="evidence.portfolio_context?.note"> · {{ evidence.portfolio_context.note }}</span>
+      </p>
+      <table v-if="evidence.feature_snapshot?.values">
+        <thead>
+          <tr>
+            <th>特征</th>
+            <th>值</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(v, k) in evidence.feature_snapshot.values" :key="k">
+            <td>{{ k }}</td>
+            <td>{{ v != null ? formatNumber(v, 4) : '—' }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">该信号没有特征快照（可能是较早的信号）。</p>
     </div>
 
     <div v-if="explanation" class="card" style="margin-top: 14px">

@@ -117,3 +117,17 @@ def test_signal_persists_feature_snapshot_evidence(db_session, client, sample_ba
 
 def test_feature_snapshot_endpoint_validates_series(client) -> None:
     assert client.get("/api/v1/feature-snapshots/9999/latest").status_code == 404
+
+
+def test_signal_evidence_endpoint(client, db_session, sample_bars) -> None:
+    version, series = _seed_series(db_session, sample_bars)
+    signal = scan_series(db_session, version, series)
+
+    body = client.get(f"/api/v1/signals/{signal.id}/evidence").json()
+    assert body["signal_id"] == signal.id
+    assert body["feature_snapshot_hash"] == signal.feature_snapshot_hash
+    assert body["feature_snapshot"] is not None
+    assert body["feature_snapshot"]["input_hash"] == signal.feature_snapshot_hash
+    assert "close" in body["feature_snapshot"]["values"]
+
+    assert client.get("/api/v1/signals/9999/evidence").status_code == 404

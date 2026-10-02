@@ -109,6 +109,49 @@ def get_signal(signal_id: int, db: Session = Depends(get_db)) -> SignalOut:
     return _serialize_signal(db, row)
 
 
+@router.get("/{signal_id}/evidence", summary="Feature snapshot + portfolio context for a signal")
+def signal_evidence(signal_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """The exact bar evidence a persisted signal was computed from (docs/09 §5)."""
+
+    from app.domain.models import FeatureSnapshot
+
+    row = db.get(Signal, signal_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="signal not found")
+    series = db.scalar(
+        select(MarketDataSeries).where(
+            MarketDataSeries.asset_id == row.asset_id,
+            MarketDataSeries.timeframe == row.timeframe,
+        )
+    )
+    snapshot = None
+    if series is not None:
+        snap = db.scalar(
+            select(FeatureSnapshot)
+            .where(
+                FeatureSnapshot.series_id == series.id,
+                FeatureSnapshot.bar_timestamp == row.bar_timestamp,
+            )
+            .order_by(FeatureSnapshot.id.desc())
+        )
+        if snap is not None:
+            snapshot = {
+                "feature_version": snap.feature_version,
+                "input_hash": snap.input_hash,
+                "values": snap.values_json,
+                "available_at": snap.available_at,
+            }
+    return {
+        "signal_id": row.id,
+        "state": row.state,
+        "bar_timestamp": row.bar_timestamp,
+        "triggered_rules": row.triggered_rules_json or [],
+        "feature_snapshot_hash": row.feature_snapshot_hash,
+        "feature_snapshot": snapshot,
+        "portfolio_context": row.portfolio_context_json,
+    }
+
+
 @router.post("/{signal_id}/acknowledge", summary="Acknowledge a signal")
 def acknowledge(signal_id: int, db: Session = Depends(get_db)) -> dict:
     import datetime as dt

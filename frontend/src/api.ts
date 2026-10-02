@@ -410,6 +410,7 @@ export const api = {
     ),
   acknowledgeSignal: (id: number) =>
     request<Record<string, unknown>>(`/signals/${id}/acknowledge`, { method: 'POST' }),
+  signalEvidence: (id: number) => request<Record<string, any>>(`/signals/${id}/evidence`),
   scanSignals: () =>
     request<{ evaluated: number; created: number; signals: SignalIntent[]; disclaimer: string }>(
       '/signals/scan',

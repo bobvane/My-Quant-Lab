@@ -169,6 +169,17 @@ async function loadMemberMetrics() {
   ensMemberMetrics.value = out
 }
 
+/** Ensemble equity curve reshaped for the shared chart component. */
+const ensEquityPoints = computed(() => {
+  const curve = ensResult.value?.equity_curve ?? []
+  return curve
+    .map((p) => ({
+      timestamp: String((p as Record<string, unknown>).timestamp ?? ''),
+      equity: Number((p as Record<string, unknown>).equity ?? 0),
+    }))
+    .filter((p) => p.timestamp !== '')
+})
+
 /** Metrics of one member's own latest completed backtest, for the comparison table. */
 function memberMetricsFor(label: string): Record<string, number | null> | null {
   return ensMemberMetrics.value.find((x) => x.label === label)?.metrics ?? null
@@ -1089,6 +1100,9 @@ onMounted(async () => {
             :sub="`票数过阈值 ${ensResult.agreement.entry_bars} 根 · 交易 ${ensResult.trades.length} 笔`"
           />
         </div>
+
+        <h4 style="margin: 12px 0 4px">集成组合权益曲线</h4>
+        <EquityChart :points="ensEquityPoints" height="260px" />
 
         <table style="margin-top: 10px">
           <thead>

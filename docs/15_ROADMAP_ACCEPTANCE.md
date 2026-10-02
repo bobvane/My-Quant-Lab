@@ -28,7 +28,7 @@ boundary and the no-lookahead / immutability guarantees.
   AI 任务路由注册、模拟盘账户。
 - `docs/17` ADR-039 收尾项全部落地。
 
-### v1.1 — 进行中
+### v1.1 — 完成（含 v1.1.x 补丁）
 
 | 项 | 状态 | 说明 |
 |---|---|---|
@@ -46,6 +46,18 @@ boundary and the no-lookahead / immutability guarantees.
 | v2：组合级仓位管理（Portfolio-aware sizing） | DONE | ADR-045 / `docs/23`。`fixed_fraction`（默认，行为不变）/ `risk_per_trade` / `atr_risk`；按止损距离反推数量，受现金上限约束 |
 | v2：策略 Ensemble | DONE | ADR-047 / `docs/24`。加权投票合并决策为**一个**组合；严格多数（`>`）语义、权重归一化、`entry_bars` 与 `entries_taken` 分离、成员无共同 bar → 422 |
 | 覆盖合并必须经过校验 | DONE | ADR-046。`model_copy(update=...)` 不校验，嵌套 `sizing` 覆盖被静默忽略并回退默认值；改为 `merge_spec_overrides` 重新校验 |
+
+### v1.2 / v1.3 — 完成
+
+| 版本 | 内容 |
+|---|---|
+| v1.2.0 | Monte Carlo 重采样（ADR-043）+ 风险型仓位管理（ADR-045）+ 监控写入失败修复（ADR-044） |
+| v1.3.0 | 策略集成引擎与 `POST /research/ensemble`（ADR-047）+ 覆盖合并校验修复（ADR-046） |
+| v1.3.1 | 集成面板（成员选择/权重/阈值）与**与各成员对比表**；修掉成员指标标签对不上的缺陷 |
+| v1.3.2 | 回测表单加入仓位管理选择器（策略默认 / 固定比例 / 按止损风险 / 按 ATR 风险） |
+| v1.3.3 | 敏感性分析支持扫描 `risk_pct`（执行轴），可同时看入场参数与风险预算 |
+
+**至此 docs/15 的 P0/P1/P2 与 v2 结构性能力清单全部完成。** 后续为打磨与体验改进。
 
 
 ## Phase 0 — Foundation

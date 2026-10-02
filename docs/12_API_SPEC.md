@@ -103,6 +103,9 @@ API base: `/api/v1`
 ## Paper Positions
 
 `GET /paper/accounts/{account_id}/positions`
+`GET /paper/accounts/{account_id}/positions/{asset_id}`
+`GET /paper/accounts/{account_id}/performance`  (equity-derived metrics)
+`GET /paper/accounts/{account_id}/orders`
 `POST /paper/accounts/{account_id}/execute`  (execute a persisted signal; virtual fill)
 `POST /paper/accounts/{account_id}/close`
 `POST /paper/accounts/{account_id}/reopen`
@@ -126,6 +129,7 @@ API base: `/api/v1`
 `GET /signals/{id}`
 `GET /signals/{id}/evidence`   (feature snapshot + portfolio context)
 `GET /signals/outcomes`
+`GET /signals/outcome-summary`   (win rate / avg PnL grouped by direction/timeframe/state/strategy)
 `POST /signals/scan`
 `POST /signals/{id}/explain`
 `POST /signals/{id}/acknowledge`

@@ -95,6 +95,32 @@ def test_executor_is_deterministic(sample_bars: pd.DataFrame) -> None:
     assert intent_a == intent_b
 
 
+def test_executor_treats_nan_as_not_satisfied() -> None:
+    """Warm-up NaN rows must never count as a satisfied condition."""
+
+    import numpy as np
+    import pandas as pd
+
+    index = pd.date_range("2024-01-01", periods=4, freq="D", tz="UTC")
+    frame = pd.DataFrame(
+        {"close": [10.0, 10.0, np.nan, 10.0], "ema20": [9.0, np.nan, 9.0, 9.0]},
+        index=index,
+    )
+    spec = StrategySpec.model_validate(
+        {
+            "schema_version": "1.0",
+            "strategy": {"id": "s", "name": "S", "version": "1.0.0"},
+            "market": {"asset_classes": ["stock"], "timeframes": ["1d"]},
+            "entry": {"long": {"all": [{"op": "gt", "left": "close", "right": "ema20"}]}},
+            "exit": {"long": {"any": [{"op": "lt", "left": "close", "right": "ema20"}]}},
+        }
+    )
+    decisions, _intent = run_strategy(spec, frame)
+    assert decisions["entry_long"].dtype == bool
+    assert not bool(decisions["entry_long"].iloc[2])  # close is NaN here
+    assert not bool(decisions["entry_long"].iloc[1])  # ema20 is NaN here
+
+
 def test_executor_no_lookahead_regression(sample_bars: pd.DataFrame) -> None:
     """Signals computed on a longer history must match the truncated history."""
 

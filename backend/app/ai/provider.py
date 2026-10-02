@@ -47,18 +47,14 @@ SIGNAL_EXPLANATION_SCHEMA: dict[str, Any] = {
     },
 }
 
-# Facts the model is forbidden to invent. Enforced by prompt *and* by this set
-# which the router uses to strip any number it did not receive as input.
-FORBIDDEN_FACT_FIELDS = (
-    "price",
-    "return",
-    "win_rate",
-    "sharpe",
-    "max_drawdown",
-    "balance",
-    "quantity",
-    "profit",
-)
+# "AI never owns numbers" is enforced structurally, not by a field blocklist:
+#  * the explanation schema (SIGNAL_EXPLANATION_SCHEMA / BACKTEST_EXPLANATION_*)
+#    only allows strings/arrays — there is no numeric fact field to fill in;
+#  * the only facts the model sees are engine-computed rows read from the DB
+#    (see app/ai/explain.py build_signal_facts / build_backtest_facts);
+#  * the model can only write Signal.explanation_json / AITask.output_json and
+#    can never change state, direction or any price/statistic column.
+# Regression covered by tests/test_ai_explain.py (facts contain no win_rate/sharpe).
 
 
 class BudgetExceeded(RuntimeError):

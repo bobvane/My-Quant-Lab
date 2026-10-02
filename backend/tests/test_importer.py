@@ -185,6 +185,16 @@ def _meta() -> RepoMeta:
     )
 
 
+def test_missing_or_unknown_license_is_warned() -> None:
+    import dataclasses
+
+    findings = analyze_python_source("strat.py", EMA_CROSS_SOURCE)
+    for value in (None, "NOASSERTION", "OTHER"):
+        meta = dataclasses.replace(_meta(), license=value)
+        _dsl, warnings = build_draft_dsl(meta, findings)
+        assert any("license is missing or unrecognised" in w for w in warnings), value
+
+
 def test_draft_builds_valid_dsl_for_clean_strategy() -> None:
     import pydantic
 

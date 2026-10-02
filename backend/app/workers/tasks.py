@@ -221,15 +221,24 @@ def _bump_version(version: str) -> str:
 def check_source(db: Any, source: Any) -> str:
     """Check one watched GitHub source and re-import on a new commit.
 
-    Returns ``"unchanged"`` / ``"imported"`` / ``"no_change"`` / ``"error"``.
+    Returns and stores the same outcome vocabulary: ``"unchanged"`` (the commit
+    is the one already seen, nothing was fetched), ``"no_change"`` (a new commit
+    was fetched and analysed, but the DSL did not change), ``"imported"``,
+    ``"incomplete"`` (a read gap left rules unread) or ``"error"``.
+
+    ``source.last_import_status`` used to collapse all three non-events into
+    ``"checked"``, which left a user staring at a row unable to tell "nothing to
+    check" from "checked and nothing changed" (ADR-058).
+
     Only creates a new StrategyVersion when the extracted DSL actually differs
     from the linked strategy's latest version (docs/05 §7, Phase 6).
     """
 
     from sqlalchemy import select
 
+    from app.data.github_source_service import record_snapshot
     from app.data.strategy_service import create_strategy_version, immutable_hash
-    from app.domain.models import GitHubSnapshot, Strategy, StrategyVersion
+    from app.domain.models import Strategy, StrategyVersion
     from app.importer import (
         GitHubClient,
         analyze_repository_files,
@@ -249,7 +258,7 @@ def check_source(db: Any, source: Any) -> str:
         source.last_import_status = "error"
         return "error"
     if not head or head == source.current_commit:
-        source.last_import_status = "checked"
+        source.last_import_status = "unchanged"
         return "unchanged"
 
     try:
@@ -266,7 +275,7 @@ def check_source(db: Any, source: Any) -> str:
         return "error"
     if not draft:
         source.current_commit = head
-        source.last_import_status = "checked"
+        source.last_import_status = "no_change"
         return "no_change"
     if not coverage["complete"] and coverage["unread_python_files"]:
         # Unattended import: a Python file that was never read may hold the rules
@@ -282,20 +291,18 @@ def check_source(db: Any, source: Any) -> str:
         if not exhausted:
             source.current_commit = head
         source.last_import_status = "incomplete"
-        db.add(
-            GitHubSnapshot(
-                source_id=source.id,
-                commit=head,
-                content_hash=immutable_hash(draft, "incomplete"),
-                manifest_json={},
-                extraction_json={
-                    "imported": False,
-                    "reason": "incomplete_analysis",
-                    "transient": exhausted,
-                    "coverage": coverage,
-                    "warnings": warnings,
-                },
-            )
+        record_snapshot(
+            db,
+            source.id,
+            head,
+            immutable_hash(draft, "incomplete"),
+            {
+                "imported": False,
+                "reason": "incomplete_analysis",
+                "transient": exhausted,
+                "coverage": coverage,
+                "warnings": warnings,
+            },
         )
         return "incomplete"
 
@@ -327,15 +334,13 @@ def check_source(db: Any, source: Any) -> str:
         imported = True
 
     source.current_commit = head
-    source.last_import_status = "imported" if imported else "checked"
-    db.add(
-        GitHubSnapshot(
-            source_id=source.id,
-            commit=head,
-            content_hash=immutable_hash(draft, next_version),
-            manifest_json={},
-            extraction_json={"imported": imported, "coverage": coverage, "warnings": warnings},
-        )
+    source.last_import_status = "imported" if imported else "no_change"
+    record_snapshot(
+        db,
+        source.id,
+        head,
+        immutable_hash(draft, next_version),
+        {"imported": imported, "coverage": coverage, "warnings": warnings},
     )
     return "imported" if imported else "no_change"
 
@@ -348,16 +353,13 @@ def check_github_sources() -> dict:
 
     from app.domain.models import GitHubSource
 
-    summary: dict[str, int] = {"checked": 0, "imported": 0, "incomplete": 0, "error": 0}
+    outcomes: dict[str, int] = {}
     with session_scope() as db:
         sources = db.scalars(select(GitHubSource).where(GitHubSource.is_watched.is_(True))).all()
         for source in sources:
-            summary["checked"] += 1
             status = check_source(db, source)
-            if status == "imported":
-                summary["imported"] += 1
-            elif status == "incomplete":
-                summary["incomplete"] += 1
-            elif status == "error":
-                summary["error"] += 1
-    return summary
+            outcomes[status] = outcomes.get(status, 0) + 1
+        # ``checked`` stays the number of sources examined; every outcome the run
+        # actually produced is reported beside it, so the summary cannot drift
+        # from the vocabulary check_source uses (ADR-058).
+        return {"checked": len(sources), **outcomes}

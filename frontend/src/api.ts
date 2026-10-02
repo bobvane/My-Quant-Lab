@@ -186,6 +186,20 @@ export interface GithubImportResult {
   warnings: Array<Record<string, unknown>>
 }
 
+/**
+ * One recorded check of a watched source. `extraction` is where the *reason*
+ * lives (`imported`, `reason`, `transient`, `coverage`, `warnings`); rows written
+ * before ADR-058 can carry an empty object.
+ */
+export interface GithubSnapshot {
+  id: number
+  source_id: number
+  commit: string
+  content_hash: string
+  fetched_at: string
+  extraction: Record<string, any>
+}
+
 /** Percentile block of a Monte Carlo distribution (docs/22). */
 export interface MonteCarloPercentiles {
   p5: number | null
@@ -793,6 +807,8 @@ export const api = {
       }),
     }),
   githubSources: () => request<Array<Record<string, any>>>('/importer/github/sources'),
+  githubSnapshots: (id: number, limit = 20) =>
+    request<GithubSnapshot[]>(`/importer/github/sources/${id}/snapshots?limit=${limit}`),
   githubCheckSource: (id: number) =>
     request<{ has_update: boolean; head: string | null; current_commit: string | null }>(
       `/importer/github/sources/${id}/check`,

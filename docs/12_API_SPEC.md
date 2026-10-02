@@ -400,6 +400,15 @@ findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
   to import from a partial read and records the coverage gap in the snapshot instead.
   A gap caused by the budget or the network is recorded as `transient` and does **not**
   advance the source's `current_commit`, so the next scheduled check retries it.
+- `last_import_status` uses the watcher's outcome vocabulary (ADR-058): `unchanged`
+  (the commit was already seen, nothing was fetched), `no_change` (a new commit was
+  fetched and analysed, the DSL did not change), `imported`, `incomplete`, `error`.
+  Rows written before v1.4.8 still say `checked`, which collapsed all three non-events;
+  clients should render it as a historical value rather than reinterpreting it.
+- `GET /importer/github/sources/{id}/snapshots` returns `id`, `source_id`, `commit`,
+  `content_hash`, `fetched_at` and `extraction`. `extraction` is the stored reason
+  (`imported`, `reason`, `transient`, `coverage`, `warnings`); snapshots written before
+  v1.4.8 from the manual import path may be `{}`.
 
 ## GitHub Snapshots
 

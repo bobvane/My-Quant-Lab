@@ -121,6 +121,24 @@ old commit
 
 如果只是 README 拼写变化，可以标记为 metadata-only，不生成策略新版本。
 
+### 7.1 一次检查的结果必须能自解释（ADR-058）
+
+`check_source` 的返回值与写进 `GitHubSource.last_import_status` 的值使用**同一套词表**：
+
+| 状态 | 含义 | 是否推进 `current_commit` |
+| --- | --- | --- |
+| `unchanged` | head 与 `current_commit` 相同，**什么都没抓取** | 不变 |
+| `no_change` | 抓取并分析了一个新 commit，但抽出的 DSL 没有变化（或没有草案） | 推进 |
+| `imported` | 从新 commit 生成了新的策略版本 | 推进 |
+| `incomplete` | 读取不完整（还有 Python 文件没读到），拒绝无人值守导入 | 结构性缺口推进；瞬时缺口（`transient`）不推进，下轮重试 |
+| `error` | 网络/解析失败，没有结论 | 不变 |
+
+在 v1.4.8 之前，`unchanged`、`no_change` 与「已检查但没有变化」这三种截然不同的结果**全部**被写成 `last_import_status = "checked"`，于是 UI 里一行「已检查」既可能是「没有任何新东西」，也可能是「抓取并分析过了，策略没变」——用户无法分辨 watcher 到底有没有干活。旧记录里残留的 `checked` 属于历史值，UI 明确标注为「已检查（旧记录）」，不猜测它的具体含义。
+
+`check_github_sources` 的汇总不再硬编码状态列表：它先返回 `checked`（本轮检查过的来源数），再把**本轮实际产生的每一种结果**按原样附上，因此汇总与 `check_source` 的词表不会各自漂移。
+
+原因（`imported` / `reason` / `transient` / `coverage` / `warnings`）写在 `GitHubSnapshot.extraction_json` 里，`GET /importer/github/sources/{id}/snapshots` 必须把它返回给调用方——只返回 commit 等于把「为什么是这个状态」留在数据库里，用户看到的就只是一个英文枚举。人工导入产生的快照同样记录 `{"imported": true, "reason": "manual_import"}`，不留空对象。
+
 ## 8. License handling
 
 导入器必须记录仓库许可证、commit、作者、URL、导入时间。

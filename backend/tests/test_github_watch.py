@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.data.github_source_service import record_snapshot
 from app.domain.models import GitHubSnapshot, GitHubSource, Strategy, StrategyVersion
 from app.importer.extract import AnalysisResult
 from app.importer.github_client import FetchCoverage
@@ -80,6 +81,7 @@ def test_check_source_imports_new_commit(db_session, monkeypatch) -> None:
     db_session.commit()
 
     assert check_source(db_session, source) == "imported"
+    assert source.last_import_status == "imported"
     db_session.commit()
     versions = db_session.query(StrategyVersion).all()
     assert len(versions) == 2
@@ -97,7 +99,41 @@ def test_check_source_unchanged_when_commit_same(db_session, monkeypatch) -> Non
     db_session.commit()
 
     assert check_source(db_session, source) == "unchanged"
+    assert source.last_import_status == "unchanged"
     assert db_session.query(GitHubSnapshot).count() == 0
+
+
+def test_a_new_commit_with_an_unchanged_dsl_is_stored_as_no_change(db_session, monkeypatch) -> None:
+    """A fetched commit that changes nothing is not the same as "nothing to check".
+
+    Both used to be stored as "checked", so the row could not tell a user whether
+    the watcher had actually fetched anything (ADR-058).
+    """
+
+    _install_fake_client(monkeypatch, "newsha")
+    source = GitHubSource(repository_url=_REPO, current_commit="oldsha", is_watched=True)
+    db_session.add(source)
+    db_session.flush()
+    strategy = Strategy(name="Demo", slug="demo-strategy", source_url=_REPO)
+    db_session.add(strategy)
+    db_session.flush()
+    db_session.add(
+        StrategyVersion(
+            strategy_id=strategy.id,
+            version="1.0.0",
+            dsl_json=dict(_DRAFT),
+            immutable_hash="x" * 64,
+        )
+    )
+    db_session.commit()
+
+    assert check_source(db_session, source) == "no_change"
+    assert source.last_import_status == "no_change"
+    assert source.current_commit == "newsha"  # the commit was read, nothing changed
+    db_session.commit()
+    assert db_session.query(StrategyVersion).count() == 1
+    snapshot = db_session.query(GitHubSnapshot).one()
+    assert snapshot.extraction_json["imported"] is False
 
 
 def test_check_source_error_on_failure(db_session, monkeypatch) -> None:
@@ -181,11 +217,85 @@ def test_unread_non_python_files_do_not_block_an_import(db_session, monkeypatch)
     source = _seed_importable_source(db_session)
 
     assert check_source(db_session, source) == "imported"
+    assert source.last_import_status == "imported"
     assert db_session.query(StrategyVersion).count() == 2
     db_session.commit()
     snapshot = db_session.query(GitHubSnapshot).one()
     assert snapshot.extraction_json["coverage"]["not_attempted_files"] == 10
     assert snapshot.extraction_json["coverage"]["complete"] is False
+
+
+def test_re_checking_a_commit_refreshes_its_snapshot(db_session, monkeypatch) -> None:
+    """One row per (source, commit): a re-check must not abort the run (ADR-058).
+
+    A commit is legitimately looked at more than once - a human imports it and the
+    watcher then checks it, or a check that ran out of its budget is retried. The
+    second insert raised ``IntegrityError: UNIQUE constraint failed:
+    github_snapshots.source_id, github_snapshots.commit``, which failed the whole
+    scheduled run and lost every other source's outcome with it.
+    """
+
+    coverage = _complete_coverage(
+        candidate_files=40,
+        candidate_python_files=35,
+        attempted_files=4,
+        downloaded_files=4,
+        not_attempted_files=36,
+        not_attempted_python_files=31,
+        budget_exhausted=True,
+    )
+    _install_fake_client(monkeypatch, "newsha", coverage)
+    source = _seed_importable_source(db_session)
+    record_snapshot(
+        db_session,
+        source.id,
+        "newsha",
+        "m" * 64,
+        {"imported": True, "reason": "manual_import"},
+    )
+    db_session.commit()
+
+    assert check_source(db_session, source) == "incomplete"
+    db_session.commit()
+    snapshots = db_session.query(GitHubSnapshot).all()
+    assert len(snapshots) == 1
+    assert snapshots[0].extraction_json["reason"] == "incomplete_analysis"
+    assert snapshots[0].extraction_json["transient"] is True
+
+
+def test_the_task_summary_names_the_statuses_the_run_produced(db_session, monkeypatch) -> None:
+    """The summary is derived from the run, not a hardcoded list (ADR-058).
+
+    The old summary only knew about ``checked``/``imported``/``incomplete``/
+    ``error``, so a run in which nothing had changed reported ``checked`` with no
+    way to tell that nothing had changed.
+    """
+
+    from contextlib import contextmanager
+
+    import app.workers.tasks as tasks
+
+    _install_fake_client(monkeypatch, "oldsha")
+    for slug in ("demo-a", "demo-b"):
+        db_session.add(
+            GitHubSource(
+                repository_url=f"https://github.com/bobvane/{slug}",
+                current_commit="oldsha",
+                is_watched=True,
+            )
+        )
+    db_session.commit()
+
+    @contextmanager
+    def _scope():  # noqa: ANN202 - test double for session_scope()
+        yield db_session
+
+    monkeypatch.setattr(tasks, "session_scope", _scope)
+
+    summary = tasks.check_github_sources()
+
+    assert summary["checked"] == 2
+    assert summary["unchanged"] == 2
 
 
 def test_a_fetch_that_ran_out_of_time_is_retried_next_run(db_session, monkeypatch) -> None:

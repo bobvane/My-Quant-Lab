@@ -40,10 +40,44 @@ def test_import_persists_github_source_and_snapshot(client, db_session) -> None:
     snapshots = client.get(f"/api/v1/importer/github/sources/{source.id}/snapshots").json()
     assert len(snapshots) == 1
     assert snapshots[0]["commit"] == "abc123"
+    # A snapshot has to explain itself: the reason lives in the extraction, and
+    # dropping it left "why did this check end this way?" unanswerable (ADR-058).
+    assert snapshots[0]["extraction"]["imported"] is True
+    assert snapshots[0]["extraction"]["reason"] == "manual_import"
 
 
 def test_import_missing_source_404(client) -> None:
     assert client.get("/api/v1/importer/github/sources/999").status_code == 404
+
+
+def test_a_second_record_for_the_same_commit_updates_the_first(db_session) -> None:
+    """Snapshots are unique per (source, commit), so later observations refresh.
+
+    Inserting a second row raised ``IntegrityError: UNIQUE constraint failed:
+    github_snapshots.source_id, github_snapshots.commit`` (ADR-058).
+    """
+
+    from app.data.github_source_service import record_snapshot
+    from app.domain.models import GitHubSnapshot, GitHubSource
+
+    source = GitHubSource(repository_url="https://github.com/bobvane/demo", current_commit="abc")
+    db_session.add(source)
+    db_session.commit()
+
+    first = record_snapshot(
+        db_session, source.id, "abc", "h" * 64, {"imported": True, "reason": "manual_import"}
+    )
+    db_session.commit()
+    second = record_snapshot(
+        db_session, source.id, "abc", "j" * 64, {"imported": False, "reason": "incomplete_analysis"}
+    )
+    db_session.commit()
+
+    assert first.id == second.id
+    assert db_session.query(GitHubSnapshot).count() == 1
+    stored = db_session.query(GitHubSnapshot).one()
+    assert stored.content_hash == "j" * 64
+    assert stored.extraction_json["reason"] == "incomplete_analysis"
 
 
 def test_check_source_now_reports_update(client, db_session, monkeypatch) -> None:

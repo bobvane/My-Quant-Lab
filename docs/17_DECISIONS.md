@@ -973,3 +973,35 @@ ADR-056 让报告能说出"读了多少、跳过了什么"，但抓取本身仍�
 **测试**
 
 `backend/tests/test_importer.py` 新增 `test_a_fetch_that_runs_out_of_its_budget_stops_early`（`max_seconds=0` → `attempted_files == 0`、全部候选 not-attempted、`budget_exhausted is True`，且警告含 `stopped after` 而**不含** `the cap is`）与 `test_get_json_honours_the_configured_timeout`（monkeypatch `httpx.get` 断言 `timeout == 2.5`）；`test_fetch_respects_cap_and_prefers_python` 补断言 `budget_exhausted is False` / `max_seconds == DEFAULT_FETCH_BUDGET_SECONDS`；`test_analyze_endpoint_reports_its_coverage` 断言 `analysis_version == "1.2.0"` / `coverage["max_seconds"] == 120` / 不含 `stopped after`。`backend/tests/test_github_watch.py` 新增 `test_a_fetch_that_ran_out_of_time_is_retried_next_run`（`budget_exhausted=True` → `current_commit` 停在 `oldsha`、快照 `transient is True`），并在 `test_unread_python_files_block_an_unattended_import` 里断言上限型缺口的 `transient is False`。`backend/scripts/probe_github_coverage.py` 增加 `max_seconds = 0` 场景，打印预算中断的 coverage 与措辞。
+
+## ADR-058：被监视的来源必须解释自己的状态（`last_import_status` 词表 + 快照可读，docs/05 §7.1）
+
+**背景**
+
+ADR-056/057 让「读了多少、为什么停下」有了算术表达，但用户从 UI 上看到的那一行仍然是 `check_source` 写下的机器字符串。四条实测缺陷（第 4 条是本地真栈验证时抓到的，单元测试没覆盖到）：
+
+1. **三种截然不同的结果共用一个状态**：`check_source` 对「head 与 `current_commit` 相同，什么都没抓」「抓取了新 commit 但没有草案」「抓取了新 commit 且 DSL 未变」三条路径**全部**写 `last_import_status = "checked"`（`backend/app/workers/tasks.py` 原第 252/269/330 行），而它的**返回值**却已经区分 `unchanged` / `no_change`。于是 UI 表格里一行「已检查」既可能是「没有新东西可看」，也可能是「抓取并分析过了，策略没变」——用户无法判断 watcher 是否真的干活，而且状态列直接渲染这个英文枚举（`frontend/src/views/StrategiesView.vue` 原第 764 行）。
+2. **原因被写下来，却读不出来**：`GitHubSnapshot.extraction_json` 里存着 `imported` / `reason` / `transient` / `coverage` / `warnings`——即「为什么是这个状态」——但 `GET /importer/github/sources/{id}/snapshots` 只返回 `id/source_id/commit/content_hash/fetched_at`，把 `extraction_json` 丢掉；前端也从未调用过这个端点。用户看到 `incomplete`，没有任何入口能查到漏了什么。人工导入路径更彻底：快照写的是 `extraction_json={}`，连 row 存在的原因都没有。
+3. **汇总会各自漂移**：`check_github_sources` 手写 `{"checked", "imported", "incomplete", "error"}` 并逐个 `if` 累加，词表一变就会漏计（`unchanged` / `no_change` 从未出现在汇总里）。
+4. **同一个 commit 被看两次会让整轮调度崩掉**：`github_snapshots` 上有 `UniqueConstraint("source_id", "commit", name="uq_github_snapshot")`（`backend/app/domain/models.py:809`），但 `check_source` 的两处写入都是**无条件 insert**，人工导入路径则用 `exists` 检查静默跳过。本地真栈验证（先人工导入 `776c9884e`，再让 watcher 去检查同一个 commit）得到 `sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) UNIQUE constraint failed: github_snapshots.source_id, github_snapshots.commit`，异常在 `session_scope` 退出时抛出，**整轮 `check_github_sources` 的结果全部回滚**。这个 bug 与 ADR-057 相互放大：瞬时缺口刻意不推进 `current_commit`，于是**下一轮必然重查同一个 commit**，也就必然再次撞上唯一约束——一次网络抖动会让每日调度永久失败，而不是重试成功。
+
+
+**决策**
+
+1. `check_source` 的返回值与 `source.last_import_status` 使用**同一套词表**：`unchanged`（head 未变，未抓取）/ `no_change`（抓了新 commit，DSL 未变或没有草案）/ `imported` / `incomplete` / `error`。`current_commit` 的推进规则不变：`unchanged` 不动，`no_change`/`imported` 推进，`incomplete` 只有结构性缺口推进（ADR-057）。
+2. 旧记录里的 `checked` **不重写、不猜测**：它同时可能是三种含义，UI 明确标为「已检查（旧记录）」，未知值原样显示。
+3. `GET /importer/github/sources/{id}/snapshots` 增加 `extraction`（即 `extraction_json`），让「为什么」有出口。
+4. 人工导入产生的快照写入 `{"imported": true, "reason": "manual_import"}`，不留空对象。
+5. `check_github_sources` 的汇总改为**派生**：`checked` 仍是本轮检查过的来源数，其余按本轮实际产生的结果原样累加（`{"checked": len(sources), **outcomes}`），因此与 `check_source` 的词表不会漂移。
+6. UI 把状态翻译为可读文案，并在「详情」里展示最近一条快照：原因、覆盖数字（读取 X / Y、其中 N 个 Python 没被读到）、警告列表，以及瞬时缺口的重试承诺（「下一轮检查会重试」）。详情行标的是**本次检查的 commit**，它可能与表格里的「当前 commit」不同——那不是笔误，正是「这个 commit 还没被标记为已处理」的表现。
+7. 两处写入合并为一个 upsert（`backend/app/data/github_source_service.py` 的 `record_snapshot(db, source_id, commit, content_hash, extraction, manifest=None)`）：先按 `(source_id, commit)` 查，存在就**更新** `content_hash` / `manifest_json` / `extraction_json` / `fetched_at`，不存在才 insert。人工导入与 watcher 都走它，因此两条路径不会各自记住不同的规则。**最新一次观察覆盖旧的解释**：快照的职责是说明来源**当前**的状态，而 `(source, commit)` 上的第二行在 schema 上就不存在。
+
+**理由**
+
+「已检查」这种状态对无人值守的监视功能来说是伪信息：用户真正需要知道的是**它做了什么、为什么没导入、下次会不会再试**。这与 ADR-056/057 是同一条线——先保证系统内部的算术诚实（coverage/预算），再保证这份诚实能到达用户（词表/快照/UI）。把状态词表统一在 `check_source` 一处、让汇总从中派生，是为了让「一个状态」只有一个含义。旧值不迁移是刻意的：数据迁移会**编造**历史，而 `checked` 客观上无法区分三种含义，标注为旧记录比假装知道更诚实。
+
+第 7 条是「解释必须写得下去」的前提：一个会抛 `IntegrityError` 的解释通道等于没有通道，而且它恰好会在 ADR-057 设计的重试路径上必现。把 upsert 放进共享服务而不是在两个调用点各写一遍，与 ADR-056 把 coverage 算术共享给端点和 watcher 是同一个理由：两条路径不能各自记住不同的规则。
+
+**测试**
+
+`backend/tests/test_github_watch.py` 新增 `test_a_new_commit_with_an_unchanged_dsl_is_stored_as_no_change`（新 commit + DSL 未变 → 返回并存储 `no_change`、`current_commit` 推进、不新建版本、快照 `imported is False`）、`test_the_task_summary_names_the_statuses_the_run_produced`（monkeypatch `session_scope`，两个 `unchanged` 来源 → 汇总含 `{"checked": 2, "unchanged": 2}`）与 `test_re_checking_a_commit_refreshes_its_snapshot`（先写入同一 commit 的人工导入快照，再让 watcher 得到瞬时缺口 → 不抛异常、快照仍只有一行且 `reason` 更新为 `incomplete_analysis`）；`test_check_source_imports_new_commit` / `test_check_source_unchanged_when_commit_same` / `test_unread_non_python_files_do_not_block_an_import` 增补「存储值等于返回值」的断言。`backend/tests/test_github_sources.py` 的 `test_import_persists_github_source_and_snapshot` 断言快照含 `extraction.imported is True` / `extraction.reason == "manual_import"`，新增 `test_a_second_record_for_the_same_commit_updates_the_first`（两次 `record_snapshot` → 同一行 id、`content_hash` 与 `extraction_json` 取最新）。本地真栈验证：`backend/scripts/probe_watch_status.py` 对真实仓库跑 `check_source`，同一 commit 返回并存储 `unchanged`；把 `current_commit` 改成旧值后真实抓取在 120s 预算处停下 → 返回并存储 `incomplete`、`current_commit` 不推进、对该 commit 的既有快照被刷新为 `incomplete_analysis` + `transient=True` + `coverage=1/179` + `unread_python=138` + `budget_exhausted=True`；真实浏览器（12 条断言 + 详情面板）全通过。

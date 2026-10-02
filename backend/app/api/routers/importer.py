@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import GithubAnalyzeOut, GithubAnalyzeRequest, GithubImportRequest
 from app.core.db import get_db
+from app.data.github_source_service import record_snapshot
 from app.data.strategy_service import create_strategy_version, parse_spec, record_audit, slugify
 from app.domain.models import GitHubSnapshot, GitHubSource, Strategy
 from app.importer import (
@@ -56,21 +57,15 @@ def _persist_github_source(
         source.current_commit = ref or source.current_commit
         source.last_checked_at = dt.datetime.now(tz=dt.UTC)
     if ref and ref != "HEAD":
-        exists = db.scalar(
-            select(GitHubSnapshot).where(
-                GitHubSnapshot.source_id == source.id, GitHubSnapshot.commit == ref
-            )
+        # One row per (source, commit): re-importing or re-checking a commit has to
+        # refresh its explanation, not insert a duplicate (ADR-058).
+        record_snapshot(
+            db,
+            source.id,
+            ref,
+            content_hash,
+            {"imported": True, "reason": "manual_import"},
         )
-        if exists is None:
-            db.add(
-                GitHubSnapshot(
-                    source_id=source.id,
-                    commit=ref,
-                    content_hash=content_hash,
-                    manifest_json={},
-                    extraction_json={},
-                )
-            )
     return source
 
 
@@ -303,6 +298,11 @@ def list_snapshots(
             "commit": row.commit,
             "content_hash": row.content_hash,
             "fetched_at": row.fetched_at,
+            # Why a check ended the way it did lives here: ``imported``,
+            # ``reason``, ``transient``, ``coverage`` and ``warnings``. Reporting
+            # only the commit made the stored explanation unreadable, so a user
+            # saw "incomplete" with no way to find out what was missed (ADR-058).
+            "extraction": row.extraction_json,
         }
         for row in rows
     ]

@@ -4,6 +4,7 @@ import {
   api,
   type Asset,
   type GithubAnalysis,
+  type GithubSnapshot,
   type SignalIntent,
   type Strategy,
   type StrategyLifecycle,
@@ -25,6 +26,28 @@ const STAGE_LABELS: Record<string, string> = {
 function stageLabel(stage: string | null | undefined): string {
   if (!stage) return '—'
   return STAGE_LABELS[stage] ?? stage
+}
+
+// What a check actually did. ``checked`` is what older rows stored for all three
+// non-events, so it is labelled as history rather than guessed at (ADR-058).
+const SOURCE_STATUS_LABELS: Record<string, string> = {
+  imported: '已导入新版本',
+  no_change: '已检查，策略无变化',
+  unchanged: '未变化（同一 commit）',
+  incomplete: '未完整读取，未导入',
+  error: '检查失败',
+  checked: '已检查（旧记录）',
+}
+
+function sourceStatusLabel(status: string | null | undefined): string {
+  if (!status) return '从未检查'
+  return SOURCE_STATUS_LABELS[status] ?? status
+}
+
+function sourceStatusTone(status: string | null | undefined): string {
+  if (status === 'error') return 'error'
+  if (status === 'incomplete') return 'error'
+  return 'muted'
 }
 
 const lifecycles = ref<StrategyLifecycle[]>([])
@@ -281,6 +304,65 @@ async function checkSourceNow(s: Record<string, any>) {
   } finally {
     checkingSource.value = null
   }
+}
+
+// Why a check ended the way it did is stored with the snapshot, so the row can
+// answer "it says incomplete - incomplete how?" instead of leaving the operator
+// with an English enum (ADR-058).
+const ghSnapshots = ref<Record<number, GithubSnapshot[]>>({})
+const ghSnapshotOpen = ref<number | null>(null)
+const ghSnapshotLoading = ref<number | null>(null)
+
+async function toggleSourceSnapshots(s: Record<string, any>) {
+  const id = Number(s.id)
+  if (ghSnapshotOpen.value === id) {
+    ghSnapshotOpen.value = null
+    return
+  }
+  ghSnapshotOpen.value = id
+  if (ghSnapshots.value[id]) return
+  ghSnapshotLoading.value = id
+  try {
+    ghSnapshots.value[id] = await api.githubSnapshots(id, 5)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    ghSnapshotLoading.value = null
+  }
+}
+
+function latestSnapshot(s: Record<string, any>): GithubSnapshot | null {
+  return ghSnapshots.value[Number(s.id)]?.[0] ?? null
+}
+
+function snapshotExplanation(snapshot: GithubSnapshot | null): string {
+  if (!snapshot) return '这个来源还没有检查记录。'
+  const extraction = snapshot.extraction ?? {}
+  const reason = String(extraction.reason ?? '')
+  if (reason === 'incomplete_analysis') {
+    const coverage = extraction.coverage ?? {}
+    const read = `${coverage.attempted_files ?? 0} / ${coverage.candidate_files ?? '?'} 个候选文件`
+    return extraction.transient
+      ? `读取因超出时间预算或网络中断而停止，只读了 ${read}；这个 commit 没有标记为已处理，下一轮检查会重试。`
+      : `读取受抓取上限限制，只读了 ${read}；同样的设置重读会得到同样的结果，所以这个 commit 已标记为处理过，不会自动导入。`
+  }
+  if (reason === 'manual_import') return '这个 commit 是人工审核后导入的。'
+  if (extraction.imported === true) return '已从这个 commit 生成新的策略版本。'
+  if (extraction.imported === false) return '已读取这个 commit，但抽取出的策略没有变化。'
+  return '这条快照没有记录原因（ADR-058 之前的旧记录）。'
+}
+
+function snapshotCoverage(snapshot: GithubSnapshot | null): string {
+  const coverage = snapshot?.extraction?.coverage
+  if (!coverage) return ''
+  return `读取 ${coverage.downloaded_files} / ${coverage.candidate_files} 个候选文件（解析 ${coverage.parsed_files} 个 Python、登记 ${coverage.inventoried_files} 个非 Python）${
+    coverage.unread_python_files > 0 ? `，其中 ${coverage.unread_python_files} 个 Python 没被读到` : ''
+  }。`
+}
+
+function snapshotWarnings(snapshot: GithubSnapshot | null): string[] {
+  const warnings = snapshot?.extraction?.warnings
+  return Array.isArray(warnings) ? warnings.map((w: unknown) => String(w)) : []
 }
 
 const repoUrl = ref('')
@@ -755,20 +837,50 @@ onMounted(load)
           </tr>
         </thead>
         <tbody>
-          <tr v-for="s in ghSources" :key="s.id">
-            <td>{{ s.repository_url }}</td>
-            <td class="muted">{{ String(s.current_commit || '').slice(0, 12) || '—' }}</td>
-            <td class="muted">{{ s.last_checked_at ? formatDateTime(String(s.last_checked_at)) : '—' }}</td>
-            <td>
-              <span v-if="ghUpdates[s.id]" class="badge WAIT">有更新</span>
-              <span v-else class="muted">{{ s.last_import_status || '—' }}</span>
-            </td>
-            <td>
-              <button class="ghost" :disabled="checkingSource === s.id" @click="checkSourceNow(s)">
-                {{ checkingSource === s.id ? '检查中…' : '检查更新' }}
-              </button>
-            </td>
-          </tr>
+          <template v-for="s in ghSources" :key="s.id">
+            <tr>
+              <td>{{ s.repository_url }}</td>
+              <td class="muted">{{ String(s.current_commit || '').slice(0, 12) || '—' }}</td>
+              <td class="muted">{{ s.last_checked_at ? formatDateTime(String(s.last_checked_at)) : '—' }}</td>
+              <td>
+                <span v-if="ghUpdates[s.id]" class="badge WAIT">有更新</span>
+                <span v-else :class="sourceStatusTone(s.last_import_status)">
+                  {{ sourceStatusLabel(s.last_import_status) }}
+                </span>
+              </td>
+              <td>
+                <button class="ghost" :disabled="checkingSource === s.id" @click="checkSourceNow(s)">
+                  {{ checkingSource === s.id ? '检查中…' : '检查更新' }}
+                </button>
+                <button class="ghost" @click="toggleSourceSnapshots(s)">
+                  {{ ghSnapshotOpen === Number(s.id) ? '收起详情' : '详情' }}
+                </button>
+              </td>
+            </tr>
+            <tr v-if="ghSnapshotOpen === Number(s.id)">
+              <td colspan="5">
+                <p v-if="ghSnapshotLoading === Number(s.id)" class="muted">读取检查记录…</p>
+                <template v-else>
+                  <p :class="latestSnapshot(s)?.extraction?.reason === 'incomplete_analysis' ? 'error' : 'muted'">
+                    {{ snapshotExplanation(latestSnapshot(s)) }}
+                  </p>
+                  <p v-if="snapshotCoverage(latestSnapshot(s))" class="muted">
+                    {{ snapshotCoverage(latestSnapshot(s)) }}
+                  </p>
+                  <ul v-if="snapshotWarnings(latestSnapshot(s)).length" class="error">
+                    <li v-for="(w, i) in snapshotWarnings(latestSnapshot(s))" :key="i">{{ w }}</li>
+                  </ul>
+                  <p v-if="latestSnapshot(s)" class="muted" style="margin-bottom: 0">
+                    本次检查的 commit <code>{{ String(latestSnapshot(s)?.commit || '').slice(0, 12) }}</code>
+                    · {{ latestSnapshot(s)?.fetched_at ? formatDateTime(String(latestSnapshot(s)?.fetched_at)) : '—' }}
+                    <span v-if="(ghSnapshots[Number(s.id)]?.length ?? 0) > 1">
+                      · 共 {{ ghSnapshots[Number(s.id)]?.length }} 条记录（只显示最近一条）
+                    </span>
+                  </p>
+                </template>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
       <p class="muted" style="margin-bottom: 0">

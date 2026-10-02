@@ -21,6 +21,21 @@
 
 ---
 
+## 主要能力（V1）
+
+- **行情**：synthetic（离线确定性演示）/ Yahoo Finance（美股·ETF·加密），去重、UTC、已收盘标记、数据质量检测（valid/partial/invalid）。
+- **策略 DSL**：声明式指标（EMA/SMA/RSI/ATR/MACD/Bollinger，可用 `period_ref` 参数化）、Price Action 特征、条件算子；策略版本不可变、可校验、可验证哈希。
+- **回测**：确定性引擎，next-bar-open 成交、手续费/滑点、止损止盈（同 bar 保守成交并标记）、MAE/MFE/R；**限价/停止入场（P1）**；Walk-Forward 与 **OOS 单次留出**；多回测对比、交易明细导出。
+- **信号**：只用已收盘 K 线，去重、证据（FeatureSnapshot + 组合上下文）、WAIT/BUY/SELL/NO_SIGNAL、结果回填与统计（胜率/PnL 分组）。
+- **模拟盘**：虚拟资金、多头执行、费用/滑点、账户开关/出入金、审计隔离。
+- **策略生命周期**：确定性证据门控的晋级/降级（无 AI 介入），参考信号需人工。
+- **通知（M11）**：Generic Webhook / 飞书 / Telegram / PushPlus / Email；去重、降噪（状态/免打扰/每日上限/冷却），密钥加密存储。
+- **Ghostfolio**：只读接入，持仓市值/成本/盈亏/股息，符号联动（BTC-USD ↔ BITCOIN）。
+- **AI（可选）**：仅解释引擎结果，多供应商/模型路由（能力/成本/预算）；未配置时量化功能完全正常。
+- **安全**：可选 Bearer 鉴权 + 写请求限流、日志脱敏、审计；GitHub 导入只做静态分析、绝不执行代码。
+
+---
+
 ## 快速开始（NAS 部署）
 
 **只需要两个文件**：`docker-compose.yml` 和 `.env`（都放在同一个项目目录里）。
@@ -58,7 +73,7 @@ docker compose pull && docker compose up -d
 默认 `MQL_VERSION=latest`（每次 pull 都是最新发布版）。想锁定版本防意外升级：
 
 ```ini
-MQL_VERSION=v0.0.8
+MQL_VERSION=v0.9.0
 ```
 
 ### 访问

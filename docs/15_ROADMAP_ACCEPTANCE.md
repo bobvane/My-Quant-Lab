@@ -18,6 +18,29 @@ stack and runs an end-to-end smoke test on every push.
 Definition of Done: met (see the checklist below), including the no-auto-trading
 boundary and the no-lookahead / immutability guarantees.
 
+## Post-V1 progress
+
+### v1.0.0 — released and verified on a real NAS
+
+- 三个 GHCR 镜像（backend / web / docker-proxy）发布；release 工作流对**已发布镜像**跑冒烟。
+- NAS 端到端检查 12/12 通过：Web `/healthz` 与首页、API `/health`（DB/Redis/worker 全绿）、
+  `/system/info`、行情同步（含幂等重跑）、建策略与版本（不可变触发器）、回测、扫信号、
+  AI 任务路由注册、模拟盘账户。
+- `docs/17` ADR-039 收尾项全部落地。
+
+### v1.1 — 进行中
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 参数覆盖真正生效 + 结果哈希只覆盖有效参数 | DONE | ADR-040。修复「哈希说谎」：override 曾被折进哈希却从未应用 |
+| 参数敏感性分析（后端 + API） | DONE | ADR-041 / `docs/21`。网格扫描、统计、稳健性判定、审计事件 |
+| 参数敏感性分析（前端热力图） | DONE | 回测实验室接入，1 轴折线 / 2 轴热力图，并列交易数防「靠不交易变好看」 |
+| 示例策略参数化（`period_ref`） | DONE | 两个示例原先的规则引用了**不存在的列**（`ema20`），实际被当作常量 20；已修正并加回归测试 |
+| 行情 provider 语义写入文档 | DONE | README 说明换 provider 后演示代码必然 0 根 K 线 |
+| Windows/UNC 开发脚本 | DONE | `scripts/Invoke-Tests.ps1`、`Invoke-FrontendChecks.ps1`、`Test-NasDeployment.ps1` |
+| 清理 `StarletteDeprecationWarning`（httpx） | TODO | CI 输出仍有 1 条告警 |
+| v2 结构性能力（Monte Carlo / 组合级仓位 / Ensemble） | TODO | 需新增 ADR 与 fixtures（ADR-037 §4） |
+
 
 ## Phase 0 — Foundation
 

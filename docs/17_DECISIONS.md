@@ -434,3 +434,46 @@ ADR，保证结果可复现、可解释。
    - 三者保留 `[计划]` 标注并写入 docs/12 理由。
 
 **理由**：补齐文档/后端已有但 UI 未暴露的能力，让 v1.0.0 的交付与已冻结范围一致；同时用 docs/12 的 `[计划]` 标注把语义不明或需持久化改造的端点显式排除在 v1.0 之外，避免为凑端点而臆造语义。
+
+> 注：ADR-038 号未被使用（历史空缺）。v1.0 之后的变更从 ADR-040 继续编号。
+
+## ADR-040：回测参数覆盖必须真正生效，且结果哈希只覆盖「有效参数」
+
+**背景**：`run_backtest(spec, bars, parameters=...)` 一直把 `parameters` 折进 `result_hash`，却**从未把它应用到特征引擎**——特征始终按 `spec.parameters` 计算。后果有两个方向，都很严重：
+
+1. **静默失效**：用 `parameters={"trend": 5}` 与 `{"trend": 40}` 跑同一策略，得到**完全相同的 25 笔交易**，但 `result_hash` 不同。使用者以为参数生效了，实际拿到的是同一份结果。
+2. **哈希说谎**：结果哈希是 docs/07 可复现性契约的锚点（策略版本 + 数据集 + 参数 + 引擎版本 + 特征版本）。它声称"参数不同 → 结果不同"，而数字层面根本没有变化，等于把两份相同的结果登记成了不同结果；反向地，把 `spec.parameters` 原样回传也会平白改变哈希、让已存结果无法复现。
+
+**决策**：
+
+1. 新增 `resolve_parameters(spec, overrides) -> (effective, warnings)`，作为参数合并的**唯一入口**。有效参数 = `spec.parameters` 叠加 overrides。
+2. `run_backtest` 用 `effective` 重写一份 `spec`（`model_copy`）后再交给特征引擎，**并**用同一个 `effective` 计算 `result_hash`。特征与哈希从此不可能不一致。
+3. **未知键降级为 warning，不抛错**：override 可能合法地携带策略不需要的键（调用方整体回传 `spec.parameters` 是常见写法），报错会破坏既有调用；同时**未知键不进入哈希**，避免"被忽略的键伪装成另一次计算"。warning 经 `BacktestResult.warnings` → API `warnings` 字段回传，用户看得到。
+4. 不把成本（`fee_bps`/`slippage_bps`）纳入 `parameters`：成本属于 `execution`，用 `execution_overrides` 调整。原先那条 `test_result_hash_changes_with_parameters` 用 `parameters` 传成本，只证明了"哈希会混入任意字典"，已改为 `test_result_hash_changes_with_costs`。
+
+**理由**：可复现性契约要求「同样的输入 → 同样的数字」，也要求「数字不同 → 哈希不同」。修复前两条都破了。此修复是 docs/21 参数敏感性分析的前提：不修的话扫一整片参数网格会得到一排完全相同的结果，还会被报告成"策略极其稳定"。
+
+## ADR-041：参数敏感性分析（docs/21）
+
+**决策**：
+
+1. 新增 `app/research/sensitivity.py` + `POST /research/sensitivity`：把一个或多个**已声明参数**（`period_ref` 指向的键）扫成笛卡尔网格，逐点独立回测，回报每个点的指标、目标指标的分布统计（mean/median/stdev/min/max/range/positive_ratio）、最佳/最差点与 `stable` 判定。
+2. **纯描述性，不做参数寻优**：报告给"这个邻域长什么样"，不给"应该用哪组参数"。`best`/`worst` 只是排序结果，不是推荐；AI 也不得改写这些数字（docs/02 §3）。
+3. `grid` 的轴必须是策略已声明的参数，未知轴 → 422（否则会扫出一份"只有一个点"的假报告）。
+4. 网格点数上限 `MAX_GRID_POINTS = 144`，超出 → 422。一次扫描 = 网格点数 × 一次回测的成本，必须防止一个手误把 NAS 的 CPU 占满一小时。
+5. 目标指标未定义（样本不足 / 无交易）时保留该点但 `objective = None`，并从排序与分布统计中剔除；`stable` 返回 `None`。**不把未知当 0**。
+6. `stable` 用「所有已评估点目标值同号」这一朴素但诚实的判据，不做样本量支撑不了的显著性检验。
+7. 每次扫描写审计事件 `sensitivity_completed`，含网格轴与统计摘要，使报告事后可复现。
+
+**理由**：docs/15 把参数敏感性分析列为 P2。在 ADR-040 之后它才真正可得。用「跨邻域是否稳健」回答"这个策略是不是只在某一组精确参数下成立"，比单点最优更接近研究要问的问题。
+
+## ADR-042：v1.1 迭代计划（体验与一致性收尾）
+
+**决策**：v1.0.0 已在 NAS 上验证（Web/API/DB/Redis/worker 全绿，12/12 端到端检查通过）。v1.1 的范围限定为"不改变回测语义、不新增结构性能力"的修复与补全：
+
+1. **行情 provider 语义写进文档与 UI**：`.env` 为 `yahoo_finance` 时 `DEMO-AAPL` 必然 0 根 K 线（这是正确行为，报错文案也已解释），但 README 仍把 `synthetic` 说成默认且未说明"换 provider 后演示代码会失效"。补文档 + 同步页给明确指引。
+2. **参数敏感性分析前端**：回测实验室接入 `POST /research/sensitivity`，用热力图/折线展示目标指标随参数的走势与稳健性。
+3. **清理测试告警**：`fastapi.testclient` 的 `StarletteDeprecationWarning`（httpx）长期存在，CI 输出不干净。
+4. **`backend/pyproject.toml` 与镜像的关系**：该文件是 pytest/ruff/mypy 配置的唯一来源，但 `Dockerfile.backend` 只装 `requirements.txt`。明确它是开发期配置并写入文档，避免"改了 pyproject 以为镜像行为会变"。
+
+**理由**：v1.0.0 是一个已验证的稳定基线。继续推进时先修一致性与体验问题、再开结构性能力，且每个大版本都停在 NAS 上做一次真实端到端验证（用户明确要求的节奏）。

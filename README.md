@@ -25,7 +25,7 @@
 
 - **行情**：synthetic（离线确定性演示）/ Yahoo Finance（美股·ETF·加密），去重、UTC、已收盘标记、数据质量检测（valid/partial/invalid）。
 - **策略 DSL**：声明式指标（EMA/SMA/RSI/ATR/MACD/Bollinger，可用 `period_ref` 参数化）、Price Action 特征、条件算子；策略版本不可变、可校验、可验证哈希。
-- **回测**：确定性引擎，next-bar-open 成交、手续费/滑点、止损止盈（同 bar 保守成交并标记）、MAE/MFE/R；**限价/停止入场（P1）**；Walk-Forward 与 **OOS 单次留出**；多回测对比、交易明细导出。
+- **回测**：确定性引擎，next-bar-open 成交、手续费/滑点、止损止盈（同 bar 保守成交并标记）、MAE/MFE/R；**限价/停止入场（P1）**；Walk-Forward 与 **OOS 单次留出**；**参数敏感性分析**（扫参数网格，看结论在邻域内是平移还是翻转——纯描述，不做寻优）；多回测对比、交易明细导出。
 - **信号**：只用已收盘 K 线，去重、证据（FeatureSnapshot + 组合上下文）、WAIT/BUY/SELL/NO_SIGNAL、结果回填与统计（胜率/PnL 分组）。
 - **模拟盘**：虚拟资金、多头执行、费用/滑点、账户开关/出入金、审计隔离。
 - **策略生命周期**：确定性证据门控的晋级/降级（无 AI 介入），参考信号需人工。
@@ -110,10 +110,14 @@ docker compose logs --tail 80 quantlab-api
 > 也可以在单次同步时用 `provider` 参数临时指定，例如
 > `POST /api/v1/market-data/sync` 请求体带 `{"symbol": "AAPL", "provider": "yahoo_finance"}`。
 >
-> 两个注意点：
+> 三个注意点：
 > 1. `synthetic` 只服务 `DEMO-AAPL` / `DEMO-BTC` 两个演示代码。用随机数据冒充实盘代码
 >    会被明确拒绝（HTTP 4xx），避免研究结论建立在编造的价格之上。
-> 2. Yahoo 可能对同一出口 IP 限流，而它的表现是**返回 0 根 K 线而非报错**；
+> 2. **换成 `yahoo_finance` 之后，演示代码 `DEMO-AAPL` / `DEMO-BTC` 会同步到 0 根 K 线。**
+>    这是正确行为（Yahoo 上不存在这两个代码），不是故障：报错文案会明确说明。此时请改用真实
+>    代码（`AAPL`、`SPY`、`BTC-USD`…），或在该次请求里显式带上 `"provider": "synthetic"`
+>    来跑演示数据。演示与真实行情**不要混在同一个代码上**比较。
+> 3. Yahoo 可能对同一出口 IP 限流，而它的表现同样是**返回 0 根 K 线而非报错**；
 >    若代码本身有效，稍后重试通常即可。
 
 ---

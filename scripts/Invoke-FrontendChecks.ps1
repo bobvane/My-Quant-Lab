@@ -1,61 +1,87 @@
-# Invoke-FrontendChecks.ps1 — typecheck + build the Vue frontend reliably.
+# Invoke-FrontendChecks.ps1 — typecheck + production build the Vue frontend.
 #
-# Why the drive mapping: the repo lives on a UNC share (\\bob-fnos\...). Node and
-# npm are launched through .cmd shims that run under cmd.exe, and **cmd.exe cannot
-# use a UNC path as its working directory** — it silently falls back to
-# C:\Windows, so local binaries such as node_modules\vue-tsc\bin\vue-tsc.js are
-# not found and every run fails with MODULE_NOT_FOUND. Addressing the repo
-# through a mapped drive letter makes cmd.exe (and therefore npm) work.
+# Reproduces CI's `frontend` job (`npm run typecheck`, `npm run build`) on Windows.
+# Two environment traps on this repo make a naive `npm run build` impossible, and
+# both are worked around here rather than papered over:
+#
+#   1. UNC + cmd.exe: npm/node are launched through .cmd shims that run under
+#      cmd.exe, and cmd.exe cannot use a UNC path as its working directory — it
+#      silently falls back to C:\Windows, so node_modules\.bin\vue-tsc is not found
+#      (MODULE_NOT_FOUND). Addressing the repo through a mapped drive letter fixes
+#      typecheck.
+#   2. Mapped drive + non-ASCII path + Vite: `vite build` resolves its root through
+#      POSIX-style paths and mangles Z:\ with the Chinese path segments into
+#      Z:\bob-fnos\..., so it cannot find index.html. `vue-tsc` is happy, Vite is
+#      not. The build therefore runs from a local ASCII mirror instead.
+#
+# Under a UNC workspace the script mirrors the frontend into a persistent local
+# directory (node_modules is re-mirrored only when it is missing, which keeps
+# repeat runs fast) and runs everything there. `npm ci` in the mirror regenerates a
+# consistent node_modules from the committed lock file.
 #
 # Usage:
 #   pwsh -NoProfile -File scripts\Invoke-FrontendChecks.ps1
 #   pwsh -NoProfile -File scripts\Invoke-FrontendChecks.ps1 -SkipInstall
-#   pwsh -NoProfile -File scripts\Invoke-FrontendChecks.ps1 -Drive Z
+#   pwsh -NoProfile -File scripts\Invoke-FrontendChecks.ps1 -KeepMirror
 param(
-    [string]$Drive = 'Z',
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [switch]$KeepMirror,
+    [string]$MirrorRoot = ''
 )
 
 $ErrorActionPreference = 'Continue'
-
-# scripts\ lives in the repo root.
 $uncRoot = Split-Path -Parent $PSScriptRoot
+$sourceFrontend = Join-Path $uncRoot 'frontend'
 
-# Resolve (or create) a drive mapping that points at the UNC share containing the
-# repo, then address the repo through it.
-function Resolve-RepoDrive {
-    param([string]$UncPath, [string]$Preferred)
-
-    $existing = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayRoot -and $UncPath.StartsWith($_.DisplayRoot, 'OrdinalIgnoreCase') }
-    if ($existing) { return $existing[0].Name }
-
-    $share = ([uri]$UncPath).Host
-    $shareRoot = "\\$share\" + ($UncPath.TrimStart('\').Split('\')[1])
-    foreach ($letter in @($Preferred, 'Y', 'X', 'W', 'V')) {
-        if (Test-Path -LiteralPath "${letter}:\") { continue }
-        cmd /c "net use ${letter}: `"$shareRoot`" /persistent:no" > $null 2>&1
-        if ($LASTEXITCODE -eq 0) { return $letter }
-    }
-    throw "no free drive letter could be mapped to $shareRoot; map the share manually and re-run with -Drive <letter>"
+if (-not (Test-Path -LiteralPath (Join-Path $sourceFrontend 'package.json'))) {
+    throw "frontend not found at $sourceFrontend"
 }
 
-if ($uncRoot -notmatch '^\\\\') {
-    # Already a local path: no mapping needed.
-    $frontend = Join-Path $uncRoot 'frontend'
+function Invoke-Robocopy {
+    param([string]$From, [string]$To, [string[]]$ExcludeDirs = @())
+    # NB: do not name this $args — that is a reserved automatic variable and
+    # assigning to it silently breaks the call.
+    $roboArgs = @($From, $To, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:1', '/W:1')
+    if ($ExcludeDirs.Count -gt 0) { $roboArgs += '/XD'; $roboArgs += $ExcludeDirs }
+    robocopy @roboArgs | Out-Null
+    # robocopy exit codes 0-7 are success (bit flags); >=8 is a real failure.
+    if ($LASTEXITCODE -ge 8) { throw "robocopy $From -> $To failed (exit $LASTEXITCODE)" }
+}
+
+# Decide where to run. A genuinely local path can be used as-is. A UNC path *or* a
+# mapped network drive must be mirrored: cmd.exe breaks on the former and Vite
+# mangles the latter into `Z:\<server>\<share>\...` (see the header).
+$drive = $null
+$rooted = $null
+if ($uncRoot -match '^([A-Za-z]):\\(.*)$') {
+    $drive = $Matches[1]
+    $rooted = $Matches[2]
+}
+$mapped = $false
+if ($drive) {
+    $info = Get-PSDrive -Name $drive -ErrorAction SilentlyContinue
+    $mapped = [bool]($info -and $info.DisplayRoot)
+}
+$needsMirror = ($uncRoot -match '^\\\\') -or $mapped
+
+if (-not $needsMirror) {
+    $work = $sourceFrontend
+    Write-Output "== local workspace: running in place =="
 }
 else {
-    $letter = Resolve-RepoDrive -UncPath $uncRoot -Preferred $Drive
-    $relative = $uncRoot.Substring($uncRoot.IndexOf('\', 2) + 1)
-    $frontend = "${letter}:\$relative\frontend"
-    Write-Output "== mapped $uncRoot -> ${letter}: =="
+    if (-not $MirrorRoot) {
+        $MirrorRoot = Join-Path $env:LOCALAPPDATA 'mql-fe-build'
+    }
+    $work = $MirrorRoot
+    $reason = if ($mapped) { "mapped network drive ${drive}: (Vite cannot build there)" } else { 'UNC path (cmd.exe cannot build there)' }
+    Write-Output "== $reason =="
+    Write-Output "== mirroring frontend to $work =="
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    Invoke-Robocopy -From $sourceFrontend -To $work -ExcludeDirs @('node_modules', 'dist')
+    Write-Output "   sources mirrored"
 }
 
-if (-not (Test-Path -LiteralPath $frontend)) { throw "frontend not found at $frontend" }
-
-Set-Location $frontend
-Write-Output "== frontend: $frontend =="
-
+Set-Location $work
 $failures = @()
 
 if (-not $SkipInstall) {
@@ -71,6 +97,10 @@ if ($LASTEXITCODE -ne 0) { $failures += 'typecheck' }
 Write-Output "`n== npm run build =="
 npm run build 2>&1 | Select-Object -Last 40
 if ($LASTEXITCODE -ne 0) { $failures += 'build' }
+
+if ($isUnc -and -not $KeepMirror) {
+    Remove-Item -LiteralPath (Join-Path $work 'dist') -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 Write-Output ""
 if ($failures.Count -eq 0) {

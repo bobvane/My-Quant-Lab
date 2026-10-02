@@ -1,5 +1,24 @@
 # 15 Roadmap & Acceptance Criteria
 
+## Implementation status (as of v1.0)
+
+All phases below are implemented and covered by automated tests; CI builds the
+stack and runs an end-to-end smoke test on every push.
+
+- Phase 0 Foundation - DONE (compose, migrations, health)
+- Phase 1 Market Data + Quant Core - DONE (indicators, PA features, DSL, quality)
+- Phase 2 Backtest Lab - DONE (engine, costs, metrics, walk-forward, OOS, comparison)
+- Phase 3 Ghostfolio - DONE (read-only adapter, holdings, portfolio context, symbol aliasing)
+- Phase 4 Paper Trading - DONE (execution engine, positions, funding, lifecycle, reset audit)
+- Phase 5 AI Layer - DONE (provider abstraction, budget, cache, structured explanations, routing)
+- Phase 6 GitHub Importer - DONE (AST analysis, provenance, watched sources, auto-reimport)
+- Phase 7 Live Signal - DONE (scheduler, scanner, dedup, outcomes, notification, noise control)
+- Phase 8 Strategy Lifecycle - DONE (evidence-gated promotion/degradation, dashboard)
+
+Definition of Done: met (see the checklist below), including the no-auto-trading
+boundary and the no-lookahead / immutability guarantees.
+
+
 ## Phase 0 — Foundation
 
 交付：Docker Compose、DB、Redis、API、Web、基础认证、迁移、日志。

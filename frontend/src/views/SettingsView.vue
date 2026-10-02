@@ -120,6 +120,19 @@ function removeChannel(index: number) {
 const providers = ref<AIProviderRecord[]>([])
 const aiModels = ref<Array<Record<string, any>>>([])
 const aiUsage = ref<Array<Record<string, any>>>([])
+const filterEntityType = ref('')
+const filterEntityId = ref('')
+
+async function loadEntityAudit() {
+  error.value = ''
+  if (!filterEntityType.value.trim() || !filterEntityId.value.trim()) return
+  try {
+    const result = await api.auditForEntity(filterEntityType.value.trim(), filterEntityId.value.trim())
+    events.value = result.events
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
 const providerName = ref('')
 const baseUrl = ref('')
 const apiKey = ref('')
@@ -562,6 +575,14 @@ onMounted(load)
 
     <div class="card" style="margin-top: 14px">
       <h3>审计日志（最近 {{ events.length }} 条）</h3>
+      <div class="row" style="margin-bottom: 8px">
+        <input v-model="filterEntityType" style="max-width: 160px" placeholder="实体类型（如 strategy）" />
+        <input v-model="filterEntityId" style="max-width: 140px" placeholder="实体 ID（如 1）" />
+        <button class="ghost" :disabled="!filterEntityType || !filterEntityId" @click="loadEntityAudit">
+          按实体过滤
+        </button>
+        <button class="ghost" @click="load">显示全部</button>
+      </div>
       <table v-if="events.length">
         <thead>
           <tr>

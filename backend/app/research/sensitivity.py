@@ -35,7 +35,9 @@ __all__ = [
     "run_sensitivity",
 ]
 
-SENSITIVITY_VERSION = "1.0.0"
+# 1.1.0: points carry `warmup_unmet`, and unmeasured points are excluded from the
+# ranking, the summary and the stability verdict (ADR-055) -- a response-shape change.
+SENSITIVITY_VERSION = "1.1.0"
 
 # Grid keys that address `execution.sizing` instead of a strategy parameter. Kept
 # deliberately tiny: each one is a documented, validated override.
@@ -164,22 +166,46 @@ def run_sensitivity(
                 "objective": metrics.get(metric),
                 "result_hash": result.result_hash,
                 "warnings": list(result.warnings),
+                # A point whose whole window sat inside the strategy's warm-up was never
+                # measured; its metrics are the flat values of a strategy that never got
+                # to trade (v1.4.5 / ADR-055).
+                "warmup_unmet": result.warmup_unmet,
             }
         )
 
     defined = [p for p in points if p["objective"] is not None]
-    values = [float(p["objective"]) for p in defined]
+    # Unmeasured points must not be ranked, must not enter the summary statistics and
+    # must not count as evidence either way in the stability verdict: they all sit at
+    # exactly 0.0, so letting them in means a point that never ran wins every grid where
+    # the real points lost money, and turns a consistent loss into a "sign flip".
+    runnable = [p for p in defined if not p["warmup_unmet"]]
+    unmeasured = sum(1 for p in points if p["warmup_unmet"])
+    values = [float(p["objective"]) for p in runnable]
 
-    ranked = sorted(defined, key=lambda p: float(p["objective"]), reverse=True)
+    ranked = sorted(runnable, key=lambda p: float(p["objective"]), reverse=True)
     best = ranked[0] if ranked else None
     worst = ranked[-1] if ranked else None
+
+    warnings: list[str] = []
+    if unmeasured:
+        detail = (
+            "no grid point was measured"
+            if not runnable
+            else f"{unmeasured} of {len(points)} were excluded from the ranking"
+        )
+        warnings.append(
+            f"{unmeasured} grid point(s) sat entirely inside the strategy's warm-up: {detail}"
+        )
 
     return {
         "sensitivity_version": SENSITIVITY_VERSION,
         "metric": metric,
-        "axes": {key: _jsonable(list(values)) for key, values in grid.items()},
+        "axes": {key: _jsonable(list(values_)) for key, values_ in grid.items()},
         "grid_points": len(points),
         "evaluated_points": len(defined),
+        "ranked_points": len(runnable),
+        "warmup_unmet_points": unmeasured,
+        "warnings": warnings,
         "points": points,
         "summary": {
             "mean": _mean(values),

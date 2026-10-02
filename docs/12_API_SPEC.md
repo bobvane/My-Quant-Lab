@@ -111,15 +111,25 @@ API base: `/api/v1`
 参数：`strategy_version_id`、`symbol`、`timeframe`、`grid`（参数名 → 取值列表）、
 `base_parameters`（可选，扫之前先套用的基线）、`metric`（排序/统计使用的目标指标，默认 `sharpe`）。
 
-返回：`axes`、`points`（每点含 `parameters`/`metrics`/`objective`/`result_hash`）、
-`summary`（mean/median/stdev/min/max/range/positive_ratio）、`best`、`worst`、`stable`。
+返回：`axes`、`points`（每点含 `parameters`/`metrics`/`objective`/`result_hash`/`warnings`/
+`warmup_unmet`）、`grid_points`、`evaluated_points`、`ranked_points`、`warmup_unmet_points`、
+`warnings`、`summary`（mean/median/stdev/min/max/range/positive_ratio）、`best`、`worst`、
+`stable`。
 
 约束与语义：
 
 - 纯描述性，**不做参数寻优**；`best`/`worst` 是排序结果，不是推荐。
 - 未知网格轴 → 422；网格点数 > 144 → 422；目标指标不在白名单 → 422。
 - 目标指标未定义时该点 `objective = null`，并从排序与统计中剔除（未知不当 0）。
+- **整段落在策略预热期内的点不会被当成结果**（ADR-055）：它的指标是「没跑起来」的扁平
+  0，因此 `warmup_unmet = true`，从 `best`/`worst`/`summary`/`stable` 中剔除，并在
+  `warnings` 里说明。`ranked_points` 才是排名实际依据的样本数；`evaluated_points` 仍
+  包含这些点（它们的 `objective` 是 0 而不是 `null`）。
+- `sensitivity_version` 当前为 `1.1.0`。
 - 每次扫描写审计事件 `sensitivity_completed`。
+- 网格可混入**一个执行轴** `risk_pct`（docs/23 §6）：它属于 `execution.sizing` 而非策略
+  参数；若策略不是 `risk_per_trade`，该点按 `risk_per_trade` 计算（否则扫出来全是相同的
+  点）。其他 `sizing` 字段会被当作未声明参数拒绝。
 - 网格可混入**一个执行轴** `risk_pct`（docs/23 §6）：它属于 `execution.sizing` 而非策略
   参数；若策略不是 `risk_per_trade`，该点按 `risk_per_trade` 计算（否则扫出来全是相同的
   点）。其他 `sizing` 字段会被当作未声明参数拒绝。

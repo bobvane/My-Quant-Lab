@@ -704,7 +704,14 @@ const sensPointCount = computed(() => {
   return Object.values(grid).reduce((acc, vs) => acc * vs.length, 1)
 })
 
-async function load() {  error.value = ''
+// Points that never got an evaluable bar report a flat 0, which would draw as a real
+// measurement sitting at the top of every losing grid. Plot only what was measured.
+const sensChartPoints = computed(() =>
+  (sensResult.value?.points ?? []).filter((p) => !p.warmup_unmet),
+)
+
+async function load() {
+  error.value = ''
   try {
     const [r, s, a] = await Promise.all([
       api.backtests(onlyVersionFilter.value ? (versionId.value ?? undefined) : undefined),
@@ -1099,11 +1106,17 @@ onMounted(async () => {
       </p>
 
       <div v-if="sensResult" style="margin-top: 12px">
+        <p v-for="(w, i) in sensResult.warnings" :key="i" class="notice">{{ w }}</p>
+
         <div class="grid cols-4">
           <StatCard
-            label="已评估 / 网格点"
-            :value="`${sensResult.evaluated_points} / ${sensResult.grid_points}`"
-            sub="目标指标未定义的点不计入统计"
+            label="参与排名 / 网格点"
+            :value="`${sensResult.ranked_points} / ${sensResult.grid_points}`"
+            :sub="
+              sensResult.warmup_unmet_points > 0
+                ? `${sensResult.warmup_unmet_points} 个点整段落在预热期内，未被测到，已排除`
+                : '未测得或目标指标未定义的点不计入统计'
+            "
           />
           <StatCard
             label="目标指标均值"
@@ -1124,7 +1137,8 @@ onMounted(async () => {
         </div>
 
         <SensitivityChart
-          :points="sensResult.points"
+          v-if="sensChartPoints.length > 0"
+          :points="sensChartPoints"
           :axes="sensResult.axes"
           :metric="sensResult.metric"
           height="320px"
@@ -1151,21 +1165,32 @@ onMounted(async () => {
             >
               <td class="muted">
                 {{ Object.entries(p.parameters).map(([k, v]) => `${k}=${v}`).join(', ') }}
+                <template v-if="p.warmup_unmet">（整段在预热期内）</template>
               </td>
-              <td :class="toneOf(p.objective)">
-                {{ p.objective === null ? 'N/A' : formatNumber(p.objective) }}
+              <td :class="p.warmup_unmet ? 'muted' : toneOf(p.objective)">
+                {{
+                  p.warmup_unmet
+                    ? '未测得'
+                    : p.objective === null
+                      ? 'N/A'
+                      : formatNumber(p.objective)
+                }}
               </td>
-              <td :class="toneOf(p.metrics.total_return)">
-                {{ formatPercent(p.metrics.total_return) }}
+              <td :class="p.warmup_unmet ? 'muted' : toneOf(p.metrics.total_return)">
+                {{ p.warmup_unmet ? '—' : formatPercent(p.metrics.total_return) }}
               </td>
-              <td>{{ formatPercent(p.metrics.max_drawdown) }}</td>
-              <td>{{ p.metrics.number_of_trades ?? '—' }}</td>
+              <td>{{ p.warmup_unmet ? '—' : formatPercent(p.metrics.max_drawdown) }}</td>
+              <td>{{ p.warmup_unmet ? '—' : (p.metrics.number_of_trades ?? '—') }}</td>
             </tr>
           </tbody>
         </table>
         <p class="muted" style="margin-top: 6px">
           标绿 = 目标指标最高的点，标红 = 最低的点，均为排序结果而非推荐。
           <code>N/A</code> 表示该点样本不足以计算该指标。
+        </p>
+        <p v-if="sensResult.warmup_unmet_points > 0" class="muted" style="margin-top: 6px">
+          标「整段在预热期内」的点，整段数据都在策略预热期里，一根可评估的 bar
+          都没有——它们报的 0 不是「不赚不亏」，而是「没跑起来」。这些点不参与上面的均值、极差与稳健性判断，也不进图。
         </p>
       </div>
     </div>

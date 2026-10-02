@@ -845,3 +845,46 @@ schema，就可能不一致，而且只在其中一个方言上暴露。所以�
 **测试**：`backend/tests/test_api.py` 新增 `test_backtest_warnings_survive_a_reload`（同一份
 列表，逐项相等）、`test_a_warm_up_longer_than_the_data_is_persisted`（含 `number_of_trades == 0`）、
 `test_a_clean_run_reports_no_warnings`。
+
+## ADR-055：没跑起来的网格点不能赢排名（`warmup_unmet`，docs/21 §6）
+
+**背景**：`run_backtest` 在整段数据都落在指标预热期内时会发一条警告（ADR-054），
+此时策略一根可评估的 bar 都没有，决策全是 `False`，指标是**扁平的一串 0**。
+
+敏感性聚合只按 `objective is not None` 筛选，于是这些点**同时污染三处**：
+
+1. `best`：0 永远打败真正亏钱的有效点，所以「没跑起来」看起来永远比「跑了但亏」好。
+   实测（DEMO-AAPL 400 根，EMA `trend_period` 扫 `[100, 300, 500, 900]`，`metric=total_return`）：
+   100 → −0.1116（12 笔）、300 → −0.1249（6 笔）、500 / 900 → **0（0 笔）**，
+   而报告的 `best` 是 `trend_period=500`。
+2. `summary`：均值、极差、`positive_ratio` 被 0 稀释。
+3. `stable`：`_is_stable` 要求全为正或全为负，0 既不正也不负，于是一次**一致亏损**被报成
+   「符号翻转」（同一实测里 `stable=False`，而两个真正测到的点都是负的）。
+
+三处都是同一个错误：**把「没测量」当成了「测量到 0」**。它比缺数据更危险，因为它看起来是个结论。
+
+**决策**：
+
+1. **引擎标记**：`BacktestResult` 新增 `warmup_unmet: bool = False`。该标志**刻意不进
+   `as_dict()`** —— HTTP 面用警告字符串表达它（ADR-054）—— 但研究聚合器必须能据此分支。
+2. **聚合分拣**：`sensitivity.py` 把点分成 `defined`（objective 非空）与 `runnable`
+   （`defined` 且非 `warmup_unmet`）。`best` / `worst` / `summary` / `stable` **全部只看
+   `runnable`**；一个点都没测到时 `best` / `worst` / `stable` 都是 `null`。
+3. **如实报告**：响应新增 `ranked_points`、`warmup_unmet_points` 与 `warnings`，说明有多少点
+   被排除、以及是不是一个点都没测到。`evaluated_points` 语义不变（仍含未测得点），所以
+   `ranked_points + 未定义点数 + warmup_unmet_points == grid_points`。
+4. **前端不把未测得点画成曲线**：表格里标为「整段在预热期内」、指标显示 `—`，图表只画测得点，
+   `ranked_points` 取代 `evaluated_points` 出现在统计卡片上。理由：一条躺在 0 上的线看起来像
+   被测量过。
+5. **`SENSITIVITY_VERSION` 由 `1.0.0` 提升为 `1.1.0`**：点的形状（新增 `warmup_unmet`）与
+   响应形状都变了。
+
+**理由**：敏感性分析的整个卖点就是「这片曲面的形状值得信任」。允许一个从未运行的格子参与排序，
+工具就会**主动**把一个 bug 报告成一种优点 —— 这与 docs/21 §3 记的那次 ADR-040 事故是同一类
+错误（把 bug 报告成优点），所以处理方式也一致：结构上不可能发生，而不是文档里提醒一句。
+
+**测试**：`backend/tests/test_backtest.py` 新增 `test_a_run_that_never_left_its_warm_up_is_flagged`
+（正常运行为 `False`、预热期未走完为 `True`、警告存在、且该键不出现在 `as_dict()` 里）；
+`backend/tests/test_sensitivity_api.py` 新增 `test_points_that_never_ran_cannot_win_the_ranking`
+（`ranked_points == 2` / `warmup_unmet_points == 2` / `best` 是测得点而非旧的 500 /
+`stable is True` 而旧代码是 `False`）。

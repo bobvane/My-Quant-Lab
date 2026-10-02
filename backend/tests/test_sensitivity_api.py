@@ -210,3 +210,53 @@ def test_sensitivity_supports_other_metrics(client, metric: str) -> None:
     )
     assert response.status_code == 200, response.text
     assert response.json()["metric"] == metric
+
+
+def test_points_that_never_ran_cannot_win_the_ranking(client) -> None:
+    """A grid point whose window sat inside the warm-up must not be a result (ADR-055).
+
+    Such a point never gets an evaluable bar, so it reports the flat 0.0 of a strategy
+    that never traded. Ranking that against points that genuinely lost money makes "did
+    not run" look like the best outcome, and its zero breaks the sign-consistency check.
+    """
+
+    version_id = _seed(client, _DSL)
+    response = client.post(
+        "/api/v1/research/sensitivity",
+        json={
+            "strategy_version_id": version_id,
+            "symbol": _SYMBOL,
+            "grid": {"trend_period": [100, 300, 500, 900]},
+            "metric": "total_return",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    by_period = {p["parameters"]["trend_period"]: p for p in body["points"]}
+    starved = [period for period, p in by_period.items() if p["warmup_unmet"]]
+    assert starved == [500, 900]
+
+    # Counted as evaluated (their objective is defined, it is just not a measurement)...
+    assert body["evaluated_points"] == 4
+    # ...but only two points are evidence of anything.
+    assert body["ranked_points"] == 2
+    assert body["warmup_unmet_points"] == 2
+    assert body["warnings"], body
+    assert "warm-up" in body["warnings"][0]
+
+    # The trap is real: the points that never ran do report a non-negative objective.
+    for period in starved:
+        assert by_period[period]["objective"] == 0.0
+        assert by_period[period]["metrics"]["number_of_trades"] == 0
+
+    # Every measured point lost money, so under the old rule a 0.0 was the winner.
+    measured = {period: p for period, p in by_period.items() if not p["warmup_unmet"]}
+    assert all(p["objective"] < 0 for p in measured.values())
+    assert body["best"]["parameters"]["trend_period"] == 100
+    assert body["worst"]["parameters"]["trend_period"] == 300
+    assert body["best"]["parameters"]["trend_period"] not in starved
+    assert body["worst"]["parameters"]["trend_period"] not in starved
+
+    # The same zeros used to read as "the objective flips sign across the grid".
+    assert body["stable"] is True

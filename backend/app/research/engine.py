@@ -51,6 +51,13 @@ class BacktestResult:
     signals: list[dict[str, Any]] = field(default_factory=list)
     result_hash: str = ""
     warnings: list[str] = field(default_factory=list)
+    # True when the whole frame sits inside the indicator warm-up: the strategy never had
+    # one evaluable bar, so every number above is an artefact of not running rather than a
+    # measurement. Deliberately absent from ``as_dict()`` -- the HTTP surface conveys this
+    # as a warning string (ADR-054) -- but research aggregators must branch on it: a grid
+    # point that never traded reports a flat 0.0, which beats every point that actually
+    # lost money (v1.4.5 / ADR-055).
+    warmup_unmet: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -198,7 +205,8 @@ def run_backtest(
 
     decisions, _ = run_strategy(spec, frame)
 
-    if feature_frame.warmup_bars and len(frame) <= feature_frame.warmup_bars:
+    warmup_unmet = bool(feature_frame.warmup_bars) and len(frame) <= feature_frame.warmup_bars
+    if warmup_unmet:
         warnings.append(
             f"only {len(frame)} bars available, warm-up needs {feature_frame.warmup_bars}"
         )
@@ -501,6 +509,7 @@ def run_backtest(
         signals=signals,
         result_hash=result_hash,
         warnings=warnings,
+        warmup_unmet=warmup_unmet,
     )
 
 

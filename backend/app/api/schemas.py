@@ -294,6 +294,14 @@ class SensitivityOut(BaseModel):
     axes: dict[str, list[Any]]
     grid_points: int
     evaluated_points: int
+    # Points that were actually measured, and therefore the only ones the ranking, the
+    # summary statistics and the stability verdict are computed from. A point whose whole
+    # window sat inside the strategy's warm-up is counted in ``evaluated_points`` (its
+    # objective is defined -- it is the flat 0.0 of a strategy that never traded) but not
+    # here (v1.4.5 / ADR-055).
+    ranked_points: int
+    warmup_unmet_points: int
+    warnings: list[str] = Field(default_factory=list)
     points: list[dict[str, Any]]
     summary: dict[str, Any]
     best: dict[str, Any] | None = None

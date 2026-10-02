@@ -319,6 +319,12 @@ export interface SensitivityPoint {
   metrics: Record<string, number | null>
   result_hash: string
   warnings: string[]
+  /**
+   * The whole window sat inside the strategy's warm-up, so this point never got an
+   * evaluable bar: its metrics are the flat zeros of a strategy that did not run, not
+   * a measurement. Excluded from the ranking, the summary and the stability verdict.
+   */
+  warmup_unmet: boolean
 }
 
 export interface SensitivityResult {
@@ -327,6 +333,10 @@ export interface SensitivityResult {
   axes: Record<string, Array<number | string>>
   grid_points: number
   evaluated_points: number
+  /** Points that were actually measured, i.e. what the ranking was computed from. */
+  ranked_points: number
+  warmup_unmet_points: number
+  warnings: string[]
   points: SensitivityPoint[]
   summary: {
     mean: number | null

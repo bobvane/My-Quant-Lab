@@ -131,6 +131,32 @@ def test_unknown_parameter_does_not_change_the_result_hash(sample_bars: pd.DataF
     assert base.result_hash == typo.result_hash
 
 
+def test_a_run_that_never_left_its_warm_up_is_flagged(sample_bars: pd.DataFrame) -> None:
+    """A run with no evaluable bar reports flat zeros, which must not read as a result.
+
+    The warning string tells a human; ``warmup_unmet`` tells the aggregators, which
+    otherwise rank a 0.0 that was never measured above a point that really lost money
+    (ADR-055).
+    """
+
+    ordinary = run_backtest(StrategySpec.model_validate(copy.deepcopy(PERIOD_REF_DSL)), sample_bars)
+    assert ordinary.warmup_unmet is False
+    assert ordinary.warnings == []
+
+    starved = run_backtest(
+        StrategySpec.model_validate(copy.deepcopy(PERIOD_REF_DSL)),
+        sample_bars,
+        parameters={"trend": 5000},
+    )
+    assert starved.warmup_unmet is True
+    assert any("warm-up" in w for w in starved.warnings), starved.warnings
+    assert starved.metrics["number_of_trades"] == 0
+
+    # The flag stays internal: the HTTP surface conveys this through `warnings`, so it
+    # must not leak into the serialised result and change the published shape.
+    assert "warmup_unmet" not in starved.as_dict()
+
+
 def test_fill_uses_next_bar_open_not_signal_bar(sample_bars: pd.DataFrame) -> None:
     spec = _spec()
     result = run_backtest(spec, sample_bars, strategy_version="t@1.0.0")

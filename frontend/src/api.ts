@@ -429,6 +429,8 @@ export const api = {
       { method: 'POST' },
     ),
   paperAccounts: () => request<PaperAccount[]>('/paper/accounts'),
+  paperPerformance: (accountId: number) =>
+    request<Record<string, any>>(`/paper/accounts/${accountId}/performance`),
   paperPositions: (accountId: number) =>
     request<PaperPosition[]>(`/paper/accounts/${accountId}/positions`),
   executePaperSignal: (accountId: number, signalId: number) =>

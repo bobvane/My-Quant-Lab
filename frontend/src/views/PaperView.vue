@@ -16,6 +16,22 @@ const fundAmount = ref(1000)
 const positions = ref<PaperPosition[]>([])
 const activeAccount = ref<number | null>(null)
 const busy = ref<number | null>(null)
+const performance = ref<Record<string, any> | null>(null)
+const perfAccount = ref<number | null>(null)
+const loadingPerf = ref<number | null>(null)
+
+async function loadPerformance(accountId: number) {
+  error.value = ''
+  loadingPerf.value = accountId
+  try {
+    performance.value = await api.paperPerformance(accountId)
+    perfAccount.value = accountId
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    loadingPerf.value = null
+  }
+}
 
 async function load() {
   error.value = ''
@@ -166,6 +182,9 @@ onMounted(load)
             <td>{{ formatDateTime(a.created_at) }}</td>
             <td>
               <button class="ghost" @click="loadPositions(a.id)">持仓</button>
+              <button class="ghost" :disabled="loadingPerf === a.id" @click="loadPerformance(a.id)">
+                {{ loadingPerf === a.id ? '计算中…' : '绩效' }}
+              </button>
               <button
                 v-if="a.status === 'active'"
                 class="ghost"
@@ -248,6 +267,17 @@ onMounted(load)
         </tbody>
       </table>
       <p v-else class="muted">该账户当前没有持仓。</p>
+    </div>
+
+    <div v-if="performance" class="card" style="margin-top: 14px">
+      <h3>绩效（账户 #{{ perfAccount }}）</h3>
+      <p class="muted">{{ performance.note }}</p>
+      <div class="grid cols-4">
+        <StatCard label="期末权益" :value="formatNumber(performance.final_equity)" sub="初始资金 + 已实现" />
+        <StatCard label="总收益" :value="formatPercent(performance.metrics.total_return)" :tone="toneOf(performance.metrics.total_return)" sub="已平仓" />
+        <StatCard label="最大回撤" :value="formatPercent(performance.metrics.max_drawdown)" :tone="toneOf(performance.metrics.max_drawdown)" sub="越小越好" />
+        <StatCard label="胜率" :value="formatPercent(performance.metrics.win_rate)" :sub="`交易 ${performance.closed_trades} 次`" />
+      </div>
     </div>
 
     <p v-if="!accounts.length" class="muted" style="margin-top: 14px">

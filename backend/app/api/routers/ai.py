@@ -283,10 +283,49 @@ def ai_usage(
     }
 
 
+def _seed_builtin_prompts(db: Session) -> None:
+    """Idempotently register the built-in prompt definitions (docs/06 §prompt 版本化)."""
+
+    from app.ai.explain import BACKTEST_SYSTEM_PROMPT, SIGNAL_SYSTEM_PROMPT
+    from app.ai.provider import SIGNAL_EXPLANATION_SCHEMA
+    from app.domain.models import AIPrompt
+
+    builtins = [
+        (
+            "signal_explain",
+            "1.0.0",
+            "signal_explanation",
+            SIGNAL_SYSTEM_PROMPT,
+            SIGNAL_EXPLANATION_SCHEMA,
+        ),
+        ("backtest_explain", "1.0.0", "backtest_analysis", BACKTEST_SYSTEM_PROMPT, None),
+    ]
+    changed = False
+    for name, version, task_type, system_prompt, schema in builtins:
+        exists = db.scalar(
+            select(AIPrompt).where(AIPrompt.name == name, AIPrompt.version == version)
+        )
+        if exists is None:
+            db.add(
+                AIPrompt(
+                    name=name,
+                    version=version,
+                    task_type=task_type,
+                    system_prompt=system_prompt,
+                    user_template="",
+                    output_schema_json=schema,
+                )
+            )
+            changed = True
+    if changed:
+        db.commit()
+
+
 @router.get("/ai/prompts", summary="AI prompt templates")
 def list_prompts(db: Session = Depends(get_db)) -> dict[str, Any]:
     from app.domain.models import AIPrompt
 
+    _seed_builtin_prompts(db)
     rows = db.scalars(select(AIPrompt).order_by(AIPrompt.name, AIPrompt.version)).all()
     return {
         "prompts": [

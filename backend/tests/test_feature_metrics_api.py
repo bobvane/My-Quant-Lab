@@ -8,7 +8,10 @@ from app.domain.models import BacktestResult, BacktestRun, Strategy, StrategyVer
 def test_empty_feature_and_ai_registries(client) -> None:
     assert client.get("/api/v1/features").json() == []
     assert client.get("/api/v1/ai/models").json()["models"] == []
-    assert client.get("/api/v1/ai/prompts").json()["prompts"] == []
+    # Built-in prompt definitions are registered on first read (docs/06).
+    prompts = client.get("/api/v1/ai/prompts").json()["prompts"]
+    assert {p["name"] for p in prompts} == {"signal_explain", "backtest_explain"}
+    assert all(p["version"] == "1.0.0" for p in prompts)
 
 
 def test_backtest_metrics_endpoint_404(client) -> None:

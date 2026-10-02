@@ -4,7 +4,7 @@
     "id": "pa-breakout",
     "name": "PA Breakout（价格行为突破）",
     "version": "1.0.0",
-    "description": "收盘价突破前 N 根 K 线高点且站上 EMA20 时入场，ATR 止损 + R 倍数止盈。仅用于验证系统结构，不代表已验证有效的策略。",
+    "description": "收盘价突破前 N 根 K 线高点且站上趋势 EMA 时入场，ATR 止损 + R 倍数止盈。趋势周期走 period_ref，可用于参数敏感性分析。仅用于验证系统结构，不代表已验证有效的策略。",
     "source": { "type": "builtin" }
   },
   "market": {
@@ -13,7 +13,7 @@
     "allow_short": false
   },
   "indicators": [
-    { "id": "trend", "type": "EMA", "period": 20, "input": "close" },
+    { "id": "ema_trend", "type": "EMA", "period_ref": "trend_period", "input": "close" },
     { "id": "vol", "type": "ATR", "period": 14 }
   ],
   "features": [
@@ -25,13 +25,14 @@
     "atr14"
   ],
   "parameters": {
+    "trend_period": 20,
     "lookback": 20
   },
   "entry": {
     "long": {
       "all": [
         { "op": "gt", "left": "close", "right": "prior_high" },
-        { "op": "gt", "left": "close", "right": "ema20" },
+        { "op": "gt", "left": "close", "right": "ema_trend" },
         { "op": "gt", "left": "close_position", "right": "0.6" }
       ]
     }
@@ -39,7 +40,7 @@
   "exit": {
     "long": {
       "any": [
-        { "op": "lt", "left": "close", "right": "ema20" },
+        { "op": "lt", "left": "close", "right": "ema_trend" },
         { "op": "gt", "left": "lower_wick_ratio", "right": "0.5" }
       ]
     }

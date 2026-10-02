@@ -155,6 +155,37 @@ export interface GithubImportResult {
   warnings: Array<Record<string, unknown>>
 }
 
+/** One evaluated grid point of a sensitivity sweep (docs/21). */
+export interface SensitivityPoint {
+  parameters: Record<string, number | string>
+  objective: number | null
+  metrics: Record<string, number | null>
+  result_hash: string
+  warnings: string[]
+}
+
+export interface SensitivityResult {
+  sensitivity_version: string
+  metric: string
+  axes: Record<string, Array<number | string>>
+  grid_points: number
+  evaluated_points: number
+  points: SensitivityPoint[]
+  summary: {
+    mean: number | null
+    median: number | null
+    stdev: number | null
+    min: number | null
+    max: number | null
+    range: number | null
+    positive_ratio: number | null
+  }
+  best: { parameters: Record<string, number | string>; objective: number; result_hash: string } | null
+  worst: { parameters: Record<string, number | string>; objective: number; result_hash: string } | null
+  /** All evaluated points share a sign. true only means sign-consistent, not good. */
+  stable: boolean | null
+}
+
 export interface AIStatus {
   configured: boolean
   provider_name: string | null
@@ -407,6 +438,25 @@ export const api = {
         symbol,
         train_bars: trainBars,
         test_bars: testBars,
+      }),
+    }),
+  // Parameter sensitivity sweep (docs/21). Descriptive only: it reports how the
+  // metrics respond across a parameter grid; it never recommends parameters.
+  sensitivity: (
+    strategyVersionId: number,
+    symbol: string,
+    grid: Record<string, Array<number | string>>,
+    metric = 'sharpe',
+    timeframe = '1d',
+  ) =>
+    request<SensitivityResult>('/research/sensitivity', {
+      method: 'POST',
+      body: JSON.stringify({
+        strategy_version_id: strategyVersionId,
+        symbol,
+        timeframe,
+        grid,
+        metric,
       }),
     }),
   signals: (state?: string, limit = 100, symbol?: string, offset = 0) =>

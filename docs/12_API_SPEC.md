@@ -91,6 +91,25 @@ API base: `/api/v1`
 `POST /research/walk-forward`
 `GET /research/runs/{id}`
 
+## Parameter Sensitivity
+
+`POST /research/sensitivity`
+
+把一个或多个**已声明参数**（DSL 中 `period_ref` 指向的键）扫成笛卡尔网格，逐点独立回测。
+
+参数：`strategy_version_id`、`symbol`、`timeframe`、`grid`（参数名 → 取值列表）、
+`base_parameters`（可选，扫之前先套用的基线）、`metric`（排序/统计使用的目标指标，默认 `sharpe`）。
+
+返回：`axes`、`points`（每点含 `parameters`/`metrics`/`objective`/`result_hash`）、
+`summary`（mean/median/stdev/min/max/range/positive_ratio）、`best`、`worst`、`stable`。
+
+约束与语义：
+
+- 纯描述性，**不做参数寻优**；`best`/`worst` 是排序结果，不是推荐。
+- 未知网格轴 → 422；网格点数 > 144 → 422；目标指标不在白名单 → 422。
+- 目标指标未定义时该点 `objective = null`，并从排序与统计中剔除（未知不当 0）。
+- 每次扫描写审计事件 `sensitivity_completed`。
+
 ## Paper Accounts
 
 `GET /paper/accounts`

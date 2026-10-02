@@ -8,11 +8,19 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.schemas import OOSOut, OOSRequest, WalkForwardOut, WalkForwardRequest
+from app.api.schemas import (
+    OOSOut,
+    OOSRequest,
+    SensitivityOut,
+    SensitivityRequest,
+    WalkForwardOut,
+    WalkForwardRequest,
+)
 from app.core.db import get_db
 from app.data.market_data_repo import load_bars
 from app.data.strategy_service import load_spec, record_audit
 from app.domain.models import Asset, MarketDataSeries, StrategyVersion
+from app.research.sensitivity import run_sensitivity
 from app.research.walk_forward import run_holdout, run_walk_forward
 
 logger = logging.getLogger(__name__)
@@ -126,3 +134,74 @@ def oos(payload: OOSRequest, db: Session = Depends(get_db)) -> OOSOut:
     )
     db.commit()
     return OOSOut(**outcome)
+
+
+@router.post(
+    "/sensitivity",
+    response_model=SensitivityOut,
+    summary="Parameter sensitivity sweep",
+)
+def sensitivity(payload: SensitivityRequest, db: Session = Depends(get_db)) -> SensitivityOut:
+    """Sweep declared parameters and report how the metrics respond (docs/21).
+
+    Descriptive only: the report ranks grid points so a human can see the shape of
+    the surface. It never recommends parameters, and the AI layer never touches
+    these numbers (docs/02 §3).
+    """
+
+    strategy_version = db.get(StrategyVersion, payload.strategy_version_id)
+    if strategy_version is None:
+        raise HTTPException(status_code=404, detail="strategy version not found")
+
+    asset = (
+        db.scalar(select(Asset).where(Asset.symbol == payload.symbol)) if payload.symbol else None
+    )
+    if payload.symbol and asset is None:
+        raise HTTPException(status_code=404, detail=f"asset '{payload.symbol}' not found")
+    series = db.scalar(
+        select(MarketDataSeries).where(
+            MarketDataSeries.timeframe == payload.timeframe,
+            *([MarketDataSeries.asset_id == asset.id] if asset else []),
+        )
+    )
+    if series is None:
+        raise HTTPException(status_code=404, detail="market data series not found")
+
+    frame = load_bars(db, series, only_closed=True)
+    if len(frame) < 60:
+        raise HTTPException(
+            status_code=422,
+            detail=f"need at least 60 closed bars, series has {len(frame)}",
+        )
+
+    spec = load_spec(strategy_version)
+    try:
+        outcome = run_sensitivity(
+            spec,
+            frame,
+            grid=payload.grid,
+            base_parameters=payload.base_parameters,
+            metric=payload.metric,
+            strategy_version=f"{strategy_version.strategy_id}@{strategy_version.version}",
+            timeframe=payload.timeframe,
+        )
+    except ValueError as exc:
+        # Bad grid shape / unknown axis / too many points are all caller errors.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="sensitivity_completed",
+        entity_type="strategy_version",
+        entity_id=str(strategy_version.id),
+        action="run",
+        payload={
+            "metric": outcome["metric"],
+            "grid_points": outcome["grid_points"],
+            "evaluated_points": outcome["evaluated_points"],
+            "axes": outcome["axes"],
+            "summary": outcome["summary"],
+        },
+    )
+    db.commit()
+    return SensitivityOut(**outcome)

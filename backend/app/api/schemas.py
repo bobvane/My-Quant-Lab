@@ -264,6 +264,38 @@ class OOSOut(BaseModel):
     out_of_sample: dict[str, Any]
 
 
+class SensitivityRequest(BaseModel):
+    """Sweep a strategy's declared parameters over a grid (docs/21, ADR-040).
+
+    ``grid`` maps a parameter name (one the strategy declares) to the values to
+    evaluate. Every combination is backtested independently, so the cost is
+    ``len(grid points)`` backtests; the engine caps that at
+    ``MAX_GRID_POINTS`` and answers 422 beyond it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_version_id: int
+    symbol: str | None = None
+    timeframe: str = "1d"
+    grid: dict[str, list[Any]] = Field(min_length=1)
+    base_parameters: dict[str, Any] | None = None
+    metric: str = "sharpe"
+
+
+class SensitivityOut(BaseModel):
+    sensitivity_version: str
+    metric: str
+    axes: dict[str, list[Any]]
+    grid_points: int
+    evaluated_points: int
+    points: list[dict[str, Any]]
+    summary: dict[str, Any]
+    best: dict[str, Any] | None = None
+    worst: dict[str, Any] | None = None
+    stable: bool | None = None
+
+
 class PaperAccountCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

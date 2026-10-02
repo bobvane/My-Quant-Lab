@@ -4,7 +4,7 @@
     "id": "ema-cross-trend",
     "name": "EMA 交叉趋势过滤",
     "version": "1.0.0",
-    "description": "快慢 EMA 金叉做多、死叉离场，并用收盘位置过滤弱突破。仅用于演示结构，不构成投资建议。",
+    "description": "快慢 EMA 金叉做多、死叉离场，并用收盘位置过滤弱突破。周期走 period_ref，可直接用于参数敏感性分析。仅用于演示结构，不构成投资建议。",
     "source": { "type": "builtin" }
   },
   "market": {
@@ -13,8 +13,8 @@
     "allow_short": false
   },
   "indicators": [
-    { "id": "fast", "type": "EMA", "period": 20, "input": "close" },
-    { "id": "slow", "type": "EMA", "period": 50, "input": "close" }
+    { "id": "ema_fast", "type": "EMA", "period_ref": "fast_period", "input": "close" },
+    { "id": "ema_slow", "type": "EMA", "period_ref": "slow_period", "input": "close" }
   ],
   "features": [
     "body_ratio",
@@ -23,14 +23,14 @@
     "atr14"
   ],
   "parameters": {
-    "stop_atr_multiple": 2.0,
-    "target_r_multiple": 2.0
+    "fast_period": 20,
+    "slow_period": 50
   },
   "entry": {
     "long": {
       "all": [
-        { "op": "crosses_above", "left": "ema20", "right": "ema50" },
-        { "op": "gt", "left": "close", "right": "ema20" },
+        { "op": "crosses_above", "left": "ema_fast", "right": "ema_slow" },
+        { "op": "gt", "left": "close", "right": "ema_fast" },
         { "op": "gt", "left": "close_position", "right": "0.5" }
       ]
     }
@@ -38,7 +38,7 @@
   "exit": {
     "long": {
       "any": [
-        { "op": "crosses_below", "left": "ema20", "right": "ema50" },
+        { "op": "crosses_below", "left": "ema_fast", "right": "ema_slow" },
         { "op": "lt", "left": "close_position", "right": "0.3" }
       ]
     }

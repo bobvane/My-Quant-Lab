@@ -6,11 +6,13 @@ import {
   type BacktestDetail,
   type BacktestSummary,
   type ExplainResult,
+  type SensitivityResult,
   type Strategy,
   type StrategyVersion,
 } from '@/api'
 import EquityChart from '@/components/EquityChart.vue'
 import MultiLineChart from '@/components/MultiLineChart.vue'
+import SensitivityChart from '@/components/SensitivityChart.vue'
 import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 
@@ -35,6 +37,24 @@ const wfResult = ref<Record<string, any> | null>(null)
 const wfTrain = ref(200)
 const wfTest = ref(60)
 const wfRunning = ref(false)
+// Parameter sensitivity sweep (docs/21). Descriptive only — the UI ranks points but
+// never presents a "recommended" parameter set.
+const sensResult = ref<SensitivityResult | null>(null)
+const sensGridText = ref('trend_period:5,10,20,40,60')
+const sensMetric = ref('sharpe')
+const sensRunning = ref(false)
+const SENS_METRICS = [
+  'sharpe',
+  'sortino',
+  'total_return',
+  'cagr',
+  'max_drawdown',
+  'win_rate',
+  'profit_factor',
+  'expectancy',
+  'number_of_trades',
+  'exposure',
+]
 function exportTradesCsv() {
   const trades = detail.value?.trades ?? []
   if (!trades.length) return
@@ -175,8 +195,69 @@ async function runWf() {
   }
 }
 
-async function load() {
+async function runSensitivity() {
   error.value = ''
+  sensResult.value = null
+  if (versionId.value === null) {
+    error.value = '请先选择策略版本'
+    return
+  }
+  if (!symbol.value.trim()) {
+    error.value = '请填写标的代码'
+    return
+  }
+  const grid = parseGrid(sensGridText.value)
+  if (grid === null) {
+    error.value = '参数网格格式应为 参数名:值1,值2（多轴用分号分隔，例如 trend_period:5,10,20）'
+    return
+  }
+  sensRunning.value = true
+  try {
+    sensResult.value = await api.sensitivity(
+      versionId.value,
+      symbol.value.trim(),
+      grid,
+      sensMetric.value,
+      timeframe.value,
+    )
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    sensRunning.value = false
+  }
+}
+
+/** Parse `name:v1,v2; other:1,2` into the API's grid shape; null when malformed. */
+function parseGrid(text: string): Record<string, Array<number | string>> | null {
+  const out: Record<string, Array<number | string>> = {}
+  const axes = text.split(';').map((s) => s.trim()).filter(Boolean)
+  if (!axes.length) return null
+  for (const axis of axes) {
+    const idx = axis.indexOf(':')
+    if (idx <= 0) return null
+    const name = axis.slice(0, idx).trim()
+    const values = axis
+      .slice(idx + 1)
+      .split(',')
+      .map((v) => v.trim())
+      .filter(Boolean)
+      .map((v) => {
+        const num = Number(v)
+        return Number.isFinite(num) && v !== '' ? num : v
+      })
+    if (!name || !values.length) return null
+    out[name] = values
+  }
+  return out
+}
+
+const sensPointCount = computed(() => {
+  const grid = parseGrid(sensGridText.value)
+  if (!grid) return 0
+  return Object.values(grid).reduce((acc, vs) => acc * vs.length, 1)
+})
+
+async function load() {  error.value = ''
   try {
     const [r, s, a] = await Promise.all([
       api.backtests(onlyVersionFilter.value ? (versionId.value ?? undefined) : undefined),
@@ -444,6 +525,103 @@ onMounted(async () => {
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>参数敏感性分析</h3>
+      <p class="muted">
+        把策略<b>已声明</b>的参数扫成网格、逐点独立回测，看结论在参数邻域内是平移还是翻转。
+        <b>这不是参数优化</b>：下方「最优/最差」只是排序结果，不构成推荐；数值全部由确定性引擎计算。
+        参数必须用 <code>period_ref</code> 声明（例如 <code>parameters.trend_period</code> 对应
+        <code>indicators[].period_ref = "trend_period"</code>）。
+      </p>
+      <div class="row">
+        <input
+          v-model="sensGridText"
+          style="min-width: 280px; flex: 1 1 320px"
+          placeholder="trend_period:5,10,20,40,60（多轴用分号：fast:5,10; slow:20,40）"
+        />
+        <select v-model="sensMetric" style="max-width: 170px">
+          <option v-for="m in SENS_METRICS" :key="m" :value="m">{{ m }}</option>
+        </select>
+        <button :disabled="sensRunning || versionId === null" @click="runSensitivity">
+          {{ sensRunning ? '计算中…' : '运行敏感性分析' }}
+        </button>
+        <span class="muted">
+          {{ sensPointCount }} 个网格点<template v-if="sensPointCount > 144">（超过上限 144）</template>
+        </span>
+      </div>
+
+      <div v-if="sensResult" style="margin-top: 12px">
+        <div class="grid cols-4">
+          <StatCard
+            label="已评估 / 网格点"
+            :value="`${sensResult.evaluated_points} / ${sensResult.grid_points}`"
+            sub="目标指标未定义的点不计入统计"
+          />
+          <StatCard
+            label="目标指标均值"
+            :value="formatNumber(sensResult.summary.mean)"
+            :sub="`中位数 ${formatNumber(sensResult.summary.median)}`"
+          />
+          <StatCard
+            label="极差 (max − min)"
+            :value="formatNumber(sensResult.summary.range)"
+            :sub="`标准差 ${formatNumber(sensResult.summary.stdev)}`"
+          />
+          <StatCard
+            label="邻域稳健"
+            :value="sensResult.stable === null ? 'N/A' : sensResult.stable ? '同号' : '符号翻转'"
+            :tone="sensResult.stable === true ? 'pos' : sensResult.stable === false ? 'neg' : undefined"
+            sub="仅表示符号一致，不代表策略好"
+          />
+        </div>
+
+        <SensitivityChart
+          :points="sensResult.points"
+          :axes="sensResult.axes"
+          :metric="sensResult.metric"
+          height="320px"
+        />
+
+        <table style="margin-top: 10px">
+          <thead>
+            <tr>
+              <th>参数</th>
+              <th>{{ sensResult.metric }}</th>
+              <th>总收益</th>
+              <th>最大回撤</th>
+              <th>交易数</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(p, i) in sensResult.points"
+              :key="i"
+              :class="{
+                best: sensResult.best && p.result_hash === sensResult.best.result_hash,
+                worst: sensResult.worst && p.result_hash === sensResult.worst.result_hash,
+              }"
+            >
+              <td class="muted">
+                {{ Object.entries(p.parameters).map(([k, v]) => `${k}=${v}`).join(', ') }}
+              </td>
+              <td :class="toneOf(p.objective)">
+                {{ p.objective === null ? 'N/A' : formatNumber(p.objective) }}
+              </td>
+              <td :class="toneOf(p.metrics.total_return)">
+                {{ formatPercent(p.metrics.total_return) }}
+              </td>
+              <td>{{ formatPercent(p.metrics.max_drawdown) }}</td>
+              <td>{{ p.metrics.number_of_trades ?? '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted" style="margin-top: 6px">
+          标绿 = 目标指标最高的点，标红 = 最低的点，均为排序结果而非推荐。
+          <code>N/A</code> 表示该点样本不足以计算该指标。
+        </p>
       </div>
     </div>
 

@@ -42,13 +42,18 @@ from app.research.metrics import compute_metrics
 from app.strategies.dsl import StrategySpec, merge_spec_overrides
 from app.strategies.executor import run_strategy
 
-__all__ = ["ENSEMBLE_VERSION", "EnsembleMember", "run_ensemble"]
+__all__ = ["ENSEMBLE_VERSION", "EnsembleMember", "run_ensemble", "run_ensemble_sweep"]
 
-ENSEMBLE_VERSION = "1.1.0"
+ENSEMBLE_VERSION = "1.2.0"
 
 # A readable report is the point; beyond a dozen members the per-member attribution
 # stops being useful. This also bounds the work (one feature build per member).
 MAX_MEMBERS = 12
+
+# ``vote_sweep`` re-simulates the portfolio once per threshold. Features and member
+# decisions are evaluated once and reused, so a point costs one simulation rather than
+# one member-by-member re-evaluation.
+MAX_SWEEP_THRESHOLDS = 12
 
 
 @dataclass
@@ -77,6 +82,160 @@ class _Evaluated:
 
 
 @dataclass
+class _EnsembleInputs:
+    """Everything the vote needs, evaluated once and reusable across thresholds.
+
+    Members' features and rules do not depend on ``vote_threshold`` — only the
+    comparison and the simulation do — so the sweep evaluates them once and only
+    re-runs the simulation. The weights here are already normalised.
+    """
+
+    members: list[EnsembleMember]
+    evaluated: list[_Evaluated]
+    index: pd.Index
+    warnings: list[str]
+    execution: Any
+    fee_rate: float
+    slippage_rate: float
+    max_position_pct: float
+    capital: float
+    stop_long: np.ndarray
+    target_long: np.ndarray
+    stop_short: np.ndarray
+    target_short: np.ndarray
+    entry_votes_long: np.ndarray
+    entry_votes_short: np.ndarray | None
+    exit_votes_short: np.ndarray | None
+    any_short: bool
+
+
+def _prepare_ensemble(
+    members: list[EnsembleMember],
+    bars: pd.DataFrame,
+    *,
+    spec_overrides: dict[str, Any] | None = None,
+) -> _EnsembleInputs:
+    """Evaluate every member once and collect the inputs the vote needs.
+
+    Threshold-independent by construction: ``run_ensemble`` and
+    ``run_ensemble_sweep`` share this so a sweep point can never disagree with a
+    single-threshold run of the same members.
+    """
+
+    if not members:
+        raise ValueError("an ensemble needs at least one member")
+    if len(members) > MAX_MEMBERS:
+        raise ValueError(f"an ensemble supports at most {MAX_MEMBERS} members")
+
+    raw_weights = [float(m.weight) for m in members]
+    if any(w < 0 for w in raw_weights):
+        raise ValueError("member weights must be >= 0")
+    total_weight = sum(raw_weights)
+    if total_weight <= 0:
+        raise ValueError("member weights must not all be zero")
+    weights = [w / total_weight for w in raw_weights]
+
+    warnings: list[str] = []
+    evaluated: list[_Evaluated] = []
+    for member, weight in zip(members, weights, strict=True):
+        feature_frame = build_features(bars, spec=member.spec)
+        frame = feature_frame.frame
+        out, _ = run_strategy(member.spec, frame)
+        evaluated.append(
+            _Evaluated(
+                label=member.label,
+                weight=weight,
+                frame=frame,
+                entry_long=out["entry_long"].astype(bool),
+                exit_long=out["exit_long"].astype(bool),
+                entry_short=(out["entry_short"].astype(bool) if "entry_short" in out else None),
+                exit_short=(out["exit_short"].astype(bool) if "exit_short" in out else None),
+                risk_stop=out.get("risk_stop"),
+                risk_target=out.get("risk_target"),
+                risk_stop_short=out.get("risk_stop_short"),
+                risk_target_short=out.get("risk_target_short"),
+            )
+        )
+        if feature_frame.warmup_bars:
+            warnings.append(
+                f"member '{member.label}' has a {feature_frame.warmup_bars}-bar warm-up"
+            )
+
+    # Every vote is cast on the same bar, so trade on the intersection of timestamps.
+    index = evaluated[0].frame.index
+    for item in evaluated[1:]:
+        index = index.intersection(item.frame.index)
+    if len(index) == 0:
+        raise ValueError("members share no common bars; check their indicators and warm-up")
+    if len(index) < len(evaluated[0].frame.index):
+        warnings.append(
+            f"ensemble evaluates {len(index)} of {len(evaluated[0].frame.index)} bars "
+            "(members' warm-ups overlap only partially)"
+        )
+
+    def votes(attr: str) -> pd.Series:
+        total = pd.Series(0.0, index=index)
+        for item in evaluated:
+            series = getattr(item, attr)
+            if series is None:
+                continue
+            total = total + series.reindex(index, fill_value=False).astype(float) * item.weight
+        return total
+
+    # The portfolio needs one cost model and one stop rule. Inheriting the first
+    # member's (overridable) is documented behaviour; inventing them would be worse.
+    # merge_spec_overrides re-validates, so a nested override such as
+    # {"execution": {"sizing": {...}}} actually takes effect instead of being kept as
+    # an unvalidated dict (which the engine would silently ignore).
+    portfolio_spec = merge_spec_overrides(members[0].spec, spec_overrides)
+
+    execution = portfolio_spec.execution
+    risk = portfolio_spec.risk
+    max_position_pct = risk.max_position_pct if risk and risk.max_position_pct else 1.0
+    fee_rate, slippage_rate = _cost_multipliers(execution.fee_bps, execution.slippage_bps)
+
+    # Risk lines come from the first member that defines them: a single portfolio can
+    # carry one stop, and mixing members' stops bar-by-bar would be arbitrary.
+    stop_long = pd.Series(np.nan, index=index)
+    target_long = pd.Series(np.nan, index=index)
+    stop_short = pd.Series(np.nan, index=index)
+    target_short = pd.Series(np.nan, index=index)
+    for item in evaluated:
+        for target_series, source in (
+            (stop_long, item.risk_stop),
+            (target_long, item.risk_target),
+            (stop_short, item.risk_stop_short),
+            (target_short, item.risk_target_short),
+        ):
+            if source is None:
+                continue
+            line = source.reindex(index)
+            target_series.loc[:] = target_series.where(target_series.notna(), line)
+
+    any_short = all(item.entry_short is not None for item in evaluated)
+
+    return _EnsembleInputs(
+        members=members,
+        evaluated=evaluated,
+        index=index,
+        warnings=warnings,
+        execution=execution,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+        max_position_pct=max_position_pct,
+        capital=float(execution.initial_capital),
+        stop_long=stop_long.to_numpy(dtype=float),
+        target_long=target_long.to_numpy(dtype=float),
+        stop_short=stop_short.to_numpy(dtype=float),
+        target_short=target_short.to_numpy(dtype=float),
+        entry_votes_long=votes("entry_long").to_numpy(dtype=float),
+        entry_votes_short=(votes("entry_short").to_numpy(dtype=float) if any_short else None),
+        exit_votes_short=(votes("exit_short").to_numpy(dtype=float) if any_short else None),
+        any_short=any_short,
+    )
+
+
+@dataclass
 class _SimResult:
     """Outcome of simulating one decision series over one bar index."""
 
@@ -86,6 +245,218 @@ class _SimResult:
     final_equity: float
     entries_taken: int
     in_position: list[bool]
+
+
+def _run_vote(
+    inputs: _EnsembleInputs,
+    *,
+    vote_threshold: float,
+    strategy_version: str,
+    timeframe: str,
+    with_curves: bool,
+    with_member_runs: bool,
+) -> dict[str, Any]:
+    """Merge the members' decisions at one threshold and simulate the portfolio.
+
+    Strictly greater than the threshold. With equal weights each member carries
+    exactly 0.5, so an inclusive ``>= 0.5`` would let ONE member alone clear a
+    "strict majority" and the ensemble would degenerate into a union of members
+    (probe: AND=0 bars but the vote fired 11 — the union). Majority means more than.
+    """
+
+    evaluated = inputs.evaluated
+    index = inputs.index
+    entry_votes_long = inputs.entry_votes_long
+    agreed_long = entry_votes_long > vote_threshold
+    exit_votes_long = None
+    for item in evaluated:
+        line = item.exit_long.reindex(index, fill_value=False).astype(float).to_numpy()
+        exit_votes_long = (
+            line * item.weight if exit_votes_long is None else exit_votes_long + line * item.weight
+        )
+    if exit_votes_long is None:  # pragma: no cover - members is never empty here
+        exit_votes_long = np.zeros(len(index), dtype=float)
+    agreed_exit = exit_votes_long > vote_threshold
+
+    entry_short = (
+        inputs.entry_votes_short > vote_threshold if inputs.entry_votes_short is not None else None
+    )
+    exit_short = (
+        # Strictly greater here too: a short exit must clear the same bar the long
+        # exit does. This was the one `>=` left behind when the entry/exit votes were
+        # tightened, and it only fires when every member allows shorts.
+        inputs.exit_votes_short > vote_threshold
+        if inputs.entry_votes_short is not None and inputs.exit_votes_short is not None
+        else None
+    )
+
+    result = _simulate(
+        frame=evaluated[0].frame,
+        index=index,
+        entry_long=agreed_long,
+        exit_long=agreed_exit,
+        entry_short=entry_short,
+        exit_short=exit_short,
+        stop_long=inputs.stop_long,
+        target_long=inputs.target_long,
+        stop_short=inputs.stop_short,
+        target_short=inputs.target_short,
+        execution=inputs.execution,
+        fee_rate=inputs.fee_rate,
+        slippage_rate=inputs.slippage_rate,
+        max_position_pct=inputs.max_position_pct,
+        capital=inputs.capital,
+        timeframe=timeframe,
+        strategy_version=strategy_version,
+    )
+
+    # Consensus attribution. The ensemble's headline numbers say whether the *combined*
+    # decision paid; they do not say who was being voted down. A member's support rate
+    # (how often the portfolio ended up doing what it proposed) is the number that makes
+    # the comparison table honest: it is computed on the ensemble's own common bars and
+    # cost model, not read from some other stored run.
+    def vote_masks(item: _Evaluated, attr: str) -> pd.Series:
+        series = getattr(item, attr)
+        if series is None:
+            return pd.Series(False, index=index)
+        return series.reindex(index, fill_value=False).astype(bool)
+
+    # Bars where exactly one member asked to enter: the vote was split, so nothing
+    # happened even though a member "signalled". Without this number a member whose
+    # signals are nearly all solo looks active while contributing nothing.
+    solo_entries = (entry_votes_long > 0) & (entry_votes_long < 1.0)
+
+    member_summary: list[dict[str, Any]] = []
+    for item in evaluated:
+        entry_mask = vote_masks(item, "entry_long")
+        exit_mask = vote_masks(item, "exit_long")
+        entry_proposed = int(entry_mask.sum())
+        exit_proposed = int(exit_mask.sum())
+        entry_agreed = int((entry_mask & agreed_long).sum())
+        exit_agreed = int((exit_mask & agreed_exit).sum())
+        member_summary.append(
+            {
+                "label": item.label,
+                "weight": item.weight,
+                "entry_bars": entry_proposed,
+                "exit_bars": exit_proposed,
+                "entry_votes": entry_proposed,
+                "exit_votes": exit_proposed,
+                "entry_agreed": entry_agreed,
+                "exit_agreed": exit_agreed,
+                "solo_entries": int((entry_mask & solo_entries).sum()),
+                # How often the vote went the member's way *on bars it signalled*: the
+                # ratio of "my proposals that survived" to "my proposals".
+                "entry_support_rate": (entry_agreed / entry_proposed) if entry_proposed else None,
+                # How often the member's vote agreed with the majority, counting every
+                # bar. A member can score 0 here while still clearing the threshold
+                # sometimes; the entry rate is the one to read next to `entry_bars`.
+                "vote_agreement_rate": (
+                    float((entry_mask == agreed_long).mean()) if len(index) else None
+                ),
+            }
+        )
+
+    proposal_union = int((entry_votes_long > 0).sum())
+    exit_proposal_union = int((exit_votes_long > 0).sum())
+    agreement = {
+        "entry_bars": int(agreed_long.sum()),
+        "exit_bars": int(agreed_exit.sum()),
+        "short_entry_bars": int(entry_short.sum()) if entry_short is not None else 0,
+        # Bars where the vote fired AND the portfolio was flat, i.e. positions
+        # actually opened. This is the number comparable to a member's entries.
+        "entries_taken": result.entries_taken,
+        "signalled_bars": proposal_union,
+        "solo_signalled_bars": int(solo_entries.sum()),
+        # Consensus among the members only: an ensemble can open zero positions because
+        # nobody agreed, which looks identical to "no signals" unless these are reported.
+        "entry_support_rate": (int(agreed_long.sum()) / proposal_union if proposal_union else None),
+        "exit_support_rate": (
+            int(agreed_exit.sum()) / exit_proposal_union if exit_proposal_union else None
+        ),
+    }
+
+    report: dict[str, Any] = {
+        "vote_threshold": vote_threshold,
+        "members": member_summary,
+        "bars_evaluated": len(index),
+        "agreement": agreement,
+        "metrics": result.metrics.as_dict(),
+        "final_equity": result.final_equity,
+        "initial_capital": inputs.capital,
+        "warnings": list(inputs.warnings),
+    }
+
+    if with_curves:
+        report["trades"] = result.trades
+        report["equity_curve"] = result.equity_curve
+
+    if with_member_runs:
+        # Each member, run on the *same* bars with the *same* cost model. The comparison
+        # table needs this: a member's most recent stored backtest may have been run on a
+        # different window or with different fees, and then the columns would silently be
+        # apples to oranges. Each member gets its own cash account funded with its weight's
+        # share of the capital, so the solo curves sum to the same starting line — weights
+        # are already normalised, so the shares sum to exactly 1.
+        member_runs: list[dict[str, Any]] = []
+        for item in evaluated:
+            solo = _simulate(
+                frame=item.frame,
+                index=index,
+                entry_long=item.entry_long.reindex(index, fill_value=False).astype(bool).to_numpy(),
+                exit_long=item.exit_long.reindex(index, fill_value=False).astype(bool).to_numpy(),
+                entry_short=(
+                    item.entry_short.reindex(index, fill_value=False).astype(bool).to_numpy()
+                    if item.entry_short is not None
+                    else None
+                ),
+                exit_short=(
+                    item.exit_short.reindex(index, fill_value=False).astype(bool).to_numpy()
+                    if item.exit_short is not None
+                    else None
+                ),
+                stop_long=(
+                    item.risk_stop.reindex(index).to_numpy(dtype=float)
+                    if item.risk_stop is not None
+                    else np.full(len(index), np.nan)
+                ),
+                target_long=(
+                    item.risk_target.reindex(index).to_numpy(dtype=float)
+                    if item.risk_target is not None
+                    else np.full(len(index), np.nan)
+                ),
+                stop_short=(
+                    item.risk_stop_short.reindex(index).to_numpy(dtype=float)
+                    if item.risk_stop_short is not None
+                    else np.full(len(index), np.nan)
+                ),
+                target_short=(
+                    item.risk_target_short.reindex(index).to_numpy(dtype=float)
+                    if item.risk_target_short is not None
+                    else np.full(len(index), np.nan)
+                ),
+                execution=inputs.execution,
+                fee_rate=inputs.fee_rate,
+                slippage_rate=inputs.slippage_rate,
+                max_position_pct=inputs.max_position_pct,
+                capital=inputs.capital * item.weight,
+                timeframe=timeframe,
+                strategy_version=item.label,
+            )
+            member_runs.append(
+                {
+                    "label": item.label,
+                    "weight": item.weight,
+                    "initial_capital": inputs.capital * item.weight,
+                    "final_equity": solo.final_equity,
+                    "entries_taken": solo.entries_taken,
+                    "metrics": solo.metrics.as_dict(),
+                    "equity_curve": solo.equity_curve,
+                }
+            )
+        report["member_runs"] = member_runs
+
+    return report
 
 
 def _simulate(
@@ -325,296 +696,167 @@ def run_ensemble(
     cost model, capital and sizing belong to the portfolio, not to a single member.
     """
 
-    if not members:
-        raise ValueError("an ensemble needs at least one member")
-    if len(members) > MAX_MEMBERS:
-        raise ValueError(f"an ensemble supports at most {MAX_MEMBERS} members")
     if not 0.0 <= vote_threshold < 1.0:
         raise ValueError("vote_threshold must be in [0, 1): the vote must exceed it")
 
-    raw_weights = [float(m.weight) for m in members]
-    if any(w < 0 for w in raw_weights):
-        raise ValueError("member weights must be >= 0")
-    total_weight = sum(raw_weights)
-    if total_weight <= 0:
-        raise ValueError("member weights must not all be zero")
-    weights = [w / total_weight for w in raw_weights]
-
-    warnings: list[str] = []
-    evaluated: list[_Evaluated] = []
-    for member, weight in zip(members, weights, strict=True):
-        feature_frame = build_features(bars, spec=member.spec)
-        frame = feature_frame.frame
-        out, _ = run_strategy(member.spec, frame)
-        evaluated.append(
-            _Evaluated(
-                label=member.label,
-                weight=weight,
-                frame=frame,
-                entry_long=out["entry_long"].astype(bool),
-                exit_long=out["exit_long"].astype(bool),
-                entry_short=(out["entry_short"].astype(bool) if "entry_short" in out else None),
-                exit_short=(out["exit_short"].astype(bool) if "exit_short" in out else None),
-                risk_stop=out.get("risk_stop"),
-                risk_target=out.get("risk_target"),
-                risk_stop_short=out.get("risk_stop_short"),
-                risk_target_short=out.get("risk_target_short"),
-            )
-        )
-        if feature_frame.warmup_bars:
-            warnings.append(
-                f"member '{member.label}' has a {feature_frame.warmup_bars}-bar warm-up"
-            )
-
-    # Every vote is cast on the same bar, so trade on the intersection of timestamps.
-    index = evaluated[0].frame.index
-    for item in evaluated[1:]:
-        index = index.intersection(item.frame.index)
-    if len(index) == 0:
-        raise ValueError("members share no common bars; check their indicators and warm-up")
-    if len(index) < len(evaluated[0].frame.index):
-        warnings.append(
-            f"ensemble evaluates {len(index)} of {len(evaluated[0].frame.index)} bars "
-            "(members' warm-ups overlap only partially)"
-        )
-
-    def votes(attr: str) -> pd.Series:
-        total = pd.Series(0.0, index=index)
-        for item in evaluated:
-            series = getattr(item, attr)
-            if series is None:
-                continue
-            total = total + series.reindex(index, fill_value=False).astype(float) * item.weight
-        return total
-
-    # Strictly greater than the threshold. With equal weights each member carries
-    # exactly 0.5, so an inclusive `>= 0.5` would let ONE member alone clear a
-    # "strict majority" and the ensemble would degenerate into a union of members
-    # (probe: AND=0 bars but the vote fired 11 — the union). Majority means more than.
-    entry_votes_long = votes("entry_long")
-    exit_votes_long = votes("exit_long")
-    agreed_long = entry_votes_long > vote_threshold
-    agreed_exit = exit_votes_long > vote_threshold
-    any_short = all(item.entry_short is not None for item in evaluated)
-    # `has_short` needs a frame to read prices from, which only exists below.
-    entry_votes_short = votes("entry_short") if any_short else None
-    exit_votes_short = votes("exit_short") if any_short else None
-    agreed_short = entry_votes_short > vote_threshold if entry_votes_short is not None else None
-
-    # The portfolio needs one cost model and one stop rule. Inheriting the first
-    # member's (overridable) is documented behaviour; inventing them would be worse.
-    # merge_spec_overrides re-validates, so a nested override such as
-    # {"execution": {"sizing": {...}}} actually takes effect instead of being kept as
-    # an unvalidated dict (which the engine would silently ignore).
-    portfolio_spec = merge_spec_overrides(members[0].spec, spec_overrides)
-
-    execution = portfolio_spec.execution
-    risk = portfolio_spec.risk
-    max_position_pct = risk.max_position_pct if risk and risk.max_position_pct else 1.0
-    fee_rate, slippage_rate = _cost_multipliers(execution.fee_bps, execution.slippage_bps)
-
-    # Risk lines come from the first member that defines them: a single portfolio can
-    # carry one stop, and mixing members' stops bar-by-bar would be arbitrary.
-    stop_long = pd.Series(np.nan, index=index)
-    target_long = pd.Series(np.nan, index=index)
-    stop_short = pd.Series(np.nan, index=index)
-    target_short = pd.Series(np.nan, index=index)
-    for item in evaluated:
-        for target_series, source in (
-            (stop_long, item.risk_stop),
-            (target_long, item.risk_target),
-            (stop_short, item.risk_stop_short),
-            (target_short, item.risk_target_short),
-        ):
-            if source is None:
-                continue
-            line = source.reindex(index)
-            target_series.loc[:] = target_series.where(target_series.notna(), line)
-
-    frame = evaluated[0].frame
-    entry_long = agreed_long.to_numpy(dtype=bool)
-    exit_long = agreed_exit.to_numpy(dtype=bool)
-    entry_short = agreed_short.to_numpy(dtype=bool) if agreed_short is not None else None
-    exit_short = (
-        # Strictly greater here too: a short exit must clear the same bar the long
-        # exit does. This was the one `>=` left behind when the entry/exit votes were
-        # tightened, and it only fires when every member allows shorts.
-        (exit_votes_short > vote_threshold).to_numpy(dtype=bool)
-        if any_short and exit_votes_short is not None
-        else None
-    )
-    stop_long_v = stop_long.to_numpy(dtype=float)
-    target_long_v = target_long.to_numpy(dtype=float)
-    stop_short_v = stop_short.to_numpy(dtype=float)
-    target_short_v = target_short.to_numpy(dtype=float)
-
-    capital = float(execution.initial_capital)
-    result = _simulate(
-        frame=frame,
-        index=index,
-        entry_long=entry_long,
-        exit_long=exit_long,
-        entry_short=entry_short,
-        exit_short=exit_short,
-        stop_long=stop_long_v,
-        target_long=target_long_v,
-        stop_short=stop_short_v,
-        target_short=target_short_v,
-        execution=execution,
-        fee_rate=fee_rate,
-        slippage_rate=slippage_rate,
-        max_position_pct=max_position_pct,
-        capital=capital,
-        timeframe=timeframe,
+    inputs = _prepare_ensemble(members, bars, spec_overrides=spec_overrides)
+    report = _run_vote(
+        inputs,
+        vote_threshold=vote_threshold,
         strategy_version=strategy_version,
+        timeframe=timeframe,
+        with_curves=True,
+        with_member_runs=True,
     )
-    equity_curve = result.equity_curve
-    trades = result.trades
-    entries_taken = result.entries_taken
-    metrics = result.metrics
-
-    # Consensus attribution. The ensemble's headline numbers say whether the *combined*
-    # decision paid; they do not say who was being voted down. A member's support rate
-    # (how often the portfolio ended up doing what it proposed) is the number that makes
-    # the comparison table honest: it is computed on the ensemble's own common bars and
-    # cost model, not read from some other stored run.
-    def vote_masks(item: _Evaluated, attr: str) -> pd.Series:
-        series = getattr(item, attr)
-        if series is None:
-            return pd.Series(False, index=index)
-        return series.reindex(index, fill_value=False).astype(bool)
-
-    # Bars where exactly one member asked to enter: the vote was split, so nothing
-    # happened even though a member "signalled". Without this number a member whose
-    # signals are nearly all solo looks active while contributing nothing.
-    solo_entries = (entry_votes_long > 0) & (entry_votes_long < 1.0)
-
-    member_summary: list[dict[str, Any]] = []
-    for item in evaluated:
-        entry_mask = vote_masks(item, "entry_long")
-        exit_mask = vote_masks(item, "exit_long")
-        entry_proposed = int(entry_mask.sum())
-        exit_proposed = int(exit_mask.sum())
-        entry_agreed = int((entry_mask & agreed_long).sum())
-        exit_agreed = int((exit_mask & agreed_exit).sum())
-        member_summary.append(
-            {
-                "label": item.label,
-                "weight": item.weight,
-                "entry_bars": entry_proposed,
-                "exit_bars": exit_proposed,
-                "entry_votes": entry_proposed,
-                "exit_votes": exit_proposed,
-                "entry_agreed": entry_agreed,
-                "exit_agreed": exit_agreed,
-                "solo_entries": int((entry_mask & solo_entries).sum()),
-                # How often the vote went the member's way *on bars it signalled*: the
-                # ratio of "my proposals that survived" to "my proposals".
-                "entry_support_rate": (entry_agreed / entry_proposed) if entry_proposed else None,
-                # How often the member's vote agreed with the majority, counting every
-                # bar. A member can score 0 here while still clearing the threshold
-                # sometimes; the entry rate is the one to read next to `entry_bars`.
-                "vote_agreement_rate": (
-                    float((entry_mask == agreed_long).mean()) if len(index) else None
-                ),
-            }
-        )
-
-    proposal_union = int((entry_votes_long > 0).sum())
-    exit_proposal_union = int((exit_votes_long > 0).sum())
-    agreement = {
-        "entry_bars": int(entry_long.sum()),
-        "exit_bars": int(exit_long.sum()),
-        "short_entry_bars": int(entry_short.sum()) if entry_short is not None else 0,
-        # Bars where the vote fired AND the portfolio was flat, i.e. positions
-        # actually opened. This is the number comparable to a member's entries.
-        "entries_taken": entries_taken,
-        "signalled_bars": proposal_union,
-        "solo_signalled_bars": int(solo_entries.sum()),
-        # Consensus among the members only: an ensemble can open zero positions because
-        # nobody agreed, which looks identical to "no signals" unless these are reported.
-        "entry_support_rate": (int(entry_long.sum()) / proposal_union if proposal_union else None),
-        "exit_support_rate": (
-            int(exit_long.sum()) / exit_proposal_union if exit_proposal_union else None
-        ),
+    return {
+        "ensemble_version": ENSEMBLE_VERSION,
+        "engine_version": f"ensemble-{ENSEMBLE_VERSION}",
+        "feature_version": "ensemble",
+        **report,
     }
 
-    # Each member, run on the *same* bars with the *same* cost model. The comparison
-    # table needs this: a member's most recent stored backtest may have been run on a
-    # different window or with different fees, and then the columns would silently be
-    # apples to oranges. Each member gets its own cash account funded with its weight's
-    # share of the capital, so the solo curves sum to the same starting line — weights
-    # are already normalised, so the shares sum to exactly 1.
-    member_runs: list[dict[str, Any]] = []
-    for item in evaluated:
-        solo = _simulate(
-            frame=item.frame,
-            index=index,
-            entry_long=item.entry_long.reindex(index, fill_value=False).astype(bool).to_numpy(),
-            exit_long=item.exit_long.reindex(index, fill_value=False).astype(bool).to_numpy(),
-            entry_short=(
-                item.entry_short.reindex(index, fill_value=False).astype(bool).to_numpy()
-                if item.entry_short is not None
-                else None
-            ),
-            exit_short=(
-                item.exit_short.reindex(index, fill_value=False).astype(bool).to_numpy()
-                if item.exit_short is not None
-                else None
-            ),
-            stop_long=(
-                item.risk_stop.reindex(index).to_numpy(dtype=float)
-                if item.risk_stop is not None
-                else np.full(len(index), np.nan)
-            ),
-            target_long=(
-                item.risk_target.reindex(index).to_numpy(dtype=float)
-                if item.risk_target is not None
-                else np.full(len(index), np.nan)
-            ),
-            stop_short=(
-                item.risk_stop_short.reindex(index).to_numpy(dtype=float)
-                if item.risk_stop_short is not None
-                else np.full(len(index), np.nan)
-            ),
-            target_short=(
-                item.risk_target_short.reindex(index).to_numpy(dtype=float)
-                if item.risk_target_short is not None
-                else np.full(len(index), np.nan)
-            ),
-            execution=execution,
-            fee_rate=fee_rate,
-            slippage_rate=slippage_rate,
-            max_position_pct=max_position_pct,
-            capital=capital * item.weight,
+
+def run_ensemble_sweep(
+    members: list[EnsembleMember],
+    bars: pd.DataFrame,
+    *,
+    thresholds: list[float] | None = None,
+    spec_overrides: dict[str, Any] | None = None,
+    strategy_version: str = "ensemble",
+    timeframe: str = "1d",
+) -> dict[str, Any]:
+    """Vote the same members at several thresholds and report the shape (docs/24 §7).
+
+    ``vote_threshold`` is the only knob an ensemble has, and its effect is
+    discontinuous: equal weights make a threshold a coalition requirement (0.5 means
+    "both members"), so the surface is a staircase, not a curve. Evaluating one
+    threshold at a time leaves the reader guessing which coalitions they skipped.
+
+    Not a recommendation: this reports how the metrics move, exactly like the
+    parameter sensitivity sweep (docs/21). Features and member rules are evaluated
+    once and only the simulation repeats, so N thresholds cost one member evaluation
+    plus N simulations.
+    """
+
+    if thresholds is None:
+        # Half a vote per member is the natural grid: with equal weights these are the
+        # only values that change anything, because the weighted vote is a sum of
+        # weights and can only land on coalition totals.
+        thresholds = _default_thresholds_for(members)
+    thresholds = [float(t) for t in thresholds]
+    if not thresholds:
+        raise ValueError("thresholds must not be empty")
+    if len(thresholds) > MAX_SWEEP_THRESHOLDS:
+        raise ValueError(f"a sweep supports at most {MAX_SWEEP_THRESHOLDS} thresholds")
+    for threshold in thresholds:
+        if not 0.0 <= threshold < 1.0:
+            raise ValueError(f"vote threshold {threshold} must be in [0, 1)")
+    if len(set(thresholds)) != len(thresholds):
+        raise ValueError("thresholds must not contain duplicates")
+
+    inputs = _prepare_ensemble(members, bars, spec_overrides=spec_overrides)
+
+    points: list[dict[str, Any]] = []
+    for threshold in sorted(thresholds):
+        report = _run_vote(
+            inputs,
+            vote_threshold=threshold,
+            strategy_version=strategy_version,
             timeframe=timeframe,
-            strategy_version=item.label,
+            with_curves=False,
+            with_member_runs=False,
         )
-        member_runs.append(
+        agreement = report["agreement"]
+        metrics = report["metrics"]
+        points.append(
             {
-                "label": item.label,
-                "weight": item.weight,
-                "initial_capital": capital * item.weight,
-                "final_equity": solo.final_equity,
-                "entries_taken": solo.entries_taken,
-                "metrics": solo.metrics.as_dict(),
-                "equity_curve": solo.equity_curve,
+                "vote_threshold": threshold,
+                # The vote value the portfolio's own entries actually cleared. This is
+                # the coalition size that mattered, not the number the caller typed.
+                "effective_vote": _effective_vote(inputs, threshold),
+                "entries_taken": agreement["entries_taken"],
+                "entry_bars": agreement["entry_bars"],
+                "signalled_bars": agreement["signalled_bars"],
+                "solo_signalled_bars": agreement["solo_signalled_bars"],
+                "final_equity": report["final_equity"],
+                "total_return": metrics.get("total_return"),
+                "max_drawdown": metrics.get("max_drawdown"),
+                "sharpe": metrics.get("sharpe"),
+                "win_rate": metrics.get("win_rate"),
+                "number_of_trades": metrics.get("number_of_trades"),
             }
         )
 
     return {
         "ensemble_version": ENSEMBLE_VERSION,
-        "vote_threshold": vote_threshold,
-        "members": member_summary,
-        "member_runs": member_runs,
-        "bars_evaluated": len(index),
-        "agreement": agreement,
-        "metrics": metrics.as_dict(),
-        "trades": trades,
-        "equity_curve": equity_curve,
-        "final_equity": result.final_equity,
-        "initial_capital": capital,
-        "engine_version": "ensemble-1.1.0",
+        "engine_version": f"ensemble-{ENSEMBLE_VERSION}",
         "feature_version": "ensemble",
-        "warnings": warnings,
+        "vote_threshold": points[0]["vote_threshold"] if len(points) == 1 else None,
+        "bars_evaluated": len(inputs.index),
+        "initial_capital": inputs.capital,
+        "thresholds": [point["vote_threshold"] for point in points],
+        "points": points,
+        "members": [
+            {
+                "label": item.label,
+                "weight": item.weight,
+                # The coalition totals the weighted vote can take. This is what makes a
+                # staircase readable: between two of these values nothing can change.
+                "weight_share": item.weight,
+            }
+            for item in inputs.evaluated
+        ],
+        "possible_votes": _possible_votes(inputs),
+        "warnings": list(inputs.warnings),
     }
+
+
+def _default_thresholds_for(members: list[EnsembleMember]) -> list[float]:
+    """Thresholds worth evaluating for this member set, in ``[0, 1)``.
+
+    Every distinct coalition total strictly inside ``(0, 1)`` is a boundary where the
+    answer changes; ``0.0`` makes any single member enough and is included so the
+    "union" case is visible in the same chart.
+    """
+
+    weights = [float(m.weight) for m in members]
+    if not weights:
+        raise ValueError("an ensemble needs at least one member")
+    total = sum(weights)
+    if total <= 0:
+        raise ValueError("member weights must not all be zero")
+    normalised = [w / total for w in weights]
+
+    grid = {0.0}
+    for value in _coalition_totals(normalised):
+        if 0.0 < value < 1.0:
+            grid.add(round(value, 6))
+    return sorted(grid)
+
+
+def _coalition_totals(normalised_weights: list[float]) -> list[float]:
+    """Distinct totals the normalised weighted vote can actually take, ascending."""
+
+    totals: set[float] = {0.0}
+    for weight in normalised_weights:
+        totals |= {round(existing + weight, 6) for existing in totals}
+    return sorted(totals)
+
+
+def _possible_votes(inputs: _EnsembleInputs) -> list[float]:
+    """Distinct totals the weighted vote can actually take, ascending."""
+
+    return _coalition_totals([item.weight for item in inputs.evaluated])
+
+
+def _effective_vote(inputs: _EnsembleInputs, threshold: float) -> float:
+    """Smallest achievable vote total that strictly exceeds ``threshold``.
+
+    Reported next to the requested threshold so a reader can see which coalition the
+    portfolio was actually waiting for.
+    """
+
+    for total in _possible_votes(inputs):
+        if total > threshold:
+            return total
+    return 0.0

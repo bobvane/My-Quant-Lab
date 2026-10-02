@@ -272,6 +272,44 @@ export interface EnsembleResult {
   feature_version: string
 }
 
+/** One evaluated threshold of an ensemble vote sweep (docs/24 §7, ADR-052). */
+export interface EnsembleSweepPoint {
+  vote_threshold: number
+  /**
+   * The smallest attainable vote that clears this threshold — the coalition the
+   * threshold is really waiting for. Between two attainable votes nothing changes,
+   * which is why this surface is a staircase and not a curve.
+   */
+  effective_vote: number
+  entries_taken: number
+  entry_bars: number
+  signalled_bars: number
+  solo_signalled_bars: number
+  final_equity: number
+  total_return: number
+  max_drawdown: number
+  sharpe: number | null
+  win_rate: number | null
+  number_of_trades: number
+}
+
+export interface EnsembleSweepResult {
+  ensemble_version: string
+  engine_version: string
+  feature_version: string
+  bars_evaluated: number
+  initial_capital: number
+  thresholds: number[]
+  points: EnsembleSweepPoint[]
+  members: Array<{ label: string; weight: number; weight_share: number }>
+  /** Every distinct total the weighted vote can take. */
+  possible_votes: number[]
+  warnings: string[]
+  dataset_version_id: number | null
+  symbol: string | null
+  timeframe: string
+}
+
 /** One evaluated grid point of a sensitivity sweep (docs/21). */
 export interface SensitivityPoint {
   parameters: Record<string, number | string>
@@ -620,6 +658,23 @@ export const api = {
         members,
         symbol,
         vote_threshold: voteThreshold,
+        execution_overrides: executionOverrides,
+      }),
+    }),
+  // The same vote at several thresholds (docs/24 §7). Descriptive: it shows the
+  // staircase so a skipped coalition is visible, and never picks a threshold.
+  ensembleSweep: (
+    members: EnsembleMemberIn[],
+    symbol: string,
+    thresholds: number[] | null = null,
+    executionOverrides: Record<string, unknown> = {},
+  ) =>
+    request<EnsembleSweepResult>('/research/ensemble/sweep', {
+      method: 'POST',
+      body: JSON.stringify({
+        members,
+        symbol,
+        thresholds,
         execution_overrides: executionOverrides,
       }),
     }),

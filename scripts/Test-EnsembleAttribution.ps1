@@ -43,9 +43,13 @@ function New-Version([string]$id, [int]$fast, [int]$slow) {
 Invoke-RestMethod "$Base/market-data/sync" -Method Post -ContentType 'application/json' `
   -Body (@{ symbol = $Symbol } | ConvertTo-Json) | Out-Null
 
-$a = New-Version 'ens-a' 5 20
-$b = New-Version 'ens-b' 10 30
-"member versions: a=$a b=$b"
+# Strategy slugs are unique, so a fixed name makes the second run of this script fail with
+# "strategy slug already exists" instead of verifying anything. Suffix them per run so the
+# script stays re-runnable against a long-lived server (the NAS deployment is one).
+$run = Get-Date -Format 'MMddHHmmss'
+$a = New-Version "ens-a-$run" 5 20
+$b = New-Version "ens-b-$run" 10 30
+"member versions: a=$a b=$b (run $run)"
 
 # A member whose own run is on the SAME symbol/timeframe, so the frontend comparison is
 # comparable rather than flagged.
@@ -97,7 +101,11 @@ foreach ($m in $ens.members) {
   if ($m.solo_entries -gt $m.entry_bars) { $ok = $false; "FAIL: $($m.label) solo > bars" }
 }
 if (-not $ens.dataset_version_id) { $ok = $false; "FAIL: no dataset_version_id" }
-if ($ens.engine_version -ne 'ensemble-1.1.0') { $ok = $false; "FAIL: engine_version dropped or stale" }
+# Derived, not hardcoded: engine_version is `ensemble-{ENSEMBLE_VERSION}`, and a literal
+# here just goes stale every release (ADR-052 decision 6).
+if ($ens.engine_version -ne "ensemble-$($ens.ensemble_version)") {
+  $ok = $false; "FAIL: engine_version '$($ens.engine_version)' != derived from '$($ens.ensemble_version)'"
+}
 
 # The same-bar member runs are what make the comparison honest: one per member, same bar
 # count as the vote, funded by weight share, and self-consistent with their own metrics.
@@ -120,4 +128,101 @@ foreach ($run in $ens.member_runs) {
 if ([math]::Abs($funded - [double]$ens.initial_capital) -gt 0.01) {
   $ok = $false; "FAIL: member funding $funded != ensemble capital $($ens.initial_capital)"
 }
+
+# --- vote-threshold sweep (docs/24 §7, ADR-052) ------------------------------
+# The sweep is only useful if a sweep point equals the single-threshold endpoint at the
+# same value. Re-run the vote directly at one of the swept thresholds and compare.
+$sweep = Invoke-RestMethod "$Base/research/ensemble/sweep" -Method Post -ContentType 'application/json' `
+  -Body (@{
+    members   = @(
+      @{ strategy_version_id = $a; weight = 1.0 },
+      @{ strategy_version_id = $b; weight = 1.0 }
+    )
+    symbol    = $Symbol
+    timeframe = '1d'
+  } | ConvertTo-Json -Depth 6)
+
+"`n-- threshold sweep --"
+$sweep | Select-Object ensemble_version, engine_version, bars_evaluated, initial_capital, possible_votes |
+  Format-List | Out-String | Write-Output
+$sweep.points |
+  Select-Object vote_threshold, effective_vote, entries_taken, entry_bars, signalled_bars,
+    total_return, max_drawdown, sharpe, number_of_trades |
+  Format-Table -AutoSize | Out-String | Write-Output
+
+if ($sweep.thresholds.Count -ne $sweep.points.Count) {
+  $ok = $false; "FAIL: thresholds $($sweep.thresholds.Count) != points $($sweep.points.Count)"
+}
+if ($sweep.engine_version -ne "ensemble-$($sweep.ensemble_version)") {
+  $ok = $false; "FAIL: sweep engine_version not derived from ensemble_version"
+}
+# Weighted votes are sums of member weights, so every swept threshold and every
+# reported effective vote must be an attainable coalition total.
+foreach ($t in $sweep.thresholds) {
+  if ($sweep.possible_votes -notcontains $t) { $ok = $false; "FAIL: threshold $t is not a coalition total" }
+}
+foreach ($p in $sweep.points) {
+  if ($sweep.possible_votes -notcontains $p.effective_vote) {
+    $ok = $false; "FAIL: effective_vote $($p.effective_vote) is not a coalition total"
+  }
+  if ($p.effective_vote -le $p.vote_threshold) {
+    $ok = $false; "FAIL: effective_vote $($p.effective_vote) does not exceed threshold $($p.vote_threshold)"
+  }
+}
+# Monotone: raising the bar can never open more positions.
+$counts = @($sweep.points | ForEach-Object { [int]$_.entries_taken })
+for ($i = 1; $i -lt $counts.Count; $i++) {
+  if ($counts[$i] -gt $counts[$i - 1]) { $ok = $false; "FAIL: entries_taken increased from threshold $($sweep.thresholds[$i-1]) to $($sweep.thresholds[$i])" }
+}
+# No curves in this contract.
+if ($null -ne $sweep.equity_curve -or $null -ne $sweep.member_runs) {
+  $ok = $false; "FAIL: sweep returned curves, which are outside its contract"
+}
+
+# Point == direct run at the same threshold.
+$probe = [double]$sweep.thresholds[-1]
+$direct = Invoke-RestMethod "$Base/research/ensemble" -Method Post -ContentType 'application/json' `
+  -Body (@{
+    members        = @(
+      @{ strategy_version_id = $a; weight = 1.0 },
+      @{ strategy_version_id = $b; weight = 1.0 }
+    )
+    symbol         = $Symbol
+    timeframe      = '1d'
+    vote_threshold = $probe
+  } | ConvertTo-Json -Depth 6)
+$last = $sweep.points[-1]
+"`n-- sweep point @$probe vs direct run --"
+@(
+  [pscustomobject]@{ field = 'entries_taken'; sweep = $last.entries_taken; direct = $direct.agreement.entries_taken }
+  [pscustomobject]@{ field = 'entry_bars'; sweep = $last.entry_bars; direct = $direct.agreement.entry_bars }
+  [pscustomobject]@{ field = 'signalled_bars'; sweep = $last.signalled_bars; direct = $direct.agreement.signalled_bars }
+  [pscustomobject]@{ field = 'final_equity'; sweep = $last.final_equity; direct = $direct.final_equity }
+  [pscustomobject]@{ field = 'total_return'; sweep = $last.total_return; direct = $direct.metrics.total_return }
+  [pscustomobject]@{ field = 'number_of_trades'; sweep = $last.number_of_trades; direct = $direct.metrics.number_of_trades }
+) | Format-Table -AutoSize | Out-String | Write-Output
+
+if ([int]$last.entries_taken -ne [int]$direct.agreement.entries_taken) { $ok = $false; "FAIL: sweep entries_taken != direct" }
+if ([int]$last.entry_bars -ne [int]$direct.agreement.entry_bars) { $ok = $false; "FAIL: sweep entry_bars != direct" }
+if ([int]$last.signalled_bars -ne [int]$direct.agreement.signalled_bars) { $ok = $false; "FAIL: sweep signalled_bars != direct" }
+if ([int]$last.number_of_trades -ne [int]$direct.metrics.number_of_trades) { $ok = $false; "FAIL: sweep number_of_trades != direct" }
+if ([math]::Abs([double]$last.final_equity - [double]$direct.final_equity) -gt 0.01) { $ok = $false; "FAIL: sweep final_equity != direct" }
+if ([math]::Abs([double]$last.total_return - [double]$direct.metrics.total_return) -gt 1e-9) { $ok = $false; "FAIL: sweep total_return != direct" }
+
+# Too many thresholds must be rejected rather than silently truncated.
+$rejected = $false
+try {
+  Invoke-RestMethod "$Base/research/ensemble/sweep" -Method Post -ContentType 'application/json' `
+    -Body (@{
+      members    = @(
+        @{ strategy_version_id = $a; weight = 1.0 },
+        @{ strategy_version_id = $b; weight = 1.0 }
+      )
+      symbol     = $Symbol
+      timeframe  = '1d'
+      thresholds = @(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.11, 0.22, 0.33, 0.44)
+    } | ConvertTo-Json -Depth 6) | Out-Null
+} catch { $rejected = $true }
+if (-not $rejected) { $ok = $false; "FAIL: 13 thresholds was accepted (cap is 12)" }
+
 "`nINVARIANTS: $(if ($ok) { 'OK' } else { 'FAILED' })"

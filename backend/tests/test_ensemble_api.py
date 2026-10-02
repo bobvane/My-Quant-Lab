@@ -103,7 +103,7 @@ def test_ensemble_reports_which_dataset_it_ran_on(client) -> None:
     assert body["symbol"] == _SYMBOL
     assert body["timeframe"] == "1d"
     # These two were computed by the engine and previously dropped by the response model.
-    assert body["engine_version"] == "ensemble-1.1.0"
+    assert body["engine_version"] == "ensemble-1.2.0"
     assert body["feature_version"] == "ensemble"
 
 

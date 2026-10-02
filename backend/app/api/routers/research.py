@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session
 from app.api.schemas import (
     EnsembleOut,
     EnsembleRequest,
+    EnsembleSweepOut,
+    EnsembleSweepRequest,
     MonteCarloOut,
     MonteCarloRequest,
     OOSOut,
@@ -30,7 +33,7 @@ from app.domain.models import (
     MarketDataSeries,
     StrategyVersion,
 )
-from app.research.ensemble import EnsembleMember, run_ensemble
+from app.research.ensemble import EnsembleMember, run_ensemble, run_ensemble_sweep
 from app.research.monte_carlo import run_monte_carlo
 from app.research.sensitivity import run_sensitivity
 from app.research.walk_forward import run_holdout, run_walk_forward
@@ -309,6 +312,120 @@ def ensemble(payload: EnsembleRequest, db: Session = Depends(get_db)) -> Ensembl
     same bars are handed to every member.
     """
 
+    labelled, series, asset, frame = _resolve_ensemble_inputs(payload, db)
+
+    try:
+        outcome = run_ensemble(
+            [member for _, member in labelled],
+            frame,
+            vote_threshold=payload.vote_threshold,
+            # The field is named `execution_overrides`, so its keys are execution fields
+            # (fee_bps, initial_capital, sizing, ...) — the same shape POST /backtests
+            # accepts. `merge_spec_overrides` wants spec-level keys, hence the wrap.
+            spec_overrides={"execution": payload.execution_overrides}
+            if payload.execution_overrides
+            else None,
+            strategy_version="ensemble",
+            timeframe=payload.timeframe,
+        )
+    except ValueError as exc:
+        # No members / too many / bad threshold / no common bars are caller errors.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Which dataset the vote ran on. The engine sees only bars, so the series identity
+    # is attached here; the comparison table uses it to tell a comparable member run
+    # from one on a different symbol/timeframe.
+    outcome["dataset_version_id"] = series.id
+    outcome["symbol"] = asset.symbol if asset is not None else None
+    outcome["timeframe"] = series.timeframe
+
+    record_audit(
+        db,
+        event_type="ensemble_completed",
+        entity_type="strategy",
+        entity_id="+".join(str(v.strategy_id) for v, _ in labelled),
+        action="run",
+        payload={
+            "members": [{"strategy_version_id": v.id, "weight": m.weight} for v, m in labelled],
+            "vote_threshold": outcome["vote_threshold"],
+            "bars_evaluated": outcome["bars_evaluated"],
+            "agreement": outcome["agreement"],
+            "final_equity": outcome["final_equity"],
+        },
+    )
+    db.commit()
+    return EnsembleOut(**outcome)
+
+
+@router.post(
+    "/ensemble/sweep",
+    response_model=EnsembleSweepOut,
+    summary="Vote the same members at several thresholds",
+)
+def ensemble_sweep(
+    payload: EnsembleSweepRequest, db: Session = Depends(get_db)
+) -> EnsembleSweepOut:
+    """Sweep the ensemble's only knob and report the shape (docs/24 §7, ADR-052).
+
+    ``vote_threshold`` is the one setting an ensemble has, and because the weighted
+    vote is a sum of member weights it can only land on coalition totals: the surface
+    is a staircase, not a curve. Running one threshold hides which coalitions were
+    skipped. This is descriptive, exactly like the parameter sensitivity sweep
+    (docs/21) — it never recommends a threshold.
+    """
+
+    labelled, series, asset, frame = _resolve_ensemble_inputs(payload, db)
+
+    try:
+        outcome = run_ensemble_sweep(
+            [member for _, member in labelled],
+            frame,
+            thresholds=payload.thresholds,
+            spec_overrides={"execution": payload.execution_overrides}
+            if payload.execution_overrides
+            else None,
+            strategy_version="ensemble",
+            timeframe=payload.timeframe,
+        )
+    except ValueError as exc:
+        # No members / bad threshold / too many thresholds / no common bars.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    outcome["dataset_version_id"] = series.id
+    outcome["symbol"] = asset.symbol if asset is not None else None
+    outcome["timeframe"] = series.timeframe
+
+    record_audit(
+        db,
+        event_type="ensemble_sweep_completed",
+        entity_type="strategy",
+        entity_id="+".join(str(v.strategy_id) for v, _ in labelled),
+        action="run",
+        payload={
+            "members": [{"strategy_version_id": v.id, "weight": m.weight} for v, m in labelled],
+            "thresholds": outcome["thresholds"],
+            "bars_evaluated": outcome["bars_evaluated"],
+            "possible_votes": outcome["possible_votes"],
+            "entries_taken": [
+                {"vote_threshold": p["vote_threshold"], "entries_taken": p["entries_taken"]}
+                for p in outcome["points"]
+            ],
+        },
+    )
+    db.commit()
+    return EnsembleSweepOut(**outcome)
+
+
+def _resolve_ensemble_inputs(
+    payload: EnsembleRequest, db: Session
+) -> tuple[list[tuple[StrategyVersion, EnsembleMember]], MarketDataSeries, Asset | None, Any]:
+    """Resolve members and the shared bar series for an ensemble request.
+
+    Extracted so the single-threshold and sweep endpoints resolve their inputs the same
+    way: the two must never disagree about which bars were voted on, or the sweep would
+    describe an ensemble the endpoint does not produce.
+    """
+
     # Resolve every member up front: a missing version is a 404 before any work happens.
     #
     # Duplicates are rejected rather than merged. Submitting the same version twice
@@ -373,44 +490,4 @@ def ensemble(payload: EnsembleRequest, db: Session = Depends(get_db)) -> Ensembl
             detail=f"need at least 60 closed bars, series has {len(frame)}",
         )
 
-    try:
-        outcome = run_ensemble(
-            [member for _, member in labelled],
-            frame,
-            vote_threshold=payload.vote_threshold,
-            # The field is named `execution_overrides`, so its keys are execution fields
-            # (fee_bps, initial_capital, sizing, ...) — the same shape POST /backtests
-            # accepts. `merge_spec_overrides` wants spec-level keys, hence the wrap.
-            spec_overrides={"execution": payload.execution_overrides}
-            if payload.execution_overrides
-            else None,
-            strategy_version="ensemble",
-            timeframe=payload.timeframe,
-        )
-    except ValueError as exc:
-        # No members / too many / bad threshold / no common bars are caller errors.
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    # Which dataset the vote ran on. The engine sees only bars, so the series identity
-    # is attached here; the comparison table uses it to tell a comparable member run
-    # from one on a different symbol/timeframe.
-    outcome["dataset_version_id"] = series.id
-    outcome["symbol"] = asset.symbol if asset is not None else None
-    outcome["timeframe"] = series.timeframe
-
-    record_audit(
-        db,
-        event_type="ensemble_completed",
-        entity_type="strategy",
-        entity_id="+".join(str(v.strategy_id) for v, _ in labelled),
-        action="run",
-        payload={
-            "members": [{"strategy_version_id": v.id, "weight": m.weight} for v, m in labelled],
-            "vote_threshold": outcome["vote_threshold"],
-            "bars_evaluated": outcome["bars_evaluated"],
-            "agreement": outcome["agreement"],
-            "final_equity": outcome["final_equity"],
-        },
-    )
-    db.commit()
-    return EnsembleOut(**outcome)
+    return labelled, series, asset, frame

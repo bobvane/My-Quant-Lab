@@ -201,6 +201,46 @@ API base: `/api/v1`
 - 同一组成员 + 权重 + 数据集 + 阈值 → 完全相同的决策与指标。
 - 每次运行写审计事件 `ensemble_completed`。
 
+## Ensemble Vote-Threshold Sweep
+
+`POST /research/ensemble/sweep`
+
+把**同一批成员**在多个 `vote_threshold` 上各跑一次，返回每个阈值下的结果（docs/24 第 7 节，
+ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，**不推荐阈值**（与参数敏感性扫描
+同族，理由相同：在同一个数据集上挑最好的那个就是过拟合）。
+
+参数：与 `POST /research/ensemble` 相同的 `members` / `symbol` / `timeframe` /
+`execution_overrides`（基类的 `vote_threshold` 被忽略），外加可选 `thresholds`
+（显式阈值列表，各值在 `[0, 1)`，最多 12 个，不可重复）。
+
+- 省略 `thresholds` → 服务端只用**答案会发生变化**的阈值，即 `possible_votes` 中严格落在
+  `(0, 1)` 内的值。加权票是成员权重之和，只能落在联盟总数上，所以两个相邻票数之间的阈值
+  行为完全相同。
+- `thresholds` 为空列表 / 超过 12 个 / 有重复 / 有值不在 `[0, 1)` → `422`。
+
+返回：
+
+- `thresholds`（实际评估的阈值，升序）、`possible_votes`（加权票的所有可能取值，升序）、
+  `members`（`label` / `weight` / `weight_share`）、`bars_evaluated`、`initial_capital`、
+  `warnings`，以及 `dataset_version_id` / `symbol` / `timeframe` / `engine_version` /
+  `feature_version`。
+- `points[]`：每个阈值一项 —— `vote_threshold`、`effective_vote`（`possible_votes` 中第一个
+  **严格大于**该阈值的票数，即该阈值实际在等哪个联盟）、`entries_taken`、`entry_bars`、
+  `signalled_bars`、`solo_signalled_bars`、`final_equity`、`total_return`、`max_drawdown`、
+  `sharpe`、`win_rate`、`number_of_trades`。
+- **不返回** `equity_curve` / `trades` / `member_runs`：曲线不在本端点契约内（12 个点各带
+  一条曲线会让响应体积失控）；需要曲线时用 `POST /research/ensemble`。
+
+语义：
+
+- 同一阈值下，扫描点与 `POST /research/ensemble` **逐项一致**：两者共用
+  `_prepare_ensemble` + `_run_vote`，特征与成员决策只评估一次并复用。若能做到不一致，这张图
+  描述的将是用户无法复现的集成。
+- 阈值升高时 `entries_taken` / `entry_bars` 单调不增（可交易 bar 不会变多）。
+- `effective_vote` 不是「需要几个成员」，而是「第一个能过线的票数」：三成员各 `1/3` 时，
+  阈值 `0.3` 的 `effective_vote` 是 `1/3`。
+- 每次运行写审计事件 `ensemble_sweep_completed`。
+
 ## Paper Accounts
 
 `GET /paper/accounts`

@@ -42,6 +42,9 @@ sum(weight_i × flag_i) > vote_threshold      # 注意是 >，不是 >=
 - `vote_threshold = 0.1`、三个等权成员 → 任一成员即可。
 - 阈值越高越保守（可交易 bar 不会变多）。
 
+因为判定是严格大于，**任何阈值都不是「连续可调」的**：票数只能取到联盟总数，两个相邻值之间的
+阈值完全等价。想看到这个旋钮的全部台阶，用第 7 节的阈值扫描，而不是逐个猜。
+
 ## 4. API
 
 ```http
@@ -65,13 +68,13 @@ POST /api/v1/research/ensemble
 
 ```json
 {
-  "ensemble_version": "1.0.0",
+  "ensemble_version": "1.2.0",
   "vote_threshold": 0.5,
   "bars_evaluated": 400,
   "dataset_version_id": 12,
   "symbol": "AAPL",
   "timeframe": "1d",
-  "engine_version": "ensemble-1.1.0",
+  "engine_version": "ensemble-1.2.0",
   "feature_version": "ensemble",
   "members": [
     {
@@ -181,20 +184,115 @@ POST /api/v1/research/ensemble
 让前端把不可比的行标出来 —— 那是「据实说明」，不是「解决问题」。现在同口径跑分由集成
 自己产出，这个警告只在**回退**到历史回测时才可能出现。
 
-## 7. 成本与风控从哪来
+## 7. 投票阈值扫描（`/research/ensemble/sweep`，ADR-052）
+
+阈值是集成**唯一的旋钮**，而它此前只能一次跑一个值 —— 靠猜。更麻烦的是它的形状：
+
+加权票是各成员权重之和，所以票数**只能落在联盟总数**（coalition totals）上。两成员等权时
+可能的票数只有 `0 / 0.5 / 1.0`；**阈值 0.4 和阈值 0.5 的行为完全相同**，因为两者等待的都是
+「两个成员都同意」。所以这个曲面是**阶梯**，不是曲线，一次跑一个值会隐藏「跳过了哪些联盟」。
+
+```http
+POST /api/v1/research/ensemble/sweep
+```
+
+请求体与 `POST /research/ensemble` 相同（`members` / `symbol` / `timeframe` /
+`execution_overrides` 全部复用），额外的 `thresholds` 是**可选**的显式阈值列表；
+基类的 `vote_threshold` 在这里被忽略。省略 `thresholds` 时服务端只在**答案会发生变化**
+的阈值上跑（即 `possible_votes` 中严格落在 `(0, 1)` 内的值），一次请求最多 12 个点。
+
+```json
+{
+  "members": [
+    { "strategy_version_id": 3, "weight": 1.0 },
+    { "strategy_version_id": 7, "weight": 1.0 }
+  ],
+  "symbol": "AAPL",
+  "timeframe": "1d",
+  "thresholds": [0.0, 0.25, 0.5, 0.75]
+}
+```
+
+响应（节的选）：
+
+```json
+{
+  "ensemble_version": "1.2.0",
+  "engine_version": "ensemble-1.2.0",
+  "feature_version": "ensemble",
+  "bars_evaluated": 400,
+  "initial_capital": 10000.0,
+  "dataset_version_id": 12,
+  "symbol": "AAPL",
+  "timeframe": "1d",
+  "thresholds": [0.0, 0.25, 0.5, 0.75],
+  "possible_votes": [0.0, 0.5, 1.0],
+  "members": [
+    { "label": "3@1.0.0", "weight": 0.5, "weight_share": 0.5 },
+    { "label": "7@1.0.0", "weight": 0.5, "weight_share": 0.5 }
+  ],
+  "points": [
+    {
+      "vote_threshold": 0.0,
+      "effective_vote": 0.5,
+      "entries_taken": 14,
+      "entry_bars": 14,
+      "signalled_bars": 23,
+      "solo_signalled_bars": 11,
+      "final_equity": 9631.0,
+      "total_return": -0.037,
+      "max_drawdown": -0.092,
+      "sharpe": -0.24,
+      "win_rate": 0.36,
+      "number_of_trades": 14
+    },
+    { "vote_threshold": 0.25, "effective_vote": 0.5, "entries_taken": 14, "...": "..." },
+    { "vote_threshold": 0.5, "effective_vote": 1.0, "entries_taken": 1, "...": "..." },
+    { "vote_threshold": 0.75, "effective_vote": 1.0, "entries_taken": 1, "...": "..." }
+  ],
+  "warnings": []
+}
+```
+
+### `effective_vote` 与 `possible_votes`
+
+| 字段 | 含义 |
+|---|---|
+| `possible_votes` | 加权票**所有可能取值**（联盟总数），升序 |
+| `points[].effective_vote` | `possible_votes` 中**第一个严格大于**该阈值的票数 —— 也就是这个阈值实际在等哪个联盟 |
+
+上例中阈值 `0.0` 与 `0.25` 的 `effective_vote` 都是 `0.5`（一个成员就够），阈值 `0.5` 与 `0.75`
+都是 `1.0`（必须两个成员同意）。**相邻两个点行为相同时，说明它们之间没有台阶** —— 这不是
+数据不够，而是这个旋钮的固有颗粒度。
+
+注意 `effective_vote` 不是「需要几个成员」，而是「第一个能过线的票数」。三成员各 `1/3` 时，
+阈值 `0.3` 的 `effective_vote` 是 `1/3`（一个成员已经够），而不是 `2/3`。
+
+### 这个端点不做什么
+
+- **不返回权益曲线**，也不返回 `member_runs`：曲线不在本端点的契约里，12 个点各带一条曲线
+  会让响应体积失控。
+- **不推荐阈值**。它与参数敏感性扫描（`docs/21`）同族：只描述形状。跨台阶比较收益并挑最高的
+  那个，就是在同一个数据集上做选择，属于过拟合，本工具不替用户做这个决定。
+- 扫描点与 `POST /research/ensemble` 在**同一阈值下必须逐项一致**：两者共用
+  `_prepare_ensemble` + `_run_vote`，特征与成员决策只评估一次并复用。若扫描点能与直接运行
+  不一致，这张图描述的将是用户无法复现的集成 —— `test_ensemble_sweep.py` 把这条锁成了断言。
+
+## 8. 成本与风控从哪来
 
 组合需要一个成本模型和一套止损规则。默认**继承第一个成员**的，并可用
 `execution_overrides` 覆盖（成本、初始资金、仓位管理都属于**组合**，不属于单个成员）。
 风险线取「第一个定义了它的成员」——一个组合只能带一个止损，逐 bar 混用各成员的止损
 是任意且不可解释的。
 
-## 7. 约束
+## 9. 约束
 
 | 情况 | 行为 |
 |---|---|
 | 成员为空 / 超过 12 个 | `422` |
 | **同一版本重复出现** | `422`（见下） |
 | `vote_threshold` 不在 `[0, 1)` | `422` |
+| `thresholds` 为空列表 / 超过 12 个 / 有重复 / 有值不在 `[0, 1)` | `422`（仅扫描端点） |
 | 权重为负 / 全为 0 | `422` |
 | 成员之间没有共同 bar（预热期完全不重叠） | `422` |
 | 预热期部分重叠 | 正常执行，但在共同 bar 上评估并写入 `warnings` |
@@ -209,16 +307,19 @@ POST /api/v1/research/ensemble
 
 想让某个策略话语权更大，请保留其他成员并**调高它的权重**，而不是重复添加它。
 
-## 8. 可复现性
+## 10. 可复现性
 
 同一组成员 + 权重 + 数据集 + 阈值 → 完全相同的决策与指标（无随机性）。
-成员权重会被归一化后记录在 `members[].weight`，便于事后核对。
+成员权重会被归一化后记录在 `members[].weight`，便于事后核对。扫描端点同理：
+同一组 `thresholds` 两次调用得到相同的 `points`。
 
-## 9. 实现位置
+## 11. 实现位置
 
 | 位置 | 作用 |
 |---|---|
-| `backend/app/research/ensemble.py` | 投票、决策合并、组合执行 |
+| `backend/app/research/ensemble.py` | 投票、决策合并、组合执行；`_prepare_ensemble`（阈值无关的公共部分）、`_run_vote`（单阈值）、`run_ensemble`、`run_ensemble_sweep` |
 | `backend/app/strategies/dsl.py` | `merge_spec_overrides`（唯一经过校验的覆盖合并入口） |
-| `backend/tests/test_ensemble.py` | 投票语义、阈值边界、权重归一化、成本/仓位覆盖、现金上限 |
-| `backend/tests/test_ensemble_api.py` | 端点契约、404/422、审计、可复现性 |
+| `backend/tests/test_ensemble.py` | 投票语义、阈值边界、权重归一化、成本/仓位覆盖、现金上限、同口径成员运行 |
+| `backend/tests/test_ensemble_sweep.py` | 扫描点与直接运行逐项一致、联盟总数、`effective_vote`、单调性、参数校验 |
+| `backend/tests/test_ensemble_api.py` | 端点契约、404/422、审计、可复现性、gzip |
+| `backend/tests/test_ensemble_sweep_api.py` | 扫描端点契约、联盟总数、单调性、审计、422 |

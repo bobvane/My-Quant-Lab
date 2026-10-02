@@ -374,6 +374,36 @@ class EnsembleOut(BaseModel):
     feature_version: str
 
 
+class EnsembleSweepRequest(EnsembleRequest):
+    """Vote the same members at several thresholds (docs/24 §7, ADR-052).
+
+    ``vote_threshold`` from the base request is ignored here; each entry of
+    ``thresholds`` is evaluated instead. Omitting ``thresholds`` uses the thresholds
+    where the answer can change: the member weight-share coalition totals.
+    """
+
+    thresholds: list[float] | None = Field(default=None, min_length=1)
+    """Explicit thresholds, each in ``[0, 1)``. The engine caps how many it will run."""
+
+
+class EnsembleSweepOut(BaseModel):
+    ensemble_version: str
+    engine_version: str
+    feature_version: str
+    bars_evaluated: int
+    initial_capital: float
+    thresholds: list[float]
+    points: list[dict[str, Any]]
+    members: list[dict[str, Any]]
+    # Every distinct total the weighted vote can take. Between two of these values
+    # nothing can change, which is why the sweep's surface is a staircase.
+    possible_votes: list[float]
+    warnings: list[str]
+    dataset_version_id: int | None = None
+    symbol: str | None = None
+    timeframe: str = "1d"
+
+
 class PaperAccountCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

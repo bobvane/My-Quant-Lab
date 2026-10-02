@@ -7,6 +7,7 @@ import {
   type BacktestSummary,
   type EnsembleMemberRun,
   type EnsembleResult,
+  type EnsembleSweepResult,
   type ExplainResult,
   type MonteCarloResult,
   type SensitivityResult,
@@ -18,6 +19,7 @@ import MonteCarloChart from '@/components/MonteCarloChart.vue'
 import MultiLineChart from '@/components/MultiLineChart.vue'
 import SensitivityChart from '@/components/SensitivityChart.vue'
 import StatCard from '@/components/StatCard.vue'
+import ThresholdSweepChart from '@/components/ThresholdSweepChart.vue'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 
 const runs = ref<BacktestSummary[]>([])
@@ -124,6 +126,15 @@ const ensWeights = ref<Record<number, number>>({})
 const ensThreshold = ref(0.5)
 const ensRunning = ref(false)
 /**
+ * Vote-threshold sweep (docs/24 §7, ADR-052). Describes the same ensemble at several
+ * thresholds; it never recommends one. `null` thresholds lets the server pick the
+ * thresholds where the answer can change (the coalition totals).
+ */
+const ensSweepResult = ref<EnsembleSweepResult | null>(null)
+const ensSweepRunning = ref(false)
+/** Optional explicit thresholds; the server derives them from the weights when blank. */
+const ensSweepThresholdsText = ref('')
+/**
  * Per-member single-strategy metrics, so "is diversifying better?" is answerable.
  * The dataset fields travel with them because a member's own stored run may be on a
  * different data window than the vote — the comparison table has to say so.
@@ -173,6 +184,10 @@ async function loadEnsCandidates() {
 }
 
 function toggleEnsMember(id: number) {
+  // A sweep describes one exact member/weight set, so changing the set must drop it.
+  // Leaving a stale staircase on screen would describe an ensemble that is no longer
+  // selected — the numbers would look current but belong to someone else's vote.
+  ensSweepResult.value = null
   const idx = ensSelected.value.indexOf(id)
   if (idx >= 0) {
     ensSelected.value = ensSelected.value.filter((x) => x !== id)
@@ -185,6 +200,7 @@ function toggleEnsMember(id: number) {
 
 /** Reset every selected member to weight 1 (equal say). */
 function ensEqualWeights() {
+  ensSweepResult.value = null
   const next: Record<number, number> = {}
   for (const id of ensSelected.value) next[id] = 1
   ensWeights.value = next
@@ -192,6 +208,7 @@ function ensEqualWeights() {
 
 /** Clear the selection entirely. */
 function ensClearSelection() {
+  ensSweepResult.value = null
   ensSelected.value = []
   ensWeights.value = {}
 }
@@ -365,7 +382,94 @@ async function runEnsemble() {
   }
 }
 
-async function runMonteCarlo() {  error.value = ''
+/**
+ * Parse the optional explicit threshold list. Returns `null` when blank, which asks the
+ * server to derive the thresholds where the answer can change (the coalition totals)
+ * instead of us guessing a grid.
+ */
+function parseEnsSweepThresholds(): number[] | null {
+  const raw = ensSweepThresholdsText.value.trim()
+  if (!raw) return null
+  const parts = raw
+    .split(/[,，\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const numbers = parts.map((s) => Number(s))
+  if (numbers.some((n) => !Number.isFinite(n) || n < 0 || n >= 1)) {
+    throw new Error('阈值需为 [0, 1) 之间的数字，例如 0, 0.25, 0.5, 0.75')
+  }
+  return numbers
+}
+
+async function runEnsembleSweep() {
+  error.value = ''
+  ensSweepResult.value = null
+  if (ensSelected.value.length < 2) {
+    error.value = '请至少选择两个策略版本参与投票（单个成员没有「认同」可言）'
+    return
+  }
+  if (!symbol.value.trim()) {
+    error.value = '请填写标的代码'
+    return
+  }
+  let thresholds: number[] | null
+  try {
+    thresholds = parseEnsSweepThresholds()
+  } catch (e) {
+    error.value = (e as Error).message
+    return
+  }
+  ensSweepRunning.value = true
+  try {
+    const members = ensSelected.value.map((id) => ({
+      strategy_version_id: id,
+      weight: Number(ensWeights.value[id] ?? 1),
+    }))
+    ensSweepResult.value = await api.ensembleSweep(members, symbol.value.trim(), thresholds)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    ensSweepRunning.value = false
+  }
+}
+
+/** Sweep points in chart shape. The endpoint returns no curves, only per-threshold numbers. */
+const ensSweepPoints = computed(() => ensSweepResult.value?.points ?? [])
+
+/** A vote share with no trailing zeros: 0.5 stays "0.5", not "0.500". */
+function fmtVote(value: number): string {
+  return String(Number(value.toFixed(6)))
+}
+
+/** Attainable vote totals, as a readable list ("0 · 0.5 · 1"). */
+const ensSweepPossibleVotes = computed(() =>
+  (ensSweepResult.value?.possible_votes ?? []).map(fmtVote).join(' · '),
+)
+
+/**
+ * How many *distinct* trading behaviours the sweep actually found.
+ *
+ * When this is 1 the knob is inert for these weights: the surface is flat, and any
+ * claim that one threshold beat another would be noise.
+ */
+const ensSweepDistinctEntries = computed(
+  () => new Set(ensSweepPoints.value.map((p) => p.entries_taken)).size,
+)
+
+const ensSweepNote = computed(() => {
+  const points = ensSweepPoints.value
+  if (points.length === 0) return ''
+  const counts = points.map((p) => p.entries_taken)
+  const lowest = points[0]
+  const highest = points[points.length - 1]
+  if (ensSweepDistinctEntries.value === 1) {
+    return `所有 ${points.length} 个阈值下开仓次数都是 ${counts[0]} 次 —— 在当前成员权重下这个旋钮不改变结果，别在这里调参。`
+  }
+  return `阈值从 ${fmtVote(lowest.vote_threshold)} 升到 ${fmtVote(highest.vote_threshold)}，开仓次数从 ${counts[0]} 次降到 ${counts[counts.length - 1]} 次。`
+})
+
+async function runMonteCarlo() {
+  error.value = ''
   mcResult.value = null
   const runId = detail.value?.id
   if (runId === undefined || runId === null) {
@@ -1243,10 +1347,77 @@ onMounted(async () => {
             阈值越高越保守（需要更多权重认同）
           </span>
         </div>
+
+        <div class="row" style="margin-top: 8px">
+          <label class="muted" style="display: flex; align-items: center; gap: 6px">
+            扫描阈值（留空 = 自动）
+            <input
+              v-model="ensSweepThresholdsText"
+              type="text"
+              placeholder="例如 0, 0.25, 0.5, 0.75"
+              style="max-width: 220px"
+            />
+          </label>
+          <button
+            class="ghost"
+            :disabled="ensSweepRunning || ensSelected.length < 2"
+            @click="runEnsembleSweep"
+          >
+            {{ ensSweepRunning ? '扫描中…' : '扫描阈值' }}
+          </button>
+          <span class="muted">
+            留空时服务端只在<b>答案会发生变化</b>的阈值上跑（票数只能落在成员权重的联盟总数上）
+          </span>
+        </div>
         <p v-if="ensSelected.length === 1" class="muted" style="margin-top: 4px">
           至少需要两个成员：只有一个成员时不存在「认同」这回事。若想让某个策略话语权更大，
           请保留其他成员并调高它的权重，而不是把它重复添加。
         </p>
+      </div>
+
+      <div v-if="ensSweepResult" style="margin-top: 12px">
+        <h4>投票阈值扫描（同一批成员、同一批 bar）</h4>
+        <p class="muted">
+          阈值是集成<b>唯一的旋钮</b>；加权票是成员权重之和，所以它只能落在
+          <b>{{ ensSweepPossibleVotes }}</b> 这些值上。两个相邻票数之间的任何阈值行为完全相同 ——
+          这张图是<b>阶梯</b>而不是曲线，别在两个台阶之间找最优点。本表只描述形状，
+          <b>不推荐阈值</b>。
+        </p>
+        <p v-if="ensSweepNote" class="muted">{{ ensSweepNote }}</p>
+        <ThresholdSweepChart :points="ensSweepPoints" height="280px" />
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>阈值</th>
+                <th>实际生效票数</th>
+                <th>开仓</th>
+                <th>投票通过</th>
+                <th>有成员想入场</th>
+                <th>总收益</th>
+                <th>最大回撤</th>
+                <th>夏普</th>
+                <th>交易数</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="p in ensSweepPoints" :key="p.vote_threshold">
+                <td>{{ fmtVote(p.vote_threshold) }}</td>
+                <td>
+                  {{ fmtVote(p.effective_vote) }}
+                  <span class="muted">（{{ Math.round(p.effective_vote * 100) }}% 权重）</span>
+                </td>
+                <td>{{ p.entries_taken }} 次</td>
+                <td>{{ p.entry_bars }} 根</td>
+                <td>{{ p.signalled_bars }} 根</td>
+                <td :class="toneOf(p.total_return)">{{ formatPercent(p.total_return) }}</td>
+                <td>{{ formatPercent(p.max_drawdown) }}</td>
+                <td>{{ formatNumber(p.sharpe) }}</td>
+                <td>{{ p.number_of_trades }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div v-if="ensResult" style="margin-top: 12px">

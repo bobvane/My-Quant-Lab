@@ -222,35 +222,33 @@ re-imported automatically when a new commit lands):
 
 ## 扩展端点
 
-根据新的 17 表结构，可能需要以下附加端点：
+状态标注：`[已实现]` 已在 API 中，`[计划]` 尚未实现。
 
 ### Market Data Sources API
 
-`GET /data-sources`
-`POST /data-sources`
+`[已实现]` `GET /market-data/data-sources`（只读；源在同步时自动创建）
 
 ### Feature Versions API
 
-`GET /features/versions`
-`GET /features/{feature_id}/versions`
+`[已实现]` `GET /features/versions`
+`[计划]` `GET /features/{feature_id}/versions`
 
-### Strategy Bloodline API
+### Strategy Lineage API
 
-`GET /strategies/{strategy_id}/bloodline`
-`GET /strategies/{strategy_id}/lineage`
+`[已实现]` `GET /strategies/{strategy_id}/lineage`
 
 ### AI Task Monitoring API
 
-`GET /ai/tasks/{task_id}/status`
-`POST /ai/tasks/{task_id}/cancel`
+`[已实现]` `GET /ai/tasks`
+`[计划]` `GET /ai/tasks/{task_id}/status`、`POST /ai/tasks/{task_id}/cancel`
 
 ### Paper Trading API
 
-`POST /paper/accounts/{account_id}/orders`
-`GET /paper/accounts/{account_id}/positions/{asset_id}`
-`POST /paper/accounts/{account_id}/orders/{order_id}/cancel`
+`[已实现]` `GET /paper/accounts/{account_id}/orders`
+`[已实现]` `GET /paper/accounts/{account_id}/positions`
+`[计划]` `GET /paper/accounts/{account_id}/positions/{asset_id}`
 
 ### Backtest Comparison API
 
-`POST /backtests/compare`
-`GET /backtests/comparisons/{comparison_id}`
+`[已实现]` `GET /backtests/compare?ids=1,2`
+`[计划]` `GET /backtests/comparisons/{comparison_id}`

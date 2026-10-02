@@ -455,6 +455,12 @@ onMounted(async () => {
             <th>平仓价</th>
             <th>数量</th>
             <th>盈亏</th>
+            <th>盈亏%</th>
+            <th>R</th>
+            <th>MAE</th>
+            <th>MFE</th>
+            <th>手续费</th>
+            <th>持仓</th>
             <th>原因</th>
             <th>歧义成交</th>
           </tr>
@@ -470,6 +476,14 @@ onMounted(async () => {
             <td :class="toneOf(t.pnl ? Number(t.pnl) : null)">
               {{ formatNumber(t.pnl ? Number(t.pnl) : null) }}
             </td>
+            <td :class="toneOf(t.pnl_pct ? Number(t.pnl_pct) : null)">
+              {{ t.pnl_pct != null ? formatPercent(Number(t.pnl_pct)) : '—' }}
+            </td>
+            <td>{{ t.r_multiple != null ? formatNumber(Number(t.r_multiple), 2) : '—' }}</td>
+            <td class="muted">{{ t.mae != null ? formatNumber(Number(t.mae)) : '—' }}</td>
+            <td class="muted">{{ t.mfe != null ? formatNumber(Number(t.mfe)) : '—' }}</td>
+            <td class="muted">{{ t.fees != null ? formatNumber(Number(t.fees)) : '—' }}</td>
+            <td class="muted">{{ t.holding_bars ?? '—' }} bar</td>
             <td>{{ t.exit_reason }}</td>
             <td>
               <span v-if="t.ambiguous_fill" class="badge SELL">保守处理</span>

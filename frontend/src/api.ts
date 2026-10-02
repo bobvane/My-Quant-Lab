@@ -454,6 +454,11 @@ export const api = {
         max_files: maxFiles,
       }),
     }),
+  githubSources: () => request<Array<Record<string, any>>>('/importer/github/sources'),
+  githubCheckSource: (id: number) =>
+    request<{ has_update: boolean; head: string | null; current_commit: string | null }>(
+      `/importer/github/sources/${id}/check`,
+    ),
   importGithubStrategy: (repoUrl: string, name: string, version: string, dsl: Record<string, unknown>, ref?: string) =>
     request<GithubImportResult>('/importer/github/import', {
       method: 'POST',

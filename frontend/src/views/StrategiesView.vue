@@ -86,6 +86,7 @@ async function load() {
     strategies.value = s
     series.value = sr
     lifecycles.value = lc
+    await loadGhSources()
   } catch (e) {
     error.value = (e as Error).message
   }
@@ -234,6 +235,36 @@ async function createStrategy() {
     await load()
   } catch (e) {
     error.value = (e as Error).message
+  }
+}
+
+const ghSources = ref<Array<Record<string, any>>>([])
+const ghUpdates = ref<Record<number, boolean>>({})
+const checkingSource = ref<number | null>(null)
+
+async function loadGhSources() {
+  try {
+    ghSources.value = await api.githubSources()
+  } catch {
+    ghSources.value = []
+  }
+}
+
+async function checkSourceNow(s: Record<string, any>) {
+  error.value = ''
+  info.value = ''
+  checkingSource.value = Number(s.id)
+  try {
+    const r = await api.githubCheckSource(Number(s.id))
+    ghUpdates.value[Number(s.id)] = r.has_update
+    info.value = r.has_update
+      ? `${s.repository_url} 有新 commit：${String(r.head).slice(0, 12)}`
+      : `${s.repository_url} 已是最新`
+    await loadGhSources()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    checkingSource.value = null
   }
 }
 
@@ -610,6 +641,40 @@ onMounted(load)
       <p v-else class="muted">
         输入公开仓库地址后，系统只下载文本做静态分析：识别指标、规则与参数，
         无法确认的一律标记未知，绝不执行仓库里的任何代码。
+      </p>
+    </div>
+
+    <div v-if="ghSources.length" class="card" style="margin-top: 14px">
+      <h3>已导入来源（自动监视更新）</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>仓库</th>
+            <th>当前 commit</th>
+            <th>最近检查</th>
+            <th>状态</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="s in ghSources" :key="s.id">
+            <td>{{ s.repository_url }}</td>
+            <td class="muted">{{ String(s.current_commit || '').slice(0, 12) || '—' }}</td>
+            <td class="muted">{{ s.last_checked_at ? formatDateTime(String(s.last_checked_at)) : '—' }}</td>
+            <td>
+              <span v-if="ghUpdates[s.id]" class="badge WAIT">有更新</span>
+              <span v-else class="muted">{{ s.last_import_status || '—' }}</span>
+            </td>
+            <td>
+              <button class="ghost" :disabled="checkingSource === s.id" @click="checkSourceNow(s)">
+                {{ checkingSource === s.id ? '检查中…' : '检查更新' }}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="muted" style="margin-bottom: 0">
+        Worker 每日自动检查；发现新 commit 时会重新解析并（若 DSL 变化）自动生成新策略版本。
       </p>
     </div>
 

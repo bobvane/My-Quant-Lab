@@ -46,6 +46,23 @@ def _ensure_source(db: Session, provider_name: str) -> MarketDataSource:
     return source
 
 
+@router.get("/data-sources", summary="List configured market data sources")
+def list_data_sources(db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(select(MarketDataSource).order_by(MarketDataSource.id)).all()
+    return [
+        {
+            "id": row.id,
+            "name": row.name,
+            "provider_type": row.provider_type,
+            "base_url": row.base_url,
+            "rate_limit_per_minute": row.rate_limit_per_minute,
+            "is_active": row.is_active,
+            "has_api_key": bool(row.api_key_encrypted),
+        }
+        for row in rows
+    ]
+
+
 @router.get("/series", summary="List market data series")
 def list_series(
     db: Session = Depends(get_db),

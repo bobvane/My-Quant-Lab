@@ -232,3 +232,40 @@ def verify_version(version_id: int, db: Session = Depends(get_db)) -> dict:
         "recomputed_hash": recomputed,
         "intact": recomputed == row.immutable_hash,
     }
+
+
+@router.get("/{strategy_id}/lineage", summary="Strategy provenance / lineage")
+def strategy_lineage(strategy_id: int, db: Session = Depends(get_db)) -> dict:
+    """Where a strategy came from, and every version's provenance."""
+
+    strategy = db.get(Strategy, strategy_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="strategy not found")
+    versions = db.scalars(
+        select(StrategyVersion)
+        .where(StrategyVersion.strategy_id == strategy_id)
+        .order_by(StrategyVersion.id)
+    ).all()
+    return {
+        "strategy_id": strategy.id,
+        "name": strategy.name,
+        "source_type": strategy.source_type,
+        "source_url": strategy.source_url,
+        "license": strategy.license,
+        "author": strategy.author,
+        "lifecycle": strategy.lifecycle,
+        "versions": [
+            {
+                "id": v.id,
+                "version": v.version,
+                "source_url": v.source_url,
+                "source_commit": v.source_commit,
+                "prompt_version": v.prompt_version,
+                "evidence": v.evidence_json,
+                "immutable_hash": v.immutable_hash,
+                "is_current": v.is_current,
+                "created_at": v.created_at,
+            }
+            for v in versions
+        ],
+    }

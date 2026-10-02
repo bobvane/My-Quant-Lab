@@ -15,6 +15,36 @@ def test_backtest_metrics_endpoint_404(client) -> None:
     assert client.get("/api/v1/backtest-metrics/backtest/9999").status_code == 404
 
 
+def test_data_sources_and_lineage(client) -> None:
+    sources = client.get("/api/v1/market-data/data-sources").json()
+    assert isinstance(sources, list)
+
+    strategy = client.post(
+        "/api/v1/strategies",
+        json={"name": "Lineage", "source_url": "https://github.com/x/y"},
+    ).json()
+    client.post(
+        f"/api/v1/strategies/{strategy['id']}/versions",
+        json={"version": "1.0.0", "dsl": _DSL_FOR_LINEAGE},
+    )
+    lineage = client.get(f"/api/v1/strategies/{strategy['id']}/lineage").json()
+    assert lineage["name"] == "Lineage"
+    assert lineage["source_url"] == "https://github.com/x/y"
+    assert len(lineage["versions"]) == 1
+    assert lineage["versions"][0]["immutable_hash"]
+    assert client.get("/api/v1/strategies/9999/lineage").status_code == 404
+
+
+_DSL_FOR_LINEAGE = {
+    "schema_version": "1.0",
+    "strategy": {"id": "ln", "name": "LN", "version": "1.0.0"},
+    "market": {"asset_classes": ["stock"], "timeframes": ["1d"]},
+    "entry": {"long": {"all": [{"op": "gt", "left": "close", "right": "ema20"}]}},
+    "exit": {"long": {"any": [{"op": "lt", "left": "close", "right": "ema20"}]}},
+    "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5},
+}
+
+
 def test_compare_backtests(client, db_session) -> None:
     from app.domain.models import Asset, MarketDataSeries, MarketDataSource
 

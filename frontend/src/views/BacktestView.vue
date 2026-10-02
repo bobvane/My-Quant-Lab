@@ -122,8 +122,21 @@ const ensSelected = ref<number[]>([])
 const ensWeights = ref<Record<number, number>>({})
 const ensThreshold = ref(0.5)
 const ensRunning = ref(false)
-/** Per-member single-strategy metrics, so "is diversifying better?" is answerable. */
-const ensMemberMetrics = ref<Array<{ label: string; versionId: number; metrics: Record<string, number | null> }>>([])
+/**
+ * Per-member single-strategy metrics, so "is diversifying better?" is answerable.
+ * The dataset fields travel with them because a member's own stored run may be on a
+ * different data window than the vote — the comparison table has to say so.
+ */
+const ensMemberMetrics = ref<
+  Array<{
+    label: string
+    versionId: number
+    metrics: Record<string, number | null>
+    datasetVersionId: number | null
+    symbol: string | null
+    timeframe: string | null
+  }>
+>([])
 /**
  * All versions across every strategy. Candidates must not be limited to the strategy
  * currently selected for a single-strategy run — voting across strategies is the
@@ -198,7 +211,14 @@ const ensDuplicateCount = computed(() => {
 
 /** Latest run per version, used to compare the ensemble against each member. */
 async function loadMemberMetrics() {
-  const out: Array<{ label: string; versionId: number; metrics: Record<string, number | null> }> = []
+  const out: Array<{
+    label: string
+    versionId: number
+    metrics: Record<string, number | null>
+    datasetVersionId: number | null
+    symbol: string | null
+    timeframe: string | null
+  }> = []
   for (const id of ensSelected.value) {
     // Prefer the global list: a member may belong to another strategy, which the
     // per-strategy `versions` list does not contain.
@@ -216,6 +236,9 @@ async function loadMemberMetrics() {
       out.push({
         label,
         versionId: id,
+        datasetVersionId: detail.dataset_version_id ?? null,
+        symbol: detail.symbol ?? null,
+        timeframe: detail.timeframe ?? null,
         metrics: {
           total_return: detail.total_return,
           max_drawdown: detail.max_drawdown,
@@ -230,6 +253,41 @@ async function loadMemberMetrics() {
   }
   ensMemberMetrics.value = out
 }
+
+/**
+ * Whether a member's stored run is even comparable to this ensemble.
+ *
+ * The member columns come from the member's own latest backtest, which may be on a
+ * different symbol/timeframe (or a different dataset version) than the vote. Showing
+ * those numbers side by side without saying so invites reading a difference as skill
+ * when it is only a different data window.
+ */
+function memberRunComparability(label: string): { same: boolean; note: string } | null {
+  const run = ensMemberMetrics.value.find((x) => x.label === label)
+  if (!run) return null
+  const ensDataset = ensResult.value?.dataset_version_id ?? null
+  const ensSymbol = ensResult.value?.symbol ?? null
+  if (ensDataset !== null && run.datasetVersionId !== null) {
+    if (run.datasetVersionId === ensDataset) return { same: true, note: '同一数据集' }
+    return {
+      same: false,
+      note: `不同数据集（成员 ${run.symbol ?? '?'} ${run.timeframe ?? '?'}）`,
+    }
+  }
+  if (ensSymbol !== null && run.symbol !== null) {
+    return run.symbol === ensSymbol
+      ? { same: true, note: '同标的' }
+      : { same: false, note: `不同标的（成员 ${run.symbol}）` }
+  }
+  return null
+}
+
+/** How many member rows are flagged as a different data window. */
+const ensIncomparableMembers = computed(() =>
+  ensResult.value
+    ? ensResult.value.members.filter((m) => memberRunComparability(m.label)?.same === false).length
+    : 0,
+)
 
 /** Ensemble equity curve reshaped for the shared chart component. */
 const ensEquityPoints = computed(() => {
@@ -1165,6 +1223,11 @@ onMounted(async () => {
           成员之间在本次数据上<b>没有产生任何认同</b>（票数从未严格超过阈值），所以组合没有开过仓 ——
           收益/回撤为 0 并非「稳健」，而是「没交易」。可以降低阈值、换用信号重叠更多的成员，
           或放宽成员的入场条件。
+          <template v-if="ensResult.agreement.signalled_bars > 0">
+            实际有 {{ ensResult.agreement.signalled_bars }} 根 K 线至少有一个成员想入场，
+            其中 {{ ensResult.agreement.solo_signalled_bars }} 根是<b>只有单个成员</b>想入场，
+            这些全被投票否决。
+          </template>
         </p>
 
         <div class="grid cols-4">
@@ -1193,8 +1256,22 @@ onMounted(async () => {
           />
         </div>
 
+        <p class="muted" style="margin-top: 6px">
+          有成员想入场的有 {{ ensResult.agreement.signalled_bars }} 根，其中票数严格过阈值的
+          {{ ensResult.agreement.entry_bars }} 根（支持率
+          {{ formatPercent(ensResult.agreement.entry_support_rate) }}）；只有单个成员想入场的
+          {{ ensResult.agreement.solo_signalled_bars }} 根，这些是<b>被投票否决</b>的信号 ——
+          如果大部分信号都属于这一类，说明成员之间几乎没有共识，而不是「信号很干净」。
+        </p>
+
         <h4 style="margin: 12px 0 4px">集成组合权益曲线</h4>
         <EquityChart :points="ensEquityPoints" height="260px" />
+
+        <p v-if="ensIncomparableMembers > 0" class="notice" style="margin-top: 10px">
+          有 {{ ensIncomparableMembers }} 个成员的收益/回撤/夏普来自<b>与本次集成不同的数据窗口</b>
+          （见下表标记）。这些数字不能直接与组合比较：差异可能只来自数据区间不同，而不是策略好坏。
+          请先对该成员在当前标的/周期上跑一次回测。
+        </p>
 
         <table style="margin-top: 10px">
           <thead>
@@ -1202,6 +1279,7 @@ onMounted(async () => {
               <th>对象</th>
               <th>权重</th>
               <th>自身触发</th>
+              <th>认同/否决</th>
               <th>总收益</th>
               <th>最大回撤</th>
               <th>夏普</th>
@@ -1212,6 +1290,9 @@ onMounted(async () => {
               <td><b>集成组合</b></td>
               <td class="muted">—</td>
               <td>{{ ensResult.agreement.entries_taken }} 次开仓</td>
+              <td class="muted">
+                {{ ensResult.agreement.signalled_bars }} → {{ ensResult.agreement.entry_bars }}
+              </td>
               <td :class="toneOf(ensResult.metrics.total_return)">
                 {{ formatPercent(ensResult.metrics.total_return) }}
               </td>
@@ -1219,9 +1300,23 @@ onMounted(async () => {
               <td>{{ formatNumber(ensResult.metrics.sharpe) }}</td>
             </tr>
             <tr v-for="m in ensResult.members" :key="m.label">
-              <td class="muted">{{ m.label }}</td>
+              <td class="muted">
+                {{ m.label }}
+                <span
+                  v-if="memberRunComparability(m.label) && !memberRunComparability(m.label)!.same"
+                  class="notice"
+                  style="margin-left: 4px"
+                  >{{ memberRunComparability(m.label)!.note }}</span
+                >
+              </td>
               <td>{{ m.weight.toFixed(2) }}</td>
               <td>{{ m.entry_bars }} 根</td>
+              <td>
+                {{ m.entry_agreed }} 认同 / {{ m.solo_entries }} 单独
+                <span class="muted" v-if="m.entry_support_rate !== null">
+                  （{{ formatPercent(m.entry_support_rate) }}）</span
+                >
+              </td>
               <td :class="toneOf(memberMetricsFor(m.label)?.total_return ?? null)">
                 {{ memberMetricsFor(m.label) ? formatPercent(memberMetricsFor(m.label)!.total_return) : '—' }}
               </td>
@@ -1236,8 +1331,10 @@ onMounted(async () => {
         </table>
         <p class="muted" style="margin-top: 6px">
           「自身触发」是各成员自己的信号根数；集成那行是真正开出的仓位数（持仓期间的重复
-          触发不算新仓），因此它必然不超过成员中最少的那个。成员的收益/回撤/夏普来自各自
-          最近一次已完成回测，缺失时显示 <code>—</code>。
+          触发不算新仓），因此它必然不超过成员中最少的那个。「认同/否决」里，<b>认同</b>是该成员
+          的信号中票数过阈值的根数，<b>单独</b>是只有它一个人想入场、被投票否决的根数，括号内为
+          认同占自身触发的比例。成员的收益/回撤/夏普来自各自最近一次已完成回测，缺失时显示
+          <code>—</code>；标记为不同数据集的行不可直接比较。
         </p>
       </div>
     </div>

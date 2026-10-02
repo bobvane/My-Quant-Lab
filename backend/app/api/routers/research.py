@@ -391,6 +391,13 @@ def ensemble(payload: EnsembleRequest, db: Session = Depends(get_db)) -> Ensembl
         # No members / too many / bad threshold / no common bars are caller errors.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    # Which dataset the vote ran on. The engine sees only bars, so the series identity
+    # is attached here; the comparison table uses it to tell a comparable member run
+    # from one on a different symbol/timeframe.
+    outcome["dataset_version_id"] = series.id
+    outcome["symbol"] = asset.symbol if asset is not None else None
+    outcome["timeframe"] = series.timeframe
+
     record_audit(
         db,
         event_type="ensemble_completed",

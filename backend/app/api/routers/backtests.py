@@ -405,6 +405,9 @@ def delete_backtest(run_id: int, db: Session = Depends(get_db)) -> dict:
 
 def _to_summary(run: BacktestRun) -> BacktestSummaryOut:
     summary = run.result.summary_json if run.result else {}
+    # The series names the symbol and timeframe. They are read here so a caller can
+    # tell whether two runs are comparable at all, not just whether they share a hash.
+    series = run.dataset if run.dataset_version_id else None
     return BacktestSummaryOut(
         id=run.id,
         strategy_version_id=run.strategy_version_id,
@@ -420,6 +423,8 @@ def _to_summary(run: BacktestRun) -> BacktestSummaryOut:
         win_rate=summary.get("win_rate"),
         number_of_trades=summary.get("number_of_trades"),
         final_equity=summary.get("final_equity"),
+        symbol=series.asset.symbol if series is not None and series.asset is not None else None,
+        timeframe=series.timeframe if series is not None else summary.get("timeframe"),
     )
 
 

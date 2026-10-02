@@ -236,6 +236,13 @@ def test_backtest_end_to_end(client) -> None:
     listed = client.get("/api/v1/backtests")
     assert listed.status_code == 200
     assert len(listed.json()) == 1
+    # The list must carry the series identity, not just an opaque dataset id: the
+    # ensemble comparison table reads these to decide whether runs are comparable.
+    summary = listed.json()[0]
+    assert summary["symbol"] == "DEMO-AAPL"
+    assert summary["timeframe"] == "1d"
+    assert body["symbol"] == "DEMO-AAPL"
+    assert body["timeframe"] == "1d"
 
     trades = client.get(f"/api/v1/backtests/{body['id']}/trades")
     assert trades.status_code == 200

@@ -158,10 +158,15 @@ def run_ensemble(
     # exactly 0.5, so an inclusive `>= 0.5` would let ONE member alone clear a
     # "strict majority" and the ensemble would degenerate into a union of members
     # (probe: AND=0 bars but the vote fired 11 — the union). Majority means more than.
-    agreed_long = votes("entry_long") > vote_threshold
-    agreed_exit = votes("exit_long") > vote_threshold
+    entry_votes_long = votes("entry_long")
+    exit_votes_long = votes("exit_long")
+    agreed_long = entry_votes_long > vote_threshold
+    agreed_exit = exit_votes_long > vote_threshold
     any_short = all(item.entry_short is not None for item in evaluated)
-    agreed_short = votes("entry_short") > vote_threshold if any_short else None
+    # `has_short` needs a frame to read prices from, which only exists below.
+    entry_votes_short = votes("entry_short") if any_short else None
+    exit_votes_short = votes("exit_short") if any_short else None
+    agreed_short = entry_votes_short > vote_threshold if entry_votes_short is not None else None
 
     # The portfolio needs one cost model and one stop rule. Inheriting the first
     # member's (overridable) is documented behaviour; inventing them would be worse.
@@ -202,8 +207,11 @@ def run_ensemble(
     exit_long = agreed_exit.to_numpy(dtype=bool)
     entry_short = agreed_short.to_numpy(dtype=bool) if agreed_short is not None else None
     exit_short = (
-        (votes("exit_short") >= vote_threshold).to_numpy(dtype=bool)
-        if agreed_short is not None
+        # Strictly greater here too: a short exit must clear the same bar the long
+        # exit does. This was the one `>=` left behind when the entry/exit votes were
+        # tightened, and it only fires when every member allows shorts.
+        (exit_votes_short > vote_threshold).to_numpy(dtype=bool)
+        if any_short and exit_votes_short is not None
         else None
     )
     stop_long_v = stop_long.to_numpy(dtype=float)
@@ -371,29 +379,78 @@ def run_ensemble(
         equity_values if len(equity_values) else np.array([capital]), trades, timeframe=timeframe
     )
 
-    member_summary = [
-        {
-            "label": item.label,
-            "weight": item.weight,
-            "entry_bars": int(item.entry_long.reindex(index, fill_value=False).sum()),
-            "exit_bars": int(item.exit_long.reindex(index, fill_value=False).sum()),
-        }
-        for item in evaluated
-    ]
+    # Consensus attribution. The ensemble's headline numbers say whether the *combined*
+    # decision paid; they do not say who was being voted down. A member's support rate
+    # (how often the portfolio ended up doing what it proposed) is the number that makes
+    # the comparison table honest: it is computed on the ensemble's own common bars and
+    # cost model, not read from some other stored run.
+    def vote_masks(item: _Evaluated, attr: str) -> pd.Series:
+        series = getattr(item, attr)
+        if series is None:
+            return pd.Series(False, index=index)
+        return series.reindex(index, fill_value=False).astype(bool)
+
+    # Bars where exactly one member asked to enter: the vote was split, so nothing
+    # happened even though a member "signalled". Without this number a member whose
+    # signals are nearly all solo looks active while contributing nothing.
+    solo_entries = (entry_votes_long > 0) & (entry_votes_long < 1.0)
+
+    member_summary: list[dict[str, Any]] = []
+    for item in evaluated:
+        entry_mask = vote_masks(item, "entry_long")
+        exit_mask = vote_masks(item, "exit_long")
+        entry_proposed = int(entry_mask.sum())
+        exit_proposed = int(exit_mask.sum())
+        entry_agreed = int((entry_mask & agreed_long).sum())
+        exit_agreed = int((exit_mask & agreed_exit).sum())
+        member_summary.append(
+            {
+                "label": item.label,
+                "weight": item.weight,
+                "entry_bars": entry_proposed,
+                "exit_bars": exit_proposed,
+                "entry_votes": entry_proposed,
+                "exit_votes": exit_proposed,
+                "entry_agreed": entry_agreed,
+                "exit_agreed": exit_agreed,
+                "solo_entries": int((entry_mask & solo_entries).sum()),
+                # How often the vote went the member's way *on bars it signalled*: the
+                # ratio of "my proposals that survived" to "my proposals".
+                "entry_support_rate": (entry_agreed / entry_proposed) if entry_proposed else None,
+                # How often the member's vote agreed with the majority, counting every
+                # bar. A member can score 0 here while still clearing the threshold
+                # sometimes; the entry rate is the one to read next to `entry_bars`.
+                "vote_agreement_rate": (
+                    float((entry_mask == agreed_long).mean()) if len(index) else None
+                ),
+            }
+        )
+
+    proposal_union = int((entry_votes_long > 0).sum())
+    exit_proposal_union = int((exit_votes_long > 0).sum())
+    agreement = {
+        "entry_bars": int(entry_long.sum()),
+        "exit_bars": int(exit_long.sum()),
+        "short_entry_bars": int(entry_short.sum()) if entry_short is not None else 0,
+        # Bars where the vote fired AND the portfolio was flat, i.e. positions
+        # actually opened. This is the number comparable to a member's entries.
+        "entries_taken": entries_taken,
+        "signalled_bars": proposal_union,
+        "solo_signalled_bars": int(solo_entries.sum()),
+        # Consensus among the members only: an ensemble can open zero positions because
+        # nobody agreed, which looks identical to "no signals" unless these are reported.
+        "entry_support_rate": (int(entry_long.sum()) / proposal_union if proposal_union else None),
+        "exit_support_rate": (
+            int(exit_long.sum()) / exit_proposal_union if exit_proposal_union else None
+        ),
+    }
 
     return {
         "ensemble_version": ENSEMBLE_VERSION,
         "vote_threshold": vote_threshold,
         "members": member_summary,
         "bars_evaluated": len(index),
-        "agreement": {
-            "entry_bars": int(entry_long.sum()),
-            "exit_bars": int(exit_long.sum()),
-            "short_entry_bars": int(entry_short.sum()) if entry_short is not None else 0,
-            # Bars where the vote fired AND the portfolio was flat, i.e. positions
-            # actually opened. This is the number comparable to a member's entries.
-            "entries_taken": entries_taken,
-        },
+        "agreement": agreement,
         "metrics": metrics.as_dict(),
         "trades": trades,
         "equity_curve": equity_curve,

@@ -328,6 +328,12 @@ class BacktestRun(Base):
     trades: Mapped[list[BacktestTrade]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
+    # Which series the run was made on. BacktestRun stores only the id; reading a run's
+    # symbol/timeframe needs the series (and its asset), so the relationship is eager to
+    # keep the list endpoint from issuing a query per row.
+    dataset: Mapped[MarketDataSeries | None] = relationship(
+        foreign_keys=[dataset_version_id], lazy="joined"
+    )
 
     __table_args__ = (
         Index("ix_backtest_runs_strategy", "strategy_version_id"),

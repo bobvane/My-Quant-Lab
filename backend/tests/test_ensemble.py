@@ -264,3 +264,76 @@ def test_unknown_override_key_does_not_crash(sample_bars) -> None:
     members = _members(("a", 5, 20))
     report = run_ensemble(members, sample_bars, spec_overrides={"strategy": {"name": "Combined"}})
     assert report["bars_evaluated"] > 0
+
+
+def test_identical_members_have_full_support_and_no_solo_signals(sample_bars) -> None:
+    """Attribution must be consistent with the degenerate case.
+
+    With one distinct member duplicated, every member signal clears the vote and no bar
+    has a "solo" proposal, so the support rate is exactly 1.0 and every solo count is 0.
+    A disagreement report that fails here would be describing the vote wrongly.
+    """
+
+    spec = _spec("dup", 5, 20)
+    report = run_ensemble(
+        [EnsembleMember("x", spec, 1.0), EnsembleMember("y", spec, 1.0)],
+        sample_bars,
+        vote_threshold=0.5,
+    )
+    agreement = report["agreement"]
+    assert agreement["solo_signalled_bars"] == 0
+    assert agreement["entry_support_rate"] == pytest.approx(1.0)
+    assert agreement["signalled_bars"] == agreement["entry_bars"]
+    for member in report["members"]:
+        assert member["solo_entries"] == 0
+        assert member["entry_agreed"] == member["entry_bars"]
+        assert member["entry_support_rate"] == pytest.approx(1.0)
+        assert member["vote_agreement_rate"] == pytest.approx(1.0)
+
+
+def test_plus_one_majority_can_be_a_solo_signal(sample_bars) -> None:
+    """Proves the false-agreement case the duplicate check guards against (ADR-046 fix).
+
+    Three members that split two ways plus one: `x` appears twice with weight 0.5 each,
+    so `x` alone reaches 1.0 while a genuinely different member reaches only 0.5. The
+    vote therefore fires on `x`'s own signals — the report must show a member with a
+    full support rate next to one whose proposals were mostly solo and rejected.
+    """
+
+    spec_x = _spec("x", 5, 20)
+    spec_y = _spec("y", 20, 60)
+    report = run_ensemble(
+        [
+            EnsembleMember("x1", spec_x, 1.0),
+            EnsembleMember("x2", spec_x, 1.0),
+            EnsembleMember("y", spec_y, 1.0),
+        ],
+        sample_bars,
+        vote_threshold=0.5,
+    )
+    by_label = {m["label"]: m for m in report["members"]}
+    # x1 and x2 are the same strategy, so they always agree with each other.
+    assert by_label["x1"]["entry_support_rate"] == pytest.approx(1.0)
+    # y shares no crossings with x in this fixture, so nothing it proposes survives.
+    assert by_label["y"]["entry_agreed"] == 0
+    assert by_label["y"]["solo_entries"] == by_label["y"]["entry_bars"]
+    assert by_label["y"]["entry_bars"] > 0, "fixture must give y its own signals to reject"
+    # The ensemble fired anyway: it did so on x's signals while rejecting every one of y's.
+    assert report["agreement"]["entry_bars"] == by_label["x1"]["entry_bars"]
+    # Solo bars are the split votes, so they include all of y's rejected signals (and,
+    # in this fixture, the bars where x acted alone as well).
+    assert report["agreement"]["solo_signalled_bars"] >= by_label["y"]["entry_bars"]
+
+
+def test_entry_support_rate_counts_union_not_intersection(sample_bars) -> None:
+    members = _members(("a", 5, 20), ("b", 10, 30))
+    report = run_ensemble(members, sample_bars, vote_threshold=0.5)
+    agreement = report["agreement"]
+    assert agreement["signalled_bars"] >= agreement["entry_bars"]
+    union = agreement["signalled_bars"]
+    if union:
+        assert agreement["entry_support_rate"] == pytest.approx(agreement["entry_bars"] / union)
+    else:
+        assert agreement["entry_support_rate"] is None
+    # Every solo bar is a bar where the vote did not fire, so it cannot exceed the union.
+    assert agreement["solo_signalled_bars"] <= union

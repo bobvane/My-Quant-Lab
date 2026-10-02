@@ -213,6 +213,11 @@ class BacktestSummaryOut(BaseModel):
     win_rate: float | None = None
     number_of_trades: int | None = None
     final_equity: float | None = None
+    # Which series/timeframe the run was made on. `dataset_version_id` alone is an
+    # opaque id; without these two a caller cannot tell whether two runs are even
+    # comparable (the ensemble comparison table reads them to say so).
+    symbol: str | None = None
+    timeframe: str | None = None
 
 
 class BacktestOut(BacktestSummaryOut):
@@ -355,6 +360,14 @@ class EnsembleOut(BaseModel):
     final_equity: float
     initial_capital: float
     warnings: list[str]
+    # Which dataset the vote ran on, and how the engine labelled itself. Callers need
+    # the id to check whether a member's own stored backtest is even comparable; the
+    # versions were previously computed and then silently dropped by this model.
+    dataset_version_id: int | None = None
+    symbol: str | None = None
+    timeframe: str = "1d"
+    engine_version: str
+    feature_version: str
 
 
 class PaperAccountCreate(BaseModel):

@@ -109,6 +109,9 @@ export interface BacktestSummary {
   win_rate: number | null
   number_of_trades: number | null
   final_equity: number | null
+  /** Which series the run used — needed to tell whether two runs are comparable. */
+  symbol: string | null
+  timeframe: string | null
 }
 
 export interface EquityPoint {
@@ -202,6 +205,14 @@ export interface EnsembleMemberOut {
   weight: number
   entry_bars: number
   exit_bars: number
+  /** How many of this member's own entry signals survived the vote. */
+  entry_agreed: number
+  /** Entry signals this member raised where the vote was split and nothing happened. */
+  solo_entries: number
+  /** `entry_agreed / entry_bars`, or null when the member never signalled. */
+  entry_support_rate: number | null
+  /** Share of all evaluated bars where this member's vote matched the outcome. */
+  vote_agreement_rate: number | null
 }
 
 export interface EnsembleResult {
@@ -218,6 +229,13 @@ export interface EnsembleResult {
      * opened. This — not `entry_bars` — is comparable to a member's entry count.
      */
     entries_taken: number
+    /** Bars where at least one member wanted to enter, i.e. the vote's denominator. */
+    signalled_bars: number
+    /** Of those, bars where only one member wanted in — split votes that did nothing. */
+    solo_signalled_bars: number
+    /** `entry_bars / signalled_bars`: how much of the members' willingness survived. */
+    entry_support_rate: number | null
+    exit_support_rate: number | null
   }
   metrics: Record<string, number | null>
   trades: Array<Record<string, unknown>>
@@ -225,9 +243,16 @@ export interface EnsembleResult {
   final_equity: number
   initial_capital: number
   warnings: string[]
+  /** Dataset the vote ran on; compare against a member's run to check comparability. */
+  dataset_version_id: number | null
+  symbol: string | null
+  timeframe: string
+  engine_version: string
+  feature_version: string
 }
 
-/** One evaluated grid point of a sensitivity sweep (docs/21). */export interface SensitivityPoint {
+/** One evaluated grid point of a sensitivity sweep (docs/21). */
+export interface SensitivityPoint {
   parameters: Record<string, number | string>
   objective: number | null
   metrics: Record<string, number | null>

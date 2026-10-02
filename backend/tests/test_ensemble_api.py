@@ -75,6 +75,67 @@ def test_ensemble_endpoint_combines_members(client) -> None:
     assert "total_return" in body["metrics"]
 
 
+def test_ensemble_reports_which_dataset_it_ran_on(client) -> None:
+    """Callers must be able to tell whether a member's stored run is comparable.
+
+    Without the dataset identity the comparison table shows a member's numbers from a
+    possibly different symbol/timeframe next to the portfolio's with no way to notice.
+    """
+
+    a, b = _seed(client)
+    response = client.post(
+        "/api/v1/research/ensemble",
+        json={
+            "members": [
+                {"strategy_version_id": a, "weight": 1.0},
+                {"strategy_version_id": b, "weight": 1.0},
+            ],
+            "symbol": _SYMBOL,
+            "timeframe": "1d",
+            "vote_threshold": 0.5,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["dataset_version_id"] is not None
+    assert body["symbol"] == _SYMBOL
+    assert body["timeframe"] == "1d"
+    # These two were computed by the engine and previously dropped by the response model.
+    assert body["engine_version"] == "ensemble-1.0.0"
+    assert body["feature_version"] == "ensemble"
+
+
+def test_ensemble_reports_support_and_solo_signals(client) -> None:
+    """Attribution numbers must be internally consistent and present per member."""
+
+    a, b = _seed(client)
+    response = client.post(
+        "/api/v1/research/ensemble",
+        json={
+            "members": [
+                {"strategy_version_id": a, "weight": 1.0},
+                {"strategy_version_id": b, "weight": 1.0},
+            ],
+            "symbol": _SYMBOL,
+            "vote_threshold": 0.5,
+        },
+    )
+    assert response.status_code == 200, response.text
+    agreement = response.json()["agreement"]
+    members = response.json()["members"]
+    assert agreement["signalled_bars"] >= agreement["entry_bars"]
+    assert agreement["solo_signalled_bars"] <= agreement["signalled_bars"]
+    for member in members:
+        assert member["entry_agreed"] <= member["entry_bars"]
+        assert member["solo_entries"] <= member["entry_bars"]
+        assert member["entry_support_rate"] is None or (0.0 <= member["entry_support_rate"] <= 1.0)
+        assert member["vote_agreement_rate"] is None or (
+            0.0 <= member["vote_agreement_rate"] <= 1.0
+        )
+    # A member can never be supported on more proposal bars than the ensemble had.
+    assert all(m["entry_agreed"] <= agreement["entry_bars"] for m in members)
+
+
 def test_ensemble_is_reproducible(client) -> None:
     a, b = _seed(client)
     payload = {

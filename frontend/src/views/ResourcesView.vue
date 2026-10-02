@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '@/api'
+import MultiLineChart from '@/components/MultiLineChart.vue'
 import { formatDateTime, formatNumber } from '@/format'
 
 type Point = { ts: string; value: number | null }
@@ -157,6 +158,9 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <option value="30d">过去 30 天</option>
         </select>
         <span class="muted">刷新 {{ RANGE_LABELS[range] ?? range }} 数据</span>
+      </div>
+      <div v-if="history.host.length || history.quantlab.length" style="margin-top: 6px">
+        <MultiLineChart :series="chartSeries()" />
       </div>
       <table v-if="history.host.length || history.quantlab.length">
         <thead>

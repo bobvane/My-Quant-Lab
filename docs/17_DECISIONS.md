@@ -574,3 +574,31 @@ ADR，保证结果可复现、可解释。
 
 **理由**：集成的价值在于「互相认同」，而认同必须用一条可执行的组合去度量，
 不能靠拼接互不相容的成交记录来制造一个本引擎无法持有的组合。
+
+## ADR-048：资源监控表主键在 SQLite 上不自增（修正迁移 0006）
+
+**背景**：`0004_resource_monitor` 用裸 `sa.BigInteger()` 建了四张资源表的主键，而 ORM 模型用的是
+`BigInteger().with_variant(Integer, "sqlite")`。差别是致命的：SQLite 只有 **`INTEGER PRIMARY KEY`**
+才是 rowid 的别名、才会自动生成值，`BIGINT PRIMARY KEY` 不会。于是 SQLite 上每一次资源写入都
+`NOT NULL constraint failed: resource_events.id`。在一次请求里它表现为「回测已经跑完、却被报成
+HTTP 500」（ADR-044 已让这个失败不再扩散，但没有消除根因）。
+
+生产是 PostgreSQL，`BIGINT`/`BIGSERIAL` 自增正常 —— 已在 NAS 上核实：`/resources/events` 能读到
+`backtest:8` 的记录。因此**这不是线上故障，而是纯 SQLite 环境（本项目的开发/验证路径）的故障**。
+
+**决策**：
+
+1. **不改写 `0004`**。它已在生产应用；改写已执行的 revision 会让历史分叉。
+2. 新增 `0006_resource_pk_sqlite`：**仅在 SQLite 上**用 `batch_alter_table` 把四张表的主键改为
+   `BigInteger().with_variant(Integer, "sqlite")`（SQLAlchemy 在 SQLite 上会重建表并搬运数据）。
+   非 SQLite 直接 return，PostgreSQL 完全不受影响。
+3. 新增 `tests/test_migrations_sqlite.py`：对真实 SQLite 跑**完整的 alembic 链**，然后
+   **不给 id** 插入 `ResourceEvent`（即当初失败的那一步），并断言四张表都能自增、且
+   `resource_events.id` 的 DDL 类型确实是 `INTEGER`（行为与根因一起锁死）。
+
+**理由**：这是「ORM 与迁移对同一列给出不同类型」这类漂移的典型案例——只要两条路径分别定义
+schema，就可能不一致，而且只在其中一个方言上暴露。所以要测**真实迁移链 + 真实插入**，
+而不是只测 `Base.metadata.create_all()`（后者用模型定义建表，永远看不到迁移的问题）。
+
+**注意**：迁移用 `existing_type=BigInteger` 声明旧类型，因此对 0006 之前建立的 SQLite 库也能执行；
+若在旧库上遇到异常，删除该 SQLite 文件重新迁移即可（它是开发/验证用临时库，无需要保留的数据）。

@@ -431,7 +431,9 @@ onMounted(async () => {
             <tr>
               <td>成交模型</td>
               <td>
-                {{ detail.execution_model.fill_model }} · 手续费
+                {{ detail.execution_model.fill_model }} · 订单
+                {{ detail.execution_model.entry_order_type || 'market' }}（有效期
+                {{ detail.execution_model.order_valid_bars ?? 1 }} bar）· 手续费
                 {{ detail.execution_model.fee_bps }}bps · 滑点
                 {{ detail.execution_model.slippage_bps }}bps
               </td>

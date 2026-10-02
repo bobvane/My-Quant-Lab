@@ -124,6 +124,8 @@ API base: `/api/v1`
 
 `GET /signals`
 `GET /signals/{id}`
+`GET /signals/{id}/evidence`   (feature snapshot + portfolio context)
+`GET /signals/outcomes`
 `POST /signals/scan`
 `POST /signals/{id}/explain`
 `POST /signals/{id}/acknowledge`
@@ -186,11 +188,13 @@ Deterministic, evidence-gated promotion/degradation. No AI is involved.
 
 ## GitHub Sources
 
-`GET /github/sources`
-`POST /github/sources`
-`GET /github/sources/{id}`
-`POST /github/sources/{id}/sync`
-`GET /github/sources/{id}/history`
+Implemented under `/importer/github/sources` (persisted on import; watched and
+re-imported automatically when a new commit lands):
+
+`GET /importer/github/sources`
+`GET /importer/github/sources/{id}`
+`GET /importer/github/sources/{id}/check`     (live commit check -> has_update)
+`GET /importer/github/sources/{id}/snapshots`
 
 ## GitHub Snapshots
 

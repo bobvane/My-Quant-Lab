@@ -122,3 +122,16 @@ V1：RULE_BASED、PRICE_ACTION、COMPOSITE。
 P2：STATISTICAL、ML、LLM_ASSISTED。
 
 ML/LLM 策略必须增加模型版本、训练区间和特征血统，不能与简单规则策略混淆。
+
+---
+
+## 6. 实现说明（当前 V1 schema 边界）
+
+本文档的示例是「目标形态」。当前 V1 的 `StrategySpec`（backend/app/strategies/dsl.py）以 `extra="forbid"` 严格解析，实际支持：
+
+- 指标：EMA / SMA / RSI / ATR / MACD / Bollinger（`indicators[].id` 会被物化为特征列；周期可用 `period` 或 `period_ref` 指向 `parameters`）。
+- 条件算子：gt / gte / lt / lte / eq / ne / crosses_above / crosses_below。
+- 列的别名：`previous_high`→`prior_high`、`previous_low`→`prior_low`、`rolling_*_prev`；成交量均线 `volume_sma_20`。
+- 执行：`fill_model`(next_bar_open/close_bar)、`entry_order_type`(market/limit/stop) + `limit_offset_atr`/`stop_offset_atr`/`order_valid_bars`、`fee_bps`、`slippage_bps`、`allow_fractional`、`initial_capital`。
+
+**尚未支持（示例中的示意项）**：`filters` / `outputs` 顶级块、`stop_price` 之类未注册列。引用它们会被 schema/校验器拒绝（刻意如此：宁可拒绝，也不静默忽略）。

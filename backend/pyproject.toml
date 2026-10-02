@@ -1,6 +1,6 @@
 [project]
 name = "my-quant-lab"
-version = "0.6.8"
+version = "0.6.9"
 description = "Personal quantitative research laboratory (NAS self-hosted, no auto trading)"
 requires-python = ">=3.12"
 license = { text = "MIT" }

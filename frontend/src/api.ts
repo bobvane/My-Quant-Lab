@@ -406,9 +406,11 @@ export const api = {
         test_bars: testBars,
       }),
     }),
-  signals: (state?: string, limit = 100) =>
+  signals: (state?: string, limit = 100, symbol?: string) =>
     request<SignalRecord[]>(
-      `/signals?limit=${limit}${state ? `&state=${encodeURIComponent(state)}` : ''}`,
+      `/signals?limit=${limit}${state ? `&state=${encodeURIComponent(state)}` : ''}${
+        symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
+      }`,
     ),
   acknowledgeSignal: (id: number) =>
     request<Record<string, unknown>>(`/signals/${id}/acknowledge`, { method: 'POST' }),

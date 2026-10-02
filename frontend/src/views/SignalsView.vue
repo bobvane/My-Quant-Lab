@@ -5,6 +5,7 @@ import { formatDateTime, formatNumber } from '@/format'
 
 const signals = ref<SignalRecord[]>([])
 const stateFilter = ref('')
+const symbolFilter = ref('')
 const error = ref('')
 const info = ref('')
 const loading = ref(false)
@@ -35,7 +36,11 @@ async function load() {
   error.value = ''
   loading.value = true
   try {
-    signals.value = await api.signals(stateFilter.value || undefined)
+    signals.value = await api.signals(
+      stateFilter.value || undefined,
+      100,
+      symbolFilter.value.trim() || undefined,
+    )
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -100,6 +105,13 @@ onMounted(load)
         >
           {{ s || '全部' }}
         </button>
+        <input
+          v-model="symbolFilter"
+          style="max-width: 160px"
+          placeholder="按代码过滤（如 AAPL）"
+          @keyup.enter="load"
+        />
+        <button class="ghost" @click="load">查询</button>
         <span class="muted" style="margin-left: auto">
           {{ loading ? '加载中…' : `共 ${signals.length} 条` }}
         </span>

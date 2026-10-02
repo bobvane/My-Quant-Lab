@@ -84,10 +84,12 @@ def history(
             key = "quantlab" if row.is_quantlab else row.container_name
             container_points.setdefault(key, []).append({"ts": row.ts.isoformat(), "value": value})
     else:
+        # Pick the coarsest granularity that still gives fine enough resolution.
+        granularity = "1d" if range == "30d" else "1h"
         for row in db.scalars(
             select(ResourceRollup)
             .where(
-                ResourceRollup.granularity == "5m",
+                ResourceRollup.granularity == granularity,
                 ResourceRollup.bucket_start >= since,
             )
             .order_by(ResourceRollup.bucket_start)
@@ -106,7 +108,7 @@ def history(
     return {
         "metric": metric,
         "range": range,
-        "source": "raw" if use_raw else "5m_rollup",
+        "source": "raw" if use_raw else ("1d_rollup" if range == "30d" else "1h_rollup"),
         "host": host_points,
         "quantlab": quantlab_points,
         "containers": container_points,

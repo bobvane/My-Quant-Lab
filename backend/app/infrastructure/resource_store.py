@@ -30,6 +30,9 @@ __all__ = [
 
 _ROLLUP_GRANULARITY = "5m"
 _ROLLUP_BUCKET_SECONDS = 300
+# Rollups are recomputed from raw samples for all granularities so a chart can
+# read the cheapest series that still covers its range (docs/20 §7).
+_ROLLUP_GRANULARITIES: dict[str, int] = {"5m": 5, "1h": 60, "1d": 1440}
 
 
 def save_cycle(db: Session, cycle: dict[str, Any]) -> int:
@@ -59,19 +62,29 @@ def save_cycle(db: Session, cycle: dict[str, Any]) -> int:
 
 
 def roll_up_recent(db: Session) -> int:
-    """Recompute the current 5-minute bucket from raw samples (no drift)."""
+    """Recompute the current bucket at every granularity from raw samples.
+
+    Recomputing (rather than incremental averaging) keeps the aggregates free of
+    drift when the worker restarts.
+    """
 
     now = dt.datetime.now(tz=dt.UTC)
-    bucket_start = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
     written = 0
-
-    written += _roll_up_host(db, bucket_start)
-    written += _roll_up_containers(db, bucket_start)
+    for granularity, minutes in _ROLLUP_GRANULARITIES.items():
+        bucket_start = now.replace(
+            minute=(now.minute // minutes) * minutes if minutes < 60 else 0,
+            second=0,
+            microsecond=0,
+        )
+        if minutes >= 1440:
+            bucket_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        written += _roll_up_host(db, bucket_start, granularity)
+        written += _roll_up_containers(db, bucket_start, granularity)
     db.commit()
     return written
 
 
-def _roll_up_host(db: Session, bucket_start: dt.datetime) -> int:
+def _roll_up_host(db: Session, bucket_start: dt.datetime, granularity: str) -> int:
     rows = db.scalars(select(HostResourceSample).where(HostResourceSample.ts >= bucket_start)).all()
     if not rows:
         return 0
@@ -85,11 +98,12 @@ def _roll_up_host(db: Session, bucket_start: dt.datetime) -> int:
         cpu_max=_max(cpu_values),
         mem_avg_mb=_avg(mem_values),
         mem_max_mb=_max(mem_values),
+        granularity=granularity,
     )
     return 1
 
 
-def _roll_up_containers(db: Session, bucket_start: dt.datetime) -> int:
+def _roll_up_containers(db: Session, bucket_start: dt.datetime, granularity: str) -> int:
     rows = db.scalars(
         select(ContainerResourceSample).where(ContainerResourceSample.ts >= bucket_start)
     ).all()
@@ -109,6 +123,7 @@ def _roll_up_containers(db: Session, bucket_start: dt.datetime) -> int:
             cpu_max=_max(cpu_values),
             mem_avg_mb=_avg(mem_values),
             mem_max_mb=_max(mem_values),
+            granularity=granularity,
         )
         written += 1
 
@@ -132,6 +147,7 @@ def _roll_up_containers(db: Session, bucket_start: dt.datetime) -> int:
             cpu_max=_max(cpu_points),
             mem_avg_mb=_avg(mem_points),
             mem_max_mb=_max(mem_points),
+            granularity=granularity,
         )
         written += 1
     return written
@@ -146,18 +162,17 @@ def _upsert_rollup(
     cpu_max: float | None,
     mem_avg_mb: float | None,
     mem_max_mb: float | None,
+    granularity: str = _ROLLUP_GRANULARITY,
 ) -> None:
     row = db.scalar(
         select(ResourceRollup).where(
-            ResourceRollup.granularity == _ROLLUP_GRANULARITY,
+            ResourceRollup.granularity == granularity,
             ResourceRollup.bucket_start == bucket_start,
             ResourceRollup.scope == scope,
         )
     )
     if row is None:
-        row = ResourceRollup(
-            granularity=_ROLLUP_GRANULARITY, bucket_start=bucket_start, scope=scope
-        )
+        row = ResourceRollup(granularity=granularity, bucket_start=bucket_start, scope=scope)
         db.add(row)
     row.cpu_avg = cpu_avg
     row.cpu_max = cpu_max

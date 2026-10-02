@@ -115,7 +115,9 @@ def test_rollup_recomputes_bucket_without_drift(db_session) -> None:
 
     from app.domain.models import ResourceRollup
 
-    ql = db_session.query(ResourceRollup).filter_by(scope="quantlab").one()
+    ql = db_session.query(ResourceRollup).filter_by(scope="quantlab", granularity="5m").one()
+    # All granularities are recomputed from raw samples.
+    assert db_session.query(ResourceRollup).filter_by(scope="quantlab").count() == 3
     assert ql.cpu_avg == pytest.approx(6.0)  # (2+4) + (2+4) summed per ts, averaged
     assert ql.cpu_max == pytest.approx(8.0)
     assert ql.mem_avg_mb == pytest.approx(400.0)

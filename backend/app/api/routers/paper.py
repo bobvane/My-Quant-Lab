@@ -164,6 +164,28 @@ def list_orders(
     return list(db.scalars(stmt.order_by(PaperOrder.id.desc()).limit(limit)).all())
 
 
+@router.get(
+    "/accounts/{account_id}/orders",
+    response_model=list[PaperOrderOut],
+    summary="List orders for a paper account",
+)
+def account_orders(
+    account_id: int,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[PaperOrder]:
+    if db.get(PaperAccount, account_id) is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    return list(
+        db.scalars(
+            select(PaperOrder)
+            .where(PaperOrder.account_id == account_id)
+            .order_by(PaperOrder.id.desc())
+            .limit(limit)
+        ).all()
+    )
+
+
 @router.get("/orders/{order_id}", response_model=PaperOrderOut, summary="Get a paper order")
 def get_order(order_id: int, db: Session = Depends(get_db)) -> PaperOrder:
     order = db.get(PaperOrder, order_id)

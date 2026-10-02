@@ -15,6 +15,12 @@ def test_backtest_metrics_endpoint_404(client) -> None:
     assert client.get("/api/v1/backtest-metrics/backtest/9999").status_code == 404
 
 
+def test_feature_versions_endpoint(client) -> None:
+    body = client.get("/api/v1/features/versions").json()
+    assert body["engine_feature_version"]
+    assert "definition_versions" in body and "snapshot_versions" in body
+
+
 def test_data_sources_and_lineage(client) -> None:
     sources = client.get("/api/v1/market-data/data-sources").json()
     assert isinstance(sources, list)

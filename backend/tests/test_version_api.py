@@ -130,6 +130,9 @@ def test_paper_orders_and_trades_are_queryable(client, db_session) -> None:
 
     orders = client.get(f"/api/v1/paper/orders?account_id={account['id']}").json()
     assert len(orders) == 1 and orders[0]["side"] == "BUY"
+    account_orders = client.get(f"/api/v1/paper/accounts/{account['id']}/orders").json()
+    assert len(account_orders) == 1
+    assert client.get("/api/v1/paper/accounts/9999/orders").status_code == 404
     assert client.get(f"/api/v1/paper/orders/{order_id}").json()["status"] == "filled"
     assert client.get("/api/v1/paper/orders/9999").status_code == 404
 

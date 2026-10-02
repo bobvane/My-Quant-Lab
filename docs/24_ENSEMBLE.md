@@ -1,6 +1,6 @@
 # 24 策略集成（Strategy Ensemble）
 
-> 状态：v1.3 已实现（后端 + API 部分）。决策见 `docs/17_DECISIONS.md` ADR-047。
+> 状态：v1.3 已实现（后端 + API）。决策见 `docs/17_DECISIONS.md` ADR-047。
 
 ## 1. 它回答什么问题
 
@@ -118,6 +118,4 @@ POST /api/v1/research/ensemble
 | `backend/app/research/ensemble.py` | 投票、决策合并、组合执行 |
 | `backend/app/strategies/dsl.py` | `merge_spec_overrides`（唯一经过校验的覆盖合并入口） |
 | `backend/tests/test_ensemble.py` | 投票语义、阈值边界、权重归一化、成本/仓位覆盖、现金上限 |
-
-> 注：本节描述的 `POST /research/ensemble` 端点随 v1.3 提供；引擎与测试已在
-> `app/research/ensemble.py` 中完成。
+| `backend/tests/test_ensemble_api.py` | 端点契约、404/422、审计、可复现性 |

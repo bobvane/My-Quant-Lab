@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import (
+    EnsembleOut,
+    EnsembleRequest,
     MonteCarloOut,
     MonteCarloRequest,
     OOSOut,
@@ -28,6 +30,7 @@ from app.domain.models import (
     MarketDataSeries,
     StrategyVersion,
 )
+from app.research.ensemble import EnsembleMember, run_ensemble
 from app.research.monte_carlo import run_monte_carlo
 from app.research.sensitivity import run_sensitivity
 from app.research.walk_forward import run_holdout, run_walk_forward
@@ -292,3 +295,92 @@ def monte_carlo(payload: MonteCarloRequest, db: Session = Depends(get_db)) -> Mo
     )
     db.commit()
     return MonteCarloOut(**outcome)
+
+
+@router.post(
+    "/ensemble",
+    response_model=EnsembleOut,
+    summary="Vote several strategy versions into one portfolio",
+)
+def ensemble(payload: EnsembleRequest, db: Session = Depends(get_db)) -> EnsembleOut:
+    """Combine strategy versions by weighted vote (docs/24, ADR-047).
+
+    Members must share a dataset and timeframe, so the basket is resolved once and the
+    same bars are handed to every member.
+    """
+
+    # Resolve every member up front: a missing version is a 404 before any work happens.
+    labelled: list[tuple[StrategyVersion, EnsembleMember]] = []
+    for entry in payload.members:
+        version = db.get(StrategyVersion, entry.strategy_version_id)
+        if version is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"strategy version {entry.strategy_version_id} not found",
+            )
+        labelled.append(
+            (
+                version,
+                EnsembleMember(
+                    label=f"{version.strategy_id}@{version.version}",
+                    spec=load_spec(version),
+                    weight=entry.weight,
+                ),
+            )
+        )
+
+    asset = (
+        db.scalar(select(Asset).where(Asset.symbol == payload.symbol)) if payload.symbol else None
+    )
+    if payload.symbol and asset is None:
+        raise HTTPException(status_code=404, detail=f"asset '{payload.symbol}' not found")
+    series = db.scalar(
+        select(MarketDataSeries).where(
+            MarketDataSeries.timeframe == payload.timeframe,
+            *([MarketDataSeries.asset_id == asset.id] if asset else []),
+        )
+    )
+    if series is None:
+        raise HTTPException(status_code=404, detail="market data series not found")
+
+    frame = load_bars(db, series, only_closed=True)
+    if len(frame) < 60:
+        raise HTTPException(
+            status_code=422,
+            detail=f"need at least 60 closed bars, series has {len(frame)}",
+        )
+
+    try:
+        outcome = run_ensemble(
+            [member for _, member in labelled],
+            frame,
+            vote_threshold=payload.vote_threshold,
+            # The field is named `execution_overrides`, so its keys are execution fields
+            # (fee_bps, initial_capital, sizing, ...) — the same shape POST /backtests
+            # accepts. `merge_spec_overrides` wants spec-level keys, hence the wrap.
+            spec_overrides={"execution": payload.execution_overrides}
+            if payload.execution_overrides
+            else None,
+            strategy_version="ensemble",
+            timeframe=payload.timeframe,
+        )
+    except ValueError as exc:
+        # No members / too many / bad threshold / no common bars are caller errors.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="ensemble_completed",
+        entity_type="strategy",
+        entity_id="+".join(str(v.strategy_id) for v, _ in labelled),
+        action="run",
+        payload={
+            "members": [{"strategy_version_id": v.id, "weight": m.weight} for v, m in labelled],
+            "vote_threshold": outcome["vote_threshold"],
+            "bars_evaluated": outcome["bars_evaluated"],
+            "agreement": outcome["agreement"],
+            "final_equity": outcome["final_equity"],
+        },
+    )
+    db.commit()
+    return EnsembleOut(**outcome)

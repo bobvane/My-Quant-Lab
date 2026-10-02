@@ -144,6 +144,32 @@ API base: `/api/v1`
 - `execution_model_json` 会记录 `sizing`，因此升级后重跑同一策略 `result_hash` 会变；
   历史回测记录保存的是当时快照，不受影响。
 
+## Strategy Ensemble
+
+`POST /research/ensemble`
+
+把多个策略版本按**加权投票**合并成一个组合（docs/24）。
+
+参数：`members`（`[{strategy_version_id, weight}]`，至少 1 个、最多 12 个）、`symbol`、
+`timeframe`、`vote_threshold`（`[0,1)`，默认 0.5）、`execution_overrides`（组合的成本/资金/
+仓位管理，键为 execution 字段，与 `POST /backtests` 同形）。
+
+返回：`members`（含归一化权重）、`bars_evaluated`、`agreement`
+（`entry_bars` / `exit_bars` / `entries_taken`）、`metrics`、`trades`、`equity_curve`、
+`final_equity`、`warnings`。
+
+约束与语义：
+
+- 票数判定为**严格大于**阈值。等权两成员各占 0.5，故 `> 0.5` 需要**两个都同意**；
+  用 `>=` 会让单个成员单独通过「多数」，集成退化为并集。
+- **不拼接**各成员成交记录：本引擎是单仓位、单一现金账户，投票产出的是**一条**决策序列。
+- `entry_bars` 是票数过阈值的 bar 数，`entries_taken` 是真正开仓次数；只有后者与成员的
+  入场数可比（`entries_taken <= min(成员 entry_bars)`）。
+- 成员之间无共同 bar → 422；预热期部分重叠 → 在共同 bar 上评估并写入 `warnings`。
+- 成员规则引用该成员特征里不存在的列 → 报错，不静默丢弃该成员。
+- 同一组成员 + 权重 + 数据集 + 阈值 → 完全相同的决策与指标。
+- 每次运行写审计事件 `ensemble_completed`。
+
 ## Paper Accounts
 
 `GET /paper/accounts`

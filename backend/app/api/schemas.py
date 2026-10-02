@@ -320,6 +320,43 @@ class MonteCarloOut(BaseModel):
     warnings: list[str]
 
 
+class EnsembleMemberIn(BaseModel):
+    """One strategy version taking part in an ensemble vote (docs/24)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_version_id: int
+    weight: float = Field(default=1.0, ge=0)
+
+
+class EnsembleRequest(BaseModel):
+    """Vote several strategy versions into one portfolio (docs/24, ADR-047)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    members: list[EnsembleMemberIn] = Field(min_length=1)
+    symbol: str | None = None
+    timeframe: str = "1d"
+    # The vote must strictly exceed this; two equal members therefore need both to
+    # agree (each contributes exactly 0.5). Valid range is [0, 1).
+    vote_threshold: float = Field(default=0.5, ge=0.0, lt=1.0)
+    execution_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class EnsembleOut(BaseModel):
+    ensemble_version: str
+    vote_threshold: float
+    members: list[dict[str, Any]]
+    bars_evaluated: int
+    agreement: dict[str, Any]
+    metrics: dict[str, Any]
+    trades: list[dict[str, Any]]
+    equity_curve: list[dict[str, Any]]
+    final_equity: float
+    initial_capital: float
+    warnings: list[str]
+
+
 class PaperAccountCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -369,7 +369,10 @@ export const api = {
     request<{ bars: Array<{ timestamp: string; close: number; high: number; low: number; open: number }> }>(
       `/market-data/latest/${encodeURIComponent(symbol)}?timeframe=${timeframe}&limit=${limit}`,
     ),
-  backtests: () => request<BacktestSummary[]>('/backtests'),
+  backtests: (strategyVersionId?: number) =>
+    request<BacktestSummary[]>(
+      `/backtests${strategyVersionId ? `?strategy_version_id=${strategyVersionId}` : ''}`,
+    ),
   backtest: (id: number) => request<BacktestDetail>(`/backtests/${id}`),
   compareBacktests: (ids: number[]) =>
     request<{ metrics: string[]; runs: Array<Record<string, any>> }>(

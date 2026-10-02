@@ -15,6 +15,7 @@ import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 
 const runs = ref<BacktestSummary[]>([])
+const onlyVersionFilter = ref(false)
 const detail = ref<BacktestDetail | null>(null)
 const error = ref('')
 const busy = ref(false)
@@ -143,7 +144,11 @@ async function runOos() {
 async function load() {
   error.value = ''
   try {
-    const [r, s, a] = await Promise.all([api.backtests(), api.strategies(), api.assets()])
+    const [r, s, a] = await Promise.all([
+      api.backtests(onlyVersionFilter.value ? (versionId.value ?? undefined) : undefined),
+      api.strategies(),
+      api.assets(),
+    ])
     runs.value = r
     strategies.value = s
     assets.value = a
@@ -408,7 +413,18 @@ onMounted(async () => {
 
     <div class="grid cols-2" style="margin-top: 14px">
       <div class="card">
-        <h3>回测记录</h3>
+        <div class="row" style="justify-content: space-between">
+          <h3>回测记录</h3>
+          <label class="muted" style="display: flex; align-items: center; gap: 6px">
+            <input
+              v-model="onlyVersionFilter"
+              type="checkbox"
+              style="width: auto"
+              @change="load"
+            />
+            只看当前所选版本
+          </label>
+        </div>
         <table v-if="runs.length">
           <thead>
             <tr>

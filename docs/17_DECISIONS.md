@@ -670,3 +670,38 @@ schema，就可能不一致，而且只在其中一个方言上暴露。所以�
 **测试**：`test_ensemble.py` 四条（单成员且权重 1 时 solo 与组合逐项相同；`initial_capital` 按权重
 分配且和为总额；顺序与可复现；成员用自己的止损线）；`test_ensemble_api.py` 三条（同 bar 跑分的
 形状与自洽、组合收益落在成员收益区间内、单成员时与组合一致）+ 一条 gzip 行为测试。
+
+## ADR-051：日志脱敏必须按记录形态分流（普通记录整条覆盖，`uvicorn.access` 逐参数改写；docs/14）
+
+**背景**：v1.4.0 的 release 流程在「Smoke test the released images」阶段出现
+`quantlab-api | --- Logging error ---`，栈底是
+`uvicorn/logging.py:99 formatMessage` → `ValueError: not enough values to unpack (expected 5, got 0)`。
+根因在自家代码：`RedactingFilter`（`backend/app/core/logging.py`）为了脱敏会把整条消息预先渲染后写入
+`record.msg` 并**清空 `record.args`**；而它同时挂在 `uvicorn.access` 上，uvicorn 的
+`AccessFormatter.formatMessage` 恰恰要把 `record.args` 解包成
+`(client_addr, method, full_path, http_version, status_code)` 五元组。args 被清空后格式化必然抛异常，
+于是**每个请求的访问日志整条丢失**，只在 stderr 留下 `--- Logging error ---`。单元测试没挡住它，因为
+`test_logging_redact.py` 里那条测试只断言 `filter(record) is True`，没有任何断言覆盖 args 的保留。
+
+**决策**：
+
+1. `RedactingFilter` 按 `record.name` 分流。默认路径不变：`record.msg = _redact(record.getMessage())`、
+   `record.args = ()`（因为消息已渲染完，再渲染一次会把 `%s` 原样打出来，并让消息里出现的裸 `%`
+   变成格式说明符）。
+2. `structured_arg_loggers = frozenset({"uvicorn.access"})` 的**日志器不走覆盖路径**，而是把
+   `record.args` 里的字符串**逐个** `_redact`，元组的长度与顺序保持不变，uvicorn 的
+   `AccessFormatter` 仍能正常解包。这样既修好崩溃，又不会为了修崩溃而放弃脱敏——查询串里的凭据
+   （`?token=...`、`?api_key=...`）依然会被抹成 `***`。
+3. 新增三条回归测试：`test_uvicorn_access_record_keeps_a_five_tuple_of_args`（过滤器后仍能用一个真的
+   `AccessFormatter` 渲染出请求行，且查询串里的密钥变成 `***`）、
+   `test_filter_does_not_crash_the_real_access_formatter_path`（按 `logging.Handler.handle` 的真实
+   顺序「先过滤器后格式化」走一遍，复现旧行为会抛的那个 `ValueError`）、
+   `test_filter_keeps_resolved_message_from_double_formatting`（普通记录只渲染一次，`%s` 不会原样输出）。
+4. docs/14 §1 补上这段实现说明与「为什么访问日志要特殊处理」，让下一次改动不会把它当成冗余特例删掉。
+
+**理由**：日志脱敏是安全需求，访问日志可用性是运维需求，二者在 `record.args` 上冲突；按记录形态分流
+是唯一能同时满足两者的做法。修复代价很小（一个启动期过滤器），但如果只做「跳过 `uvicorn.access`」的
+最小修复，就会留下「查询串里的凭据进访问日志」这个安全缺口。
+
+**测试**：`backend/tests/test_logging_redact.py` 三轮（普通记录渲染一次、访问记录保持五元组且脱敏、
+按真实 handler 顺序不抛异常），全套 503 passed / 4 skipped。

@@ -24,15 +24,32 @@ def _redact(text: str) -> str:
 
 
 class RedactingFilter(logging.Filter):
-    """Remove secret-looking values from every log record."""
+    """Remove secret-looking values from every log record.
+
+    Normal records are rendered here and redacted as a whole: ``record.msg``
+    becomes the finished message and ``record.args`` is cleared, so the handler
+    must never render the record a second time.
+
+    ``uvicorn.access`` is special.  Its formatter unpacks ``record.args`` as a
+    five-tuple ``(client, method, full_path, http_version, status)``, so
+    clearing the args makes ``AccessFormatter.formatMessage`` raise
+    ``ValueError: not enough values to unpack (expected 5, got 0)`` and every
+    access line is lost.  That tuple is kept intact and redacted element by
+    element instead, which still catches credentials smuggled into a query
+    string (``?token=...``).
+    """
+
+    #: Logger names whose records are redacted argument by argument.
+    structured_arg_loggers = frozenset({"uvicorn.access"})
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
-        message = _redact(record.getMessage())
-        if isinstance(record.args, (tuple, dict)) and record.args:
-            record.msg = message
-            record.args = ()
-        else:
-            record.msg = message
+        if record.name in self.structured_arg_loggers and isinstance(record.args, tuple):
+            record.args = tuple(
+                _redact(item) if isinstance(item, str) else item for item in record.args
+            )
+            return True
+        record.msg = _redact(record.getMessage())
+        record.args = ()
         return True
 
 
@@ -69,6 +86,9 @@ def configure_logging() -> None:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.addHandler(handler)
 
+    # Attached to uvicorn's access logger as well.  The filter redacts that
+    # logger's arguments in place instead of clearing them, so uvicorn's own
+    # AccessFormatter still finds its five positional args.
     logging.getLogger("uvicorn.access").addFilter(RedactingFilter())
     # Outbound request URLs may embed credentials (e.g. the Telegram bot token),
     # so never let httpx log them even when LOG_LEVEL=DEBUG is misconfigured.

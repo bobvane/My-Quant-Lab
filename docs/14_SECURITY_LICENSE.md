@@ -8,6 +8,23 @@
 - redact exception strings
 - `.env` excluded from Git
 
+实现（`backend/app/core/logging.py`）：`RedactingFilter` 同时挂在 root handler 与
+`uvicorn.access` logger 上，把 `api_key|token|secret|password|authorization` 的
+`key=value` 与 `"key": "value"` 两种形式改写为 `***`。
+
+**`uvicorn.access` 走另一条路径：逐参数脱敏，而不是清空参数。** uvicorn 自带的
+`AccessFormatter` 会把 `record.args` 当成 5 元组解包
+（`(client_addr, method, full_path, http_version, status_code)`）；
+如果过滤器按常规做法把 `record.args` 清空（因为消息已经预先格式化），
+格式化阶段就会抛 `ValueError: not enough values to unpack (expected 5, got 0)`，
+访问日志整条丢失、每个请求都打出 `--- Logging error ---`（v1.4.1 修复）。
+现在的做法是只把元组里的字符串逐个 `_redact`，元组长度与顺序不变，
+因此查询串里的凭据（`?token=...`）仍会被抹掉。
+
+回归测试：`backend/tests/test_logging_redact.py::test_uvicorn_access_record_keeps_a_five_tuple_of_args`、
+`::test_filter_does_not_crash_the_real_access_formatter_path`、
+`::test_filter_keeps_resolved_message_from_double_formatting`。
+
 ## 2. GitHub input sandbox
 
 任何外部仓库都视为不可信输入。

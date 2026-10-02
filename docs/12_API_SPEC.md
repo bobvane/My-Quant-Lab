@@ -374,6 +374,24 @@ re-imported automatically when a new commit lands):
 `GET /importer/github/sources/{id}/check`     (live commit check -> has_update)
 `GET /importer/github/sources/{id}/snapshots`
 
+`POST /importer/github/analyze` is read-only and returns the review surface: the
+findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
+
+- `analysis_version` (currently `1.1.0`) rises whenever the report's field semantics
+  change. It moved to `1.1.0` when `files_scanned` was split into `files_parsed` and
+  `files_inventoried` (non-Python files are inventoried, not parsed) and
+  `files_skipped` became `[{path, reason}]` instead of bare paths.
+- `coverage` = `candidate_files`, `candidate_python_files`, `cap`, `attempted_files`,
+  `downloaded_files`, `parsed_files`, `inventoried_files`, `skipped_files`,
+  `not_attempted_files`, `unread_python_files`, `complete`. The numbers describe the
+  fetch, not the repo's docs: `1` candidate file and `cap = 1` are different facts.
+- `warnings` carries the coverage sentences (never fetched / unread Python / unread
+  after fetch) plus the DSL-builder warnings. They are not advisory decoration: a
+  non-empty list means the findings may be missing rules that live in files the
+  analysis never read.
+- The last_import_status of a watched source can be `incomplete`: the watcher refuses
+  to import from a partial read and records the coverage gap in the snapshot instead.
+
 ## GitHub Snapshots
 
 `GET /github/snapshots`

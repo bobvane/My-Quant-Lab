@@ -539,8 +539,14 @@ class GithubAnalyzeOut(BaseModel):
     ref: str
     description: str | None = None
     license: str | None = None
-    files_scanned: list[str]
-    files_skipped: list[str]
+    # ``coverage`` is the review surface: it says how many candidate files the
+    # repository had, how many were downloaded, and how many were only
+    # inventoried or not read at all (docs/05 section 4.1).
+    analysis_version: str
+    coverage: dict[str, Any]
+    files_parsed: list[str]
+    files_inventoried: list[str]
+    files_skipped: list[dict[str, Any]]
     indicators: list[dict[str, Any]]
     rules: list[dict[str, Any]]
     params: list[dict[str, Any]]

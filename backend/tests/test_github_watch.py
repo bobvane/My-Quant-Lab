@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from app.domain.models import GitHubSnapshot, GitHubSource, Strategy, StrategyVersion
+from app.importer.extract import AnalysisResult
+from app.importer.github_client import FetchCoverage
 from app.workers.tasks import _bump_version, check_source
 
 _REPO = "https://github.com/bobvane/demo"
@@ -16,6 +18,24 @@ _DRAFT = {
 }
 
 
+def _complete_coverage(**overrides) -> FetchCoverage:
+    """A fetch that read every candidate file, i.e. the only case that imports."""
+
+    fields = {
+        "candidate_files": 3,
+        "candidate_python_files": 3,
+        "attempted_files": 3,
+        "downloaded_files": 3,
+        "skipped_files": 0,
+        "skipped_python_files": 0,
+        "not_attempted_files": 0,
+        "not_attempted_python_files": 0,
+        "cap": 30,
+    }
+    fields.update(overrides)
+    return FetchCoverage(**fields)
+
+
 def test_bump_version_scheme() -> None:
     assert _bump_version("1.0.0") == "1.0.1"
     assert _bump_version("1.0.8") == "1.0.9"
@@ -23,8 +43,10 @@ def test_bump_version_scheme() -> None:
     assert _bump_version("1.9.9") == "2.0.0"
 
 
-def _install_fake_client(monkeypatch, head: str):
+def _install_fake_client(monkeypatch, head: str, coverage: FetchCoverage | None = None):
     import app.importer as importer
+
+    report = coverage or _complete_coverage()
 
     class _FakeClient:
         def __init__(self) -> None:
@@ -34,10 +56,10 @@ def _install_fake_client(monkeypatch, head: str):
             return head
 
         def fetch_repository(self, repo_url, ref=None, *, max_files=30):  # noqa: ANN001
-            return (object(), [])
+            return (object(), [], report)
 
     monkeypatch.setattr(importer, "GitHubClient", _FakeClient)
-    monkeypatch.setattr(importer, "analyze_repository_files", lambda files: None)
+    monkeypatch.setattr(importer, "analyze_repository_files", lambda files: AnalysisResult())
     monkeypatch.setattr(importer, "build_draft_dsl", lambda meta, findings: (_DRAFT, []))
 
 
@@ -92,3 +114,74 @@ def test_check_source_error_on_failure(db_session, monkeypatch) -> None:
 
     assert check_source(db_session, source) == "error"
     assert source.last_import_status == "error"
+
+
+def _seed_importable_source(db_session) -> GitHubSource:
+    source = GitHubSource(repository_url=_REPO, current_commit="oldsha", is_watched=True)
+    db_session.add(source)
+    db_session.flush()
+    strategy = Strategy(name="Demo", slug="demo-strategy", source_url=_REPO)
+    db_session.add(strategy)
+    db_session.flush()
+    db_session.add(
+        StrategyVersion(
+            strategy_id=strategy.id,
+            version="1.0.0",
+            dsl_json={**_DRAFT, "execution": {"fill_model": "next_bar_open", "fee_bps": 0}},
+            immutable_hash="x" * 64,
+        )
+    )
+    db_session.commit()
+    return source
+
+
+def test_unread_python_files_block_an_unattended_import(db_session, monkeypatch) -> None:
+    """A partial read must not silently replace a strategy version (ADR-056).
+
+    The watcher imports without a human in the loop. If a Python file was left
+    unread (beyond the fetch cap here), the draft is built from partial evidence
+    and importing it would drop whatever rules that file holds.
+    """
+
+    coverage = _complete_coverage(
+        candidate_files=40,
+        candidate_python_files=35,
+        attempted_files=30,
+        downloaded_files=30,
+        not_attempted_files=10,
+        not_attempted_python_files=5,
+    )
+    _install_fake_client(monkeypatch, "newsha", coverage)
+    source = _seed_importable_source(db_session)
+
+    assert check_source(db_session, source) == "incomplete"
+    assert source.last_import_status == "incomplete"
+    assert source.current_commit == "newsha"
+    assert db_session.query(StrategyVersion).count() == 1  # nothing imported
+    db_session.commit()
+    snapshot = db_session.query(GitHubSnapshot).one()
+    assert snapshot.extraction_json["reason"] == "incomplete_analysis"
+    assert snapshot.extraction_json["coverage"]["unread_python_files"] == 5
+    assert any("never fetched" in w for w in snapshot.extraction_json["warnings"])
+
+
+def test_unread_non_python_files_do_not_block_an_import(db_session, monkeypatch) -> None:
+    """Skipped READMEs and configs are reported, but they carry no rules."""
+
+    coverage = _complete_coverage(
+        candidate_files=40,
+        candidate_python_files=3,
+        attempted_files=30,
+        downloaded_files=30,
+        not_attempted_files=10,
+        not_attempted_python_files=0,
+    )
+    _install_fake_client(monkeypatch, "newsha", coverage)
+    source = _seed_importable_source(db_session)
+
+    assert check_source(db_session, source) == "imported"
+    assert db_session.query(StrategyVersion).count() == 2
+    db_session.commit()
+    snapshot = db_session.query(GitHubSnapshot).one()
+    assert snapshot.extraction_json["coverage"]["not_attempted_files"] == 10
+    assert snapshot.extraction_json["coverage"]["complete"] is False

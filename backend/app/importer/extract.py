@@ -12,20 +12,28 @@ import ast
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.importer.github_client import RepoFile
+from app.importer.github_client import FetchCoverage, RepoFile
 from app.importer.sanitize import sanitize_untrusted_text
 
 __all__ = [
+    "ANALYSIS_VERSION",
     "AnalysisResult",
     "Evidence",
     "IndicatorFinding",
     "ParamFinding",
     "RuleFinding",
+    "SkippedFile",
     "UnknownFinding",
     "UnsafeFlag",
     "analyze_python_source",
     "analyze_repository_files",
+    "build_coverage",
+    "coverage_warnings",
 ]
+
+# Bumped when the analysis report changes shape: 1.1.0 separates parsed from
+# inventoried files, keeps each skip reason, and adds the coverage block.
+ANALYSIS_VERSION = "1.1.0"
 
 MAX_SNIPPET_CHARS = 400
 
@@ -122,10 +130,21 @@ class UnsafeFlag:
     evidence: Evidence
 
 
+@dataclass(frozen=True)
+class SkippedFile:
+    """A candidate file the fetch could not read, and why."""
+
+    path: str
+    reason: str
+
+
 @dataclass
 class AnalysisResult:
-    files_scanned: list[str] = field(default_factory=list)
-    files_skipped: list[str] = field(default_factory=list)
+    # Split on purpose: a ``.md`` next to the code is inventoried, never parsed,
+    # and counting it as "scanned" is how a report overstates its own coverage.
+    files_parsed: list[str] = field(default_factory=list)
+    files_inventoried: list[str] = field(default_factory=list)
+    files_skipped: list[SkippedFile] = field(default_factory=list)
     indicators: list[IndicatorFinding] = field(default_factory=list)
     rules: list[RuleFinding] = field(default_factory=list)
     params: list[ParamFinding] = field(default_factory=list)
@@ -502,13 +521,15 @@ def analyze_repository_files(files: list[RepoFile]) -> AnalysisResult:
     merged = AnalysisResult()
     for repo_file in files:
         if repo_file.content is None:
-            merged.files_skipped.append(repo_file.path)
+            merged.files_skipped.append(
+                SkippedFile(path=repo_file.path, reason=repo_file.skipped_reason or "not fetched")
+            )
             continue
         if not repo_file.path.lower().endswith(".py"):
-            merged.files_scanned.append(repo_file.path)
+            merged.files_inventoried.append(repo_file.path)
             continue
         partial = analyze_python_source(repo_file.path, repo_file.content)
-        merged.files_scanned.append(repo_file.path)
+        merged.files_parsed.append(repo_file.path)
         merged.indicators.extend(partial.indicators)
         merged.rules.extend(partial.rules)
         merged.params.extend(partial.params)
@@ -516,3 +537,50 @@ def analyze_repository_files(files: list[RepoFile]) -> AnalysisResult:
         merged.unsafe_flags.extend(partial.unsafe_flags)
         merged.lookbacks.extend(partial.lookbacks)
     return merged
+
+
+def build_coverage(fetch: FetchCoverage, findings: AnalysisResult) -> dict[str, Any]:
+    """Describe what the analysis read, and what it did not.
+
+    One implementation for both callers (the analyze endpoint and the GitHub
+    watcher), because two arithmetics would eventually disagree about whether a
+    repository was fully reviewed -- and this number decides whether a draft may
+    be imported without a human.
+    """
+    return {
+        "analysis_version": ANALYSIS_VERSION,
+        "candidate_files": fetch.candidate_files,
+        "candidate_python_files": fetch.candidate_python_files,
+        "cap": fetch.cap,
+        "attempted_files": fetch.attempted_files,
+        "downloaded_files": fetch.downloaded_files,
+        "parsed_files": len(findings.files_parsed),
+        "inventoried_files": len(findings.files_inventoried),
+        "skipped_files": len(findings.files_skipped),
+        "not_attempted_files": fetch.not_attempted_files,
+        "unread_python_files": fetch.unread_python_files,
+        "complete": fetch.complete,
+    }
+
+
+def coverage_warnings(coverage: dict[str, Any]) -> list[str]:
+    """Turn a coverage block into the sentences a reviewer has to read."""
+    messages: list[str] = []
+    not_attempted = int(coverage["not_attempted_files"])
+    if not_attempted:
+        messages.append(
+            f"{not_attempted} candidate file(s) were never fetched: the cap is "
+            f"{coverage['cap']} of {coverage['candidate_files']} candidate file(s). "
+            "Raise max_files to read more; this report covers only the files listed above."
+        )
+    if int(coverage["unread_python_files"]):
+        messages.append(
+            f"{coverage['unread_python_files']} Python file(s) were not read, so rules that "
+            "live in them are missing from these findings."
+        )
+    skipped = int(coverage["skipped_files"])
+    if skipped:
+        messages.append(
+            f"{skipped} file(s) were fetched but could not be read (see files_skipped)."
+        )
+    return messages

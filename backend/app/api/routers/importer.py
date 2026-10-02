@@ -30,7 +30,9 @@ from app.importer import (
     GitHubClient,
     GitHubError,
     analyze_repository_files,
+    build_coverage,
     build_draft_dsl,
+    coverage_warnings,
     parse_repo_url,
 )
 from app.strategies.validator import validate_strategy
@@ -94,7 +96,7 @@ def analyze_repository(payload: GithubAnalyzeRequest) -> GithubAnalyzeOut:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         client = GitHubClient(token=payload.token)
-        meta, files = client.fetch_repository(
+        meta, files, fetch_coverage = client.fetch_repository(
             payload.repo_url, payload.ref, max_files=payload.max_files
         )
     except GitHubError as exc:
@@ -102,21 +104,27 @@ def analyze_repository(payload: GithubAnalyzeRequest) -> GithubAnalyzeOut:
 
     findings = analyze_repository_files(files)
     draft_dsl, warnings = build_draft_dsl(meta, findings)
+    coverage = build_coverage(fetch_coverage, findings)
     return GithubAnalyzeOut(
         owner=meta.owner,
         repo=meta.repo,
         ref=meta.ref,
         description=meta.description,
         license=meta.license,
-        files_scanned=findings.files_scanned,
-        files_skipped=findings.files_skipped,
+        analysis_version=coverage["analysis_version"],
+        coverage=coverage,
+        files_parsed=findings.files_parsed,
+        files_inventoried=findings.files_inventoried,
+        files_skipped=[
+            {"path": skipped.path, "reason": skipped.reason} for skipped in findings.files_skipped
+        ],
         indicators=[_finding_to_dict(f) for f in findings.indicators],
         rules=[_finding_to_dict(f) for f in findings.rules],
         params=[_finding_to_dict(f) for f in findings.params],
         unknowns=[_finding_to_dict(f) for f in findings.unknowns],
         unsafe_flags=[_finding_to_dict(f) for f in findings.unsafe_flags],
         draft_dsl=draft_dsl,
-        warnings=warnings,
+        warnings=warnings + coverage_warnings(coverage),
     )
 
 

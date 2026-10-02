@@ -228,9 +228,10 @@ def test_analyze_repository_files_skips_non_python() -> None:
         RepoFile(path="notes.md", size=50, sha="c", content="# hello"),
     ]
     result = analyze_repository_files(files)
-    assert "strat.py" in result.files_scanned
-    assert "logo.png" in result.files_skipped
-    assert "notes.md" in result.files_scanned  # inventoried, not parsed
+    assert result.files_parsed == ["strat.py"]
+    assert [s.path for s in result.files_skipped] == ["logo.png"]
+    assert result.files_skipped[0].reason == "binary"
+    assert result.files_inventoried == ["notes.md"]  # inventoried, not parsed
     assert result.indicators
 
 
@@ -288,16 +289,28 @@ def test_fetch_respects_cap_and_prefers_python() -> None:
             return "x = 1"
 
     client = ManyFiles()
-    _, files = client.fetch_repository("https://github.com/acme/strat", max_files=5)
+    _, files, coverage = client.fetch_repository("https://github.com/acme/strat", max_files=5)
     assert len(files) == 5
     assert all(f.path.endswith(".py") for f in files)
+    # The 15 candidates the cap dropped used to vanish without a trace; the
+    # caller now has to be able to say how many files were never looked at.
+    assert coverage.candidate_files == 20
+    assert coverage.candidate_python_files == 10
+    assert coverage.attempted_files == 5
+    assert coverage.not_attempted_files == 15
+    assert coverage.not_attempted_python_files == 5
+    assert coverage.cap == 5
+    assert coverage.complete is False
+    assert coverage.unread_python_files == 5
 
 
 def test_fetch_repository_uses_only_allow_listed_hosts() -> None:
     client = _FakeGitHub()
-    meta, files = client.fetch_repository("https://github.com/acme/strat")
+    meta, files, coverage = client.fetch_repository("https://github.com/acme/strat")
     assert meta.owner == "acme" and meta.license == "MIT"
     assert any(f.path == "strat.py" and f.content for f in files)
+    assert coverage.complete is True
+    assert coverage.unread_python_files == 0
     for call in client.calls:
         assert "github" in call
 
@@ -333,6 +346,63 @@ def test_analyze_endpoint_rejects_untrusted_url(client) -> None:
         json={"repo_url": "https://evil.example.com/acme/strat"},
     )
     assert response.status_code == 422
+
+
+def test_analyze_endpoint_reports_its_coverage(client, monkeypatch) -> None:
+    """The review surface has to say what was read and what was skipped (ADR-056).
+
+    ``max_files=5`` against 4 Python files and 10 markdown files means the report
+    covers 5 of 14 candidates. Without the coverage block the response would read
+    as if the whole repository had been analysed.
+    """
+
+    class ManyDocs(_FakeGitHub):
+        def __init__(self, token: str | None = None) -> None:
+            super().__init__()
+
+        def get_json(self, url: str):  # type: ignore[override]
+            if "/git/trees/" in url:
+                return {
+                    "tree": [
+                        {"path": f"doc{i}.md", "type": "blob", "size": 10, "sha": str(i)}
+                        for i in range(10)
+                    ]
+                    + [
+                        {"path": f"mod{i}.py", "type": "blob", "size": 10, "sha": f"p{i}"}
+                        for i in range(4)
+                    ],
+                    "truncated": False,
+                }
+            return super().get_json(url)
+
+        def get_text(self, url: str, *, max_bytes: int = 1) -> str:  # type: ignore[override]
+            if url.endswith(".py"):
+                return EMA_CROSS_SOURCE
+            return "# demo"
+
+    import app.api.routers.importer as importer_router
+
+    monkeypatch.setattr(importer_router, "GitHubClient", ManyDocs)
+    response = client.post(
+        "/api/v1/importer/github/analyze",
+        json={"repo_url": "https://github.com/acme/strat", "max_files": 5},
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["analysis_version"] == "1.1.0"
+    coverage = body["coverage"]
+    assert coverage["candidate_files"] == 14
+    assert coverage["candidate_python_files"] == 4
+    assert coverage["attempted_files"] == 5
+    assert coverage["not_attempted_files"] == 9
+    assert coverage["complete"] is False
+    assert coverage["unread_python_files"] == 0
+
+    assert all(path.endswith(".py") for path in body["files_parsed"])
+    assert all(path.endswith(".md") for path in body["files_inventoried"])
+    assert len(body["files_parsed"]) == 4  # inventoried is not parsed
+    assert any("never fetched" in warning for warning in body["warnings"])
 
 
 def test_import_endpoint_rejects_invalid_dsl(client) -> None:

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ALLOWED_HOSTS",
+    "FetchCoverage",
     "GitHubClient",
     "GitHubError",
     "RepoFile",
@@ -69,6 +70,38 @@ class RepoFile:
     content: str | None = None
     skipped_reason: str | None = None
     truncated: bool = False
+
+
+@dataclass(frozen=True)
+class FetchCoverage:
+    """How much of the repository a fetch actually read (docs/05 section 4.1).
+
+    The fetch cap and the byte limit are deliberate, but they used to be invisible:
+    a caller could not tell "read 12 files" from "read 12 of 40", and the per-file
+    skip reasons were computed here and then dropped. Everything the report needs is
+    counted at the moment it happens, because that is the only place the candidate
+    list, the cap and the failures are all visible at once.
+    """
+
+    candidate_files: int
+    candidate_python_files: int
+    attempted_files: int
+    downloaded_files: int
+    skipped_files: int
+    skipped_python_files: int
+    not_attempted_files: int
+    not_attempted_python_files: int
+    cap: int
+
+    @property
+    def complete(self) -> bool:
+        """True only when every candidate file was downloaded."""
+        return self.downloaded_files == self.candidate_files
+
+    @property
+    def unread_python_files(self) -> int:
+        """Python candidates that were never read: rules may live in them."""
+        return self.not_attempted_python_files + self.skipped_python_files
 
 
 def parse_repo_url(url: str) -> tuple[str, str]:
@@ -212,13 +245,18 @@ class GitHubClient:
 
     def fetch_repository(
         self, repo_url: str, ref: str | None = None, *, max_files: int = DEFAULT_MAX_FILES
-    ) -> tuple[RepoMeta, list[RepoFile]]:
+    ) -> tuple[RepoMeta, list[RepoFile], FetchCoverage]:
         """Fetch metadata + candidate files. Never executes anything.
 
         Strategy code (``.py``) is fetched first because it carries the rules;
         docs and configs follow only if the cap allows.  Each file is retried
         once on transient network errors; a file that still fails is recorded
         as skipped (with reason) instead of failing the whole analysis.
+
+        Returns the metadata, the files, and a :class:`FetchCoverage` that says
+        how much of the candidate list the returned files actually cover: the
+        skipped entries and the candidates beyond the cap are both counted, so a
+        caller can report what was *not* read instead of implying it read it all.
         """
 
         owner, name = parse_repo_url(repo_url)
@@ -249,6 +287,7 @@ class GitHubClient:
         cap = max(1, min(max_files, MAX_FILES_TO_FETCH))
         files: list[RepoFile] = []
         skipped_rest = max(0, len(candidates) - cap)
+        skipped_python = 0
         for entry in candidates[:cap]:
             path = str(entry.get("path", ""))
             size = int(entry.get("size") or 0)
@@ -257,6 +296,8 @@ class GitHubClient:
                 files.append(
                     RepoFile(path=path, size=size, sha=sha, skipped_reason="file too large")
                 )
+                if path.lower().endswith(".py"):
+                    skipped_python += 1
                 continue
             content: str | None = None
             failure: str | None = None
@@ -269,11 +310,30 @@ class GitHubClient:
                     failure = str(exc)
             if content is None:
                 files.append(RepoFile(path=path, size=size, sha=sha, skipped_reason=failure))
+                if path.lower().endswith(".py"):
+                    skipped_python += 1
                 continue
             files.append(RepoFile(path=path, size=size, sha=sha, content=content))
         if skipped_rest:
             logger.info("skipped %d files beyond the fetch cap", skipped_rest)
-        return meta, files
+
+        beyond = candidates[cap:]
+        coverage = FetchCoverage(
+            candidate_files=len(candidates),
+            candidate_python_files=sum(
+                1 for e in candidates if str(e.get("path", "")).lower().endswith(".py")
+            ),
+            attempted_files=min(cap, len(candidates)),
+            downloaded_files=sum(1 for f in files if f.content is not None),
+            skipped_files=sum(1 for f in files if f.content is None),
+            skipped_python_files=skipped_python,
+            not_attempted_files=len(beyond),
+            not_attempted_python_files=sum(
+                1 for e in beyond if str(e.get("path", "")).lower().endswith(".py")
+            ),
+            cap=cap,
+        )
+        return meta, files, coverage
 
     # -- helpers -----------------------------------------------------------
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
   api,
   type Asset,
@@ -290,6 +290,25 @@ const importName = ref('')
 const analyzing = ref(false)
 const importing = ref(false)
 const analysis = ref<GithubAnalysis | null>(null)
+
+// The analysis is a review surface, not a guarantee: say out loud how much of
+// the repository it actually read, because the files it never fetched are the
+// ones nobody has reviewed (docs/05 §4.1).
+const coverageHeadline = computed(() => {
+  const coverage = analysis.value?.coverage
+  if (!coverage) return ''
+  if (coverage.complete) return '已完整读取仓库中的全部候选文件。'
+  const parts = [
+    `${coverage.not_attempted_files} 个候选文件从未获取（上限 ${coverage.cap}，仓库共 ${coverage.candidate_files} 个）`,
+  ]
+  if (coverage.skipped_files > 0) parts.push(`${coverage.skipped_files} 个获取后无法读取`)
+  return `未完整读取：${parts.join('，')}。下面的结论只覆盖已列出的文件。`
+})
+
+const unreadPythonWarning = computed(() => {
+  const n = analysis.value?.coverage.unread_python_files ?? 0
+  return n > 0 ? `其中 ${n} 个 Python 文件没被读到——它们里面的规则不会出现在下面的发现里。` : ''
+})
 
 async function analyzeRepo() {
   error.value = ''
@@ -623,12 +642,33 @@ onMounted(load)
       <div v-if="analysis">
         <p class="muted">
           {{ analysis.owner }}/{{ analysis.repo }} @ {{ analysis.ref }} ·
-          扫描 {{ analysis.files_scanned.length }} 个文件 ·
+          读取 {{ analysis.coverage.downloaded_files }} / {{ analysis.coverage.candidate_files }} 个候选文件
+          （解析 {{ analysis.coverage.parsed_files }} 个 Python、登记
+          {{ analysis.coverage.inventoried_files }} 个非 Python）·
           许可证 {{ analysis.license ?? '未知' }}
         </p>
+        <p :class="analysis.coverage.complete ? 'muted' : 'error'">{{ coverageHeadline }}</p>
+        <p v-if="unreadPythonWarning" class="error">{{ unreadPythonWarning }}</p>
         <ul v-if="analysis.warnings.length" class="error">
           <li v-for="(w, idx) in analysis.warnings" :key="idx">{{ w }}</li>
         </ul>
+        <details v-if="analysis.files_skipped.length" class="muted">
+          <summary>被跳过的文件（{{ analysis.files_skipped.length }}）</summary>
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(f, idx) in analysis.files_skipped" :key="idx">
+                <td>{{ f.path }}</td>
+                <td class="muted">{{ f.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </details>
         <table v-if="analysis.rules.length">
           <thead>
             <tr>

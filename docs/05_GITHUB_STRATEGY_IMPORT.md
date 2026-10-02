@@ -48,6 +48,15 @@ GitHub 是不可信输入。绝不能：
 
 V1 可以完全不执行原始代码，只做 AST/文本/AI 提取和 DSL 重建。
 
+### 4.1 覆盖率（coverage，ADR-056）
+
+"不可信输入"意味着报告本身也不能夸大它做过的事。分析报告必须回答：**候选文件共几个、实际下载几个、真的解析几个、只登记几个、跳过几个及原因、有几个候选从未尝试**。
+
+- `POST /importer/github/analyze` 返回 `coverage` 块、`files_parsed` / `files_inventoried` / `files_skipped[{path, reason}]`，并把覆盖率结论写进 `warnings`（"25 candidate file(s) were never fetched…"）。
+- `analysis_version`（当前 `1.1.0`）随字段语义变化提升：`files_scanned` 曾把"只登记未解析"的非 Python 文件也算成已扫描，`files_skipped` 曾只有路径、丢掉 `skipped_reason`。
+- **无人值守的 watcher 不得从不完整的读取中自动导入**：若还有 Python 文件没被读到（超出抓取上限或下载失败），`check_source` 记 `last_import_status = "incomplete"`、写 `GitHubSnapshot.extraction_json = {"imported": false, "reason": "incomplete_analysis", "coverage": ..., "warnings": ...}`，并且**不新建策略版本**——变化的规则可能就在没读到的文件里，导入部分草案等于静默降级策略。
+- 只登记不解析的 `.md`/`.json` **不**阻断导入（这是常见情况），但会出现在报告里。
+
 ## 5. AI Extraction 输出
 
 必须结构化：
@@ -122,6 +131,10 @@ old commit
 Commit：abc123
 类型：Breakout
 已识别：EMA20 / ATR14 / breakout confirmation
+覆盖：读取 12 / 30 个候选文件（解析 9 个 Python、登记 3 个非 Python）
 警告：原项目使用当前未确认 K 线，已按系统规则改为 closed bar
+警告：18 个候选文件从未获取（上限 12）；9 个 Python 文件没被读到
 状态：Experimental
 ```
+
+人审的前提是报告说清了"到底看了多少"。未读到的文件正是没被审阅的代码，所以它们必须出现在用户最终看到的这一段里，而不是只躺在日志中。

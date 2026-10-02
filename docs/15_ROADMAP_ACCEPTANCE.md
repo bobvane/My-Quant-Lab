@@ -69,6 +69,7 @@ boundary and the no-lookahead / immutability guarantees.
 | v1.4.3 | 扫描网格必须精确且总能评估（ADR-053）：修 `_coalition_totals` 的逐级取整漂移（十二等权成员的最大票数曾是 `0.999996`，导致默认网格 13 点 > 上限 12，**最宽集成用不了默认路径**）；上限 12 → 64 并把放不下改成可操作的 422；票数比较统一到发布的六位精度（`_clears`），修掉「报告说需要两个成员、模拟却让一个进场」；响应新增 `max_thresholds` |
 | v1.4.4 | 引擎的警告必须跟结果一起落库（ADR-054）：`backtest_results.warnings_json` + 迁移 `0007_backtest_result_warnings`，`GET /backtests/{id}` 不再硬编码返回空列表（此前「被忽略的参数覆盖」「warm-up 长于数据」只在创建响应里出现一次，刷新即消失，而后者对应的是一次 `number_of_trades = 0` 的「成功」回测）；前端在指标卡上方渲染回测提醒，扫描面板也显示自己的 `warnings` |
 | v1.4.5 | 没跑起来的网格点不能赢排名（ADR-055）：引擎新增 `warmup_unmet` 标记（刻意不进 `as_dict()`），敏感性聚合把「整段落在预热期内」的点从 `best`/`worst`/`summary`/`stable` 中剔除（此前它们的扁平 0 会让 `best` 变成一个 0 笔交易的点、并把一致亏损报成「符号翻转」）；响应新增 `ranked_points`/`warmup_unmet_points`/`warnings`，`sensitivity_version` 升为 `1.1.0`；前端统计卡改显示「参与排名」、表格标出未测得点、图表不再画它们 |
+| v1.4.6 | 分析必须说明它读了多少、跳过了什么（ADR-056）：`github_client.py` 新增 `FetchCoverage`（`fetch_repository` 返回三元组），`extract.py` 把 `files_scanned` 拆成 `files_parsed`/`files_inventoried`、`files_skipped` 带 `reason`、新增共用的 `build_coverage()`/`coverage_warnings()`；`/importer/github/analyze` 返回 `coverage` 并把覆盖率结论并入 `warnings`（此前 25 个从未尝试的候选、跳过的原因、"只登记未解析"全都不出现在报告里）；watcher 遇到读到不全（还有 Python 文件未读）时记 `incomplete` 并**拒绝自动导入**；前端显示「读取 X / Y」、非完整读取警告与被跳过文件的原因 |
 
 **至此 docs/15 的 P0/P1/P2 与 v2 结构性能力清单全部完成。** 后续为打磨与体验改进。
 

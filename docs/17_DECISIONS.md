@@ -888,3 +888,61 @@ schema，就可能不一致，而且只在其中一个方言上暴露。所以�
 `backend/tests/test_sensitivity_api.py` 新增 `test_points_that_never_ran_cannot_win_the_ranking`
 （`ranked_points == 2` / `warmup_unmet_points == 2` / `best` 是测得点而非旧的 500 /
 `stable is True` 而旧代码是 `False`）。
+
+## ADR-056：分析必须说明它读了多少、跳过了什么、为什么（coverage，docs/05 §4.1）
+
+**背景**：GitHub 是不可信输入（docs/05 §4），导入器的人工前提是**先审阅 findings 与草案 DSL**。
+可整个契约里没有一句要求报告**覆盖面**，实测（`backend/scripts/probe_github_coverage.py`，
+20 个 `.py` + 10 个 `.md`、一个文件超字节上限、一个下载失败）三处缺口：
+
+1. **`skipped_reason` 算出来又丢掉**：`github_client.py` 为超限文件写 `"file too large"`、
+   为下载失败写异常文本，而 `extract.py:505` 只把 `repo_file.path` 追加进 `files_skipped`，
+   `GithubAnalyzeOut.files_skipped` 只有路径 —— 全仓没有任何消费者（`grep skipped_reason` 只有
+   生产者）。用户看得到"跳过了 2 个文件"，看不到"为什么"。
+2. **超出抓取上限的文件整批消失**：`github_client.py:249-252` 截断候选后只在 `logger.info`
+   里报数量，从不出现在响应里。cap=5 的实测：返回 5 条、25 个候选**没有任何痕迹**；
+   `backend/tests/test_importer.py:270 test_fetch_respects_cap_and_prefers_python` 恰好把这种
+   静默丢弃固化成了断言（`assert len(files) == 5`）。
+3. **`files_scanned` 把"登记"当成"分析"**：非 `.py` 文件也进 `files_scanned`
+   （`extract.py` 自己的 docstring 写着「non-Python files are inventoried, not parsed」），
+   而 UI 只显示 `files_scanned.length`。cap=22 的实测：`files_scanned = 20`，其中只有 18 个真被解析。
+
+后果是报告**高估**自己的覆盖面，而且高估的正是安全相关的量：没读到的文件就是没人审阅的代码。
+更糟的是无人值守路径：watcher 会**自动导入**，此前从不完整读取里同样自动导入。
+
+**决策**：
+
+1. **抓取阶段一次算清**：`github_client.py` 新增 `@dataclass(frozen=True) FetchCoverage`
+   （候选数、`.py` 候选数、尝试数、下载成功数、跳过数、跳过 `.py` 数、未尝试数、未尝试 `.py` 数、
+   cap），派生 `complete`（`downloaded_files == candidate_files`）与 `unread_python_files`
+   （未尝试 `.py` + 跳过 `.py`）；`fetch_repository` 由二元组改为返回 `(meta, files, coverage)`，
+   强制每个调用方处理它。
+2. **分析阶段保留原因**：`extract.py` 新增 `SkippedFile(path, reason)`，`AnalysisResult` 把
+   `files_scanned` 拆成 `files_parsed` 与 `files_inventoried`。`ANALYSIS_VERSION` 提升为 `1.1.0`。
+3. **一个 `build_coverage()` 给两个调用方用**：端点与 watcher 共用同一段算术与
+   `coverage_warnings()`。两套算术迟早会对"这个仓库有没有被完整审阅"给出不同答案，而这个答案
+   决定无人值守时能不能导入。
+4. **无人值守拒绝从不完整读取中导入**：`check_source` 在 `coverage["unread_python_files"] > 0` 时
+   记 `last_import_status = "incomplete"`、写快照
+   `extraction_json = {"imported": False, "reason": "incomplete_analysis", "coverage": ..., "warnings": ...}`、
+   **不新建策略版本**（变化的规则可能就在没读到的 `.py` 里，导入部分草案等于静默降级策略）。
+   只登记不解析的 `.md`/`.json` 不阻断导入 —— 那是常见情况，不是风险。
+5. **报告面**：`GithubAnalyzeOut` 新增 `analysis_version` / `coverage`，`files_skipped` 变为
+   `[{path, reason}]`，覆盖率结论并入 `warnings`；前端头部改成"读取 X / Y 个候选文件（解析 N 个
+   Python、登记 M 个非 Python）"、非完整读取时显示错误色结论、并列出被跳过文件及原因。
+
+**理由**：人工审阅是这道防线的全部，而审阅的前提是知道报告覆盖了多少。把"未尝试的文件数"留在
+日志里，等于把最需要人看的东西放在人不会看的地方 —— 与 ADR-055 同一类错误（把缺口报告成正常）。
+另外这条缺口直接改变无人值守行为：不完整读取下自动导入，会让一个策略在没有任何人察觉的情况下
+被降级。
+
+**测试**：`backend/tests/test_github_watch.py` 新增
+`test_unread_python_files_block_an_unattended_import`（状态为 `incomplete`、版本数不变、快照里
+`reason == "incomplete_analysis"` 且 `coverage["unread_python_files"] == 5`）与
+`test_unread_non_python_files_do_not_block_an_import`（同样不完整但 `.py` 都读到 → 正常导入，
+快照仍记录 `not_attempted_files == 10`）；`backend/tests/test_importer.py` 新增
+`test_analyze_endpoint_reports_its_coverage`（cap=5 对 14 个候选 → `not_attempted_files == 9`、
+`files_parsed` 全是 `.py`、`files_inventoried` 全是 `.md`、警告含 `never fetched`），并改写
+`test_analyze_repository_files_skips_non_python`（断言 `files_parsed` / `files_inventoried` /
+`files_skipped[0].reason`）与 `test_fetch_respects_cap_and_prefers_python`（断言
+`not_attempted_files == 15`、`unread_python_files == 5`）。

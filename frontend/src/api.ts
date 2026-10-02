@@ -132,14 +132,38 @@ export interface BacktestDetail extends BacktestSummary {
   warnings: string[]
 }
 
+/** What the importer actually read, and what it never looked at (docs/05 §3.1). */
+export interface GithubCoverage {
+  analysis_version: string
+  candidate_files: number
+  candidate_python_files: number
+  cap: number
+  attempted_files: number
+  downloaded_files: number
+  parsed_files: number
+  inventoried_files: number
+  skipped_files: number
+  not_attempted_files: number
+  unread_python_files: number
+  complete: boolean
+}
+
+export interface GithubSkippedFile {
+  path: string
+  reason: string
+}
+
 export interface GithubAnalysis {
   owner: string
   repo: string
   ref: string
   description: string | null
   license: string | null
-  files_scanned: string[]
-  files_skipped: string[]
+  analysis_version: string
+  coverage: GithubCoverage
+  files_parsed: string[]
+  files_inventoried: string[]
+  files_skipped: GithubSkippedFile[]
   indicators: Array<Record<string, unknown>>
   rules: Array<Record<string, unknown>>
   params: Array<Record<string, unknown>>

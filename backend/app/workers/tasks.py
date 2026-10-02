@@ -233,7 +233,9 @@ def check_source(db: Any, source: Any) -> str:
     from app.importer import (
         GitHubClient,
         analyze_repository_files,
+        build_coverage,
         build_draft_dsl,
+        coverage_warnings,
         parse_repo_url,
     )
 
@@ -251,9 +253,13 @@ def check_source(db: Any, source: Any) -> str:
         return "unchanged"
 
     try:
-        meta, files = client.fetch_repository(source.repository_url, head, max_files=30)
+        meta, files, fetch_coverage = client.fetch_repository(
+            source.repository_url, head, max_files=30
+        )
         findings = analyze_repository_files(files)
-        draft, _warnings = build_draft_dsl(meta, findings)
+        draft, warnings = build_draft_dsl(meta, findings)
+        coverage = build_coverage(fetch_coverage, findings)
+        warnings = warnings + coverage_warnings(coverage)
     except Exception as exc:  # noqa: BLE001
         logger.warning("github fetch/analyze failed for %s: %s", source.repository_url, exc)
         source.last_import_status = "error"
@@ -262,6 +268,27 @@ def check_source(db: Any, source: Any) -> str:
         source.current_commit = head
         source.last_import_status = "checked"
         return "no_change"
+    if not coverage["complete"] and coverage["unread_python_files"]:
+        # Unattended import: a Python file that was never read may hold the rules
+        # that changed. Importing the partial draft would silently downgrade the
+        # strategy, so record the gap and leave the version alone (ADR-056).
+        source.current_commit = head
+        source.last_import_status = "incomplete"
+        db.add(
+            GitHubSnapshot(
+                source_id=source.id,
+                commit=head,
+                content_hash=immutable_hash(draft, "incomplete"),
+                manifest_json={},
+                extraction_json={
+                    "imported": False,
+                    "reason": "incomplete_analysis",
+                    "coverage": coverage,
+                    "warnings": warnings,
+                },
+            )
+        )
+        return "incomplete"
 
     strategies = db.scalars(
         select(Strategy).where(Strategy.source_url == source.repository_url)
@@ -298,7 +325,7 @@ def check_source(db: Any, source: Any) -> str:
             commit=head,
             content_hash=immutable_hash(draft, next_version),
             manifest_json={},
-            extraction_json={"imported": imported},
+            extraction_json={"imported": imported, "coverage": coverage, "warnings": warnings},
         )
     )
     return "imported" if imported else "no_change"
@@ -312,7 +339,7 @@ def check_github_sources() -> dict:
 
     from app.domain.models import GitHubSource
 
-    summary: dict[str, int] = {"checked": 0, "imported": 0, "error": 0}
+    summary: dict[str, int] = {"checked": 0, "imported": 0, "incomplete": 0, "error": 0}
     with session_scope() as db:
         sources = db.scalars(select(GitHubSource).where(GitHubSource.is_watched.is_(True))).all()
         for source in sources:
@@ -320,6 +347,8 @@ def check_github_sources() -> dict:
             status = check_source(db, source)
             if status == "imported":
                 summary["imported"] += 1
+            elif status == "incomplete":
+                summary["incomplete"] += 1
             elif status == "error":
                 summary["error"] += 1
     return summary

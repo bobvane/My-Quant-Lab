@@ -142,6 +142,7 @@ function removeChannel(index: number) {
 
 const providers = ref<AIProviderRecord[]>([])
 const aiModels = ref<Array<Record<string, any>>>([])
+const aiPrompts = ref<Array<Record<string, any>>>([])
 const aiUsage = ref<Array<Record<string, any>>>([])
 const filterEntityType = ref('')
 const filterEntityId = ref('')
@@ -171,16 +172,19 @@ const busyId = ref<number | null>(null)
 async function load() {
   error.value = ''
   try {
-    const [audit, settings, ai, notification, models, usage, notifyLog] = await Promise.all([
-      api.audit(),
-      api.settings(),
-      api.aiProviders(),
-      api.notificationConfig(),
-      api.aiModels().catch(() => ({ models: [] })),
-      api.aiUsage().catch(() => ({ usage: [] })),
-      api.notificationEvents().catch(() => ({ events: [] })),
-    ])
+    const [audit, settings, ai, notification, models, usage, notifyLog, prompts] =
+      await Promise.all([
+        api.audit(),
+        api.settings(),
+        api.aiProviders(),
+        api.notificationConfig(),
+        api.aiModels().catch(() => ({ models: [] })),
+        api.aiUsage().catch(() => ({ usage: [] })),
+        api.notificationEvents().catch(() => ({ events: [] })),
+        api.aiPrompts().catch(() => ({ prompts: [] })),
+      ])
     notifyEvents.value = notifyLog.events
+    aiPrompts.value = prompts.prompts
     events.value = audit.events
     environment.value = (settings.environment as Record<string, unknown>) ?? {}
     systemSettings.value = (settings.settings as Array<Record<string, any>>) ?? []
@@ -477,6 +481,30 @@ onMounted(load)
         </tbody>
       </table>
       <p v-else class="muted">还没有模型条目。</p>
+    </div>
+
+    <div v-if="aiPrompts.length" class="card" style="margin-top: 14px">
+      <h3>AI 提示词模板（{{ aiPrompts.length }}）</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>版本</th>
+            <th>任务</th>
+            <th>能力档</th>
+            <th>启用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="p in aiPrompts" :key="String(p.id)">
+            <td>{{ p.name }}</td>
+            <td>{{ p.version }}</td>
+            <td>{{ p.task_type }}</td>
+            <td>{{ p.capability_tier }}</td>
+            <td>{{ p.is_active ? '是' : '否' }}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <div class="card" style="margin-top: 14px">

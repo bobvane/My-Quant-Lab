@@ -494,6 +494,7 @@ export const api = {
   aiTasks: (limit = 50) => request<Array<Record<string, unknown>>>(`/ai/tasks?limit=${limit}`),
   aiModels: () => request<{ models: Array<Record<string, any>> }>('/ai/models'),
   aiPrompts: () => request<{ prompts: Array<Record<string, any>> }>('/ai/prompts'),
+  aiTasksList: (limit = 50) => request<Array<Record<string, any>>>(`/ai/tasks?limit=${limit}`),
   aiUsage: (limit = 100) => request<{ usage: Array<Record<string, any>> }>(`/ai/usage?limit=${limit}`),
   auditForEntity: (entityType: string, entityId: string) =>
     request<{ total: number; events: Array<Record<string, unknown>> }>(

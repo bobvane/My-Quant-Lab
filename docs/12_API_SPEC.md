@@ -235,7 +235,7 @@ re-imported automatically when a new commit lands):
 ### Feature Versions API
 
 `[已实现]` `GET /features/versions`
-`[计划]` `GET /features/{feature_id}/versions`
+`[计划]` `GET /features/{feature_id}/versions`（特征定义为单版本、按 name 唯一，v1.0 不做）
 
 ### Strategy Lineage API
 
@@ -244,15 +244,16 @@ re-imported automatically when a new commit lands):
 ### AI Task Monitoring API
 
 `[已实现]` `GET /ai/tasks`
-`[计划]` `GET /ai/tasks/{task_id}/status`、`POST /ai/tasks/{task_id}/cancel`
+`[已实现]` `GET /ai/tasks/{task_id}/status`（轻量状态轮询，含错误信息）
+`[计划]` `POST /ai/tasks/{task_id}/cancel`（AI 调用为同步执行、无排队，v1.0 不做）
 
 ### Paper Trading API
 
 `[已实现]` `GET /paper/accounts/{account_id}/orders`
 `[已实现]` `GET /paper/accounts/{account_id}/positions`
-`[计划]` `GET /paper/accounts/{account_id}/positions/{asset_id}`
+`[已实现]` `GET /paper/accounts/{account_id}/positions/{asset_id}`
 
 ### Backtest Comparison API
 
 `[已实现]` `GET /backtests/compare?ids=1,2`
-`[计划]` `GET /backtests/comparisons/{comparison_id}`
+`[计划]` `GET /backtests/comparisons/{comparison_id}`（对比为无状态即时计算，不持久化快照，v1.0 不做）

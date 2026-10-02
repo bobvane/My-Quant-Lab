@@ -419,3 +419,18 @@ ADR，保证结果可复现、可解释。
 4. 变更管理：任何触及回测语义、DSL 契约、不可变性的改动，必须先更新 ADR 与 golden/回归测试。
 
 **理由**：给项目一个明确的稳定基线，并约束后续演进的边界。
+
+## ADR-039：v1.0.0 发布前的打磨收尾
+
+**决策**：
+1. **AI 任务面板**：设置页展示 `/ai/tasks`（任务类型/提示词/状态/费用/耗时），点击「详情」调 `/ai/tasks/{id}` 查看结构化输出、Token 用量与错误；任务详情为只读审计用途，密钥永不回显。
+2. **Walk-Forward UI**：回测实验室接入滚动 Walk-Forward（后端 `POST /research/walk-forward` 早已就绪），与 OOS 并列展示「窗口数 / 平均样本外收益 / 一致性」及逐窗口明细。
+3. **Ghostfolio 连接测试**：仪表盘持仓卡片增加「测试连接」（`GET /settings/ghostfolio/test`），仍为只读。
+4. **轻量端点**：新增 `GET /ai/tasks/{task_id}/status`（状态轮询，含错误信息）。
+5. **明确不做**（v1.0 范围冻结，避免臆造）：
+   - `POST /ai/tasks/{task_id}/cancel`：AI 为同步执行、无排队任务可取消；
+   - `GET /backtests/comparisons/{comparison_id}`：对比为无状态即时计算、不持久化；
+   - `GET /features/{feature_id}/versions`：特征定义为单版本、按 name 唯一。
+   - 三者保留 `[计划]` 标注并写入 docs/12 理由。
+
+**理由**：补齐文档/后端已有但 UI 未暴露的能力，让 v1.0.0 的交付与已冻结范围一致；同时用 docs/12 的 `[计划]` 标注把语义不明或需持久化改造的端点显式排除在 v1.0 之外，避免为凑端点而臆造语义。

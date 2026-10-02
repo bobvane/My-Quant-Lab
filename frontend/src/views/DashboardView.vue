@@ -17,6 +17,8 @@ const explainedFor = ref('')
 const gfHoldings = ref<Array<Record<string, any>>>([])
 const gfSummary = ref<Record<string, any> | null>(null)
 const gfConnected = ref(false)
+const gfTesting = ref(false)
+const gfTestResult = ref<Record<string, any> | null>(null)
 const assets = ref<Array<Record<string, any>>>([])
 const seriesList = ref<Array<Record<string, any>>>([])
 
@@ -74,6 +76,19 @@ async function runScan() {
 const actionable = () => signals.value.filter((s) => s.state === 'BUY' || s.state === 'SELL').length
 const waiting = () => signals.value.filter((s) => s.state === 'WAIT').length
 
+async function testGf() {
+  error.value = ''
+  gfTestResult.value = null
+  gfTesting.value = true
+  try {
+    gfTestResult.value = await api.testGhostfolio()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    gfTesting.value = false
+  }
+}
+
 async function explainRow(index: number) {
   const s = signals.value[index]
   if (!s || s.strategy_version_id == null) return
@@ -126,8 +141,16 @@ onMounted(load)
     </div>
 
     <div v-if="gfConnected && gfHoldings.length" class="card" style="margin-top: 14px">
-      <h3>我的 Ghostfolio 持仓</h3>
-      <div class="row" style="align-items: flex-start; gap: 18px; flex-wrap: nowrap">
+      <div class="row" style="justify-content: space-between">
+        <h3 style="margin: 0">我的 Ghostfolio 持仓</h3>
+        <button class="ghost" :disabled="gfTesting" @click="testGf">
+          {{ gfTesting ? '测试中…' : '测试连接' }}
+        </button>
+      </div>
+      <p v-if="gfTestResult" :class="gfTestResult.ok ? 'notice' : 'error'" style="margin: 8px 0 0">
+        连接{{ gfTestResult.ok ? '成功' : '失败' }}：{{ gfTestResult.detail }}
+      </p>
+      <div class="row" style="align-items: flex-start; gap: 18px; flex-wrap: nowrap; margin-top: 10px">
         <div style="flex: 1 1 auto; min-width: 0; overflow-x: auto">
       <table>
         <thead>

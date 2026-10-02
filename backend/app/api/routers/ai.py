@@ -206,6 +206,23 @@ def list_ai_tasks(
     return out
 
 
+@router.get("/ai/tasks/{task_id}/status", summary="Status of one AI task")
+def get_ai_task_status(task_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.domain.models import AITask
+
+    row = db.get(AITask, task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="ai task not found")
+    return {
+        "id": row.id,
+        "task_type": row.task_type,
+        "status": row.status,
+        "error_message": row.error_message,
+        "created_at": row.created_at,
+        "completed_at": row.completed_at,
+    }
+
+
 @router.get("/ai/tasks/{task_id}", summary="One AI task with its stored output")
 def get_ai_task(task_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     from app.domain.models import AITask

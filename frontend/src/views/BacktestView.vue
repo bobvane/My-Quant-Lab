@@ -31,6 +31,10 @@ const running = ref(false)
 const oosResult = ref<Record<string, any> | null>(null)
 const oosPct = ref(0.2)
 const oosRunning = ref(false)
+const wfResult = ref<Record<string, any> | null>(null)
+const wfTrain = ref(200)
+const wfTest = ref(60)
+const wfRunning = ref(false)
 function exportTradesCsv() {
   const trades = detail.value?.trades ?? []
   if (!trades.length) return
@@ -138,6 +142,36 @@ async function runOos() {
     error.value = (e as Error).message
   } finally {
     oosRunning.value = false
+  }
+}
+
+async function runWf() {
+  error.value = ''
+  wfResult.value = null
+  if (versionId.value === null) {
+    error.value = '请先选择策略版本'
+    return
+  }
+  if (!symbol.value.trim()) {
+    error.value = '请填写标的代码'
+    return
+  }
+  if (wfTrain.value + wfTest.value < 80) {
+    error.value = '训练 + 测试窗口合计至少 80 根'
+    return
+  }
+  wfRunning.value = true
+  try {
+    wfResult.value = await api.walkForward(
+      versionId.value,
+      symbol.value.trim(),
+      wfTrain.value,
+      wfTest.value,
+    )
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    wfRunning.value = false
   }
 }
 
@@ -328,6 +362,85 @@ onMounted(async () => {
               <td>样本数</td>
               <td>{{ oosResult.in_sample_bars }}</td>
               <td>{{ oosResult.out_of_sample_bars }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>滚动 Walk-Forward</h3>
+      <p class="muted">
+        滑动窗口重复「训练段 + 测试段」，看样本外表现是否稳定（不同于只切一次的 OOS）。
+        训练段窗口仅用于观察，不做参数拟合。
+      </p>
+      <div class="row">
+        <input
+          v-model.number="wfTrain"
+          type="number"
+          min="60"
+          step="10"
+          style="max-width: 130px"
+          placeholder="训练窗口"
+        />
+        <input
+          v-model.number="wfTest"
+          type="number"
+          min="20"
+          step="10"
+          style="max-width: 130px"
+          placeholder="测试窗口"
+        />
+        <button :disabled="wfRunning || versionId === null" @click="runWf">
+          {{ wfRunning ? '计算中…' : '运行 Walk-Forward' }}
+        </button>
+        <span class="muted">训练 {{ wfTrain }} 根 / 测试 {{ wfTest }} 根</span>
+      </div>
+
+      <div v-if="wfResult" style="margin-top: 10px">
+        <table>
+          <thead>
+            <tr>
+              <th>窗口数</th>
+              <th>平均样本内收益</th>
+              <th>平均样本外收益</th>
+              <th>样本外为正的窗口</th>
+              <th>一致性</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>{{ wfResult.windows }}</td>
+              <td>{{ formatPercent(wfResult.summary.mean_is_return) }}</td>
+              <td>{{ formatPercent(wfResult.summary.mean_oos_return) }}</td>
+              <td>
+                {{ wfResult.summary.positive_oos_windows }} /
+                {{ wfResult.windows }}
+              </td>
+              <td>{{ formatPercent(wfResult.summary.consistency) }}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <table v-if="wfResult.segments?.length" style="margin-top: 10px">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>训练段</th>
+              <th>测试段</th>
+              <th>样本内收益</th>
+              <th>样本外收益</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="seg in wfResult.segments" :key="seg.window">
+              <td>{{ seg.window }}</td>
+              <td class="muted">{{ String(seg.train_start).slice(0, 10) }} → {{ String(seg.train_end).slice(0, 10) }}</td>
+              <td class="muted">{{ String(seg.test_start).slice(0, 10) }} → {{ String(seg.test_end).slice(0, 10) }}</td>
+              <td>{{ formatPercent(seg.in_sample.total_return) }}</td>
+              <td :class="toneOf(seg.out_of_sample.total_return)">
+                {{ formatPercent(seg.out_of_sample.total_return) }}
+              </td>
             </tr>
           </tbody>
         </table>

@@ -234,6 +234,60 @@ def test_paper_account_lifecycle(client) -> None:
     assert reset.json()["reset_count"] == 1
 
 
+def test_paper_position_by_asset(client, db_session) -> None:
+    from app.domain.models import Asset, PaperPosition
+
+    created = client.post(
+        "/api/v1/paper/accounts",
+        json=PaperAccountCreate(name="Pos Test", initial_cash=10_000).model_dump(),
+    )
+    account_id = created.json()["id"]
+
+    asset = Asset(symbol="DEMO-BTC", asset_class="crypto", currency="USD")
+    db_session.add(asset)
+    db_session.flush()
+    position = PaperPosition(
+        account_id=account_id, asset_id=asset.id, quantity=2, avg_cost=100, realized_pnl=0
+    )
+    db_session.add(position)
+    db_session.commit()
+
+    ok = client.get(f"/api/v1/paper/accounts/{account_id}/positions/{asset.id}")
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["asset_id"] == asset.id
+    assert body["quantity"] == 2.0
+
+    missing = client.get(f"/api/v1/paper/accounts/{account_id}/positions/999999")
+    assert missing.status_code == 404
+
+    no_account = client.get("/api/v1/paper/accounts/999999/positions/1")
+    assert no_account.status_code == 404
+
+
+def test_ai_task_status_endpoint(client, db_session) -> None:
+    from app.domain.models import AITask
+
+    task = AITask(
+        task_type="signal_explanation",
+        prompt_name="signal_explain",
+        prompt_version="1.0.0",
+        input_hash="test-input-hash",
+        status="completed",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    ok = client.get(f"/api/v1/ai/tasks/{task.id}/status")
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["id"] == task.id
+    assert body["status"] == "completed"
+
+    missing = client.get("/api/v1/ai/tasks/999999/status")
+    assert missing.status_code == 404
+
+
 def test_settings_never_return_secrets(client) -> None:
     response = client.put(
         "/api/v1/settings",

@@ -144,6 +144,9 @@ const providers = ref<AIProviderRecord[]>([])
 const aiModels = ref<Array<Record<string, any>>>([])
 const aiPrompts = ref<Array<Record<string, any>>>([])
 const aiUsage = ref<Array<Record<string, any>>>([])
+const aiTasks = ref<Array<Record<string, any>>>([])
+const taskDetail = ref<Record<string, any> | null>(null)
+const taskDetailId = ref<number | null>(null)
 const filterEntityType = ref('')
 const filterEntityId = ref('')
 
@@ -172,7 +175,7 @@ const busyId = ref<number | null>(null)
 async function load() {
   error.value = ''
   try {
-    const [audit, settings, ai, notification, models, usage, notifyLog, prompts] =
+    const [audit, settings, ai, notification, models, usage, notifyLog, prompts, tasks] =
       await Promise.all([
         api.audit(),
         api.settings(),
@@ -182,9 +185,11 @@ async function load() {
         api.aiUsage().catch(() => ({ usage: [] })),
         api.notificationEvents().catch(() => ({ events: [] })),
         api.aiPrompts().catch(() => ({ prompts: [] })),
+        api.aiTasksList().catch(() => []),
       ])
     notifyEvents.value = notifyLog.events
     aiPrompts.value = prompts.prompts
+    aiTasks.value = tasks
     events.value = audit.events
     environment.value = (settings.environment as Record<string, unknown>) ?? {}
     systemSettings.value = (settings.settings as Array<Record<string, any>>) ?? []
@@ -373,6 +378,33 @@ async function remove(row: AIProviderRecord) {
   }
 }
 
+async function openTask(task: Record<string, any>) {
+  error.value = ''
+  const id = Number(task.id)
+  if (taskDetailId.value === id) {
+    taskDetail.value = null
+    taskDetailId.value = null
+    return
+  }
+  taskDetailId.value = id
+  taskDetail.value = null
+  try {
+    taskDetail.value = await api.aiTask(id)
+  } catch (e) {
+    error.value = (e as Error).message
+    taskDetailId.value = null
+  }
+}
+
+function prettyJson(value: unknown): string {
+  if (value === null || value === undefined) return '—'
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -532,6 +564,91 @@ onMounted(load)
         </tbody>
       </table>
       <p v-else class="muted">暂无 AI 调用记录。</p>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>AI 任务记录（最近 {{ aiTasks.length }} 条）</h3>
+      <p class="muted">
+        每次 AI 解释都会留下任务记录（提示词版本、模型、费用、耗时）。
+        相同输入的再次解释会命中缓存、费用为 0。密钥永不写入任务记录。
+      </p>
+      <table v-if="aiTasks.length">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>时间</th>
+            <th>任务</th>
+            <th>提示词</th>
+            <th>状态</th>
+            <th>费用 USD</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in aiTasks" :key="String(t.id)">
+            <td>{{ t.id }}</td>
+            <td class="muted">{{ formatDateTime(String(t.created_at)) }}</td>
+            <td>{{ t.task_type }}</td>
+            <td class="muted">{{ t.prompt_name }} v{{ t.prompt_version }}</td>
+            <td>{{ t.status }}</td>
+            <td>{{ formatNumber(t.cost_usd, 4) }}</td>
+            <td>
+              <button class="ghost" @click="openTask(t)">
+                {{ taskDetailId === t.id ? '收起' : '详情' }}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">暂无 AI 任务记录。配置 provider 后使用「AI 解释」按钮即可产生。</p>
+
+      <div v-if="taskDetail" class="card" style="margin-top: 10px; padding: 10px 12px">
+        <div class="row" style="align-items: center; justify-content: space-between">
+          <h3 style="margin: 0">任务 #{{ taskDetail.id }} 详情</h3>
+          <button class="ghost" @click="openTask(taskDetail)">收起</button>
+        </div>
+        <table style="margin-top: 8px">
+          <tbody>
+            <tr>
+              <td class="muted">状态</td>
+              <td>{{ taskDetail.status }}</td>
+            </tr>
+            <tr>
+              <td class="muted">任务 / 提示词</td>
+              <td>{{ taskDetail.task_type }} · {{ taskDetail.prompt_name }} v{{ taskDetail.prompt_version }}</td>
+            </tr>
+            <tr>
+              <td class="muted">Provider / 模型</td>
+              <td>{{ taskDetail.provider_id ?? '—' }} / {{ taskDetail.model_id ?? '—' }}</td>
+            </tr>
+            <tr>
+              <td class="muted">输入哈希</td>
+              <td><code>{{ taskDetail.input_hash }}</code></td>
+            </tr>
+            <tr>
+              <td class="muted">费用 USD</td>
+              <td>{{ formatNumber(taskDetail.cost_usd, 4) }}</td>
+            </tr>
+            <tr>
+              <td class="muted">创建 / 完成</td>
+              <td>
+                {{ formatDateTime(String(taskDetail.created_at)) }} /
+                {{ formatDateTime(taskDetail.completed_at ? String(taskDetail.completed_at) : null) }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p v-if="taskDetail.error_message" class="error" style="margin-top: 8px">
+          错误：{{ taskDetail.error_message }}
+        </p>
+
+        <h4 style="margin: 10px 0 4px">Token 用量</h4>
+        <pre class="code-block">{{ prettyJson(taskDetail.token_usage) }}</pre>
+
+        <h4 style="margin: 10px 0 4px">输出（结构化解释）</h4>
+        <pre class="code-block">{{ prettyJson(taskDetail.output) }}</pre>
+      </div>
     </div>
 
     <div class="card" style="margin-top: 14px">

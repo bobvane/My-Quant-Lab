@@ -24,16 +24,22 @@ from typing import Any
 import pandas as pd
 
 from app.research.engine import resolve_parameters, run_backtest
-from app.strategies.dsl import StrategySpec
+from app.strategies.dsl import StrategySpec, merge_spec_overrides
 
 __all__ = [
     "SENSITIVITY_VERSION",
     "MAX_GRID_POINTS",
+    "EXECUTION_AXES",
+    "TRACKED_METRICS",
     "expand_grid",
     "run_sensitivity",
 ]
 
 SENSITIVITY_VERSION = "1.0.0"
+
+# Grid keys that address `execution.sizing` instead of a strategy parameter. Kept
+# deliberately tiny: each one is a documented, validated override.
+EXECUTION_AXES: frozenset[str] = frozenset({"risk_pct"})
 
 # A sweep multiplies the cost of one backtest by the number of grid points. Cap it
 # so a typo cannot pin a NAS CPU for an hour; the API surfaces this as a 422.
@@ -99,15 +105,25 @@ def run_sensitivity(
             f"unsupported metric '{metric}'; choose one of {', '.join(TRACKED_METRICS)}"
         )
 
-    # Reject unknown axes up front: silently sweeping nothing would produce a
-    # single-point report that looks like a real sweep.
+    # A grid key is either a strategy parameter (resolved by period_ref) or one of the
+    # few execution axes this sweep understands. `risk_pct` lives in `execution.sizing`
+    # rather than `parameters`, but "does this strategy survive a different risk
+    # budget?" is exactly the kind of neighbourhood question this report exists to
+    # answer (docs/23 §7).
     effective_base, _ = resolve_parameters(spec, base_parameters)
-    unknown_axes = sorted(key for key in grid if key not in effective_base)
+    execution_axes = [key for key in grid if key in EXECUTION_AXES]
+    if len(execution_axes) > 1:
+        raise ValueError(
+            "only one execution axis per sweep, got: " + ", ".join(sorted(execution_axes))
+        )
+    param_axes = [key for key in grid if key not in EXECUTION_AXES]
+    unknown_axes = sorted(key for key in param_axes if key not in effective_base)
     if unknown_axes:
         raise ValueError(
             "grid axis/axes not declared by the strategy: "
             + ", ".join(unknown_axes)
             + f"; this strategy declares: {', '.join(sorted(effective_base)) or '(none)'}"
+            + f"; execution axes available: {', '.join(sorted(EXECUTION_AXES))}"
         )
 
     overrides = expand_grid(grid)
@@ -120,9 +136,21 @@ def run_sensitivity(
 
     points: list[dict[str, Any]] = []
     for combo in overrides:
-        params = {**effective_base, **combo}
+        exec_combo = {k: v for k, v in combo.items() if k in EXECUTION_AXES}
+        params = {**effective_base, **{k: v for k, v in combo.items() if k not in EXECUTION_AXES}}
+        point_spec = spec
+        if exec_combo:
+            # risk_per_trade is the only mode where risk_pct has any effect, so a sweep
+            # of risk_pct implies that mode unless the strategy already asks for it.
+            if spec.execution.sizing.mode != "risk_per_trade":
+                point_spec = merge_spec_overrides(
+                    spec,
+                    {"execution": {"sizing": {"mode": "risk_per_trade", **exec_combo}}},
+                )
+            else:
+                point_spec = merge_spec_overrides(spec, {"execution": {"sizing": exec_combo}})
         result = run_backtest(
-            spec,
+            point_spec,
             bars,
             strategy_version=strategy_version,
             timeframe=timeframe,

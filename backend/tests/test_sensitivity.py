@@ -164,6 +164,52 @@ def test_identical_metrics_with_different_parameters_still_change_the_hash(
     assert report["points"][0]["result_hash"] == first.result_hash
 
 
+def test_sweep_of_risk_pct_is_an_execution_axis(sample_bars: pd.DataFrame) -> None:
+    """``risk_pct`` sweeps position risk, not a strategy parameter (docs/23 §7).
+
+    It lives in ``execution.sizing``, so it must be accepted even though the strategy
+    does not declare it — and each point must genuinely change the sizing.
+    """
+
+    report = run_sensitivity(
+        _spec(),
+        sample_bars,
+        grid={"risk_pct": [0.005, 0.02, 0.05]},
+        metric="total_return",
+    )
+    assert report["grid_points"] == 3
+    assert report["axes"] == {"risk_pct": [0.005, 0.02, 0.05]}
+    # Different risk budgets must not collapse to one computation.
+    assert len({p["result_hash"] for p in report["points"]}) == 3
+
+
+def test_risk_pct_sweep_can_be_combined_with_a_parameter(sample_bars: pd.DataFrame) -> None:
+    report = run_sensitivity(
+        _spec(),
+        sample_bars,
+        grid={"trend_period": [5, 20], "risk_pct": [0.01, 0.03]},
+    )
+    assert report["grid_points"] == 4
+    assert set(report["axes"]) == {"trend_period", "risk_pct"}
+    assert len({p["result_hash"] for p in report["points"]}) == 4
+
+
+def test_other_sizing_fields_are_not_silently_accepted(sample_bars: pd.DataFrame) -> None:
+    """Only the documented execution axes are sweeps; anything else must be rejected.
+
+    ``atr_multiple`` is a real ``execution.sizing`` field but is not an allowed axis, so
+    it has to fail as an undeclared parameter rather than quietly doing nothing.
+    """
+
+    with pytest.raises(ValueError, match="not declared by the strategy"):
+        run_sensitivity(_spec(), sample_bars, grid={"risk_pct": [0.01], "atr_multiple": [2.0]})
+
+
+def test_unknown_axis_error_mentions_execution_axes(sample_bars: pd.DataFrame) -> None:
+    with pytest.raises(ValueError, match="execution axes available"):
+        run_sensitivity(_spec(), sample_bars, grid={"nope": [1, 2]})
+
+
 def test_sweep_rejects_unknown_grid_axis(sample_bars: pd.DataFrame) -> None:
     with pytest.raises(ValueError, match="not declared by the strategy"):
         run_sensitivity(_spec(), sample_bars, grid={"nope": [1, 2]})

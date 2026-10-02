@@ -109,6 +109,9 @@ API base: `/api/v1`
 - 未知网格轴 → 422；网格点数 > 144 → 422；目标指标不在白名单 → 422。
 - 目标指标未定义时该点 `objective = null`，并从排序与统计中剔除（未知不当 0）。
 - 每次扫描写审计事件 `sensitivity_completed`。
+- 网格可混入**一个执行轴** `risk_pct`（docs/23 §6）：它属于 `execution.sizing` 而非策略
+  参数；若策略不是 `risk_per_trade`，该点按 `risk_per_trade` 计算（否则扫出来全是相同的
+  点）。其他 `sizing` 字段会被当作未声明参数拒绝。
 
 ## Monte Carlo
 

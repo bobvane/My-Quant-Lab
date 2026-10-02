@@ -85,10 +85,30 @@ qty ≤ cash × 0.999 / fill
   - 默认模式与显式 `fixed_fraction` 结果完全一致；
   - 风险参数非法（`risk_pct ≤ 0`、`> 1`）被拒绝。
 
-## 6. 实现位置
+## 6. 把风险预算也扫一遍（参数敏感性分析）
+
+`POST /research/sensitivity` 的 `grid` 除了策略参数，还接受一个**执行轴**：
+
+```json
+"grid": { "fast_period": [5, 10, 20], "risk_pct": [0.005, 0.01, 0.02] }
+```
+
+- 目前只有 `risk_pct` 是允许的执行轴（`EXECUTION_AXES`），它落在 `execution.sizing`
+  而不是 `parameters`，所以不属于 `period_ref` 体系。
+- 扫 `risk_pct` 时，若策略本身不是 `risk_per_trade`，该点会**按 `risk_per_trade`
+  计算**（否则 `risk_pct` 对固定比例模式毫无作用，扫出来的会是一排相同的点）。
+- 每次扫描**最多一个**执行轴；其他 `sizing` 字段（如 `atr_multiple`）会被当作未声明的
+  参数拒绝，而不是静默忽略。
+- 未知轴的报错会一并列出可用的执行轴，便于发现拼写错误。
+
+这样就能同时回答两类问题：「入场参数变一点结论会不会翻转」与「换个风险预算结论会不会翻转」。
+
+## 7. 实现位置
 
 | 位置 | 作用 |
 |---|---|
-| `backend/app/strategies/dsl.py` | `SizingSpec` / `ExecutionSpec.sizing` |
+| `backend/app/strategies/dsl.py` | `SizingSpec` / `ExecutionSpec.sizing` / `merge_spec_overrides` |
 | `backend/app/research/engine.py` | `_position_quantity`（唯一的定量入口，market 与挂单两条路径共用） |
+| `backend/app/research/sensitivity.py` | `EXECUTION_AXES`：把 `risk_pct` 接到网格扫描 |
 | `backend/tests/test_sizing.py` | 单元 + 集成测试 |
+| `backend/tests/test_sensitivity.py` | 执行轴扫描、未知轴拒绝、组合扫描 |

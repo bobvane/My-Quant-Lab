@@ -107,6 +107,46 @@ def list_outcomes(
     ]
 
 
+@router.get("/outcome-summary", summary="Aggregated signal-outcome statistics")
+def outcome_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Win rate / average PnL across evaluated signal outcomes (docs/09 §8).
+
+    Pure aggregation of stored outcomes — no recomputation, no AI.
+    """
+
+    from app.domain.models import SignalOutcome
+
+    rows = db.execute(
+        select(SignalOutcome, Signal).join(Signal, Signal.id == SignalOutcome.signal_id)
+    ).all()
+    buckets: dict[str, list[float]] = {}
+
+    def bucket_for(token: str) -> list[float]:
+        return buckets.setdefault(token, [])
+
+    for outcome, signal in rows:
+        pnl = float(outcome.pnl_pct) if outcome.pnl_pct is not None else None
+        if pnl is None:
+            continue
+        bucket_for("ALL").append(pnl)
+        bucket_for(f"direction:{signal.direction}").append(pnl)
+        bucket_for(f"timeframe:{signal.timeframe}").append(pnl)
+        bucket_for(f"state:{signal.state}").append(pnl)
+
+    def summarise(values: list[float]) -> dict[str, Any]:
+        if not values:
+            return {"count": 0, "win_rate": None, "avg_pnl_pct": None, "total_pnl_pct": None}
+        wins = sum(1 for v in values if v > 0)
+        return {
+            "count": len(values),
+            "win_rate": round(wins / len(values), 4),
+            "avg_pnl_pct": round(sum(values) / len(values), 4),
+            "total_pnl_pct": round(sum(values), 4),
+        }
+
+    return {"evaluated": len(rows), "groups": {k: summarise(v) for k, v in sorted(buckets.items())}}
+
+
 @router.get("/{signal_id}", response_model=SignalOut, summary="Get one signal")
 def get_signal(signal_id: int, db: Session = Depends(get_db)) -> SignalOut:
     row = db.get(Signal, signal_id)

@@ -15,6 +15,7 @@ Security contract (non-negotiable):
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -44,6 +45,12 @@ MAX_FILE_BYTES = 200 * 1024
 MAX_TREE_ENTRIES = 2000
 DEFAULT_MAX_FILES = 12
 FETCH_RETRIES = 1
+
+# Wall-clock ceiling for one repository fetch. The per-request timeout bounds a
+# single call, not the loop: 30 files x 2 attempts x 15s is 15 minutes of spinner
+# before anyone hears back. A fetch that runs out of budget stops and reports the
+# files it never tried, which is information the caller can act on.
+DEFAULT_FETCH_BUDGET_SECONDS = 120.0
 
 
 class GitHubError(RuntimeError):
@@ -81,6 +88,11 @@ class FetchCoverage:
     skip reasons were computed here and then dropped. Everything the report needs is
     counted at the moment it happens, because that is the only place the candidate
     list, the cap and the failures are all visible at once.
+
+    ``not_attempted_files`` counts every candidate this fetch never tried, whether
+    the cap stopped it or ``max_seconds`` did; ``budget_exhausted`` says which of the
+    two happened, because "lower max_files" and "raise the budget" are different
+    instructions for the reader.
     """
 
     candidate_files: int
@@ -92,6 +104,8 @@ class FetchCoverage:
     not_attempted_files: int
     not_attempted_python_files: int
     cap: int
+    max_seconds: float | None = None
+    budget_exhausted: bool = False
 
     @property
     def complete(self) -> bool:
@@ -156,10 +170,12 @@ class GitHubClient:
         token: str | None = None,
         timeout: float = 15.0,
         user_agent: str = "my-quant-lab-importer/1.0",
+        total_budget: float = DEFAULT_FETCH_BUDGET_SECONDS,
     ) -> None:
         self._token = token
         self._timeout = timeout
         self._user_agent = user_agent
+        self._total_budget = total_budget
 
     # -- low-level HTTP (override in tests) -------------------------------
 
@@ -174,7 +190,9 @@ class GitHubClient:
 
         self._assert_allowed(url)
         try:
-            response = httpx.get(url, headers=self._headers("application/vnd.github+json"))
+            response = httpx.get(
+                url, headers=self._headers("application/vnd.github+json"), timeout=self._timeout
+            )
         except Exception as exc:
             raise GitHubError(f"network error fetching {self._safe_url(url)}: {exc}") from exc
         self._check(response, url)
@@ -244,7 +262,12 @@ class GitHubClient:
         )
 
     def fetch_repository(
-        self, repo_url: str, ref: str | None = None, *, max_files: int = DEFAULT_MAX_FILES
+        self,
+        repo_url: str,
+        ref: str | None = None,
+        *,
+        max_files: int = DEFAULT_MAX_FILES,
+        max_seconds: float | None = None,
     ) -> tuple[RepoMeta, list[RepoFile], FetchCoverage]:
         """Fetch metadata + candidate files. Never executes anything.
 
@@ -253,12 +276,19 @@ class GitHubClient:
         once on transient network errors; a file that still fails is recorded
         as skipped (with reason) instead of failing the whole analysis.
 
+        ``max_seconds`` (defaults to the client's ``total_budget``) bounds the
+        whole loop, not one request: when it runs out the remaining candidates are
+        left unattempted and reported as such, so a slow network produces a
+        smaller *and honest* report instead of a long silence.
+
         Returns the metadata, the files, and a :class:`FetchCoverage` that says
         how much of the candidate list the returned files actually cover: the
         skipped entries and the candidates beyond the cap are both counted, so a
         caller can report what was *not* read instead of implying it read it all.
         """
 
+        budget = self._total_budget if max_seconds is None else max_seconds
+        started = time.monotonic()
         owner, name = parse_repo_url(repo_url)
         meta_raw = self.get_repo(owner, name)
         default_branch = str(meta_raw.get("default_branch") or "main")
@@ -286,9 +316,14 @@ class GitHubClient:
 
         cap = max(1, min(max_files, MAX_FILES_TO_FETCH))
         files: list[RepoFile] = []
-        skipped_rest = max(0, len(candidates) - cap)
         skipped_python = 0
+        attempted = 0
+        budget_exhausted = False
         for entry in candidates[:cap]:
+            if time.monotonic() - started >= budget:
+                budget_exhausted = True
+                break
+            attempted += 1
             path = str(entry.get("path", ""))
             size = int(entry.get("size") or 0)
             sha = str(entry.get("sha") or "")
@@ -314,24 +349,30 @@ class GitHubClient:
                     skipped_python += 1
                 continue
             files.append(RepoFile(path=path, size=size, sha=sha, content=content))
-        if skipped_rest:
-            logger.info("skipped %d files beyond the fetch cap", skipped_rest)
 
-        beyond = candidates[cap:]
+        # Candidates the cap already excluded, plus any the budget stopped short of.
+        attempted_paths = {f.path for f in files}
+        beyond = [e for e in candidates if str(e.get("path", "")) not in attempted_paths]
+        skipped_rest = len(beyond)
+        if skipped_rest:
+            logger.info("skipped %d files beyond the fetch cap or budget", skipped_rest)
+
         coverage = FetchCoverage(
             candidate_files=len(candidates),
             candidate_python_files=sum(
                 1 for e in candidates if str(e.get("path", "")).lower().endswith(".py")
             ),
-            attempted_files=min(cap, len(candidates)),
+            attempted_files=attempted,
             downloaded_files=sum(1 for f in files if f.content is not None),
             skipped_files=sum(1 for f in files if f.content is None),
             skipped_python_files=skipped_python,
-            not_attempted_files=len(beyond),
+            not_attempted_files=skipped_rest,
             not_attempted_python_files=sum(
                 1 for e in beyond if str(e.get("path", "")).lower().endswith(".py")
             ),
             cap=cap,
+            max_seconds=budget,
+            budget_exhausted=budget_exhausted,
         )
         return meta, files, coverage
 

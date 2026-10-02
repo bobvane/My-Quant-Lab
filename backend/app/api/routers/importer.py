@@ -97,7 +97,10 @@ def analyze_repository(payload: GithubAnalyzeRequest) -> GithubAnalyzeOut:
     try:
         client = GitHubClient(token=payload.token)
         meta, files, fetch_coverage = client.fetch_repository(
-            payload.repo_url, payload.ref, max_files=payload.max_files
+            payload.repo_url,
+            payload.ref,
+            max_files=payload.max_files,
+            max_seconds=payload.max_seconds,
         )
     except GitHubError as exc:
         raise HTTPException(status_code=502, detail=f"github fetch failed: {exc}") from exc

@@ -531,6 +531,12 @@ class GithubAnalyzeRequest(BaseModel):
         description="Optional GitHub token to raise API rate limits; never stored",
     )
     max_files: int = Field(default=12, ge=1, le=30, description="Cap on fetched files (.py first)")
+    max_seconds: int = Field(
+        default=120,
+        ge=10,
+        le=600,
+        description="Wall-clock budget for the whole fetch; the rest is reported unread",
+    )
 
 
 class GithubAnalyzeOut(BaseModel):

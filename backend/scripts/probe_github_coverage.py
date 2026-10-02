@@ -73,8 +73,12 @@ class _StubGitHub(GitHubClient):
         return _SOURCE
 
 
-def _scenario(cap: int) -> tuple[RepoMeta, list[RepoFile], FetchCoverage]:
-    return _StubGitHub().fetch_repository("https://github.com/acme/strat", max_files=cap)
+def _scenario(
+    cap: int, seconds: float | None = None
+) -> tuple[RepoMeta, list[RepoFile], FetchCoverage]:
+    return _StubGitHub().fetch_repository(
+        "https://github.com/acme/strat", max_files=cap, max_seconds=seconds
+    )
 
 
 def main() -> int:
@@ -85,14 +89,15 @@ def main() -> int:
     print(f"{_TOO_LARGE} exceeds the byte limit; {_UNFETCHABLE} raises on download.")
     print()
 
-    for cap in (5, 22):
-        meta, files, fetch = _scenario(cap)
+    for cap, seconds in ((5, None), (22, None), (20, 0.0)):
+        meta, files, fetch = _scenario(cap, seconds)
         findings = analyze_repository_files(files)
         _, draft_warnings = build_draft_dsl(meta, findings)
         coverage = build_coverage(fetch, findings)
         warnings = draft_warnings + coverage_warnings(coverage)
 
-        print(f"===== cap = {cap} =====")
+        label = f"cap = {cap}" + (f", max_seconds = {seconds}" if seconds is not None else "")
+        print(f"===== {label} =====")
         print("-- fetch_repository returned --")
         for repo_file in files:
             state = "content" if repo_file.content is not None else "skipped"
@@ -114,8 +119,9 @@ def main() -> int:
 
     print(
         "The response can now distinguish 'analysed 3 files' from 'analysed 3 of 30',\n"
-        "it says why each skipped file was skipped, and it no longer counts inventoried\n"
-        "non-Python files as parsed."
+        "it says why each skipped file was skipped, it no longer counts inventoried\n"
+        "non-Python files as parsed, and a fetch that ran out of its time budget says so\n"
+        "instead of blaming the cap."
     )
     return 0
 

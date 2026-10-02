@@ -162,6 +162,7 @@ def test_unread_python_files_block_an_unattended_import(db_session, monkeypatch)
     snapshot = db_session.query(GitHubSnapshot).one()
     assert snapshot.extraction_json["reason"] == "incomplete_analysis"
     assert snapshot.extraction_json["coverage"]["unread_python_files"] == 5
+    assert snapshot.extraction_json["transient"] is False  # a cap-limited read is stable
     assert any("never fetched" in w for w in snapshot.extraction_json["warnings"])
 
 
@@ -185,3 +186,35 @@ def test_unread_non_python_files_do_not_block_an_import(db_session, monkeypatch)
     snapshot = db_session.query(GitHubSnapshot).one()
     assert snapshot.extraction_json["coverage"]["not_attempted_files"] == 10
     assert snapshot.extraction_json["coverage"]["complete"] is False
+
+
+def test_a_fetch_that_ran_out_of_time_is_retried_next_run(db_session, monkeypatch) -> None:
+    """A transient gap must not be marked as seen (ADR-057).
+
+    A read limited by the cap will read exactly as much next time, so that gap is
+    recorded against the commit. A read that ran out of its time budget may
+    succeed on a quieter network, so the source must stay on the old commit and
+    try again instead of abandoning the update forever.
+    """
+
+    coverage = _complete_coverage(
+        candidate_files=40,
+        candidate_python_files=35,
+        attempted_files=4,
+        downloaded_files=4,
+        not_attempted_files=36,
+        not_attempted_python_files=31,
+        max_seconds=120.0,
+        budget_exhausted=True,
+    )
+    _install_fake_client(monkeypatch, "newsha", coverage)
+    source = _seed_importable_source(db_session)
+
+    assert check_source(db_session, source) == "incomplete"
+    assert source.last_import_status == "incomplete"
+    assert source.current_commit == "oldsha"  # not seen: the next run retries
+    assert db_session.query(StrategyVersion).count() == 1
+    db_session.commit()
+    snapshot = db_session.query(GitHubSnapshot).one()
+    assert snapshot.extraction_json["transient"] is True
+    assert any("stopped after" in w for w in snapshot.extraction_json["warnings"])

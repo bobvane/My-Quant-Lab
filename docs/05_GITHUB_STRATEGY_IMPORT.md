@@ -53,9 +53,21 @@ V1 可以完全不执行原始代码，只做 AST/文本/AI 提取和 DSL 重建
 "不可信输入"意味着报告本身也不能夸大它做过的事。分析报告必须回答：**候选文件共几个、实际下载几个、真的解析几个、只登记几个、跳过几个及原因、有几个候选从未尝试**。
 
 - `POST /importer/github/analyze` 返回 `coverage` 块、`files_parsed` / `files_inventoried` / `files_skipped[{path, reason}]`，并把覆盖率结论写进 `warnings`（"25 candidate file(s) were never fetched…"）。
-- `analysis_version`（当前 `1.1.0`）随字段语义变化提升：`files_scanned` 曾把"只登记未解析"的非 Python 文件也算成已扫描，`files_skipped` 曾只有路径、丢掉 `skipped_reason`。
-- **无人值守的 watcher 不得从不完整的读取中自动导入**：若还有 Python 文件没被读到（超出抓取上限或下载失败），`check_source` 记 `last_import_status = "incomplete"`、写 `GitHubSnapshot.extraction_json = {"imported": false, "reason": "incomplete_analysis", "coverage": ..., "warnings": ...}`，并且**不新建策略版本**——变化的规则可能就在没读到的文件里，导入部分草案等于静默降级策略。
+- `analysis_version`（当前 `1.2.0`）随字段语义变化提升：`files_scanned` 曾把"只登记未解析"的非 Python 文件也算成已扫描，`files_skipped` 曾只有路径、丢掉 `skipped_reason`；`1.2.0` 起 `coverage` 区分"没读是因为上限"与"没读是因为时间预算用完了"。
+- **无人值守的 watcher 不得从不完整的读取中自动导入**：若还有 Python 文件没被读到（超出抓取上限或下载失败），`check_source` 记 `last_import_status = "incomplete"`、写 `GitHubSnapshot.extraction_json = {"imported": false, "reason": "incomplete_analysis", "transient": ..., "coverage": ..., "warnings": ...}`，并且**不新建策略版本**——变化的规则可能就在没读到的文件里，导入部分草案等于静默降级策略。
 - 只登记不解析的 `.md`/`.json` **不**阻断导入（这是常见情况），但会出现在报告里。
+
+### 4.2 抓取时间预算（ADR-057）
+
+单次请求的超时**约束不了整个循环**：30 个文件 × 2 次尝试 × 15s 是十几分钟的等待。所以 `fetch_repository` 还接受一个**墙钟预算** `max_seconds`（默认 `DEFAULT_FETCH_BUDGET_SECONDS = 120`，端点字段 `max_seconds` 默认 120、范围 10–600）。预算用完时：
+
+- 停止抓取，剩余候选记入 `coverage.not_attempted_files`，并把 `coverage.budget_exhausted` 置为 `true`、`max_seconds` 记下实际预算值；
+- `warnings` 说的是"the fetch stopped after 120s: N candidate file(s) were left unread. Raise the time budget or lower max_files…"，而不是把责任推给上限——两者的建议相反（`max_files` 根本没被碰到）；
+- 客户端可以据此区分"仓库太大"（上限）与"网络太慢"（预算），后者重试有意义。
+
+抓取**必须**把配置的超时传给每一个 HTTP 调用：`GitHubClient(timeout=15.0)` 曾经只作用于文件下载，`get_json`（repo / tree / commit）静默使用 httpx 的默认值。
+
+watcher 里这条区别决定了是否"记为已见"：上限造成的缺口是结构性的（同一个 commit 再读一次结果相同），标记已见以免每次调度都重复几十次请求；预算/网络造成的缺口是**瞬时**的（`extraction_json["transient"] = true`），此时**不推进 `current_commit`**，下一轮调度会重试——否则一次网络抖动就等于永久放弃这次更新。
 
 ## 5. AI Extraction 输出
 

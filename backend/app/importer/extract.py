@@ -33,7 +33,7 @@ __all__ = [
 
 # Bumped when the analysis report changes shape: 1.1.0 separates parsed from
 # inventoried files, keeps each skip reason, and adds the coverage block.
-ANALYSIS_VERSION = "1.1.0"
+ANALYSIS_VERSION = "1.2.0"
 
 MAX_SNIPPET_CHARS = 400
 
@@ -560,6 +560,8 @@ def build_coverage(fetch: FetchCoverage, findings: AnalysisResult) -> dict[str, 
         "not_attempted_files": fetch.not_attempted_files,
         "unread_python_files": fetch.unread_python_files,
         "complete": fetch.complete,
+        "max_seconds": fetch.max_seconds,
+        "budget_exhausted": fetch.budget_exhausted,
     }
 
 
@@ -568,11 +570,20 @@ def coverage_warnings(coverage: dict[str, Any]) -> list[str]:
     messages: list[str] = []
     not_attempted = int(coverage["not_attempted_files"])
     if not_attempted:
-        messages.append(
-            f"{not_attempted} candidate file(s) were never fetched: the cap is "
-            f"{coverage['cap']} of {coverage['candidate_files']} candidate file(s). "
-            "Raise max_files to read more; this report covers only the files listed above."
-        )
+        if coverage.get("budget_exhausted"):
+            budget = coverage.get("max_seconds")
+            limit = f"{float(budget):.0f}s" if budget is not None else "its time budget"
+            messages.append(
+                f"the fetch stopped after {limit}: {not_attempted} candidate file(s) were "
+                "left unread. Raise the time budget or lower max_files to cover more; this "
+                "report covers only the files listed above."
+            )
+        else:
+            messages.append(
+                f"{not_attempted} candidate file(s) were never fetched: the cap is "
+                f"{coverage['cap']} of {coverage['candidate_files']} candidate file(s). "
+                "Raise max_files to read more; this report covers only the files listed above."
+            )
     if int(coverage["unread_python_files"]):
         messages.append(
             f"{coverage['unread_python_files']} Python file(s) were not read, so rules that "

@@ -6,6 +6,7 @@ overriding the client's two low-level methods.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from app.importer import (
@@ -17,7 +18,12 @@ from app.importer import (
     parse_repo_url,
     sanitize_untrusted_text,
 )
-from app.importer.github_client import RepoFile, RepoMeta
+from app.importer.extract import AnalysisResult, build_coverage, coverage_warnings
+from app.importer.github_client import (
+    DEFAULT_FETCH_BUDGET_SECONDS,
+    RepoFile,
+    RepoMeta,
+)
 from app.strategies.dsl import StrategySpec
 from app.strategies.validator import validate_strategy
 
@@ -302,6 +308,68 @@ def test_fetch_respects_cap_and_prefers_python() -> None:
     assert coverage.cap == 5
     assert coverage.complete is False
     assert coverage.unread_python_files == 5
+    # The cap is what stopped this read, so the advice is "raise max_files" and
+    # the gap is not a transient one.
+    assert coverage.budget_exhausted is False
+    assert coverage.max_seconds == DEFAULT_FETCH_BUDGET_SECONDS
+
+
+def test_a_fetch_that_runs_out_of_its_budget_stops_early() -> None:
+    """The budget bounds the whole loop, not one request (ADR-057).
+
+    A per-request timeout cannot bound N files of retries: 30 files x 2 attempts
+    x 15s is fifteen minutes before anyone hears back.
+    """
+
+    class ManyFiles(_FakeGitHub):
+        def get_json(self, url: str):  # type: ignore[override]
+            if "/git/trees/" in url:
+                return {
+                    "tree": [
+                        {"path": f"mod{i}.py", "type": "blob", "size": 10, "sha": f"p{i}"}
+                        for i in range(10)
+                    ],
+                    "truncated": False,
+                }
+            return super().get_json(url)
+
+        def get_text(self, url: str, *, max_bytes: int = 1) -> str:  # type: ignore[override]
+            return "x = 1"
+
+    client = ManyFiles()
+    _, files, coverage = client.fetch_repository(
+        "https://github.com/acme/strat", max_files=10, max_seconds=0
+    )
+    assert files == []
+    assert coverage.attempted_files == 0
+    assert coverage.candidate_files == 10
+    assert coverage.not_attempted_files == 10
+    assert coverage.not_attempted_python_files == 10
+    assert coverage.budget_exhausted is True
+    assert coverage.max_seconds == 0
+    assert coverage.complete is False
+    # The instruction has to name the budget here: "raise max_files" would be
+    # wrong advice when max_files was never reached.
+    report = build_coverage(coverage, AnalysisResult())
+    assert report["budget_exhausted"] is True
+    warnings = coverage_warnings(report)
+    assert any("stopped after" in w for w in warnings)
+    assert not any("the cap is" in w for w in warnings)
+
+
+def test_get_json_honours_the_configured_timeout(monkeypatch) -> None:
+    """The client's timeout must reach every request, not just file downloads."""
+
+    seen: list[dict] = []
+
+    def fake_get(url: str, **kwargs):  # noqa: ANN001, ANN202
+        seen.append({"url": url, **kwargs})
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    client = GitHubClient(timeout=2.5)
+    client.get_json("https://api.github.com/repos/acme/strat")
+    assert seen and seen[0]["timeout"] == 2.5
 
 
 def test_fetch_repository_uses_only_allow_listed_hosts() -> None:
@@ -318,6 +386,9 @@ def test_fetch_repository_uses_only_allow_listed_hosts() -> None:
 class _FakeResponse:
     def __init__(self, status_code: int) -> None:
         self.status_code = status_code
+
+    def json(self) -> dict:
+        return {}
 
 
 def test_status_check_maps_errors() -> None:
@@ -390,7 +461,7 @@ def test_analyze_endpoint_reports_its_coverage(client, monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
 
-    assert body["analysis_version"] == "1.1.0"
+    assert body["analysis_version"] == "1.2.0"
     coverage = body["coverage"]
     assert coverage["candidate_files"] == 14
     assert coverage["candidate_python_files"] == 4
@@ -398,11 +469,14 @@ def test_analyze_endpoint_reports_its_coverage(client, monkeypatch) -> None:
     assert coverage["not_attempted_files"] == 9
     assert coverage["complete"] is False
     assert coverage["unread_python_files"] == 0
+    assert coverage["budget_exhausted"] is False
+    assert coverage["max_seconds"] == 120
 
     assert all(path.endswith(".py") for path in body["files_parsed"])
     assert all(path.endswith(".md") for path in body["files_inventoried"])
     assert len(body["files_parsed"]) == 4  # inventoried is not parsed
     assert any("never fetched" in warning for warning in body["warnings"])
+    assert not any("stopped after" in warning for warning in body["warnings"])
 
 
 def test_import_endpoint_rejects_invalid_dsl(client) -> None:

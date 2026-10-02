@@ -272,7 +272,15 @@ def check_source(db: Any, source: Any) -> str:
         # Unattended import: a Python file that was never read may hold the rules
         # that changed. Importing the partial draft would silently downgrade the
         # strategy, so record the gap and leave the version alone (ADR-056).
-        source.current_commit = head
+        #
+        # Only a structural gap is marked as seen. A cap-limited read of a given
+        # commit will read exactly as much next time, so retrying it would just
+        # repeat the request and stall the schedule; a fetch that ran out of time
+        # (or lost files to the network) is transient, and marking it seen would
+        # abandon the update forever (ADR-057).
+        exhausted = bool(coverage.get("budget_exhausted"))
+        if not exhausted:
+            source.current_commit = head
         source.last_import_status = "incomplete"
         db.add(
             GitHubSnapshot(
@@ -283,6 +291,7 @@ def check_source(db: Any, source: Any) -> str:
                 extraction_json={
                     "imported": False,
                     "reason": "incomplete_analysis",
+                    "transient": exhausted,
                     "coverage": coverage,
                     "warnings": warnings,
                 },

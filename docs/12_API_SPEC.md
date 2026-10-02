@@ -377,20 +377,29 @@ re-imported automatically when a new commit lands):
 `POST /importer/github/analyze` is read-only and returns the review surface: the
 findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
 
-- `analysis_version` (currently `1.1.0`) rises whenever the report's field semantics
+- `analysis_version` (currently `1.2.0`) rises whenever the report's field semantics
   change. It moved to `1.1.0` when `files_scanned` was split into `files_parsed` and
   `files_inventoried` (non-Python files are inventoried, not parsed) and
-  `files_skipped` became `[{path, reason}]` instead of bare paths.
+  `files_skipped` became `[{path, reason}]` instead of bare paths; to `1.2.0` when
+  `coverage` learned to separate "the cap stopped it" from "the time budget stopped it".
+- `max_files` (1–30, default 12) caps how many candidates are fetched; `max_seconds`
+  (10–600, default 120) is the wall-clock budget for the whole fetch (ADR-057). The
+  per-request timeout cannot bound a loop of 30 files with retries, so the loop has a
+  budget of its own and stops when it is spent.
 - `coverage` = `candidate_files`, `candidate_python_files`, `cap`, `attempted_files`,
   `downloaded_files`, `parsed_files`, `inventoried_files`, `skipped_files`,
-  `not_attempted_files`, `unread_python_files`, `complete`. The numbers describe the
-  fetch, not the repo's docs: `1` candidate file and `cap = 1` are different facts.
-- `warnings` carries the coverage sentences (never fetched / unread Python / unread
-  after fetch) plus the DSL-builder warnings. They are not advisory decoration: a
-  non-empty list means the findings may be missing rules that live in files the
-  analysis never read.
+  `not_attempted_files`, `unread_python_files`, `complete`, `max_seconds`,
+  `budget_exhausted`. The numbers describe the fetch, not the repo's docs: `1` candidate
+  file and `cap = 1` are different facts. `budget_exhausted` decides which advice
+  applies — raise the budget, or raise `max_files` (the cap was never reached).
+- `warnings` carries the coverage sentences (never fetched / stopped after the budget /
+  unread Python / unread after fetch) plus the DSL-builder warnings. They are not
+  advisory decoration: a non-empty list means the findings may be missing rules that
+  live in files the analysis never read.
 - The last_import_status of a watched source can be `incomplete`: the watcher refuses
   to import from a partial read and records the coverage gap in the snapshot instead.
+  A gap caused by the budget or the network is recorded as `transient` and does **not**
+  advance the source's `current_commit`, so the next scheduled check retries it.
 
 ## GitHub Snapshots
 

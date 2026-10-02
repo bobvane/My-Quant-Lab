@@ -946,3 +946,30 @@ schema，就可能不一致，而且只在其中一个方言上暴露。所以�
 `test_analyze_repository_files_skips_non_python`（断言 `files_parsed` / `files_inventoried` /
 `files_skipped[0].reason`）与 `test_fetch_respects_cap_and_prefers_python`（断言
 `not_attempted_files == 15`、`unread_python_files == 5`）。
+
+## ADR-057：抓取必须有墙钟预算，且必须说实话（`max_seconds`，docs/05 §4.2）
+
+**背景**
+
+ADR-056 让报告能说出"读了多少、跳过了什么"，但抓取本身仍然可以无限期地跑下去，而且它对配置的超时并不诚实：
+
+- `GitHubClient(timeout=15.0)` 的超时只传给了 `get_text`（文件下载）。`get_json` 调 `httpx.get(url, headers=...)` 时**没有传 timeout**，所以 repo / tree / commit 三类请求静默使用 httpx 的默认值（0.28.1 实测 `DEFAULT_TIMEOUT_CONFIG = Timeout(timeout=5.0)`）。配置的旋钮对 3/5 的网络调用无效。
+- 更严重的是**没有任何整体预算**：`fetch_repository` 对最多 `cap = min(max_files, 30)` 个文件、每个文件 `FETCH_RETRIES + 1 = 2` 次尝试、每次最多 `self._timeout`，最坏 30 × 2 × 15 = **900s**，再加 3 个 JSON 调用。前端没有请求超时，UI 只写着"分析中…（视网络情况可能需要一两分钟）"。实测（本机直连 GitHub）一次默认 `max_files=12` 的分析耗时 **640s**：用户既不知道它在跑，也不知道它卡住了。单请求超时按定义约束不了循环。
+- 这个缺口还把 ADR-056 的安全设计变成了陷阱：watcher 在读到不全时记 `incomplete` 并 `source.current_commit = head`，于是**因网络或预算造成的瞬时缺口被永久记为"已见"**，下一次调度看到 `head == current_commit` 直接返回 `unchanged`，这次更新就再也不会被重试。而只有上限造成的缺口才是"重试也没用"的那一类。
+
+**决策**
+
+1. `get_json` 传 `timeout=self._timeout`：配置的超时必须作用于每一个 HTTP 调用。
+2. `GitHubClient.__init__` 新增 `total_budget`（默认 `DEFAULT_FETCH_BUDGET_SECONDS = 120.0`），`fetch_repository` 新增 `max_seconds`（为 `None` 时取客户端预算）；循环在每个候选前检查 `time.monotonic() - started >= budget`，用完即停。
+3. 预算用尽时**不假装没发生**：剩余候选进入 `coverage.not_attempted_files`，并新增 `budget_exhausted` 与 `max_seconds` 两个字段；`coverage_warnings()` 据此改说"the fetch stopped after 120s: N candidate file(s) were left unread. Raise the time budget or lower max_files…"。**上限与预算不能共用一句建议**——`max_files` 根本没被碰到时叫用户去调它是错的。
+4. 端点 `POST /importer/github/analyze` 暴露 `max_seconds`（`ge=10, le=600`，默认 120），前端给两个输入（最多读取文件数、最长等待秒数），让警告里的建议可执行：此前 UI 既没有 `max_files` 也没有预算，"Raise max_files"是一句界面无法执行的建议。
+5. `analysis_version` 升为 `1.2.0`（`coverage` 的字段语义变了）。
+6. watcher 只在**非瞬时**缺口时推进 `current_commit`：`transient = bool(coverage["budget_exhausted"])` 时保留旧 commit（下轮重试）、写进快照 `extraction_json["transient"]`。上限造成的结构性缺口仍然标记已见，否则每次调度都会重复几十次注定相同的请求。
+
+**理由**
+
+等待时间不是"体验问题"，而是**报告能否被信任的一部分**：ADR-056 规定报告必须说明它没读到什么，而一个没有预算的抓取会让用户用"它是不是死了"来代替"它读了多少"。第 6 条是同一件事的另一面：一个诚实报告缺口、却把瞬时缺口当永久结论的系统，会把网络抖动变成静默的更新丢失。把两件事都用同一套算术表达（预算写进 coverage、瞬时性写进快照），是为了让"要不要重试""要不要相信这份报告"都有据可依。
+
+**测试**
+
+`backend/tests/test_importer.py` 新增 `test_a_fetch_that_runs_out_of_its_budget_stops_early`（`max_seconds=0` → `attempted_files == 0`、全部候选 not-attempted、`budget_exhausted is True`，且警告含 `stopped after` 而**不含** `the cap is`）与 `test_get_json_honours_the_configured_timeout`（monkeypatch `httpx.get` 断言 `timeout == 2.5`）；`test_fetch_respects_cap_and_prefers_python` 补断言 `budget_exhausted is False` / `max_seconds == DEFAULT_FETCH_BUDGET_SECONDS`；`test_analyze_endpoint_reports_its_coverage` 断言 `analysis_version == "1.2.0"` / `coverage["max_seconds"] == 120` / 不含 `stopped after`。`backend/tests/test_github_watch.py` 新增 `test_a_fetch_that_ran_out_of_time_is_retried_next_run`（`budget_exhausted=True` → `current_commit` 停在 `oldsha`、快照 `transient is True`），并在 `test_unread_python_files_block_an_unattended_import` 里断言上限型缺口的 `transient is False`。`backend/scripts/probe_github_coverage.py` 增加 `max_seconds = 0` 场景，打印预算中断的 coverage 与措辞。

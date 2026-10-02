@@ -286,6 +286,8 @@ async function checkSourceNow(s: Record<string, any>) {
 const repoUrl = ref('')
 const repoRef = ref('')
 const repoToken = ref('')
+const repoMaxFiles = ref(12)
+const repoMaxSeconds = ref(120)
 const importName = ref('')
 const analyzing = ref(false)
 const importing = ref(false)
@@ -298,6 +300,11 @@ const coverageHeadline = computed(() => {
   const coverage = analysis.value?.coverage
   if (!coverage) return ''
   if (coverage.complete) return '已完整读取仓库中的全部候选文件。'
+  if (coverage.budget_exhausted) {
+    const budget = coverage.max_seconds === null ? '时间预算' : `${coverage.max_seconds} 秒的时间预算`
+    const rest = coverage.skipped_files > 0 ? `，另有 ${coverage.skipped_files} 个获取后无法读取` : ''
+    return `读取因超出${budget}而中断：只读了 ${coverage.attempted_files} / ${coverage.candidate_files} 个候选文件${rest}。把预算调大，或减少最多读取文件数后再试——下面的结论只覆盖已列出的文件。`
+  }
   const parts = [
     `${coverage.not_attempted_files} 个候选文件从未获取（上限 ${coverage.cap}，仓库共 ${coverage.candidate_files} 个）`,
   ]
@@ -324,6 +331,8 @@ async function analyzeRepo() {
       repoUrl.value.trim(),
       repoRef.value.trim() || undefined,
       repoToken.value.trim() || undefined,
+      repoMaxFiles.value,
+      repoMaxSeconds.value,
     )
     importName.value = analysis.value.repo
     dslText.value = JSON.stringify(analysis.value.draft_dsl, null, 2)
@@ -630,6 +639,27 @@ onMounted(load)
         <button :disabled="analyzing" @click="analyzeRepo">
           {{ analyzing ? '分析中…（视网络情况可能需要一两分钟）' : '分析仓库' }}
         </button>
+      </div>
+      <div class="row" style="margin-bottom: 10px">
+        <label class="muted" for="repo-max-files">最多读取文件数</label>
+        <input
+          id="repo-max-files"
+          v-model.number="repoMaxFiles"
+          type="number"
+          min="1"
+          max="30"
+          style="max-width: 90px"
+        />
+        <label class="muted" for="repo-max-seconds">最长等待秒数</label>
+        <input
+          id="repo-max-seconds"
+          v-model.number="repoMaxSeconds"
+          type="number"
+          min="10"
+          max="600"
+          style="max-width: 90px"
+        />
+        <span class="muted">超时就停下并说明读了哪些，不会一直转圈</span>
       </div>
       <div class="row" style="margin-bottom: 10px">
         <input

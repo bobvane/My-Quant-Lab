@@ -132,7 +132,7 @@ export interface BacktestDetail extends BacktestSummary {
   warnings: string[]
 }
 
-/** What the importer actually read, and what it never looked at (docs/05 §3.1). */
+/** What the importer actually read, and what it never looked at (docs/05 §4.1). */
 export interface GithubCoverage {
   analysis_version: string
   candidate_files: number
@@ -146,6 +146,10 @@ export interface GithubCoverage {
   not_attempted_files: number
   unread_python_files: number
   complete: boolean
+  /** Wall-clock budget the fetch was given; null when it was unbounded. */
+  max_seconds: number | null
+  /** The budget is what stopped this read, not the cap: the advice differs. */
+  budget_exhausted: boolean
 }
 
 export interface GithubSkippedFile {
@@ -771,7 +775,13 @@ export const api = {
       body: JSON.stringify({ key, value }),
     }),
   audit: () => request<{ total: number; events: Array<Record<string, unknown>> }>('/settings/audit'),
-  analyzeGithubRepo: (repoUrl: string, ref?: string, token?: string, maxFiles = 12) =>
+  analyzeGithubRepo: (
+    repoUrl: string,
+    ref?: string,
+    token?: string,
+    maxFiles = 12,
+    maxSeconds = 120,
+  ) =>
     request<GithubAnalysis>('/importer/github/analyze', {
       method: 'POST',
       body: JSON.stringify({
@@ -779,6 +789,7 @@ export const api = {
         ref: ref || undefined,
         token: token || undefined,
         max_files: maxFiles,
+        max_seconds: maxSeconds,
       }),
     }),
   githubSources: () => request<Array<Record<string, any>>>('/importer/github/sources'),

@@ -22,6 +22,47 @@ DSL: dict = {
 }
 
 
+def test_backtest_survives_a_monitoring_failure(client, monkeypatch) -> None:
+    """Optional monitoring must never turn a good backtest into a 500.
+
+    Regression: ``record_resource_event`` flushes, so its failure leaves the session
+    rollback-pending. The caller swallowed the exception but never rolled back,
+    which poisoned the request and produced a 500 (PendingRollbackError) for a run
+    that had actually completed. The write now happens after the backtest is
+    committed, so a failure can only cost the monitoring row.
+    """
+
+    import app.infrastructure.resource_store as resource_store
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("monitoring backend unavailable")
+
+    monkeypatch.setattr(resource_store, "record_resource_event", explode)
+
+    client.post(
+        "/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol="DEMO-AAPL").model_dump()
+    )
+    strategy = client.post("/api/v1/strategies", json={"name": "Monitored"}).json()
+    version = client.post(
+        f"/api/v1/strategies/{strategy['id']}/versions",
+        json=StrategyVersionCreate(version="1.0.0", dsl=DSL).model_dump(),
+    ).json()
+
+    response = client.post(
+        "/api/v1/backtests",
+        json=BacktestCreate(
+            strategy_version_id=version["id"], symbol="DEMO-AAPL", timeframe="1d"
+        ).model_dump(mode="json"),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "completed"
+
+    # The failure must not leave the session unusable for the next request either.
+    listed = client.get("/api/v1/backtests")
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+
+
 def test_health_endpoint(client) -> None:
     response = client.get("/api/v1/health")
     assert response.status_code == 200

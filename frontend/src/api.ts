@@ -191,6 +191,42 @@ export interface MonteCarloResult {
   warnings: string[]
 }
 
+/** One member of an ensemble vote (docs/24). */
+export interface EnsembleMemberIn {
+  strategy_version_id: number
+  weight: number
+}
+
+export interface EnsembleMemberOut {
+  label: string
+  weight: number
+  entry_bars: number
+  exit_bars: number
+}
+
+export interface EnsembleResult {
+  ensemble_version: string
+  vote_threshold: number
+  members: EnsembleMemberOut[]
+  bars_evaluated: number
+  agreement: {
+    entry_bars: number
+    exit_bars: number
+    short_entry_bars: number
+    /**
+     * Bars where the vote fired AND the portfolio was flat, i.e. positions actually
+     * opened. This — not `entry_bars` — is comparable to a member's entry count.
+     */
+    entries_taken: number
+  }
+  metrics: Record<string, number | null>
+  trades: Array<Record<string, unknown>>
+  equity_curve: Array<Record<string, unknown>>
+  final_equity: number
+  initial_capital: number
+  warnings: string[]
+}
+
 /** One evaluated grid point of a sensitivity sweep (docs/21). */export interface SensitivityPoint {
   parameters: Record<string, number | string>
   objective: number | null
@@ -504,6 +540,23 @@ export const api = {
         runs,
         seed,
         trades_per_run: tradesPerRun,
+      }),
+    }),
+  // Weighted vote across several strategy versions, executed as ONE portfolio
+  // (docs/24). A member must be agreed with, not merely present.
+  ensemble: (
+    members: EnsembleMemberIn[],
+    symbol: string,
+    voteThreshold = 0.5,
+    executionOverrides: Record<string, unknown> = {},
+  ) =>
+    request<EnsembleResult>('/research/ensemble', {
+      method: 'POST',
+      body: JSON.stringify({
+        members,
+        symbol,
+        vote_threshold: voteThreshold,
+        execution_overrides: executionOverrides,
       }),
     }),
   signals: (state?: string, limit = 100, symbol?: string, offset = 0) =>

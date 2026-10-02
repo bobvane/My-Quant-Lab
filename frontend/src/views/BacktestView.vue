@@ -5,6 +5,7 @@ import {
   type Asset,
   type BacktestDetail,
   type BacktestSummary,
+  type EnsembleResult,
   type ExplainResult,
   type MonteCarloResult,
   type SensitivityResult,
@@ -112,8 +113,95 @@ const mcRuns = ref(1000)
 const mcSeed = ref(0)
 const mcRunning = ref(false)
 
-async function runMonteCarlo() {
+// ---------------------------------------------------------------- ensemble ----
+// Weighted vote across several strategy versions, executed as ONE portfolio
+// (docs/24). Members are picked from the selected strategy's versions plus any other
+// version already loaded; each carries a weight that is normalised server-side.
+const ensResult = ref<EnsembleResult | null>(null)
+const ensSelected = ref<number[]>([])
+const ensWeights = ref<Record<number, number>>({})
+const ensThreshold = ref(0.5)
+const ensRunning = ref(false)
+/** Per-member single-strategy metrics, so "is diversifying better?" is answerable. */
+const ensMemberMetrics = ref<Array<{ label: string; versionId: number; metrics: Record<string, number | null> }>>([])
+/** Enough distinct versions to vote with; below two a "vote" is meaningless. */
+const ensCandidates = computed(() => versions.value)
+
+function toggleEnsMember(id: number) {
+  const idx = ensSelected.value.indexOf(id)
+  if (idx >= 0) {
+    ensSelected.value = ensSelected.value.filter((x) => x !== id)
+  } else {
+    ensSelected.value = [...ensSelected.value, id]
+    if (ensWeights.value[id] === undefined) ensWeights.value = { ...ensWeights.value, [id]: 1 }
+  }
+}
+
+/** Latest run per version, used to compare the ensemble against each member. */
+async function loadMemberMetrics() {
+  const out: Array<{ label: string; versionId: number; metrics: Record<string, number | null> }> = []
+  for (const id of ensSelected.value) {
+    const version = versions.value.find((v) => v.id === id)
+    // The API labels members `strategyId@version` (research.py). Building the label
+    // from `version` alone produced "1.0.5" and never matched the "1@1.0.5" emitted by
+    // the backend, so every comparison cell fell back to "—".
+    const label = version ? `${version.strategy_id}@${version.version}` : String(id)
+    try {
+      const runs = await api.backtests(id)
+      const latest = runs.find((r) => r.status === 'completed')
+      if (!latest) continue
+      const detail = await api.backtest(latest.id)
+      out.push({
+        label,
+        versionId: id,
+        metrics: {
+          total_return: detail.total_return,
+          max_drawdown: detail.max_drawdown,
+          sharpe: detail.sharpe,
+          win_rate: detail.win_rate,
+          number_of_trades: detail.number_of_trades,
+        },
+      })
+    } catch {
+      // A member with no completed backtest simply has no comparison row.
+    }
+  }
+  ensMemberMetrics.value = out
+}
+
+/** Metrics of one member's own latest completed backtest, for the comparison table. */
+function memberMetricsFor(label: string): Record<string, number | null> | null {
+  return ensMemberMetrics.value.find((x) => x.label === label)?.metrics ?? null
+}
+
+async function runEnsemble() {
   error.value = ''
+  ensResult.value = null
+  ensMemberMetrics.value = []
+  if (ensSelected.value.length < 2) {
+    error.value = '请至少选择两个策略版本参与投票（单个成员没有「认同」可言）'
+    return
+  }
+  if (!symbol.value.trim()) {
+    error.value = '请填写标的代码'
+    return
+  }
+  ensRunning.value = true
+  try {
+    const members = ensSelected.value.map((id) => ({
+      strategy_version_id: id,
+      weight: Number(ensWeights.value[id] ?? 1),
+    }))
+    ensResult.value = await api.ensemble(members, symbol.value.trim(), ensThreshold.value)
+    await loadMemberMetrics()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    ensRunning.value = false
+  }
+}
+
+async function runMonteCarlo() {  error.value = ''
   mcResult.value = null
   const runId = detail.value?.id
   if (runId === undefined || runId === null) {
@@ -830,6 +918,140 @@ onMounted(async () => {
           方法 <code>{{ mcResult.method }}</code> · 观测交易 {{ mcResult.summary.observed_trades }} 笔 ·
           每次 {{ mcResult.summary.trades_per_run }} 笔 · {{ mcResult.summary.runs }} 条路径 ·
           seed {{ mcResult.seed }} · 时间周期 {{ mcResult.timeframe }}
+        </p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>策略集成（加权投票）</h3>
+      <p class="muted">
+        勾选多个策略版本，逐根 K 线按权重投票，只有票数<b>严格超过</b>阈值的才开仓，
+        合并后的决策驱动<b>一个</b>组合执行。
+        <b>这不是「哪个策略最好」</b>，而是「互相认同是否比单打独斗更稳」。
+        等权两成员时各占 0.5 票，所以 0.5 的阈值意味着<b>两个都同意</b>才算数。
+      </p>
+
+      <div v-if="!ensCandidates.length" class="muted">先在上面选择一个策略（需要有多个版本可选）。</div>
+      <div v-else>
+        <div class="row" style="flex-wrap: wrap; gap: 8px">
+          <label
+            v-for="v in ensCandidates"
+            :key="v.id"
+            class="muted"
+            style="display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px"
+          >
+            <input
+              type="checkbox"
+              style="width: auto"
+              :checked="ensSelected.includes(v.id)"
+              @change="toggleEnsMember(v.id)"
+            />
+            v{{ v.version }}
+            <input
+              v-if="ensSelected.includes(v.id)"
+              v-model.number="ensWeights[v.id]"
+              type="number"
+              min="0"
+              step="0.5"
+              style="max-width: 70px"
+              title="权重（会被归一化）"
+            />
+          </label>
+        </div>
+
+        <div class="row" style="margin-top: 8px">
+          <label class="muted" style="display: flex; align-items: center; gap: 6px">
+            投票阈值
+            <input
+              v-model.number="ensThreshold"
+              type="number"
+              min="0"
+              max="0.99"
+              step="0.1"
+              style="max-width: 90px"
+            />
+          </label>
+          <button :disabled="ensRunning || ensSelected.length < 2" @click="runEnsemble">
+            {{ ensRunning ? '计算中…' : '运行集成' }}
+          </button>
+          <span class="muted">
+            已选 {{ ensSelected.length }} 个成员 ·
+            阈值越高越保守（需要更多权重认同）
+          </span>
+        </div>
+      </div>
+
+      <div v-if="ensResult" style="margin-top: 12px">
+        <p v-for="w in ensResult.warnings" :key="w" class="notice">{{ w }}</p>
+
+        <div class="grid cols-4">
+          <StatCard
+            label="组合总收益"
+            :value="formatPercent(ensResult.metrics.total_return)"
+            :tone="toneOf(ensResult.metrics.total_return)"
+            :sub="`期末权益 ${formatNumber(ensResult.final_equity)}`"
+          />
+          <StatCard
+            label="组合最大回撤"
+            :value="formatPercent(ensResult.metrics.max_drawdown)"
+            :tone="toneOf(ensResult.metrics.max_drawdown)"
+            sub="越小越好"
+          />
+          <StatCard
+            label="组合夏普"
+            :value="formatNumber(ensResult.metrics.sharpe)"
+            :tone="toneOf(ensResult.metrics.sharpe)"
+            :sub="`评估 ${ensResult.bars_evaluated} 根`"
+          />
+          <StatCard
+            label="认同并开仓"
+            :value="String(ensResult.agreement.entries_taken)"
+            :sub="`票数过阈值 ${ensResult.agreement.entry_bars} 根 · 交易 ${ensResult.trades.length} 笔`"
+          />
+        </div>
+
+        <table style="margin-top: 10px">
+          <thead>
+            <tr>
+              <th>对象</th>
+              <th>权重</th>
+              <th>自身触发</th>
+              <th>总收益</th>
+              <th>最大回撤</th>
+              <th>夏普</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>集成组合</b></td>
+              <td class="muted">—</td>
+              <td>{{ ensResult.agreement.entries_taken }} 次开仓</td>
+              <td :class="toneOf(ensResult.metrics.total_return)">
+                {{ formatPercent(ensResult.metrics.total_return) }}
+              </td>
+              <td>{{ formatPercent(ensResult.metrics.max_drawdown) }}</td>
+              <td>{{ formatNumber(ensResult.metrics.sharpe) }}</td>
+            </tr>
+            <tr v-for="m in ensResult.members" :key="m.label">
+              <td class="muted">{{ m.label }}</td>
+              <td>{{ m.weight.toFixed(2) }}</td>
+              <td>{{ m.entry_bars }} 根</td>
+              <td :class="toneOf(memberMetricsFor(m.label)?.total_return ?? null)">
+                {{ memberMetricsFor(m.label) ? formatPercent(memberMetricsFor(m.label)!.total_return) : '—' }}
+              </td>
+              <td>
+                {{ memberMetricsFor(m.label) ? formatPercent(memberMetricsFor(m.label)!.max_drawdown) : '—' }}
+              </td>
+              <td>
+                {{ memberMetricsFor(m.label) ? formatNumber(memberMetricsFor(m.label)!.sharpe) : '—' }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted" style="margin-top: 6px">
+          「自身触发」是各成员自己的信号根数；集成那行是真正开出的仓位数（持仓期间的重复
+          触发不算新仓），因此它必然不超过成员中最少的那个。成员的收益/回撤/夏普来自各自
+          最近一次已完成回测，缺失时显示 <code>—</code>。
         </p>
       </div>
     </div>

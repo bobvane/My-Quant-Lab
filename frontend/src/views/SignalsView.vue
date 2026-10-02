@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { api, type ExplainResult, type SignalRecord } from '@/api'
-import { formatDateTime, formatNumber } from '@/format'
+import { formatDateTime, formatNumber, toneOf } from '@/format'
 
 const signals = ref<SignalRecord[]>([])
 const stateFilter = ref('')
@@ -16,6 +16,22 @@ const explainedFor = ref('')
 const evidence = ref<Record<string, any> | null>(null)
 const evidenceFor = ref('')
 const evidencing = ref<number | null>(null)
+const outcomes = ref<Array<Record<string, any>>>([])
+const showOutcomes = ref(false)
+
+async function toggleOutcomes() {
+  error.value = ''
+  if (showOutcomes.value) {
+    showOutcomes.value = false
+    return
+  }
+  try {
+    outcomes.value = await api.signalOutcomes()
+    showOutcomes.value = true
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
 
 async function showEvidence(row: SignalRecord) {
   error.value = ''
@@ -112,6 +128,9 @@ onMounted(load)
           @keyup.enter="load"
         />
         <button class="ghost" @click="load">查询</button>
+        <button class="ghost" @click="toggleOutcomes">
+          {{ showOutcomes ? '收起信号结果' : '信号结果' }}
+        </button>
         <span class="muted" style="margin-left: auto">
           {{ loading ? '加载中…' : `共 ${signals.length} 条` }}
         </span>
@@ -165,6 +184,42 @@ onMounted(load)
         </tbody>
       </table>
       <p v-else class="muted">没有信号。到「研究仪表盘」点「立即扫描」，或等待定时任务。</p>
+    </div>
+
+    <div v-if="showOutcomes" class="card" style="margin-top: 14px">
+      <h3>信号结果追踪（{{ outcomes.length }} 条）</h3>
+      <p class="muted">
+        回填的是「信号发出后价格如何走」：pnl% 为方向化收益，MAE/MFE 为最大不利/有利偏移。
+      </p>
+      <table v-if="outcomes.length">
+        <thead>
+          <tr>
+            <th>信号</th>
+            <th>方向</th>
+            <th>周期</th>
+            <th>K 线时间</th>
+            <th>结果</th>
+            <th>PnL%</th>
+            <th>MAE%</th>
+            <th>MFE%</th>
+            <th>评估时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="o in outcomes" :key="String(o.signal_id)">
+            <td>#{{ o.signal_id }}</td>
+            <td>{{ o.direction }}</td>
+            <td>{{ o.timeframe }}</td>
+            <td class="muted">{{ formatDateTime(String(o.bar_timestamp)) }}</td>
+            <td>{{ o.outcome_state }}</td>
+            <td :class="toneOf(o.pnl_pct)">{{ o.pnl_pct != null ? formatNumber(o.pnl_pct, 3) + '%' : '—' }}</td>
+            <td class="muted">{{ o.mae_pct != null ? formatNumber(o.mae_pct, 3) + '%' : '—' }}</td>
+            <td class="muted">{{ o.mfe_pct != null ? formatNumber(o.mfe_pct, 3) + '%' : '—' }}</td>
+            <td class="muted">{{ o.evaluated_at ? formatDateTime(String(o.evaluated_at)) : '—' }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">还没有信号结果（需价格前进后由定时任务回填）。</p>
     </div>
 
     <div v-if="evidence" class="card" style="margin-top: 14px">

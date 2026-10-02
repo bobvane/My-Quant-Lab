@@ -30,6 +30,44 @@ const running = ref(false)
 const oosResult = ref<Record<string, any> | null>(null)
 const oosPct = ref(0.2)
 const oosRunning = ref(false)
+function exportTradesCsv() {
+  const trades = detail.value?.trades ?? []
+  if (!trades.length) return
+  const columns = [
+    'direction',
+    'entry_time',
+    'entry_price',
+    'exit_time',
+    'exit_price',
+    'quantity',
+    'pnl',
+    'pnl_pct',
+    'r_multiple',
+    'mae',
+    'mfe',
+    'fees',
+    'slippage',
+    'holding_bars',
+    'exit_reason',
+    'ambiguous_fill',
+  ]
+  const escape = (v: unknown) => {
+    const s = v == null ? '' : String(v)
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const lines = [columns.join(',')]
+  for (const t of trades) {
+    lines.push(columns.map((c) => escape((t as Record<string, unknown>)[c])).join(','))
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `backtest-${detail.value?.id ?? 'run'}-trades.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 const drawdownSeries = computed(() => {
   const points = detail.value?.equity_curve ?? []
   let peak = -Infinity
@@ -463,7 +501,10 @@ onMounted(async () => {
     </div>
 
     <div v-if="detail?.trades.length" class="card" style="margin-top: 14px">
-      <h3>交易明细</h3>
+      <div class="row" style="justify-content: space-between">
+        <h3>交易明细</h3>
+        <button class="ghost" @click="exportTradesCsv">导出 CSV</button>
+      </div>
       <table>
         <thead>
           <tr>

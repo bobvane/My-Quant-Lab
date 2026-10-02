@@ -41,6 +41,23 @@ const explainedFor = ref('')
 const evidence = ref<Record<string, any> | null>(null)
 const evidenceFor = ref('')
 const evidencing = ref<number | null>(null)
+const scanning = ref(false)
+
+async function scan() {
+  error.value = ''
+  info.value = ''
+  scanning.value = true
+  try {
+    await api.scanSignals()
+    info.value = '扫描完成，已重新加载信号列表'
+    await resetAndLoad()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    scanning.value = false
+  }
+}
+
 const outcomes = ref<Array<Record<string, any>>>([])
 const outcomeSummary = ref<Record<string, any> | null>(null)
 const showOutcomes = ref(false)
@@ -215,7 +232,13 @@ onMounted(load)
           </tr>
         </tbody>
       </table>
-      <p v-else class="muted">没有信号。到「研究仪表盘」点「立即扫描」，或等待定时任务。</p>
+      <div v-else class="row">
+        <p class="muted">没有信号。</p>
+        <button class="ghost" :disabled="scanning" @click="scan">
+          {{ scanning ? '扫描中…' : '立即扫描' }}
+        </button>
+        <span class="muted">或等待定时任务（每 15 分钟）。</span>
+      </div>
       <div v-if="signals.length && signals.length % PAGE === 0" class="row" style="margin-top: 8px">
         <button class="ghost" :disabled="loading" @click="loadMore">
           {{ loading ? '加载中…' : '加载更多' }}

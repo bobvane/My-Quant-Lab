@@ -128,6 +128,21 @@ const versions = ref<Array<Record<string, any>>>([])
 const expandedId = ref<number | null>(null)
 const activating = ref<number | null>(null)
 const lineage = ref<Record<string, any> | null>(null)
+const expandedVersion = ref<number | null>(null)
+const versionParams = ref<Array<Record<string, any>>>([])
+
+async function toggleParams(versionId: number) {
+  if (expandedVersion.value === versionId) {
+    expandedVersion.value = null
+    return
+  }
+  try {
+    versionParams.value = await api.versionParameters(versionId)
+    expandedVersion.value = versionId
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
 
 async function showLineage(s: Strategy) {
   error.value = ''
@@ -445,16 +460,29 @@ onMounted(load)
                 <th>Prompt</th>
                 <th>哈希</th>
                 <th>当前</th>
+                <th>参数</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="v in lineage.versions" :key="v.id">
-                <td>{{ v.version }}</td>
-                <td class="muted">{{ v.source_commit || '—' }}</td>
-                <td class="muted">{{ v.prompt_version || '—' }}</td>
-                <td class="muted">{{ String(v.immutable_hash).slice(0, 12) }}…</td>
-                <td>{{ v.is_current ? '是' : '' }}</td>
-              </tr>
+              <template v-for="v in lineage.versions" :key="v.id">
+                <tr>
+                  <td>{{ v.version }}</td>
+                  <td class="muted">{{ v.source_commit || '—' }}</td>
+                  <td class="muted">{{ v.prompt_version || '—' }}</td>
+                  <td class="muted">{{ String(v.immutable_hash).slice(0, 12) }}…</td>
+                  <td>{{ v.is_current ? '是' : '' }}</td>
+                  <td>
+                    <button class="ghost" @click="toggleParams(Number(v.id))">
+                      {{ expandedVersion === v.id ? '收起参数' : '参数' }}
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="expandedVersion === v.id">
+                  <td colspan="6">
+                    <code>{{ JSON.stringify(versionParams) }}</code>
+                  </td>
+                </tr>
+              </template>
             </tbody>
           </table>
           <p v-else class="muted">该策略还没有版本。</p>

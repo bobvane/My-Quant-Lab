@@ -10,6 +10,7 @@ import {
   type StrategyVersion,
 } from '@/api'
 import EquityChart from '@/components/EquityChart.vue'
+import MultiLineChart from '@/components/MultiLineChart.vue'
 import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 
@@ -29,6 +30,17 @@ const running = ref(false)
 const oosResult = ref<Record<string, any> | null>(null)
 const oosPct = ref(0.2)
 const oosRunning = ref(false)
+const drawdownSeries = computed(() => {
+  const points = detail.value?.equity_curve ?? []
+  let peak = -Infinity
+  const series = points.map((p) => {
+    peak = Math.max(peak, p.equity)
+    const dd = peak > 0 ? ((p.equity - peak) / peak) * 100 : 0
+    return { ts: p.timestamp, value: dd }
+  })
+  return [{ name: '回撤 %', points: series }]
+})
+
 const metricRows = computed(() => {
   const metrics = detail.value?.metrics ?? {}
   return Object.entries(metrics as Record<string, number | null>).map(([key, value]) => ({
@@ -308,6 +320,11 @@ onMounted(async () => {
     <div v-if="detail" class="card" style="margin-top: 14px">
       <h3>权益曲线</h3>
       <EquityChart :points="detail.equity_curve" />
+    </div>
+
+    <div v-if="detail" class="card" style="margin-top: 14px">
+      <h3>回撤曲线</h3>
+      <MultiLineChart :series="drawdownSeries" height="220px" />
     </div>
 
     <div v-if="detail" class="card" style="margin-top: 14px">

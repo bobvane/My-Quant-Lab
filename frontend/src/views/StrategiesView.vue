@@ -126,6 +126,16 @@ const deletingStrategy = ref<number | null>(null)
 const versions = ref<Array<Record<string, any>>>([])
 const expandedId = ref<number | null>(null)
 const activating = ref<number | null>(null)
+const lineage = ref<Record<string, any> | null>(null)
+
+async function showLineage(s: Strategy) {
+  error.value = ''
+  try {
+    lineage.value = s.id === expandedId.value && lineage.value ? null : await api.strategyLineage(s.id)
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
 
 async function toggleVersions(s: Strategy) {
   error.value = ''
@@ -384,10 +394,40 @@ onMounted(load)
                 <button class="ghost" @click="toggleVersions(s)">
                   {{ expandedId === s.id ? '收起版本' : '版本' }}
                 </button>
+                <button class="ghost" @click="showLineage(s)">血统</button>
               </td>
             </tr>
           </tbody>
         </table>
+        <div v-if="lineage" class="card" style="margin-top: 10px">
+          <h3>策略血统 #{{ lineage.strategy_id }}</h3>
+          <p class="muted">
+            来源 {{ lineage.source_type || '—' }} · 许可 {{ lineage.license || '未知' }} ·
+            作者 {{ lineage.author || '—' }}
+            <span v-if="lineage.source_url"> · {{ lineage.source_url }}</span>
+          </p>
+          <table v-if="lineage.versions?.length">
+            <thead>
+              <tr>
+                <th>版本</th>
+                <th>来源 commit</th>
+                <th>Prompt</th>
+                <th>哈希</th>
+                <th>当前</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="v in lineage.versions" :key="v.id">
+                <td>{{ v.version }}</td>
+                <td class="muted">{{ v.source_commit || '—' }}</td>
+                <td class="muted">{{ v.prompt_version || '—' }}</td>
+                <td class="muted">{{ String(v.immutable_hash).slice(0, 12) }}…</td>
+                <td>{{ v.is_current ? '是' : '' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="muted">该策略还没有版本。</p>
+        </div>
         <div v-if="expandedId !== null" class="card" style="margin-top: 10px">
           <h3>策略 #{{ expandedId }} 版本</h3>
           <table v-if="versions.length">

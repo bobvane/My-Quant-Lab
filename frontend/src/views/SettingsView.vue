@@ -11,6 +11,28 @@ import { formatDateTime, formatNumber } from '@/format'
 
 const events = ref<Array<Record<string, unknown>>>([])
 const environment = ref<Record<string, unknown>>({})
+const systemSettings = ref<Array<Record<string, any>>>([])
+const newSettingKey = ref('')
+const newSettingValue = ref('')
+
+async function saveSetting(key: string, value: string) {
+  error.value = ''
+  info.value = ''
+  try {
+    await api.updateSetting(key, value)
+    info.value = `已保存设置 ${key}`
+    await load()
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
+async function addSetting() {
+  if (!newSettingKey.value.trim()) return
+  await saveSetting(newSettingKey.value.trim(), newSettingValue.value)
+  newSettingKey.value = ''
+  newSettingValue.value = ''
+}
 const error = ref('')
 const info = ref('')
 
@@ -161,6 +183,7 @@ async function load() {
     notifyEvents.value = notifyLog.events
     events.value = audit.events
     environment.value = (settings.environment as Record<string, unknown>) ?? {}
+    systemSettings.value = (settings.settings as Array<Record<string, any>>) ?? []
     providers.value = ai.providers
     aiModels.value = models.models
     aiUsage.value = usage.usage
@@ -583,6 +606,45 @@ onMounted(load)
         </tbody>
       </table>
       <p v-else class="muted">暂无通知记录。</p>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>系统参数（system_settings）</h3>
+      <p class="muted">
+        用于运行时可调的键值（如 <code>proxy_url</code>）。通知相关键请在「信号通知」卡片设置。
+      </p>
+      <table v-if="systemSettings.length">
+        <thead>
+          <tr>
+            <th>键</th>
+            <th>值</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="s in systemSettings" :key="s.key">
+            <td>{{ s.key }}</td>
+            <td>
+              <span v-if="s.is_secret" class="muted">{{ s.value }}（{{ s.is_set ? '已设置' : '未设置' }}）</span>
+              <input
+                v-else
+                :value="s.value ?? ''"
+                style="max-width: 260px"
+                @change="saveSetting(String(s.key), ($event.target as HTMLInputElement).value)"
+              />
+            </td>
+            <td>
+              <span v-if="s.is_secret" class="muted">写-only</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">暂无系统参数。</p>
+      <div class="row" style="margin-top: 8px">
+        <input v-model="newSettingKey" style="max-width: 200px" placeholder="键（如 proxy_url）" />
+        <input v-model="newSettingValue" style="max-width: 260px" placeholder="值" />
+        <button class="ghost" :disabled="!newSettingKey.trim()" @click="addSetting">新增/更新</button>
+      </div>
     </div>
 
     <div class="card" style="margin-top: 14px">

@@ -453,6 +453,11 @@ export const api = {
       body: JSON.stringify({ name, initial_cash: initialCash }),
     }),
   settings: () => request<Record<string, unknown>>('/settings'),
+  updateSetting: (key: string, value: string) =>
+    request<Record<string, unknown>>('/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ key, value }),
+    }),
   audit: () => request<{ total: number; events: Array<Record<string, unknown>> }>('/settings/audit'),
   analyzeGithubRepo: (repoUrl: string, ref?: string, token?: string, maxFiles = 12) =>
     request<GithubAnalysis>('/importer/github/analyze', {

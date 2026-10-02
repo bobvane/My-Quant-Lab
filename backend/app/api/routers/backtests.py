@@ -277,6 +277,36 @@ def list_backtests(
     return [_to_summary(row) for row in rows]
 
 
+@router.get("/compare", summary="Compare several backtest runs side by side")
+def compare_backtests(
+    db: Session = Depends(get_db),
+    ids: str = Query(..., description="Comma separated backtest run ids"),
+    limit: int = Query(default=10, ge=2, le=20),
+) -> dict[str, Any]:
+    try:
+        run_ids = [int(part) for part in ids.split(",") if part.strip()][:limit]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="ids must be comma separated integers") from exc
+    if len(run_ids) < 2:
+        raise HTTPException(status_code=422, detail="at least two backtest ids are required")
+
+    runs = db.scalars(select(BacktestRun).where(BacktestRun.id.in_(run_ids))).all()
+    metrics = ("total_return", "max_drawdown", "sharpe", "win_rate", "number_of_trades")
+    rows = []
+    for run in runs:
+        summary = dict(run.result.summary_json) if run.result else {}
+        rows.append(
+            {
+                "run_id": run.id,
+                "strategy_version_id": run.strategy_version_id,
+                "status": run.status,
+                "result_hash": run.result.result_hash if run.result else None,
+                **{k: summary.get(k) for k in metrics},
+            }
+        )
+    return {"metrics": list(metrics), "runs": rows}
+
+
 @router.get("/{run_id}", response_model=BacktestOut, summary="Get a backtest result")
 def get_backtest(run_id: int, db: Session = Depends(get_db)) -> BacktestOut:
     run = db.get(BacktestRun, run_id)

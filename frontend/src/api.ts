@@ -304,6 +304,8 @@ export interface EnsembleSweepResult {
   members: Array<{ label: string; weight: number; weight_share: number }>
   /** Every distinct total the weighted vote can take. */
   possible_votes: number[]
+  /** Longest threshold list the sweep will evaluate; ask for more and it is a 422. */
+  max_thresholds: number
   warnings: string[]
   dataset_version_id: number | null
   symbol: string | null

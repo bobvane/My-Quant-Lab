@@ -211,16 +211,20 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
 
 参数：与 `POST /research/ensemble` 相同的 `members` / `symbol` / `timeframe` /
 `execution_overrides`（基类的 `vote_threshold` 被忽略），外加可选 `thresholds`
-（显式阈值列表，各值在 `[0, 1)`，最多 12 个，不可重复）。
+（显式阈值列表，各值在 `[0, 1)`，不可重复）。
 
 - 省略 `thresholds` → 服务端只用**答案会发生变化**的阈值，即 `possible_votes` 中严格落在
   `(0, 1)` 内的值。加权票是成员权重之和，只能落在联盟总数上，所以两个相邻票数之间的阈值
   行为完全相同。
-- `thresholds` 为空列表 / 超过 12 个 / 有重复 / 有值不在 `[0, 1)` → `422`。
+- `thresholds` 为空列表 / 超过 `max_thresholds` 个 / 有重复 / 有值不在 `[0, 1)` → `422`。
+- 默认网格的联盟边界多于 `max_thresholds`（成员权重互不相同时很容易发生）→ `422`，报错会给出
+  边界个数与上限，并指向显式 `thresholds`。**上限是拒绝而不是截断**：截断会悄悄丢掉台阶，而
+  这张图的意义正是「哪些台阶被跳过」。
 
 返回：
 
 - `thresholds`（实际评估的阈值，升序）、`possible_votes`（加权票的所有可能取值，升序）、
+  `max_thresholds`（一次扫描的阈值个数上限；客户端不要硬编码它，这个数字会随实现变化）、
   `members`（`label` / `weight` / `weight_share`）、`bars_evaluated`、`initial_capital`、
   `warnings`，以及 `dataset_version_id` / `symbol` / `timeframe` / `engine_version` /
   `feature_version`。
@@ -228,7 +232,7 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
   **严格大于**该阈值的票数，即该阈值实际在等哪个联盟）、`entries_taken`、`entry_bars`、
   `signalled_bars`、`solo_signalled_bars`、`final_equity`、`total_return`、`max_drawdown`、
   `sharpe`、`win_rate`、`number_of_trades`。
-- **不返回** `equity_curve` / `trades` / `member_runs`：曲线不在本端点契约内（12 个点各带
+- **不返回** `equity_curve` / `trades` / `member_runs`：曲线不在本端点契约内（每个点各带
   一条曲线会让响应体积失控）；需要曲线时用 `POST /research/ensemble`。
 
 语义：
@@ -236,6 +240,9 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
 - 同一阈值下，扫描点与 `POST /research/ensemble` **逐项一致**：两者共用
   `_prepare_ensemble` + `_run_vote`，特征与成员决策只评估一次并复用。若能做到不一致，这张图
   描述的将是用户无法复现的集成。
+- 票数比较按**发布的六位小数精度**进行（`possible_votes` / `effective_vote` / 引擎判定同口径）。
+  否则 `1/12 = 0.0833333…` 会在原始浮点下越过发布的 `0.083333`，出现「报告说需要两个成员、
+  模拟却让一个成员进场」。联盟总数只在求和结束后取整一次，逐级取整会累积漂移。
 - 阈值升高时 `entries_taken` / `entry_bars` 单调不增（可交易 bar 不会变多）。
 - `effective_vote` 不是「需要几个成员」，而是「第一个能过线的票数」：三成员各 `1/3` 时，
   阈值 `0.3` 的 `effective_vote` 是 `1/3`。

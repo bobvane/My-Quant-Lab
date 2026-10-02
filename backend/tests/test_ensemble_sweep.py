@@ -9,11 +9,15 @@ and ``_run_vote``, so this test is what keeps that true.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from app.research.ensemble import (
+    MAX_MEMBERS,
     MAX_SWEEP_THRESHOLDS,
     EnsembleMember,
+    _clears,
+    _coalition_totals,
     run_ensemble,
     run_ensemble_sweep,
 )
@@ -182,3 +186,107 @@ def test_single_member_sweep_has_no_interior_boundary(sample_bars) -> None:
     assert sweep["thresholds"] == [0.0]
     assert sweep["possible_votes"] == [0.0, 1.0]
     assert sweep["points"][0]["effective_vote"] == pytest.approx(1.0)
+
+
+def _equal_members(count: int) -> list[EnsembleMember]:
+    """``count`` equal-weight members with distinct EMA pairs, so none of them is a copy."""
+
+    return _members(*[(f"m{i}", 5 + i, 40 + 2 * i) for i in range(count)])
+
+
+def test_coalition_totals_do_not_drift_with_member_count() -> None:
+    """Twelve equal members are twelfths, not 0.249999 and 0.999996.
+
+    Rounding each partial sum compounded the float error: three twelfths came out as
+    0.249999 and twelve as 0.999996. That is cosmetic until you notice 0.999996 < 1.0, at
+    which point the fullest possible coalition counts as an interior boundary and the
+    default grid contains a threshold that means something no vote total can reach.
+    """
+
+    totals = _coalition_totals([1.0 / 12] * 12)
+    assert len(totals) == 13
+    assert totals[0] == 0.0
+    assert totals[-1] == 1.0
+    # The thirds and quarters are exactly representable at the reported precision, so a
+    # staircase labelled with them is a staircase a reader can type back in.
+    assert 0.25 in totals
+    assert 0.5 in totals
+    assert 0.75 in totals
+    assert not [t for t in totals if 0.9999 < t < 1.0]
+
+
+def test_the_widest_ensemble_can_still_use_the_default_grid(sample_bars) -> None:
+    """12 equal members is ``MAX_MEMBERS``; leaving ``thresholds`` blank must work.
+
+    This is the regression: the drifted 0.999996 boundary made the default grid 13 points
+    long, one over the cap, so the largest supported ensemble was refused by the endpoint's
+    own default.
+    """
+
+    sweep = run_ensemble_sweep(_equal_members(MAX_MEMBERS), sample_bars)
+
+    assert len(sweep["thresholds"]) == MAX_MEMBERS
+    assert sweep["thresholds"][0] == 0.0
+    assert sweep["thresholds"] == sorted(sweep["thresholds"])
+    assert sweep["possible_votes"][-1] == 1.0
+    assert len(sweep["points"]) == len(sweep["thresholds"])
+    assert sweep["max_thresholds"] == MAX_SWEEP_THRESHOLDS
+
+    # Every published step has to be self-consistent: the coalition named as "what the
+    # portfolio was waiting for" must be a reachable total and must actually beat the
+    # threshold it is reported next to.
+    for point in sweep["points"]:
+        assert point["vote_threshold"] in sweep["thresholds"]
+        assert point["effective_vote"] in sweep["possible_votes"]
+        assert point["effective_vote"] > point["vote_threshold"]
+
+    # Twelve equal members are twelve twelfths, so the twelve default steps must name
+    # twelve *different* coalitions -- a repeated answer would mean two rows were really
+    # the same experiment.
+    assert len({point["effective_vote"] for point in sweep["points"]}) == MAX_MEMBERS
+
+    entries = [point["entries_taken"] for point in sweep["points"]]
+    assert entries == sorted(entries, reverse=True)
+
+
+def test_a_default_grid_too_large_to_evaluate_says_what_to_do(sample_bars) -> None:
+    """Powers of two make every subset sum distinct, so the exact grid cannot fit.
+
+    The message has to name the size of the grid and the way out, because the caller's
+    request was "leave it blank" -- being told only that a sweep supports at most N
+    thresholds would not connect the refusal to the thing they asked for.
+    """
+
+    members = _equal_members(8)
+    for index, member in enumerate(members):
+        member.weight = float(2**index)
+
+    with pytest.raises(ValueError) as excinfo:
+        run_ensemble_sweep(members, sample_bars)
+
+    message = str(excinfo.value)
+    assert "distinct coalition totals" in message
+    assert "explicit" in message
+    assert str(MAX_SWEEP_THRESHOLDS) in message
+
+    # The same member set is fine when the caller picks the thresholds themselves.
+    explicit = run_ensemble_sweep(members, sample_bars, thresholds=[0.0, 0.5])
+    assert [point["vote_threshold"] for point in explicit["points"]] == [0.0, 0.5]
+
+
+def test_a_rounded_boundary_is_still_a_boundary() -> None:
+    """A member carrying exactly 1/12 must not clear a threshold reported as 0.083333.
+
+    ``possible_votes`` is rounded for display, so one member's raw 0.08333333333 sits just
+    *above* the printed boundary. Without the epsilon the portfolio would open on that vote
+    while ``effective_vote`` reported the next coalition up -- the report and the
+    simulation disagreeing about which coalition cleared the bar.
+    """
+
+    twelfth = np.array([1.0 / 12])
+    assert not _clears(twelfth, 0.083333).any()
+    assert _clears(twelfth, 0.0).all()
+    assert _clears(np.array([2.0 / 12]), 0.083333).all()
+    # Equal weights are unaffected: half a vote still needs both members.
+    assert not _clears(np.array([0.5]), 0.5).any()
+    assert _clears(np.array([1.0]), 0.5).all()

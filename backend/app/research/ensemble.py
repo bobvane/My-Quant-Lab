@@ -52,8 +52,21 @@ MAX_MEMBERS = 12
 
 # ``vote_sweep`` re-simulates the portfolio once per threshold. Features and member
 # decisions are evaluated once and reused, so a point costs one simulation rather than
-# one member-by-member re-evaluation.
-MAX_SWEEP_THRESHOLDS = 12
+# one member-by-member re-evaluation. The bound is a work bound, not a taste: the exact
+# grid is the coalition totals, which is 12 points for the widest equal-weight ensemble
+# (``MAX_MEMBERS``) but grows with the number of distinct subset sums once weights differ
+# (five members weighted 1..5 are 19 boundaries). 64 covers every realistic member set
+# while keeping a sweep to at most 64 simulations.
+MAX_SWEEP_THRESHOLDS = 64
+
+# A vote total is a sum of normalised weights, so it is a float, and the API publishes
+# thresholds and coalition totals rounded to a fixed precision. Comparing a raw float sum
+# against a rounded threshold is what makes a report lie: a member carrying exactly 1/12
+# clears a displayed threshold of 0.083333, while ``possible_votes`` says the next coalition
+# up was needed. Both the single-threshold run and the sweep therefore compare at the
+# precision they publish, so the reported ``effective_vote`` and the simulation that
+# produced the numbers cannot disagree.
+_TOTAL_DECIMALS = 6
 
 
 @dataclass
@@ -258,16 +271,16 @@ def _run_vote(
 ) -> dict[str, Any]:
     """Merge the members' decisions at one threshold and simulate the portfolio.
 
-    Strictly greater than the threshold. With equal weights each member carries
-    exactly 0.5, so an inclusive ``>= 0.5`` would let ONE member alone clear a
-    "strict majority" and the ensemble would degenerate into a union of members
+    Strictly greater than the threshold, up to ``_VOTE_EPSILON``. With equal weights each
+    member carries exactly 0.5, so an inclusive ``>= 0.5`` would let ONE member alone
+    clear a "strict majority" and the ensemble would degenerate into a union of members
     (probe: AND=0 bars but the vote fired 11 — the union). Majority means more than.
     """
 
     evaluated = inputs.evaluated
     index = inputs.index
     entry_votes_long = inputs.entry_votes_long
-    agreed_long = entry_votes_long > vote_threshold
+    agreed_long = _clears(entry_votes_long, vote_threshold)
     exit_votes_long = None
     for item in evaluated:
         line = item.exit_long.reindex(index, fill_value=False).astype(float).to_numpy()
@@ -276,16 +289,18 @@ def _run_vote(
         )
     if exit_votes_long is None:  # pragma: no cover - members is never empty here
         exit_votes_long = np.zeros(len(index), dtype=float)
-    agreed_exit = exit_votes_long > vote_threshold
+    agreed_exit = _clears(exit_votes_long, vote_threshold)
 
     entry_short = (
-        inputs.entry_votes_short > vote_threshold if inputs.entry_votes_short is not None else None
+        _clears(inputs.entry_votes_short, vote_threshold)
+        if inputs.entry_votes_short is not None
+        else None
     )
     exit_short = (
         # Strictly greater here too: a short exit must clear the same bar the long
         # exit does. This was the one `>=` left behind when the entry/exit votes were
         # tightened, and it only fires when every member allows shorts.
-        inputs.exit_votes_short > vote_threshold
+        _clears(inputs.exit_votes_short, vote_threshold)
         if inputs.entry_votes_short is not None and inputs.exit_votes_short is not None
         else None
     )
@@ -743,11 +758,14 @@ def run_ensemble_sweep(
         # only values that change anything, because the weighted vote is a sum of
         # weights and can only land on coalition totals.
         thresholds = _default_thresholds_for(members)
+        thresholds = _within_sweep_budget(thresholds)
     thresholds = [float(t) for t in thresholds]
     if not thresholds:
         raise ValueError("thresholds must not be empty")
     if len(thresholds) > MAX_SWEEP_THRESHOLDS:
-        raise ValueError(f"a sweep supports at most {MAX_SWEEP_THRESHOLDS} thresholds")
+        raise ValueError(
+            f"a sweep evaluates at most {MAX_SWEEP_THRESHOLDS} thresholds, got {len(thresholds)}"
+        )
     for threshold in thresholds:
         if not 0.0 <= threshold < 1.0:
             raise ValueError(f"vote threshold {threshold} must be in [0, 1)")
@@ -807,8 +825,45 @@ def run_ensemble_sweep(
             for item in inputs.evaluated
         ],
         "possible_votes": _possible_votes(inputs),
+        # How many thresholds a sweep will evaluate. Reported so a client can explain the
+        # bound instead of hard-coding it, and so a caller who is refused knows the number
+        # they have to stay under.
+        "max_thresholds": MAX_SWEEP_THRESHOLDS,
         "warnings": list(inputs.warnings),
     }
+
+
+def _clears(votes: np.ndarray, vote_threshold: float) -> np.ndarray:
+    """Bars where a weighted vote beats ``vote_threshold``.
+
+    One place decides what "more than the threshold" means, so the single-threshold
+    endpoint, the sweep and the reported ``effective_vote`` cannot drift apart. The
+    comparison happens at the precision the response publishes, which is what keeps a
+    rounded threshold from being cleared by the very coalition it names.
+    """
+
+    limit = round(vote_threshold, _TOTAL_DECIMALS)
+    return np.round(votes, _TOTAL_DECIMALS) > limit
+
+
+def _within_sweep_budget(thresholds: list[float]) -> list[float]:
+    """Reject a default grid that is too large to evaluate, and say what to do about it.
+
+    Unequal weights do not change the *shape* of the answer but they do multiply the
+    boundaries: the totals the vote can take are the subset sums of the weights, which is
+    why an equal-weight ensemble is cheap and a set of irregular weights is not. When the
+    exact grid no longer fits the budget, the caller has to choose the thresholds they
+    care about -- silently evaluating a subset would put a step in the chart that was
+    never measured.
+    """
+
+    if len(thresholds) <= MAX_SWEEP_THRESHOLDS:
+        return thresholds
+    raise ValueError(
+        f"this member set has {len(thresholds)} distinct coalition totals, more than the "
+        f"{MAX_SWEEP_THRESHOLDS} thresholds a sweep will evaluate; pass an explicit "
+        f"`thresholds` list to pick the boundaries you care about"
+    )
 
 
 def _default_thresholds_for(members: list[EnsembleMember]) -> list[float]:
@@ -830,17 +885,24 @@ def _default_thresholds_for(members: list[EnsembleMember]) -> list[float]:
     grid = {0.0}
     for value in _coalition_totals(normalised):
         if 0.0 < value < 1.0:
-            grid.add(round(value, 6))
+            grid.add(round(value, _TOTAL_DECIMALS))
     return sorted(grid)
 
 
 def _coalition_totals(normalised_weights: list[float]) -> list[float]:
-    """Distinct totals the normalised weighted vote can actually take, ascending."""
+    """Distinct totals the normalised weighted vote can actually take, ascending.
+
+    Rounded once at the end rather than after every addition: rounding each partial sum
+    compounds the error, and twelve equal members drifted all the way to
+    ``0.249999``/``0.999996``, which both mislabelled the staircase and pushed a
+    ``0.999996`` "boundary" below 1.0 so the default grid overflowed its own cap.
+    """
 
     totals: set[float] = {0.0}
     for weight in normalised_weights:
-        totals |= {round(existing + weight, 6) for existing in totals}
-    return sorted(totals)
+        totals |= {existing + weight for existing in totals}
+    # Rounding can merge two raw totals that were an ulp apart, so dedupe afterwards too.
+    return sorted({round(value, _TOTAL_DECIMALS) for value in totals})
 
 
 def _possible_votes(inputs: _EnsembleInputs) -> list[float]:
@@ -853,10 +915,13 @@ def _effective_vote(inputs: _EnsembleInputs, threshold: float) -> float:
     """Smallest achievable vote total that strictly exceeds ``threshold``.
 
     Reported next to the requested threshold so a reader can see which coalition the
-    portfolio was actually waiting for.
+    portfolio was actually waiting for. The comparison is the same one ``_clears`` makes,
+    so this number always names the coalition that really cleared the bar rather than the
+    one a bare ``>`` on rounded floats would suggest.
     """
 
+    limit = round(threshold, _TOTAL_DECIMALS)
     for total in _possible_votes(inputs):
-        if total > threshold:
+        if total > limit:
             return total
     return 0.0

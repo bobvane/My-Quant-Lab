@@ -66,6 +66,7 @@ boundary and the no-lookahead / immutability guarantees.
 | v1.4.0 | 同口径成员对比（ADR-050）：`member_runs`（每成员在**同一批 bar、同一套成本模型、各自权重资金**下的独立跑分）+ 引擎版本提升为 `ensemble-1.1.0` + gzip 中间件；前端叠加组合与成员权益曲线 |
 | v1.4.1 | 修访问日志整条丢失：脱敏过滤器清空 `record.args` 让 uvicorn `AccessFormatter` 解包 5 元组失败（release smoke test 里的 `ValueError: not enough values to unpack (expected 5, got 0)`），改为逐参数脱敏 |
 | v1.4.2 | 投票阈值扫描（ADR-052）：`POST /research/ensemble/sweep` 一次给出集成**唯一旋钮**的全部台阶（票数只能落在联盟总数上，故曲面是阶梯），带 `effective_vote` 指明每个阈值实际在等哪个联盟；`ensemble.py` 拆出阈值无关的 `_prepare_ensemble` + 单阈值 `_run_vote`，使扫描点与直接运行「逐项一致」成为结构保证；引擎版本提升为 `ensemble-1.2.0`；前端新增 `ThresholdSweepChart.vue` 与阶梯语义说明 |
+| v1.4.3 | 扫描网格必须精确且总能评估（ADR-053）：修 `_coalition_totals` 的逐级取整漂移（十二等权成员的最大票数曾是 `0.999996`，导致默认网格 13 点 > 上限 12，**最宽集成用不了默认路径**）；上限 12 → 64 并把放不下改成可操作的 422；票数比较统一到发布的六位精度（`_clears`），修掉「报告说需要两个成员、模拟却让一个进场」；响应新增 `max_thresholds` |
 
 **至此 docs/15 的 P0/P1/P2 与 v2 结构性能力清单全部完成。** 后续为打磨与体验改进。
 

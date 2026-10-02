@@ -209,7 +209,12 @@ if ([int]$last.number_of_trades -ne [int]$direct.metrics.number_of_trades) { $ok
 if ([math]::Abs([double]$last.final_equity - [double]$direct.final_equity) -gt 0.01) { $ok = $false; "FAIL: sweep final_equity != direct" }
 if ([math]::Abs([double]$last.total_return - [double]$direct.metrics.total_return) -gt 1e-9) { $ok = $false; "FAIL: sweep total_return != direct" }
 
-# Too many thresholds must be rejected rather than silently truncated.
+# Too many thresholds must be rejected rather than silently truncated, and the cap has to
+# come from the response rather than a number baked into this script -- a hard-coded cap is
+# exactly the duplicated fact that goes stale (it was 12 when the widest ensemble needed
+# 13 points for its own default grid).
+$cap = [int]$sweep.max_thresholds
+if ($cap -le 0) { $ok = $false; "FAIL: sweep did not report max_thresholds" }
 $rejected = $false
 try {
   Invoke-RestMethod "$Base/research/ensemble/sweep" -Method Post -ContentType 'application/json' `
@@ -220,9 +225,9 @@ try {
       )
       symbol     = $Symbol
       timeframe  = '1d'
-      thresholds = @(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.11, 0.22, 0.33, 0.44)
+      thresholds = @(0..$cap | ForEach-Object { ($_ + 1) / ($cap + 2) })
     } | ConvertTo-Json -Depth 6) | Out-Null
 } catch { $rejected = $true }
-if (-not $rejected) { $ok = $false; "FAIL: 13 thresholds was accepted (cap is 12)" }
+if (-not $rejected) { $ok = $false; "FAIL: $($cap + 1) thresholds was accepted (cap is $cap)" }
 
 "`nINVARIANTS: $(if ($ok) { 'OK' } else { 'FAILED' })"

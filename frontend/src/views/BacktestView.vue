@@ -383,6 +383,15 @@ async function runEnsemble() {
 }
 
 /**
+ * Longest explicit threshold list this endpoint will evaluate.
+ *
+ * Prefer the budget the server reported over any number written here: it is the server's
+ * constant, and it has already changed once (12 was not enough for the widest ensemble's
+ * own default grid). `null` until a sweep has answered.
+ */
+const ensSweepBudget = computed(() => ensSweepResult.value?.max_thresholds ?? null)
+
+/**
  * Parse the optional explicit threshold list. Returns `null` when blank, which asks the
  * server to derive the thresholds where the answer can change (the coalition totals)
  * instead of us guessing a grid.
@@ -397,6 +406,10 @@ function parseEnsSweepThresholds(): number[] | null {
   const numbers = parts.map((s) => Number(s))
   if (numbers.some((n) => !Number.isFinite(n) || n < 0 || n >= 1)) {
     throw new Error('阈值需为 [0, 1) 之间的数字，例如 0, 0.25, 0.5, 0.75')
+  }
+  const budget = ensSweepBudget.value
+  if (budget !== null && numbers.length > budget) {
+    throw new Error(`一次扫描最多评估 ${budget} 个阈值，当前填了 ${numbers.length} 个`)
   }
   return numbers
 }
@@ -1384,6 +1397,11 @@ onMounted(async () => {
           <b>不推荐阈值</b>。
         </p>
         <p v-if="ensSweepNote" class="muted">{{ ensSweepNote }}</p>
+        <p class="muted">
+          本次评估了 {{ ensSweepPoints.length }} 个阈值，一次扫描最多
+          {{ ensSweepResult.max_thresholds }} 个。要更多台阶就自己填阈值列表；超过上限会被
+          <b>拒绝</b>（报错会说明这份成员权重一共有多少个联盟边界），而不是悄悄截断。
+        </p>
         <ThresholdSweepChart :points="ensSweepPoints" height="280px" />
         <div class="table-wrap">
           <table>

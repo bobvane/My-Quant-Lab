@@ -14,6 +14,7 @@ import copy
 import pytest
 
 from app.api.schemas import MarketDataSyncRequest
+from app.research.ensemble import MAX_MEMBERS, MAX_SWEEP_THRESHOLDS
 
 _SYMBOL = "DEMO-AAPL"
 
@@ -247,3 +248,89 @@ def test_sweep_unknown_member_is_404(client) -> None:
         },
     )
     assert response.status_code == 404
+
+
+def test_sweep_reports_its_threshold_budget(client) -> None:
+    """The cap travels with the response instead of being hard-coded by every client."""
+
+    a, b = _seed(client)
+    body = client.post(
+        "/api/v1/research/ensemble/sweep",
+        json={"members": _members(a, b), "symbol": _SYMBOL, "timeframe": "1d"},
+    ).json()
+
+    assert body["max_thresholds"] == MAX_SWEEP_THRESHOLDS
+    assert len(body["thresholds"]) <= body["max_thresholds"]
+
+
+def test_the_widest_ensemble_can_use_its_default_grid(client) -> None:
+    """Twelve equal members, no ``thresholds`` sent: this used to be a 422.
+
+    The endpoint's own default grid was one point longer than its cap, because twelve
+    equal members drifted to a largest coalition total of 0.999996 -- just under 1.0, so it
+    counted as an interior boundary. The widest ensemble the API accepts could not be swept
+    without the caller typing thresholds by hand.
+    """
+
+    client.post("/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol=_SYMBOL).model_dump())
+    versions = [_version(client, f"wide-{i}", 5 + i, 40 + 2 * i) for i in range(MAX_MEMBERS)]
+
+    response = client.post(
+        "/api/v1/research/ensemble/sweep",
+        json={
+            "members": [{"strategy_version_id": v, "weight": 1.0} for v in versions],
+            "symbol": _SYMBOL,
+            "timeframe": "1d",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["thresholds"]) == MAX_MEMBERS
+    assert len(body["points"]) == MAX_MEMBERS
+    assert body["possible_votes"][-1] == 1.0
+    for point in body["points"]:
+        assert point["effective_vote"] in body["possible_votes"]
+        assert point["effective_vote"] > point["vote_threshold"]
+
+
+def test_an_unaffordable_default_grid_is_a_422_that_says_what_to_do(client) -> None:
+    """Powers of two make every subset sum distinct, so the exact grid cannot be evaluated.
+
+    The refusal has to name the way out: the caller asked for the *default* grid, so the
+    message must point at the explicit ``thresholds`` list rather than only at a limit.
+    """
+
+    client.post("/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol=_SYMBOL).model_dump())
+    versions = [_version(client, f"pow-{i}", 5 + i, 40 + 2 * i) for i in range(8)]
+
+    response = client.post(
+        "/api/v1/research/ensemble/sweep",
+        json={
+            "members": [
+                {"strategy_version_id": v, "weight": float(2**i)} for i, v in enumerate(versions)
+            ],
+            "symbol": _SYMBOL,
+            "timeframe": "1d",
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "distinct coalition totals" in detail
+    assert "explicit" in detail
+
+    # Picking the boundaries by hand is all that was missing.
+    explicit = client.post(
+        "/api/v1/research/ensemble/sweep",
+        json={
+            "members": [
+                {"strategy_version_id": v, "weight": float(2**i)} for i, v in enumerate(versions)
+            ],
+            "symbol": _SYMBOL,
+            "timeframe": "1d",
+            "thresholds": [0.0, 0.5],
+        },
+    )
+    assert explicit.status_code == 200, explicit.text
+    assert [p["vote_threshold"] for p in explicit.json()["points"]] == [0.0, 0.5]

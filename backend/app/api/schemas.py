@@ -398,6 +398,9 @@ class EnsembleSweepOut(BaseModel):
     # Every distinct total the weighted vote can take. Between two of these values
     # nothing can change, which is why the sweep's surface is a staircase.
     possible_votes: list[float]
+    # The number of thresholds a sweep will evaluate. A caller-supplied list over this
+    # length is a 422, and so is a default grid that would need more points than this.
+    max_thresholds: int
     warnings: list[str]
     dataset_version_id: int | None = None
     symbol: str | None = None

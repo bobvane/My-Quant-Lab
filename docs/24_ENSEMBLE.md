@@ -199,7 +199,12 @@ POST /api/v1/research/ensemble/sweep
 请求体与 `POST /research/ensemble` 相同（`members` / `symbol` / `timeframe` /
 `execution_overrides` 全部复用），额外的 `thresholds` 是**可选**的显式阈值列表；
 基类的 `vote_threshold` 在这里被忽略。省略 `thresholds` 时服务端只在**答案会发生变化**
-的阈值上跑（即 `possible_votes` 中严格落在 `(0, 1)` 内的值），一次请求最多 12 个点。
+的阈值上跑（即 `possible_votes` 中严格落在 `(0, 1)` 内的值）。
+
+一次请求最多评估 `max_thresholds` 个点（当前是 64）。**上限是 422 而不是截断**：显式列表超长
+会被拒绝，默认网格放不下同样会被拒绝，报错会告诉你这份成员权重一共有多少个联盟边界，并指向
+显式 `thresholds`。响应里带着 `max_thresholds`，客户端不必把这个数字抄一份（它会变：v1.4.2 时
+它还是 12，而 12 等权成员——API 允许的最宽集成——的默认网格恰好是 13 点）。
 
 ```json
 {
@@ -227,6 +232,7 @@ POST /api/v1/research/ensemble/sweep
   "timeframe": "1d",
   "thresholds": [0.0, 0.25, 0.5, 0.75],
   "possible_votes": [0.0, 0.5, 1.0],
+  "max_thresholds": 64,
   "members": [
     { "label": "3@1.0.0", "weight": 0.5, "weight_share": 0.5 },
     { "label": "7@1.0.0", "weight": 0.5, "weight_share": 0.5 }
@@ -258,7 +264,8 @@ POST /api/v1/research/ensemble/sweep
 
 | 字段 | 含义 |
 |---|---|
-| `possible_votes` | 加权票**所有可能取值**（联盟总数），升序 |
+| `possible_votes` | 加权票**所有可能取值**（联盟总数），升序，六位小数 |
+| `max_thresholds` | 一次扫描最多评估的阈值个数；超过就是 `422` |
 | `points[].effective_vote` | `possible_votes` 中**第一个严格大于**该阈值的票数 —— 也就是这个阈值实际在等哪个联盟 |
 
 上例中阈值 `0.0` 与 `0.25` 的 `effective_vote` 都是 `0.5`（一个成员就够），阈值 `0.5` 与 `0.75`
@@ -268,9 +275,15 @@ POST /api/v1/research/ensemble/sweep
 注意 `effective_vote` 不是「需要几个成员」，而是「第一个能过线的票数」。三成员各 `1/3` 时，
 阈值 `0.3` 的 `effective_vote` 是 `1/3`（一个成员已经够），而不是 `2/3`。
 
+**比较发生在发布的精度上（六位小数）**：`possible_votes`、`effective_vote` 和引擎的票数判定
+用的是同一个 `round(..., 6)`。否则会出现「报告说需要两个成员、模拟却让一个成员进场」这种自相
+矛盾——十二个等权成员的票数是 `1/12 = 0.0833333…`，原始浮点大于发布的 `0.083333`，但四舍五入
+之后它们相等。同理，联盟总数只在**求和结束后**取整一次：逐级取整会让误差累积，十二等权成员的
+最大票数会变成 `0.999996` 而不是 `1.0`。
+
 ### 这个端点不做什么
 
-- **不返回权益曲线**，也不返回 `member_runs`：曲线不在本端点的契约里，12 个点各带一条曲线
+- **不返回权益曲线**，也不返回 `member_runs`：曲线不在本端点的契约里，每个点各带一条曲线
   会让响应体积失控。
 - **不推荐阈值**。它与参数敏感性扫描（`docs/21`）同族：只描述形状。跨台阶比较收益并挑最高的
   那个，就是在同一个数据集上做选择，属于过拟合，本工具不替用户做这个决定。
@@ -292,7 +305,8 @@ POST /api/v1/research/ensemble/sweep
 | 成员为空 / 超过 12 个 | `422` |
 | **同一版本重复出现** | `422`（见下） |
 | `vote_threshold` 不在 `[0, 1)` | `422` |
-| `thresholds` 为空列表 / 超过 12 个 / 有重复 / 有值不在 `[0, 1)` | `422`（仅扫描端点） |
+| `thresholds` 为空列表 / 超过 `max_thresholds` 个 / 有重复 / 有值不在 `[0, 1)` | `422`（仅扫描端点） |
+| 默认网格的联盟边界多于 `max_thresholds`（如 8 个权重互不相同的成员） | `422`，报错说明边界个数与上限，并指向显式 `thresholds` |
 | 权重为负 / 全为 0 | `422` |
 | 成员之间没有共同 bar（预热期完全不重叠） | `422` |
 | 预热期部分重叠 | 正常执行，但在共同 bar 上评估并写入 `warnings` |
@@ -317,7 +331,7 @@ POST /api/v1/research/ensemble/sweep
 
 | 位置 | 作用 |
 |---|---|
-| `backend/app/research/ensemble.py` | 投票、决策合并、组合执行；`_prepare_ensemble`（阈值无关的公共部分）、`_run_vote`（单阈值）、`run_ensemble`、`run_ensemble_sweep` |
+| `backend/app/research/ensemble.py` | 投票、决策合并、组合执行；`_prepare_ensemble`（阈值无关的公共部分）、`_run_vote`（单阈值）、`_clears`（按发布精度比较）、`_coalition_totals`、`_within_sweep_budget`、`run_ensemble`、`run_ensemble_sweep` |
 | `backend/app/strategies/dsl.py` | `merge_spec_overrides`（唯一经过校验的覆盖合并入口） |
 | `backend/tests/test_ensemble.py` | 投票语义、阈值边界、权重归一化、成本/仓位覆盖、现金上限、同口径成员运行 |
 | `backend/tests/test_ensemble_sweep.py` | 扫描点与直接运行逐项一致、联盟总数、`effective_vote`、单调性、参数校验 |

@@ -270,6 +270,37 @@ def test_api_execute_positions_and_status(client, db_session) -> None:
     assert reopened.json()["status"] == "active"
 
 
+def test_api_paper_performance(client, db_session) -> None:
+    from app.domain.models import Asset, PaperTrade
+
+    account = client.post(
+        "/api/v1/paper/accounts", json={"name": "Perf PA", "initial_cash": 1000}
+    ).json()
+    asset = Asset(symbol="PERF", asset_class="stock")
+    db_session.add(asset)
+    db_session.flush()
+    db_session.add(
+        PaperTrade(
+            account_id=account["id"],
+            asset_id=asset.id,
+            direction="LONG",
+            entry_time=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+            entry_price=10.0,
+            exit_time=dt.datetime(2026, 1, 2, tzinfo=dt.UTC),
+            exit_price=11.0,
+            quantity=10.0,
+            pnl=10.0,
+        )
+    )
+    db_session.commit()
+
+    body = client.get(f"/api/v1/paper/accounts/{account['id']}/performance").json()
+    assert body["closed_trades"] == 1
+    assert body["final_equity"] == 1010.0
+    assert body["metrics"]["number_of_trades"] == 1
+    assert client.get("/api/v1/paper/accounts/9999/performance").status_code == 404
+
+
 def test_api_fund_and_withdraw_limits(client) -> None:
     account = client.post(
         "/api/v1/paper/accounts", json={"name": "Fund PA", "initial_cash": 1000}

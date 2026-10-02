@@ -108,6 +108,50 @@ def account_equity(account_id: int, db: Session = Depends(get_db)) -> dict:
     }
 
 
+@router.get(
+    "/accounts/{account_id}/performance",
+    summary="Performance metrics for a paper account (docs/08 §5)",
+)
+def account_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
+    import numpy as np
+
+    from app.research.metrics import compute_metrics
+
+    account = db.get(PaperAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+
+    trades = list(
+        db.scalars(
+            select(PaperTrade)
+            .where(PaperTrade.account_id == account_id, PaperTrade.exit_time.is_not(None))
+            .order_by(PaperTrade.exit_time)
+        ).all()
+    )
+    initial = float(account.initial_cash)
+    equity = [initial]
+    for trade in trades:
+        equity.append(equity[-1] + float(trade.pnl or 0))
+    trade_dicts = [
+        {
+            "pnl": float(t.pnl or 0),
+            "entry_price": float(t.entry_price),
+            "exit_price": float(t.exit_price) if t.exit_price is not None else None,
+            "direction": t.direction,
+        }
+        for t in trades
+    ]
+    metrics = compute_metrics(np.asarray(equity, dtype=float), trade_dicts, timeframe="1d")
+    return {
+        "account_id": account_id,
+        "initial_cash": initial,
+        "final_equity": equity[-1],
+        "closed_trades": len(trades),
+        "metrics": metrics.as_dict(),
+        "note": "指标由已平仓交易的权益序列计算；持仓未实现盈亏不计入。",
+    }
+
+
 @router.get("/accounts/{account_id}/trades", summary="List paper trades")
 def account_trades(account_id: int, db: Session = Depends(get_db)) -> list[dict]:
     account = db.get(PaperAccount, account_id)

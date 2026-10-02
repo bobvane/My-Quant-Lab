@@ -44,11 +44,91 @@ def test_backtest_is_deterministic(sample_bars: pd.DataFrame) -> None:
     assert len(first.trades) == len(second.trades)
 
 
-def test_result_hash_changes_with_parameters(sample_bars: pd.DataFrame) -> None:
-    spec = _spec()
-    cheap = run_backtest(spec, sample_bars, parameters={"fee_bps": 10})
-    expensive = run_backtest(spec, sample_bars, parameters={"fee_bps": 50})
+def test_result_hash_changes_with_costs(sample_bars: pd.DataFrame) -> None:
+    """Costs live in ``execution`` and must be covered by the hash.
+
+    This used to pass ``fee_bps`` through the ``parameters`` argument, which only
+    proved the hash mixed in whatever dict it was handed — the engine ignored it,
+    so the two runs were byte-identical yet hashed differently. Costs are now
+    varied where they actually belong.
+    """
+
+    cheap = run_backtest(_spec(fee_bps=10, slippage_bps=5), sample_bars)
+    expensive = run_backtest(_spec(fee_bps=50, slippage_bps=5), sample_bars)
     assert cheap.result_hash != expensive.result_hash
+    assert cheap.final_equity != pytest.approx(expensive.final_equity)
+
+
+PERIOD_REF_DSL: dict = {
+    "schema_version": "1.0",
+    "strategy": {"id": "pr", "name": "Period Ref", "version": "1.0.0"},
+    "market": {"asset_classes": ["stock"], "timeframes": ["1d"]},
+    "indicators": [{"id": "emaX", "type": "EMA", "period_ref": "trend"}],
+    "parameters": {"trend": 20},
+    "entry": {"long": {"all": [{"op": "crosses_above", "left": "close", "right": "emaX"}]}},
+    "exit": {"long": {"any": [{"op": "crosses_below", "left": "close", "right": "emaX"}]}},
+    "risk": {"stop_loss_atr_multiple": 2.0},
+    "execution": {"fee_bps": 10, "slippage_bps": 5, "initial_capital": 10_000.0},
+}
+
+
+def test_parameter_override_actually_changes_the_backtest(sample_bars: pd.DataFrame) -> None:
+    """A ``period_ref`` override must reach the feature engine.
+
+    Regression: ``run_backtest`` accepted ``parameters`` and folded them into the
+    result hash but never applied them, so two runs with different periods
+    produced *identical* trades while reporting *different* result hashes — the
+    reproducibility contract ("same inputs -> same numbers") was broken in the
+    direction that matters most: the hash claimed a difference the numbers did
+    not have.
+    """
+
+    spec = StrategySpec.model_validate(copy.deepcopy(PERIOD_REF_DSL))
+    fast = run_backtest(spec, sample_bars, parameters={"trend": 5})
+    slow = run_backtest(spec, sample_bars, parameters={"trend": 40})
+
+    # Applying the override must change the actual computed result...
+    assert [t["entry_time"] for t in fast.trades] != [t["entry_time"] for t in slow.trades] or (
+        len(fast.trades) != len(slow.trades)
+    ), "period_ref override did not change the backtest result"
+    # ...and a different result must imply a different hash.
+    assert fast.result_hash != slow.result_hash
+
+
+def test_parameters_equivalent_to_spec_produce_the_same_hash(sample_bars: pd.DataFrame) -> None:
+    """Overriding nothing must be a no-op, not a hash change.
+
+    The hash covers the *effective* parameters, so passing the spec's own values
+    back in cannot silently invalidate a stored result.
+    """
+
+    spec = StrategySpec.model_validate(copy.deepcopy(PERIOD_REF_DSL))
+    base = run_backtest(spec, sample_bars)
+    echoed = run_backtest(spec, sample_bars, parameters={"trend": spec.parameters["trend"]})
+    assert base.result_hash == echoed.result_hash
+    assert len(base.trades) == len(echoed.trades)
+
+
+def test_overriding_an_unknown_parameter_warns(sample_bars: pd.DataFrame) -> None:
+    """A typo in an override must be reported, not silently ignored.
+
+    This is a warning rather than an error on purpose: an override may legitimately
+    carry keys the engine does not need, and callers that pass ``spec.parameters``
+    through wholesale must keep working.
+    """
+
+    spec = StrategySpec.model_validate(copy.deepcopy(PERIOD_REF_DSL))
+    result = run_backtest(spec, sample_bars, parameters={"trendd": 10})
+    assert any("trendd" in w for w in result.warnings), result.warnings
+
+
+def test_unknown_parameter_does_not_change_the_result_hash(sample_bars: pd.DataFrame) -> None:
+    """An ignored key must not masquerade as a different computation."""
+
+    spec = StrategySpec.model_validate(copy.deepcopy(PERIOD_REF_DSL))
+    base = run_backtest(spec, sample_bars)
+    typo = run_backtest(spec, sample_bars, parameters={"trendd": 10})
+    assert base.result_hash == typo.result_hash
 
 
 def test_fill_uses_next_bar_open_not_signal_bar(sample_bars: pd.DataFrame) -> None:

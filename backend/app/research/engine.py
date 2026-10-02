@@ -74,6 +74,40 @@ def _cost_multipliers(fee_bps: float, slippage_bps: float) -> tuple[float, float
     return fee_bps / 10_000.0, slippage_bps / 10_000.0
 
 
+def resolve_parameters(
+    spec: StrategySpec, overrides: dict[str, Any] | None
+) -> tuple[dict[str, Any], list[str]]:
+    """Merge parameter overrides into ``spec.parameters``.
+
+    Returns ``(effective_parameters, warnings)``. The returned mapping is the
+    single source of truth for *both* the feature engine and the result hash, so a
+    run can never report a hash for parameters it did not actually use.
+
+    Keys the strategy does not declare are dropped with a warning instead of
+    raising: an override may legitimately carry extra keys (callers echo
+    ``spec.parameters`` back in), and a typo should be visible without breaking an
+    otherwise valid run. Dropping them also keeps the hash stable — an ignored key
+    must not masquerade as a different computation.
+    """
+
+    effective = dict(spec.parameters or {})
+    if not overrides:
+        return effective, []
+
+    warnings: list[str] = []
+    unknown = sorted(k for k in overrides if k not in effective)
+    if unknown:
+        warnings.append(
+            "ignored unknown parameter override(s): "
+            + ", ".join(unknown)
+            + f"; this strategy declares: {', '.join(sorted(effective)) or '(none)'}"
+        )
+    for key, value in overrides.items():
+        if key in effective:
+            effective[key] = value
+    return effective, warnings
+
+
 def run_backtest(
     spec: StrategySpec,
     bars: pd.DataFrame,
@@ -85,10 +119,17 @@ def run_backtest(
     """Run a long-only (or short-enabled) backtest over ``bars``.
 
     ``bars`` must contain ``timestamp`` (UTC) plus OHLCV columns.
+
+    ``parameters`` overrides the strategy's declared ``parameters`` (the values an
+    indicator's ``period_ref`` resolves against). Only the *effective* values reach
+    the feature engine and the result hash, so replaying a stored hash requires the
+    same overrides.
     """
 
-    parameters = parameters or {}
-    warnings: list[str] = []
+    effective_parameters, warnings = resolve_parameters(spec, parameters)
+    if effective_parameters != (spec.parameters or {}):
+        spec = spec.model_copy(update={"parameters": effective_parameters})
+
     fee_rate, slippage_rate = _cost_multipliers(spec.execution.fee_bps, spec.execution.slippage_bps)
     capital = float(spec.execution.initial_capital)
     max_position_pct = spec.risk.max_position_pct if spec.risk else None
@@ -372,7 +413,7 @@ def run_backtest(
             "dataset_hash": dataset_hash,
             "engine_version": ENGINE_VERSION,
             "feature_version": FEATURE_VERSION,
-            "parameters": parameters,
+            "parameters": effective_parameters,
             "metrics": metrics.as_dict(),
             "trade_count": len(trades),
         },

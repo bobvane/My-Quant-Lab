@@ -53,3 +53,5 @@ def test_outcome_summary_groups(client, db_session) -> None:
     assert all_group["total_pnl_pct"] == 1.5
     assert body["groups"]["state:BUY"]["count"] == 2
     assert body["groups"]["direction:FLAT"]["count"] == 1
+    # Each signal belongs to its own seeded strategy, so 3 strategy groups exist.
+    assert len([k for k in body["groups"] if k.startswith("strategy:")]) == 3

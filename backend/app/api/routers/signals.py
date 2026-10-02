@@ -134,6 +134,10 @@ def outcome_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
         bucket_for(f"direction:{signal.direction}").append(pnl)
         bucket_for(f"timeframe:{signal.timeframe}").append(pnl)
         bucket_for(f"state:{signal.state}").append(pnl)
+        version = db.get(StrategyVersion, signal.strategy_version_id)
+        strategy = db.get(Strategy, version.strategy_id) if version else None
+        if strategy is not None:
+            bucket_for(f"strategy:{strategy.name}").append(pnl)
 
     def summarise(values: list[float]) -> dict[str, Any]:
         if not values:

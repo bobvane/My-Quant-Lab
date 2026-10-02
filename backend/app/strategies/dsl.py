@@ -161,6 +161,32 @@ class RiskSpec(BaseModel):
 
 OrderType = Literal["market", "limit", "stop"]
 
+SizingMode = Literal["fixed_fraction", "risk_per_trade", "atr_risk"]
+
+
+class SizingSpec(BaseModel):
+    """How much to buy/sell on entry (docs/23, ADR-045).
+
+    ``fixed_fraction`` is the historical behaviour and the default, so existing
+    strategy versions keep producing exactly the same numbers.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: SizingMode = "fixed_fraction"
+    # Fraction of *current cash* to deploy. Ignored unless mode=fixed_fraction.
+    fraction: float | None = Field(default=None, gt=0, le=1)
+    # Fraction of current equity to risk between entry and the stop.
+    risk_pct: float = Field(default=0.01, gt=0, le=1)
+    # ATR multiple used as the risk distance when mode=atr_risk.
+    atr_multiple: float = Field(default=2.0, gt=0)
+
+    @model_validator(mode="after")
+    def _check(self) -> SizingSpec:
+        if self.mode == "risk_per_trade" and self.risk_pct <= 0:
+            raise ValueError("risk_per_trade requires risk_pct > 0")
+        return self
+
 
 class ExecutionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -174,6 +200,7 @@ class ExecutionSpec(BaseModel):
     slippage_bps: float = Field(default=0.0, ge=0)
     allow_fractional: bool = True
     initial_capital: float = Field(default=10_000.0, gt=0)
+    sizing: SizingSpec = Field(default_factory=SizingSpec)
 
     @field_validator("fee_bps", "slippage_bps")
     @classmethod

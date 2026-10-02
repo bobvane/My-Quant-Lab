@@ -70,6 +70,61 @@ class BacktestResult:
         }
 
 
+def _position_quantity(
+    *,
+    sizing: Any,
+    cash: float,
+    fill: float,
+    max_position_pct: float,
+    stop_distance: float | None,
+    allow_fractional: bool,
+) -> float:
+    """Quantity for one entry (docs/23, ADR-045).
+
+    ``fixed_fraction`` reproduces the historical behaviour exactly: spend
+    ``max_position_pct`` of current cash. The risk-based modes size from the
+    distance to the stop so that a wider stop buys less, which is the whole point
+    of risk-based sizing.
+
+    A risk-based size is only used when it is *usable* (positive stop distance and
+    a positive quantity); otherwise the engine falls back to the fraction rule
+    rather than silently skipping the trade. Either way the size is capped so the
+    notional can never exceed available cash — this is a research engine, not a
+    margin account.
+    """
+
+    if fill <= 0 or cash <= 0 or max_position_pct <= 0:
+        return 0.0
+
+    mode = getattr(sizing, "mode", "fixed_fraction") if sizing is not None else "fixed_fraction"
+    fraction = getattr(sizing, "fraction", None) if sizing is not None else None
+    deploy = float(fraction) if fraction is not None else float(max_position_pct)
+    deploy = min(deploy, 1.0)
+
+    qty: float | None = None
+    if mode == "risk_per_trade" and stop_distance and stop_distance > 0:
+        risk_pct = float(getattr(sizing, "risk_pct", 0.01))
+        risk_budget = cash * risk_pct
+        qty = risk_budget / stop_distance
+    elif mode == "atr_risk" and stop_distance and stop_distance > 0:
+        # stop_distance is already the ATR multiple, so this reduces to letting the
+        # configured risk_pct cap the loss at the ATR-based stop.
+        risk_pct = float(getattr(sizing, "risk_pct", 0.01))
+        qty = (cash * risk_pct) / stop_distance
+
+    if qty is None or qty <= 0:
+        qty = (cash * deploy) / fill
+
+    # Never buy more than cash allows (fees are charged on top and handled by the
+    # caller, which is why the cap uses a hair under the full amount).
+    affordable = (cash * 0.999) / fill
+    qty = min(qty, affordable)
+
+    if not allow_fractional:
+        qty = float(int(qty))
+    return float(qty) if qty > 0 else 0.0
+
+
 def _cost_multipliers(fee_bps: float, slippage_bps: float) -> tuple[float, float]:
     return fee_bps / 10_000.0, slippage_bps / 10_000.0
 
@@ -266,37 +321,42 @@ def run_backtest(
                     fill_ref = float(opens[i + 1])
                     slip = fill_ref * slippage_rate
                     fill = fill_ref + slip if want_long else fill_ref - slip
-                    budget = cash * float(max_position_pct)
-                    if budget > 0:
-                        qty = budget / fill
-                        if not spec.execution.allow_fractional:
-                            qty = float(int(qty))
-                        if qty > 0:
-                            fee = abs(fill * qty) * fee_rate
-                            if want_long:
-                                cash -= fill * qty + fee
-                                direction = "LONG"
-                            else:
-                                cash += fill * qty - fee
-                                direction = "SHORT"
-                            quantity = qty
-                            entry_price = fill
-                            entry_fee = fee
-                            entry_slippage = abs(slip)
-                            entry_index = i + 1
-                            trade_high = fill
-                            trade_low = fill
-                            raw_stop = stop_line[i] if want_long else stop_short_line[i]
-                            entry_stop = float(raw_stop) if not np.isnan(float(raw_stop)) else None
-                            signals.append(
-                                {
-                                    "bar_time": index[i].isoformat(),
-                                    "state": "BUY" if want_long else "SELL",
-                                    "direction": direction,
-                                    "fill_time": index[i + 1].isoformat(),
-                                    "fill_price": fill,
-                                }
-                            )
+                    raw_stop = stop_line[i] if want_long else stop_short_line[i]
+                    raw_stop_f = float(raw_stop)
+                    stop_distance = abs(fill - raw_stop_f) if not np.isnan(raw_stop_f) else None
+                    qty = _position_quantity(
+                        sizing=spec.execution.sizing,
+                        cash=cash,
+                        fill=fill,
+                        max_position_pct=float(max_position_pct),
+                        stop_distance=stop_distance,
+                        allow_fractional=spec.execution.allow_fractional,
+                    )
+                    if qty > 0:
+                        fee = abs(fill * qty) * fee_rate
+                        if want_long:
+                            cash -= fill * qty + fee
+                            direction = "LONG"
+                        else:
+                            cash += fill * qty - fee
+                            direction = "SHORT"
+                        quantity = qty
+                        entry_price = fill
+                        entry_fee = fee
+                        entry_slippage = abs(slip)
+                        entry_index = i + 1
+                        trade_high = fill
+                        trade_low = fill
+                        entry_stop = None if np.isnan(raw_stop_f) else raw_stop_f
+                        signals.append(
+                            {
+                                "bar_time": index[i].isoformat(),
+                                "state": "BUY" if want_long else "SELL",
+                                "direction": direction,
+                                "fill_time": index[i + 1].isoformat(),
+                                "fill_price": fill,
+                            }
+                        )
                 elif atr_col is not None:
                     atr_value = float(frame[atr_col].iloc[i])
                     price = _order_price(
@@ -324,38 +384,43 @@ def run_backtest(
                 fill = _pending_fill(pending, float(opens[i]), float(highs[i]), float(lows[i]))
                 if fill is not None:
                     slip = fill * slippage_rate
-                    budget = cash * float(max_position_pct)
-                    if budget > 0:
-                        qty = budget / fill
-                        if not spec.execution.allow_fractional:
-                            qty = float(int(qty))
-                        if qty > 0:
-                            fee = abs(fill * qty) * fee_rate
-                            if pending["long"]:
-                                cash -= fill * qty + fee
-                                direction = "LONG"
-                            else:
-                                cash += fill * qty - fee
-                                direction = "SHORT"
-                            quantity = qty
-                            entry_price = fill
-                            entry_fee = fee
-                            entry_slippage = abs(slip)
-                            entry_index = i
-                            trade_high = fill
-                            trade_low = fill
-                            raw_stop = stop_line[i] if pending["long"] else stop_short_line[i]
-                            entry_stop = float(raw_stop) if not np.isnan(float(raw_stop)) else None
-                            signals.append(
-                                {
-                                    "bar_time": index[i].isoformat(),
-                                    "state": "BUY" if pending["long"] else "SELL",
-                                    "direction": direction,
-                                    "fill_time": index[i].isoformat(),
-                                    "fill_price": fill,
-                                }
-                            )
-                            pending = None
+                    raw_stop = stop_line[i] if pending["long"] else stop_short_line[i]
+                    raw_stop_f = float(raw_stop)
+                    stop_distance = abs(fill - raw_stop_f) if not np.isnan(raw_stop_f) else None
+                    qty = _position_quantity(
+                        sizing=spec.execution.sizing,
+                        cash=cash,
+                        fill=fill,
+                        max_position_pct=float(max_position_pct),
+                        stop_distance=stop_distance,
+                        allow_fractional=spec.execution.allow_fractional,
+                    )
+                    if qty > 0:
+                        fee = abs(fill * qty) * fee_rate
+                        if pending["long"]:
+                            cash -= fill * qty + fee
+                            direction = "LONG"
+                        else:
+                            cash += fill * qty - fee
+                            direction = "SHORT"
+                        quantity = qty
+                        entry_price = fill
+                        entry_fee = fee
+                        entry_slippage = abs(slip)
+                        entry_index = i
+                        trade_high = fill
+                        trade_low = fill
+                        entry_stop = None if np.isnan(raw_stop_f) else raw_stop_f
+                        signals.append(
+                            {
+                                "bar_time": index[i].isoformat(),
+                                "state": "BUY" if pending["long"] else "SELL",
+                                "direction": direction,
+                                "fill_time": index[i].isoformat(),
+                                "fill_price": fill,
+                            }
+                        )
+                        pending = None
 
         # 3) Mark to market.
         position_value = quantity * close * direction_sign(direction)

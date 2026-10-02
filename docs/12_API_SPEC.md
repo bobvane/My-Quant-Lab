@@ -133,6 +133,17 @@ API base: `/api/v1`
 - 相同 seed 必然得到相同分布；每次运行写审计事件 `monte_carlo_completed`。
 - 年化周期取自该次回测的数据集周期，不接受调用方声明。
 
+## Backtest 执行模型（仓位管理）
+
+`POST /backtests` 的 `execution_overrides` 接受 `sizing`（docs/23）：
+`{"mode": "fixed_fraction" | "risk_per_trade" | "atr_risk", "risk_pct": 0.01, "fraction": 0.5}`。
+
+- `fixed_fraction` 为默认，与历史行为完全一致。
+- 风险型模式按「入场价到止损价的距离」反推数量；缺失止损距离时回退为 `fixed_fraction`。
+- 所有模式都受 `qty ≤ cash × 0.999 / fill` 约束（不产生杠杆）。
+- `execution_model_json` 会记录 `sizing`，因此升级后重跑同一策略 `result_hash` 会变；
+  历史回测记录保存的是当时快照，不受影响。
+
 ## Paper Accounts
 
 `GET /paper/accounts`

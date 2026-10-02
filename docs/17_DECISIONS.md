@@ -509,3 +509,19 @@ ADR，保证结果可复现、可解释。
 **理由**：可观测性是可选装饰，不能成为关键路径的故障点。原实现的失败模式恰好相反：最不重要的一次写入决定了整个请求的成败。
 
 **已知的独立问题**：`alembic/versions/0004_resource_monitor_tables.py` 用裸 `sa.BigInteger()` 建 `resource_events.id`，在 SQLite 上 `BIGINT PRIMARY KEY` 不自增（模型侧 `_BigIntegerPK` 用 `with_variant(Integer, "sqlite")`，但迁移没有），因此**纯 SQLite 环境**下资源事件必然写入失败；生产是 PostgreSQL，未触发。ADR-044 让该失败不再扩散。迁移一旦执行便不应改写（会与已存在的库产生分叉），故不动 0004。
+
+## ADR-045：仓位管理加入风险型模式（docs/23）
+
+**背景**：docs/15 把 Portfolio-aware position sizing 列为 P2。引擎此前只有一种下注方式：投入当前现金的固定比例（`risk.max_position_pct`）。这使**止损距离与风险脱钩**——止损放宽一倍，单笔亏损就放大一倍。对「每笔风险大致恒定」的研究意图来说这是结构性缺陷。
+
+**决策**：
+
+1. `execution.sizing` 新增 `SizingSpec`，`mode` 取 `fixed_fraction`（默认）/ `risk_per_trade` / `atr_risk`。
+2. 定量逻辑收敛到**唯一入口** `_position_quantity`，market 入场与限价/停止挂单两条路径共用（此前两处各写一遍相同的 `budget/fill`，任何改动都要改两遍，是重复代码的典型风险点）。
+3. **默认 `fixed_fraction`，既有数字不变**：只新增字段、不改原路径算术，由既有 backtest / examples / sensitivity 套件全绿保证，并显式断言「默认 = 显式 fixed_fraction」。
+4. 风险型模式统一受**现金上限**约束 `qty ≤ cash × 0.999 / fill`。研究引擎不是保证金账户，无论风险参数多激进，名义敞口不得超过可用现金。（顺带修掉一个既有隐患：`max_position_pct = 1.0` 时旧代码按满仓买入后再扣手续费，现金会变成负数。）
+5. **缺失止损距离时回退为 `fixed_fraction`，而不是跳过交易**：静默不交易会让回测结果无法解释。
+6. 验证分两层：单元层精确断言风险算术；集成层断言**文档承诺的意图**——止损距离减半则数量变大，**且**止损出场亏损仍≈风险预算（后者才排除「买得多是因为亏得更多」）。
+7. `execution_model_json` 因此包含 `sizing`，升级后重跑同一策略 `result_hash` 会变；历史回测记录保存的是当时快照，不受影响。这一点写进 `docs/23`。
+
+**理由**：风险型仓位是让「止损宽度」与「单笔风险」解耦的唯一办法，也是组合级风险管理的先决条件。把它做成默认不变的可选模式，避免破坏已冻结的可复现性基线（ADR-037 §4）。

@@ -262,6 +262,26 @@ def execute(
     )
 
 
+@router.get(
+    "/accounts/{account_id}/positions/{asset_id}",
+    response_model=PaperPositionOut,
+    summary="Get a single position",
+)
+def account_position(
+    account_id: int, asset_id: int, db: Session = Depends(get_db)
+) -> PaperPosition:
+    if db.get(PaperAccount, account_id) is None:
+        raise HTTPException(status_code=404, detail="paper account not found")
+    position = db.scalar(
+        select(PaperPosition).where(
+            PaperPosition.account_id == account_id, PaperPosition.asset_id == asset_id
+        )
+    )
+    if position is None:
+        raise HTTPException(status_code=404, detail="position not found")
+    return position
+
+
 @router.post("/accounts/{account_id}/close", summary="Close (freeze) a paper account")
 def close_account(account_id: int, db: Session = Depends(get_db)) -> dict:
     account = db.get(PaperAccount, account_id)

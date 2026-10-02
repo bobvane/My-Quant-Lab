@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   api,
   type Asset,
@@ -29,6 +29,14 @@ const running = ref(false)
 const oosResult = ref<Record<string, any> | null>(null)
 const oosPct = ref(0.2)
 const oosRunning = ref(false)
+const metricRows = computed(() => {
+  const metrics = detail.value?.metrics ?? {}
+  return Object.entries(metrics as Record<string, number | null>).map(([key, value]) => ({
+    key,
+    value,
+  }))
+})
+
 const compareIds = ref<number[]>([])
 const compareResult = ref<{ metrics: string[]; runs: Array<Record<string, any>> } | null>(null)
 const comparing = ref(false)
@@ -415,6 +423,24 @@ onMounted(async () => {
         </table>
         <p v-else class="muted">选择一条回测记录查看详情。</p>
       </div>
+    </div>
+
+    <div v-if="detail && metricRows.length" class="card" style="margin-top: 14px">
+      <h3>指标明细</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>指标</th>
+            <th>值</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="m in metricRows" :key="m.key">
+            <td>{{ m.key }}</td>
+            <td :class="toneOf(m.value)">{{ m.value != null ? formatNumber(m.value, 4) : 'N/A' }}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <div v-if="detail?.trades.length" class="card" style="margin-top: 14px">

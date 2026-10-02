@@ -496,10 +496,12 @@ export const api = {
     request<ExplainResult>(`/signals/${signalId}/explain`, { method: 'POST' }),
   explainBacktest: (runId: number) =>
     request<ExplainResult>(`/backtests/${runId}/explain`, { method: 'POST' }),
-  aiTasks: (limit = 50) => request<Array<Record<string, unknown>>>(`/ai/tasks?limit=${limit}`),
   aiModels: () => request<{ models: Array<Record<string, any>> }>('/ai/models'),
   aiPrompts: () => request<{ prompts: Array<Record<string, any>> }>('/ai/prompts'),
   aiTasksList: (limit = 50) => request<Array<Record<string, any>>>(`/ai/tasks?limit=${limit}`),
+  // Read-only audit detail of one AI task: structured output, token usage and
+  // error. Secrets are never echoed back by the API.
+  aiTask: (taskId: number) => request<Record<string, any>>(`/ai/tasks/${taskId}`),
   aiUsage: (limit = 100) => request<{ usage: Array<Record<string, any>> }>(`/ai/usage?limit=${limit}`),
   auditForEntity: (entityType: string, entityId: string) =>
     request<{ total: number; events: Array<Record<string, unknown>> }>(

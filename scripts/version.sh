@@ -77,6 +77,18 @@ sync_version_references() {
         "${REPO_ROOT}/backend/pyproject.toml" 2>/dev/null && rm -f "${REPO_ROOT}/backend/pyproject.toml.bak"
     sed -i.bak 's/^\([[:space:]]*"version":[[:space:]]*"\)[^"]*\("\)/\1'"${version}"'\2/' \
         "${REPO_ROOT}/frontend/package.json" 2>/dev/null && rm -f "${REPO_ROOT}/frontend/package.json.bak"
+    # package-lock.json carries the version twice: once at the top level and once
+    # in the root entry of "packages". Both are 2-space indented and sit next to
+    # "name", which no dependency entry has, so anchoring on "name" keeps the
+    # rewrite off the dependency tree. Without this the lock file silently drifts
+    # behind package.json on every release (it had stuck at 0.9.8 while the app
+    # was already at 1.0.0).
+    if [ -f "${REPO_ROOT}/frontend/package-lock.json" ]; then
+        sed -i.bak -E \
+            '/^[[:space:]]*"name": "my-quant-lab-web",$/{n;s/^([[:space:]]*"version": ")[^"]*(")/\1'"${version}"'\2/;}' \
+            "${REPO_ROOT}/frontend/package-lock.json" \
+            && rm -f "${REPO_ROOT}/frontend/package-lock.json.bak"
+    fi
 }
 
 cmd_show() {
@@ -104,7 +116,7 @@ cmd_bump() {
     sync_version_references "$new_version"
 
     git -C "$REPO_ROOT" add "$VERSION_FILE" .env.example backend/app/__init__.py \
-        backend/pyproject.toml frontend/package.json 2>/dev/null || true
+        backend/pyproject.toml frontend/package.json frontend/package-lock.json 2>/dev/null || true
     git -C "$REPO_ROOT" commit -m "build: release ${new_version}"
 
     if [ "${1:-}" = "--tag" ]; then

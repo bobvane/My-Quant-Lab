@@ -24,6 +24,9 @@ node_modules/
 dist/
 build/
 .vite/
+# `vue-tsc -b` (npm run build) writes an incremental build cache next to the
+# sources; it must never be committed.
+*.tsbuildinfo
 
 # Database / volumes
 *.db

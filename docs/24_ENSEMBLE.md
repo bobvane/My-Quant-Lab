@@ -68,11 +68,34 @@ POST /api/v1/research/ensemble
   "ensemble_version": "1.0.0",
   "vote_threshold": 0.5,
   "bars_evaluated": 400,
+  "dataset_version_id": 12,
+  "symbol": "AAPL",
+  "timeframe": "1d",
+  "engine_version": "ensemble-1.0.0",
+  "feature_version": "ensemble",
   "members": [
-    { "label": "3@1.0.0", "weight": 0.5, "entry_bars": 10, "exit_bars": 9 },
-    { "label": "7@1.0.0", "weight": 0.5, "entry_bars": 4,  "exit_bars": 4 }
+    {
+      "label": "3@1.0.0",
+      "weight": 0.5,
+      "entry_bars": 10,
+      "exit_bars": 9,
+      "entry_agreed": 1,
+      "solo_entries": 9,
+      "entry_support_rate": 0.1,
+      "vote_agreement_rate": 0.98
+    },
+    { "label": "7@1.0.0", "weight": 0.5, "entry_bars": 4, "exit_bars": 4 }
   ],
-  "agreement": { "entry_bars": 1, "exit_bars": 1, "short_entry_bars": 0, "entries_taken": 1 },
+  "agreement": {
+    "entry_bars": 1,
+    "exit_bars": 1,
+    "short_entry_bars": 0,
+    "entries_taken": 1,
+    "signalled_bars": 13,
+    "solo_signalled_bars": 12,
+    "entry_support_rate": 0.077,
+    "exit_support_rate": 0.2
+  },
   "metrics": { "total_return": 0.013, "sharpe": 0.06, "max_drawdown": -0.016, "...": "..." },
   "final_equity": 10129.2,
   "trades": ["..."],
@@ -88,7 +111,43 @@ POST /api/v1/research/ensemble
 只有 `entries_taken` 与成员的 `entry_bars` 可比，且必然 `<= min(成员 entry_bars)`。
 把两者混为一谈会高估集成的信号质量。
 
-## 5. 成本与风控从哪来
+## 5. 认同统计（谁被投票否决了）
+
+组合的收益/回撤只说明**合并后的决策**值不值，不说明**谁被否决了**。两个结果完全不同
+的集成（一个「成员高度一致」、一个「成员几乎从不同时开仓」）在只报 `entries_taken` 时
+看起来一模一样，因此响应里带上归因：
+
+| 字段 | 位置 | 含义 |
+|---|---|---|
+| `signalled_bars` | `agreement` | 至少有一个成员想入场的 bar 数（投票的分子分母基准） |
+| `solo_signalled_bars` | `agreement` | 其中**只有单个成员**想入场、因而被投票否决的 bar 数 |
+| `entry_support_rate` | `agreement` | `entry_bars / signalled_bars`：成员的入场意愿有多少活过了投票 |
+| `exit_support_rate` | `agreement` | 同上，针对退出信号 |
+| `entry_bars` / `entry_agreed` | `members[]` | 该成员自己提议的入场根数 / 其中票数过阈值的根数 |
+| `solo_entries` | `members[]` | 该成员单独提议、被否决的根数 |
+| `entry_support_rate` | `members[]` | `entry_agreed / entry_bars`；该成员从没提议时为 `null` |
+| `vote_agreement_rate` | `members[]` | 该成员在**全部**评估 bar 上与最终结果一致的占比 |
+
+读法：
+
+- `solo_signalled_bars` 接近 `signalled_bars` → 成员之间**几乎没有共识**，集成的收益不是
+  分散化带来的，而是「恰好没怎么交易」。这不是稳健，是没交易。
+- `entry_support_rate` 低 → 集成在大量否决成员的信号；策略集成在这种成员组合上不会比
+  单策略给出更多信息。
+- `vote_agreement_rate` 很高但 `entry_support_rate` 很低是**正常**的：多数 bar 上大家都不
+  想开仓，此时「一致」平凡成立。判断成员是否被否决要看 `entry_support_rate`。
+
+所有认定都在集成**自己的共同 bar** 上用同一套成本假设计算，因此不与成员各自的历史回测
+结果混淆。
+
+### 为什么不能拿成员的历史回测直接和集成比
+
+成员那几列收益/回撤/夏普来自**该成员最近一次已完成的单策略回测**，其标的、周期、数据集
+版本、成本模型和初始资金都**可能和本次集成不同**。响应返回 `dataset_version_id` / `symbol`
+/ `timeframe` 就是为了让调用方（前端对比表）标出这种不可比：数据显示在一起但窗口不同，
+差异可能只来自数据区间，而不是策略好坏。要真正比较，先在**同一标的/周期**上跑一次该成员。
+
+## 6. 成本与风控从哪来
 
 组合需要一个成本模型和一套止损规则。默认**继承第一个成员**的，并可用
 `execution_overrides` 覆盖（成本、初始资金、仓位管理都属于**组合**，不属于单个成员）。

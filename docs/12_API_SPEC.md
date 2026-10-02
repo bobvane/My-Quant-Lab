@@ -75,6 +75,10 @@ API base: `/api/v1`
 `GET /backtests/{id}/trades`
 `POST /backtests/{id}/compare`
 
+回测摘要除指标外还返回 `dataset_version_id` / `symbol` / `timeframe`：只有 id 无法判断两次
+回测是否可比（同一策略在不同标的/周期上的结果本就不同），集成对比表读这两个字段来标记
+「不同数据窗口」。
+
 ## Backtest Results
 
 `GET /backtest-results`
@@ -157,9 +161,18 @@ API base: `/api/v1`
 `timeframe`、`vote_threshold`（`[0,1)`，默认 0.5）、`execution_overrides`（组合的成本/资金/
 仓位管理，键为 execution 字段，与 `POST /backtests` 同形）。
 
-返回：`members`（含归一化权重）、`bars_evaluated`、`agreement`
-（`entry_bars` / `exit_bars` / `entries_taken`）、`metrics`、`trades`、`equity_curve`、
-`final_equity`、`warnings`。
+返回：`members`（含归一化权重与认同统计）、`bars_evaluated`、`agreement`、`metrics`、
+`trades`、`equity_curve`、`final_equity`、`warnings`，以及 `dataset_version_id` / `symbol` /
+`timeframe` / `engine_version` / `feature_version`（标识本次投票所在的数据集与引擎版本）。
+
+认同统计（用于回答「谁被投票否决了」，见 docs/24 第 5 节）：
+
+- `agreement.signalled_bars` / `solo_signalled_bars` / `entry_support_rate` /
+  `exit_support_rate`：至少一个成员想入场的 bar 数 / 其中只有单个成员想入场（因而被否决）的
+  bar 数 / 入场意愿的存活比例 / 退出信号的存活比例。
+- `members[].entry_votes` / `entry_agreed` / `solo_entries` / `entry_support_rate` /
+  `vote_agreement_rate`：该成员提议的入场根数 / 其中票数过阈值的根数 / 单独提议被否决的根数 /
+  `entry_agreed / entry_bars`（无提议时为 `null`）/ 与最终结果一致的全部 bar 占比。
 
 约束与语义：
 
@@ -168,6 +181,8 @@ API base: `/api/v1`
 - **不拼接**各成员成交记录：本引擎是单仓位、单一现金账户，投票产出的是**一条**决策序列。
 - `entry_bars` 是票数过阈值的 bar 数，`entries_taken` 是真正开仓次数；只有后者与成员的
   入场数可比（`entries_taken <= min(成员 entry_bars)`）。
+- 成员的收益/回撤/夏普**不在本响应里**：它们来自 `GET /backtests`（各成员自己的历史回测），
+  其数据集/成本模型可能与本次集成不同，因此响应返回 `dataset_version_id` 供调用方比对。
 - 成员之间无共同 bar → 422；预热期部分重叠 → 在共同 bar 上评估并写入 `warnings`。
 - **同一版本重复出现 → 422**：两条同版本会归一化成 0.5+0.5，使「严格超过阈值」被该版本
   自己的信号满足，报告会显示一次实际只有一个参与者的「投票」。想加大某策略话语权请调高

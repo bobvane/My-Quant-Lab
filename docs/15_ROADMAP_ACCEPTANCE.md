@@ -39,6 +39,7 @@ boundary and the no-lookahead / immutability guarantees.
 | 行情 provider 语义写入文档 | DONE | README 说明换 provider 后演示代码必然 0 根 K 线 |
 | Windows/UNC 开发脚本 | DONE | `scripts/Invoke-Tests.ps1`、`Invoke-FrontendChecks.ps1`、`Test-NasDeployment.ps1` |
 | 真实浏览器验证脚本 | DONE | `scripts/Test-WebUi.ps1` 用无头 Chrome 断言 Vue 实际挂载与视图渲染（服务端返回 index.html 不能证明 SPA 能跑） |
+| 走真实 HTTP 的集成探针 | DONE | `scripts/Test-EnsembleAttribution.ps1`（v1.3.9）：pytest 用 in-process TestClient，从不走网络；该脚本对活的栈建版本、跑回测、调 `POST /research/ensemble`，断言前端依赖的自洽不变量 |
 | 清理 `StarletteDeprecationWarning`（httpx） | DONE | 加 `httpx2` 为**测试期**依赖（starlette TestClient 首选它）；应用自身 HTTP 调用仍用 httpx |
 | CI action 版本对齐 | DONE | `upload-artifact` v4→v7（消除 Node 20 弃用告警）、`checkout` v5→v7；其余已是各自最新大版本 |
 | v2：Monte Carlo 重采样 | DONE | ADR-043 / `docs/22`。交易级 IID bootstrap、分位数与概率、扇形图；纯描述、非预测 |
@@ -56,6 +57,12 @@ boundary and the no-lookahead / immutability guarantees.
 | v1.3.1 | 集成面板（成员选择/权重/阈值）与**与各成员对比表**；修掉成员指标标签对不上的缺陷 |
 | v1.3.2 | 回测表单加入仓位管理选择器（策略默认 / 固定比例 / 按止损风险 / 按 ATR 风险） |
 | v1.3.3 | 敏感性分析支持扫描 `risk_pct`（执行轴），可同时看入场参数与风险预算 |
+| v1.3.4 | 集成组合权益曲线（复用 `EquityChart`） |
+| v1.3.5 | 集成成员候选改为**跨策略**（原先只能选当前策略的版本，「让两个不同策略互相投票」在 UI 上不可达） |
+| v1.3.6 | SQLite 上资源表主键不自增导致写入失败（ADR-048，新增迁移 0006 + 真实迁移链测试） |
+| v1.3.7 | 修 `latest` 镜像标签被并发发布互相覆盖（只有最高 tag 才移动 `latest`） |
+| v1.3.8 | 拒绝重复成员（会归一化成「一个参与者却显示为投票」）+ 权重归一/清空按钮 + 零交易文案 |
+| v1.3.9 | 认同归因（ADR-049）：`signalled_bars` / `solo_signalled_bars` / 每成员支持率；对比表标注数据窗口不可比；修做空退出判定残留的 `>=` |
 
 **至此 docs/15 的 P0/P1/P2 与 v2 结构性能力清单全部完成。** 后续为打磨与体验改进。
 

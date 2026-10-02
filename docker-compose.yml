@@ -1,15 +1,16 @@
 # My Quant Lab — V1 production compose stack.
-# 最后修改版本: v0.1.5
+# 最后修改版本: v1.0.0
 #
 # 标准用法（图形化 NAS）：在容器管理界面里选择本项目目录，直接使用本文件。
 # 只需要两个文件：本文件 + 同目录下的 .env。不需要源码，不需要第二个文件。
 #
-#   quantlab-web       Vue 3 UI (nginx, 代理 /api)
-#   quantlab-api       FastAPI，启动时自动执行数据库迁移
-#   quantlab-worker    Celery worker
-#   quantlab-scheduler Celery beat（定时扫描信号）
-#   quantlab-postgres  PostgreSQL（仅 backend 网络，不对外暴露）
-#   quantlab-redis     Redis（仅 backend 网络，不对外暴露）
+#   quantlab-web          Vue 3 UI (nginx, 代理 /api)
+#   quantlab-api          FastAPI，启动时自动执行数据库迁移
+#   quantlab-worker       Celery worker
+#   quantlab-scheduler    Celery beat（定时扫描信号）
+#   quantlab-postgres     PostgreSQL（仅 backend 网络，不对外暴露）
+#   quantlab-redis        Redis（仅 backend 网络，不对外暴露）
+#   quantlab-docker-proxy 只读 Docker stats 代理（仅 backend 网络，不对外暴露）
 #
 # 镜像全部来自 GitHub Packages 预构建（本文件不含 build 段）：
 #   默认拉取 latest（.env 里可改 MQL_VERSION 锁定版本，例如 v0.0.8）。

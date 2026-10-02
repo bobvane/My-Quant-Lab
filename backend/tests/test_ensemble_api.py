@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 
+import pytest
+
 from app.api.schemas import MarketDataSyncRequest
 
 _SYMBOL = "DEMO-AAPL"
@@ -101,7 +103,7 @@ def test_ensemble_reports_which_dataset_it_ran_on(client) -> None:
     assert body["symbol"] == _SYMBOL
     assert body["timeframe"] == "1d"
     # These two were computed by the engine and previously dropped by the response model.
-    assert body["engine_version"] == "ensemble-1.0.0"
+    assert body["engine_version"] == "ensemble-1.1.0"
     assert body["feature_version"] == "ensemble"
 
 
@@ -134,6 +136,111 @@ def test_ensemble_reports_support_and_solo_signals(client) -> None:
         )
     # A member can never be supported on more proposal bars than the ensemble had.
     assert all(m["entry_agreed"] <= agreement["entry_bars"] for m in members)
+
+
+def test_ensemble_reports_same_bar_member_runs(client) -> None:
+    """Each member is reported on the ensemble's own bars and cost model.
+
+    The old comparison table read each member's most recent stored backtest, which could
+    have run on another window or fee model. These runs are produced by the ensemble
+    itself, so the table no longer compares incommensurable numbers.
+    """
+
+    a, b = _seed(client)
+    response = client.post(
+        "/api/v1/research/ensemble",
+        json={
+            "members": [
+                {"strategy_version_id": a, "weight": 1.0},
+                {"strategy_version_id": b, "weight": 1.0},
+            ],
+            "symbol": _SYMBOL,
+            "timeframe": "1d",
+            "vote_threshold": 0.5,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    runs = body["member_runs"]
+    assert len(runs) == len(body["members"]) == 2
+    assert [run["label"] for run in runs] == [member["label"] for member in body["members"]]
+
+    bars = body["bars_evaluated"]
+    for run in runs:
+        # Same bars as the portfolio: this is what makes the comparison legitimate.
+        assert len(run["equity_curve"]) == bars
+        assert run["initial_capital"] > 0
+        assert "total_return" in run["metrics"]
+        # `entries_taken` counts positions opened; the metric counts what was reported.
+        assert run["metrics"]["number_of_trades"] > 0
+    assert sum(run["initial_capital"] for run in runs) == pytest.approx(body["initial_capital"])
+
+    # The portfolio's total return has to be one of the outcomes a single-account run can
+    # reach: bounded by the best and worst solo run. A value outside that range would mean
+    # the portfolio is trading something no member did (or the two used different cost
+    # models), which is exactly the comparison this report exists to make honest.
+    returns = [run["metrics"]["total_return"] for run in runs]
+    assert min(returns) <= body["metrics"]["total_return"] <= max(returns)
+
+
+def test_ensemble_single_member_matches_its_own_solo_run(client) -> None:
+    """With one member the vote cannot change anything, so the two must coincide."""
+
+    a, _ = _seed(client)
+    response = client.post(
+        "/api/v1/research/ensemble",
+        json={
+            "members": [{"strategy_version_id": a, "weight": 1.0}],
+            "symbol": _SYMBOL,
+            "vote_threshold": 0.5,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    run = body["member_runs"][0]
+    assert run["final_equity"] == pytest.approx(body["final_equity"])
+    assert run["equity_curve"] == body["equity_curve"]
+    assert run["metrics"]["total_return"] == pytest.approx(body["metrics"]["total_return"])
+
+
+def test_ensemble_report_is_compressed_when_the_client_asks(client) -> None:
+    """The report is large because it carries a curve per member, so it must compress.
+
+    Without gzip the response is hundreds of KB of JSON that the browser has to pull
+    through the proxy on every run. This asserts the client that advertises gzip still
+    gets back the same JSON, and gets less of it over the wire.
+    """
+
+    a, b = _seed(client)
+    payload = {
+        "members": [
+            {"strategy_version_id": a, "weight": 1.0},
+            {"strategy_version_id": b, "weight": 1.0},
+        ],
+        "symbol": _SYMBOL,
+        "vote_threshold": 0.5,
+    }
+    compressed = client.post(
+        "/api/v1/research/ensemble", json=payload, headers={"Accept-Encoding": "gzip"}
+    )
+    plain = client.post(
+        "/api/v1/research/ensemble", json=payload, headers={"Accept-Encoding": "identity"}
+    )
+    assert compressed.status_code == plain.status_code == 200, compressed.text
+    assert compressed.headers.get("content-encoding") == "gzip"
+    assert plain.headers.get("content-encoding") is None
+
+    # httpx transparently decodes, so this is the real payload either way: the two
+    # requests must have produced the same report.
+    assert compressed.json()["metrics"] == plain.json()["metrics"]
+    assert compressed.json()["member_runs"] == plain.json()["member_runs"]
+
+    # httpx transparently decodes, so `content` is the JSON either way. The compressed
+    # response has no `Content-Length` header, which is what proves the body really was
+    # re-encoded: an untouched body would still advertise its original length.
+    assert plain.headers.get("content-length") == str(len(plain.content))
+    assert compressed.headers.get("content-length") is None
+    assert compressed.headers.get("vary") is not None
 
 
 def test_ensemble_is_reproducible(client) -> None:

@@ -5,6 +5,8 @@ import * as echarts from 'echarts'
 export interface SeriesLine {
   name: string
   points: Array<{ ts: string; value: number | null }>
+  /** Draw this line on top and heavier — used for the total, not the components. */
+  emphasis?: boolean
 }
 
 const props = defineProps<{ series: SeriesLine[]; height?: string }>()
@@ -36,8 +38,10 @@ function render() {
         data: s.points.map((p) => (p.value == null ? null : Number(p.value.toFixed(2)))),
         smooth: true,
         showSymbol: false,
-        lineStyle: { width: 2, color: COLORS[i % COLORS.length] },
-        areaStyle: { color: 'rgba(76,141,255,0.08)' },
+        // The heavier line has to be painted last, or a member's line covers it.
+        z: s.emphasis ? 3 : 2,
+        lineStyle: { width: s.emphasis ? 3 : 1.5, color: COLORS[i % COLORS.length] },
+        areaStyle: s.emphasis ? { color: 'rgba(76,141,255,0.10)' } : undefined,
       })),
     },
     true,

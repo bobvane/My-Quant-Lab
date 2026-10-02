@@ -161,9 +161,18 @@ API base: `/api/v1`
 `timeframe`、`vote_threshold`（`[0,1)`，默认 0.5）、`execution_overrides`（组合的成本/资金/
 仓位管理，键为 execution 字段，与 `POST /backtests` 同形）。
 
-返回：`members`（含归一化权重与认同统计）、`bars_evaluated`、`agreement`、`metrics`、
-`trades`、`equity_curve`、`final_equity`、`warnings`，以及 `dataset_version_id` / `symbol` /
-`timeframe` / `engine_version` / `feature_version`（标识本次投票所在的数据集与引擎版本）。
+返回：`members`（含归一化权重与认同统计）、`member_runs`（每个成员在**同一批 bar、同一套成本
+模型**下的独立跑分，见下）、`bars_evaluated`、`agreement`、`metrics`、`trades`、`equity_curve`、
+`final_equity`、`warnings`，以及 `dataset_version_id` / `symbol` / `timeframe` /
+`engine_version` / `feature_version`（标识本次投票所在的数据集与引擎版本）。
+
+同口径成员跑分（`member_runs`，与 `members` 等长同序，见 docs/24 第 6 节）：
+
+- `label` / `weight` / `initial_capital`（= 组合初始资金 × 归一化权重，各成员之和恰为组合
+  初始资金）/ `final_equity` / `entries_taken` / `metrics` / `equity_curve`。
+- 由**与组合相同的模拟器**（`ensemble.py` 的 `_simulate`）算出，故与组合完全可比：差异只能
+  来自决策序列，不能来自执行假设。
+- 每个成员是**独立账户**的模拟，不是「组合同时持有多个仓位」（引擎单仓位单现金账户）。
 
 认同统计（用于回答「谁被投票否决了」，见 docs/24 第 5 节）：
 
@@ -182,7 +191,7 @@ API base: `/api/v1`
 - `entry_bars` 是票数过阈值的 bar 数，`entries_taken` 是真正开仓次数；只有后者与成员的
   入场数可比（`entries_taken <= min(成员 entry_bars)`）。
 - 成员的收益/回撤/夏普**不在本响应里**：它们来自 `GET /backtests`（各成员自己的历史回测），
-  其数据集/成本模型可能与本次集成不同，因此响应返回 `dataset_version_id` 供调用方比对。
+  其数据集/成本模型可能与本次集成不同；要跟集成比就用 `member_runs`，它才是同口径的。
 - 成员之间无共同 bar → 422；预热期部分重叠 → 在共同 bar 上评估并写入 `warnings`。
 - **同一版本重复出现 → 422**：两条同版本会归一化成 0.5+0.5，使「严格超过阈值」被该版本
   自己的信号满足，报告会显示一次实际只有一个参与者的「投票」。想加大某策略话语权请调高

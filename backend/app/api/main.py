@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 
 from app.api.routers import (
     ai as ai_router,
@@ -166,6 +167,11 @@ def create_app() -> FastAPI:
 
     # Added after auth so CORS is the outermost layer and 401s still carry the
     # CORS headers a cross-origin browser needs to read them.
+    #
+    # gzip is here for the ensemble report: it ships an equity point per bar for the
+    # portfolio *and* for each member (up to 12), which is hundreds of KB of very
+    # compressible JSON. The threshold keeps small responses untouched.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

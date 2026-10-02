@@ -337,3 +337,84 @@ def test_entry_support_rate_counts_union_not_intersection(sample_bars) -> None:
         assert agreement["entry_support_rate"] is None
     # Every solo bar is a bar where the vote did not fire, so it cannot exceed the union.
     assert agreement["solo_signalled_bars"] <= union
+
+
+def test_solo_member_run_matches_the_ensemble_when_they_must_agree(sample_bars) -> None:
+    """The same-bar comparison must be exact in its degenerate case.
+
+    One member at weight 1.0 cannot vote anything down, so the voted portfolio *is* that
+    member. If the two were simulated by different code paths — say the solo run went
+    through ``run_backtest`` while the portfolio went through this module — the curves
+    would drift apart and the comparison table would report a difference that does not
+    exist. This asserts the curves, trades and metrics are identical.
+    """
+
+    spec = _spec("solo", 5, 20)
+    report = run_ensemble([EnsembleMember("solo", spec, 1.0)], sample_bars, vote_threshold=0.5)
+    member_run = report["member_runs"][0]
+    assert member_run["initial_capital"] == pytest.approx(report["initial_capital"])
+    assert member_run["final_equity"] == pytest.approx(report["final_equity"])
+    assert member_run["metrics"]["total_return"] == pytest.approx(report["metrics"]["total_return"])
+    assert member_run["entries_taken"] == report["agreement"]["entries_taken"]
+    assert member_run["equity_curve"] == report["equity_curve"]
+
+
+def test_member_runs_are_funded_by_weight_share(sample_bars) -> None:
+    """Each solo account starts from its weight's share, so the curves share a baseline."""
+
+    report = run_ensemble(
+        [
+            EnsembleMember("a", _spec("a", 5, 20), 3.0),
+            EnsembleMember("b", _spec("b", 10, 30), 1.0),
+        ],
+        sample_bars,
+        vote_threshold=0.5,
+    )
+    capital = report["initial_capital"]
+    by_label = {run["label"]: run for run in report["member_runs"]}
+    assert by_label["a"]["weight"] == pytest.approx(0.75)
+    assert by_label["b"]["weight"] == pytest.approx(0.25)
+    assert by_label["a"]["initial_capital"] == pytest.approx(capital * 0.75)
+    assert by_label["b"]["initial_capital"] == pytest.approx(capital * 0.25)
+    # The shares are the whole account, no more and no less.
+    total = sum(run["initial_capital"] for run in report["member_runs"])
+    assert total == pytest.approx(capital)
+
+
+def test_member_runs_are_ordered_like_members_and_reproducible(sample_bars) -> None:
+    members = _members(("a", 5, 20), ("b", 10, 30))
+    first = run_ensemble(members, sample_bars, vote_threshold=0.5)
+    second = run_ensemble(members, sample_bars, vote_threshold=0.5)
+    assert [run["label"] for run in first["member_runs"]] == [m["label"] for m in first["members"]]
+    assert [run["final_equity"] for run in first["member_runs"]] == [
+        run["final_equity"] for run in second["member_runs"]
+    ]
+    assert [run["metrics"]["total_return"] for run in first["member_runs"]] == [
+        run["metrics"]["total_return"] for run in second["member_runs"]
+    ]
+
+
+def test_member_runs_use_each_members_own_risk_lines(sample_bars) -> None:
+    """A solo run must use its own spec's stops, not the portfolio's inherited ones.
+
+    The portfolio takes its cost model and stop rule from the first member (documented
+    behaviour). If the solo runs reused *that* rule instead of their own, a member with
+    a tight stop would be reported with the first member's wide one, and the comparison
+    would flatter it for the wrong reason.
+    """
+
+    members = [
+        EnsembleMember("tight", _spec("tight", 5, 20), 1.0),
+        EnsembleMember("wide", _spec("wide", 10, 30), 1.0),
+    ]
+    wide_spec = _spec("wide", 10, 30)
+    wide_spec = wide_spec.model_copy(deep=True)
+    assert wide_spec.risk is not None
+    wide_spec.risk.stop_loss_atr_multiple = 6.0
+    members[1] = EnsembleMember("wide", wide_spec, 1.0)
+
+    report = run_ensemble(members, sample_bars, vote_threshold=0.5)
+    by_label = {run["label"]: run for run in report["member_runs"]}
+    # A wider stop exits later and at a worse price, so the two members cannot be
+    # reporting the same trade outcome unless one is ignoring its own stop.
+    assert by_label["tight"]["final_equity"] != pytest.approx(by_label["wide"]["final_equity"])

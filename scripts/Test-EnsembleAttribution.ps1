@@ -81,9 +81,14 @@ $ens.agreement | Format-List | Out-String | Write-Output
 $ens.members | Format-Table label, weight, entry_bars, entry_agreed, solo_entries, entry_support_rate, vote_agreement_rate -AutoSize |
   Out-String | Write-Output
 
-# Same members, deliberately different dataset should be impossible here (one dataset per
-# symbol), but the incomparable case is exercised by the API test suite; here we assert
-# the consistency invariants the UI relies on.
+"`n-- same-bar member runs (ADR-050) --"
+$ens.member_runs |
+  Select-Object label, weight, initial_capital, final_equity, entries_taken,
+    @{ n = 'total_return'; e = { $_.metrics.total_return } },
+    @{ n = 'max_drawdown'; e = { $_.metrics.max_drawdown } },
+    @{ n = 'curve_len'; e = { $_.equity_curve.Count } } |
+  Format-Table -AutoSize | Out-String | Write-Output
+
 $ok = $true
 if ($ens.agreement.signalled_bars -lt $ens.agreement.entry_bars) { $ok = $false; "FAIL: union < votes" }
 if ($ens.agreement.solo_signalled_bars -gt $ens.agreement.signalled_bars) { $ok = $false; "FAIL: solo > union" }
@@ -92,5 +97,27 @@ foreach ($m in $ens.members) {
   if ($m.solo_entries -gt $m.entry_bars) { $ok = $false; "FAIL: $($m.label) solo > bars" }
 }
 if (-not $ens.dataset_version_id) { $ok = $false; "FAIL: no dataset_version_id" }
-if ($ens.engine_version -ne 'ensemble-1.0.0') { $ok = $false; "FAIL: engine_version dropped" }
+if ($ens.engine_version -ne 'ensemble-1.1.0') { $ok = $false; "FAIL: engine_version dropped or stale" }
+
+# The same-bar member runs are what make the comparison honest: one per member, same bar
+# count as the vote, funded by weight share, and self-consistent with their own metrics.
+if ($ens.member_runs.Count -ne $ens.members.Count) {
+  $ok = $false; "FAIL: member_runs count $($ens.member_runs.Count) != members $($ens.members.Count)"
+}
+$funded = 0.0
+foreach ($run in $ens.member_runs) {
+  $funded += [double]$run.initial_capital
+  if ($run.equity_curve.Count -ne $ens.bars_evaluated) {
+    $ok = $false; "FAIL: $($run.label) curve $($run.equity_curve.Count) != bars $($ens.bars_evaluated)"
+  }
+  if ($run.entries_taken -ne $run.metrics.number_of_trades) {
+    $ok = $false; "FAIL: $($run.label) entries_taken != number_of_trades"
+  }
+  if ([math]::Abs([double]$run.initial_capital - [double]$ens.initial_capital * [double]$run.weight) -gt 0.01) {
+    $ok = $false; "FAIL: $($run.label) not funded by weight share"
+  }
+}
+if ([math]::Abs($funded - [double]$ens.initial_capital) -gt 0.01) {
+  $ok = $false; "FAIL: member funding $funded != ensemble capital $($ens.initial_capital)"
+}
 "`nINVARIANTS: $(if ($ok) { 'OK' } else { 'FAILED' })"

@@ -352,6 +352,10 @@ class EnsembleOut(BaseModel):
     ensemble_version: str
     vote_threshold: float
     members: list[dict[str, Any]]
+    # Each member run on the ensemble's own bars with the ensemble's own cost model.
+    # A member's stored backtest may have used a different window or fee model, which
+    # made the old comparison table incomparable; these are the same-bar numbers.
+    member_runs: list[dict[str, Any]] = Field(default_factory=list)
     bars_evaluated: int
     agreement: dict[str, Any]
     metrics: dict[str, Any]

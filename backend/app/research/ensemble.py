@@ -44,7 +44,7 @@ from app.strategies.executor import run_strategy
 
 __all__ = ["ENSEMBLE_VERSION", "EnsembleMember", "run_ensemble"]
 
-ENSEMBLE_VERSION = "1.0.0"
+ENSEMBLE_VERSION = "1.1.0"
 
 # A readable report is the point; beyond a dozen members the per-member attribution
 # stops being useful. This also bounds the work (one feature build per member).
@@ -74,6 +74,239 @@ class _Evaluated:
     risk_stop_short: pd.Series | None = None
     risk_target_short: pd.Series | None = None
     tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _SimResult:
+    """Outcome of simulating one decision series over one bar index."""
+
+    equity_curve: list[dict[str, Any]]
+    trades: list[dict[str, Any]]
+    metrics: dict[str, Any]
+    final_equity: float
+    entries_taken: int
+    in_position: list[bool]
+
+
+def _simulate(
+    *,
+    frame: pd.DataFrame,
+    index: pd.Index,
+    entry_long: np.ndarray,
+    exit_long: np.ndarray,
+    entry_short: np.ndarray | None,
+    exit_short: np.ndarray | None,
+    stop_long: np.ndarray,
+    target_long: np.ndarray,
+    stop_short: np.ndarray,
+    target_short: np.ndarray,
+    execution: Any,
+    fee_rate: float,
+    slippage_rate: float,
+    max_position_pct: float,
+    capital: float,
+    timeframe: str,
+    strategy_version: str,
+) -> _SimResult:
+    """Simulate one decision series over ``index`` and return its outcome.
+
+    Both the voted portfolio and each member's own (solo) run go through here, which is
+    the point: the comparison table must be produced by the same arithmetic, on the same
+    bars, with the same cost model. Anything else makes the columns incomparable.
+
+    ``stop_*``/``target_*`` are per-bar arrays for the entry the decision series asks
+    for: the voted portfolio passes the risk lines inherited from its members' specs,
+    while a solo run passes that member's own.
+
+    A still-open position is closed at the last bar's close and the last equity point is
+    overwritten with the resulting cash, so the curve ends flat rather than marking to
+    market a position the run is no longer holding.
+    """
+
+    frame = frame.reindex(index)
+    opens = frame["open"].to_numpy(dtype=float)
+    highs = frame["high"].to_numpy(dtype=float)
+    lows = frame["low"].to_numpy(dtype=float)
+    closes = frame["close"].to_numpy(dtype=float)
+    symbol = str(frame["symbol"].iloc[0]) if "symbol" in frame.columns else ""
+
+    if len(frame) == 0:
+        return _SimResult(
+            equity_curve=[],
+            trades=[],
+            metrics=compute_metrics(np.array([capital]), [], timeframe=timeframe),
+            final_equity=capital,
+            entries_taken=0,
+            in_position=[],
+        )
+
+    cash = capital
+    quantity = 0.0
+    entry_price = 0.0
+    entry_index = -1
+    entry_fee = 0.0
+    entry_slippage = 0.0
+    direction = "LONG"
+    trades: list[dict[str, Any]] = []
+    equity_curve: list[dict[str, Any]] = []
+    in_position: list[bool] = []
+    trade_high = 0.0
+    trade_low = 0.0
+    entry_stop: float | None = None
+    # Count entries the engine actually *took*, not bars where the decision fired: while
+    # a position is open a new decision is ignored, so signal bars can exceed positions
+    # and would overstate agreement relative to a member's own entry count.
+    entries_taken = 0
+
+    for i in range(len(frame)):
+        bar_time = index[i]
+        close = float(closes[i])
+
+        if quantity > 0:
+            trade_high = max(trade_high, float(highs[i]))
+            trade_low = min(trade_low, float(lows[i]))
+            is_long = direction == "LONG"
+            stop = stop_long[i] if is_long else stop_short[i]
+            target = target_long[i] if is_long else target_short[i]
+            rule_exit = bool(exit_long[i] if is_long else exit_short[i])
+            exit_price, reason, ambiguous = _resolve_exit(
+                bar_high=float(highs[i]),
+                bar_low=float(lows[i]),
+                stop=stop,
+                target=target,
+                close=close,
+                rule_exit=rule_exit,
+                is_long=is_long,
+            )
+            if exit_price is not None:
+                slip = exit_price * slippage_rate
+                fill = exit_price - slip if is_long else exit_price + slip
+                fee = abs(fill * quantity) * fee_rate
+                cash += direction_sign(direction) * (fill * quantity) - fee
+                pnl = (fill - entry_price) * quantity * direction_sign(direction) - fee - entry_fee
+                trades.append(
+                    _trade_record(
+                        direction=direction,
+                        symbol=symbol,
+                        entry_time=index[entry_index],
+                        entry_price=entry_price,
+                        exit_time=bar_time,
+                        exit_price=fill,
+                        quantity=quantity,
+                        fees=fee + entry_fee,
+                        slippage=abs(slip) + abs(entry_slippage),
+                        pnl=pnl,
+                        holding_bars=i - entry_index,
+                        exit_reason=reason,
+                        ambiguous_fill=ambiguous,
+                        strategy_version=strategy_version,
+                        trade_high=trade_high,
+                        trade_low=trade_low,
+                        entry_stop=entry_stop,
+                    )
+                )
+                quantity = 0.0
+                entry_price = 0.0
+                entry_fee = 0.0
+                entry_slippage = 0.0
+                entry_stop = None
+                direction = "LONG"
+
+        # Entry fills at the *next* bar open, matching the single-strategy engine.
+        if quantity == 0 and i + 1 < len(frame):
+            want_long = bool(entry_long[i])
+            want_short = bool(entry_short[i]) if entry_short is not None else False
+            if want_long or want_short:
+                fill_ref = float(opens[i + 1])
+                slip = fill_ref * slippage_rate
+                fill = fill_ref + slip if want_long else fill_ref - slip
+                raw_stop = stop_long[i] if want_long else stop_short[i]
+                stop_distance = (
+                    abs(fill - float(raw_stop)) if not np.isnan(float(raw_stop)) else None
+                )
+                qty = _position_quantity(
+                    sizing=execution.sizing,
+                    cash=cash,
+                    fill=fill,
+                    max_position_pct=float(max_position_pct),
+                    stop_distance=stop_distance,
+                    allow_fractional=execution.allow_fractional,
+                )
+                if qty > 0:
+                    fee = abs(fill * qty) * fee_rate
+                    entries_taken += 1
+                    if want_long:
+                        cash -= fill * qty + fee
+                        direction = "LONG"
+                    else:
+                        cash += fill * qty - fee
+                        direction = "SHORT"
+                    quantity = qty
+                    entry_price = fill
+                    entry_fee = fee
+                    entry_slippage = abs(slip)
+                    entry_index = i + 1
+                    trade_high = fill
+                    trade_low = fill
+                    entry_stop = None if np.isnan(float(raw_stop)) else float(raw_stop)
+
+        position_value = quantity * close * direction_sign(direction)
+        in_position.append(quantity > 0)
+        equity_curve.append(
+            {
+                "timestamp": bar_time.isoformat(),
+                "equity": cash + position_value,
+                "cash": cash,
+                "position_value": position_value,
+                "close": close,
+            }
+        )
+
+    if quantity > 0:
+        last = len(frame) - 1
+        fill = float(closes[last])
+        fee = abs(fill * quantity) * fee_rate
+        cash += direction_sign(direction) * (fill * quantity) - fee
+        pnl = (fill - entry_price) * quantity * direction_sign(direction) - fee - entry_fee
+        trades.append(
+            _trade_record(
+                direction=direction,
+                symbol=symbol,
+                entry_time=index[entry_index],
+                entry_price=entry_price,
+                exit_time=index[last],
+                exit_price=fill,
+                quantity=quantity,
+                fees=fee + entry_fee,
+                slippage=entry_slippage,
+                pnl=pnl,
+                holding_bars=last - entry_index,
+                exit_reason="end_of_data",
+                ambiguous_fill=False,
+                strategy_version=strategy_version,
+                trade_high=trade_high,
+                trade_low=trade_low,
+                entry_stop=entry_stop,
+            )
+        )
+        equity_curve[-1]["equity"] = cash
+        equity_curve[-1]["cash"] = cash
+        equity_curve[-1]["position_value"] = 0.0
+
+    equity_values = np.array([point["equity"] for point in equity_curve], dtype=float)
+    metrics = compute_metrics(
+        equity_values if len(equity_values) else np.array([capital]),
+        trades,
+        timeframe=timeframe,
+    )
+    return _SimResult(
+        equity_curve=equity_curve,
+        trades=trades,
+        metrics=metrics,
+        final_equity=float(equity_values[-1]) if len(equity_values) else capital,
+        entries_taken=entries_taken,
+        in_position=in_position,
+    )
 
 
 def run_ensemble(
@@ -198,11 +431,7 @@ def run_ensemble(
             line = source.reindex(index)
             target_series.loc[:] = target_series.where(target_series.notna(), line)
 
-    frame = evaluated[0].frame.reindex(index)
-    opens = frame["open"].to_numpy(dtype=float)
-    highs = frame["high"].to_numpy(dtype=float)
-    lows = frame["low"].to_numpy(dtype=float)
-    closes = frame["close"].to_numpy(dtype=float)
+    frame = evaluated[0].frame
     entry_long = agreed_long.to_numpy(dtype=bool)
     exit_long = agreed_exit.to_numpy(dtype=bool)
     entry_short = agreed_short.to_numpy(dtype=bool) if agreed_short is not None else None
@@ -220,164 +449,29 @@ def run_ensemble(
     target_short_v = target_short.to_numpy(dtype=float)
 
     capital = float(execution.initial_capital)
-    cash = capital
-    quantity = 0.0
-    entry_price = 0.0
-    entry_index = -1
-    entry_fee = 0.0
-    entry_slippage = 0.0
-    direction = "LONG"
-    trades: list[dict[str, Any]] = []
-    equity_curve: list[dict[str, Any]] = []
-    in_position: list[bool] = []
-    trade_high = 0.0
-    trade_low = 0.0
-    entry_stop: float | None = None
-    symbol = str(frame["symbol"].iloc[0]) if "symbol" in frame.columns else ""
-    # Count entries the engine actually *took*, not bars where the vote fired: while a
-    # position is open a new vote is ignored, so signal bars can exceed positions and
-    # would overstate agreement relative to a member's own entry count.
-    entries_taken = 0
-
-    for i in range(len(frame)):
-        bar_time = index[i]
-        close = float(closes[i])
-
-        if quantity > 0:
-            trade_high = max(trade_high, float(highs[i]))
-            trade_low = min(trade_low, float(lows[i]))
-            is_long = direction == "LONG"
-            stop = stop_long_v[i] if is_long else stop_short_v[i]
-            target = target_long_v[i] if is_long else target_short_v[i]
-            rule_exit = bool(exit_long[i] if is_long else exit_short[i])
-            exit_price, reason, ambiguous = _resolve_exit(
-                bar_high=float(highs[i]),
-                bar_low=float(lows[i]),
-                stop=stop,
-                target=target,
-                close=close,
-                rule_exit=rule_exit,
-                is_long=is_long,
-            )
-            if exit_price is not None:
-                slip = exit_price * slippage_rate
-                fill = exit_price - slip if is_long else exit_price + slip
-                fee = abs(fill * quantity) * fee_rate
-                cash += direction_sign(direction) * (fill * quantity) - fee
-                pnl = (fill - entry_price) * quantity * direction_sign(direction) - fee - entry_fee
-                trades.append(
-                    _trade_record(
-                        direction=direction,
-                        symbol=symbol,
-                        entry_time=index[entry_index],
-                        entry_price=entry_price,
-                        exit_time=bar_time,
-                        exit_price=fill,
-                        quantity=quantity,
-                        fees=fee + entry_fee,
-                        slippage=abs(slip) + abs(entry_slippage),
-                        pnl=pnl,
-                        holding_bars=i - entry_index,
-                        exit_reason=reason,
-                        ambiguous_fill=ambiguous,
-                        strategy_version=strategy_version,
-                        trade_high=trade_high,
-                        trade_low=trade_low,
-                        entry_stop=entry_stop,
-                    )
-                )
-                quantity = 0.0
-                entry_price = 0.0
-                entry_fee = 0.0
-                entry_slippage = 0.0
-                entry_stop = None
-                direction = "LONG"
-
-        # Entry fills at the *next* bar open, matching the single-strategy engine.
-        if quantity == 0 and i + 1 < len(frame):
-            want_long = bool(entry_long[i])
-            want_short = bool(entry_short[i]) if entry_short is not None else False
-            if want_long or want_short:
-                fill_ref = float(opens[i + 1])
-                slip = fill_ref * slippage_rate
-                fill = fill_ref + slip if want_long else fill_ref - slip
-                raw_stop = stop_long_v[i] if want_long else stop_short_v[i]
-                stop_distance = (
-                    abs(fill - float(raw_stop)) if not np.isnan(float(raw_stop)) else None
-                )
-                qty = _position_quantity(
-                    sizing=execution.sizing,
-                    cash=cash,
-                    fill=fill,
-                    max_position_pct=float(max_position_pct),
-                    stop_distance=stop_distance,
-                    allow_fractional=execution.allow_fractional,
-                )
-                if qty > 0:
-                    fee = abs(fill * qty) * fee_rate
-                    entries_taken += 1
-                    if want_long:
-                        cash -= fill * qty + fee
-                        direction = "LONG"
-                    else:
-                        cash += fill * qty - fee
-                        direction = "SHORT"
-                    quantity = qty
-                    entry_price = fill
-                    entry_fee = fee
-                    entry_slippage = abs(slip)
-                    entry_index = i + 1
-                    trade_high = fill
-                    trade_low = fill
-                    entry_stop = None if np.isnan(float(raw_stop)) else float(raw_stop)
-
-        position_value = quantity * close * direction_sign(direction)
-        in_position.append(quantity > 0)
-        equity_curve.append(
-            {
-                "timestamp": bar_time.isoformat(),
-                "equity": cash + position_value,
-                "cash": cash,
-                "position_value": position_value,
-                "close": close,
-            }
-        )
-
-    if quantity > 0 and len(frame) > 0:
-        last = len(frame) - 1
-        fill = float(closes[last])
-        fee = abs(fill * quantity) * fee_rate
-        cash += direction_sign(direction) * (fill * quantity) - fee
-        pnl = (fill - entry_price) * quantity * direction_sign(direction) - fee - entry_fee
-        trades.append(
-            _trade_record(
-                direction=direction,
-                symbol=symbol,
-                entry_time=index[entry_index],
-                entry_price=entry_price,
-                exit_time=index[last],
-                exit_price=fill,
-                quantity=quantity,
-                fees=fee + entry_fee,
-                slippage=entry_slippage,
-                pnl=pnl,
-                holding_bars=last - entry_index,
-                exit_reason="end_of_data",
-                ambiguous_fill=False,
-                strategy_version=strategy_version,
-                trade_high=trade_high,
-                trade_low=trade_low,
-                entry_stop=entry_stop,
-            )
-        )
-        equity_curve[-1]["equity"] = cash
-        equity_curve[-1]["cash"] = cash
-        equity_curve[-1]["position_value"] = 0.0
-
-    equity_values = np.array([point["equity"] for point in equity_curve], dtype=float)
-    metrics = compute_metrics(
-        equity_values if len(equity_values) else np.array([capital]), trades, timeframe=timeframe
+    result = _simulate(
+        frame=frame,
+        index=index,
+        entry_long=entry_long,
+        exit_long=exit_long,
+        entry_short=entry_short,
+        exit_short=exit_short,
+        stop_long=stop_long_v,
+        target_long=target_long_v,
+        stop_short=stop_short_v,
+        target_short=target_short_v,
+        execution=execution,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+        max_position_pct=max_position_pct,
+        capital=capital,
+        timeframe=timeframe,
+        strategy_version=strategy_version,
     )
+    equity_curve = result.equity_curve
+    trades = result.trades
+    entries_taken = result.entries_taken
+    metrics = result.metrics
 
     # Consensus attribution. The ensemble's headline numbers say whether the *combined*
     # decision paid; they do not say who was being voted down. A member's support rate
@@ -445,18 +539,82 @@ def run_ensemble(
         ),
     }
 
+    # Each member, run on the *same* bars with the *same* cost model. The comparison
+    # table needs this: a member's most recent stored backtest may have been run on a
+    # different window or with different fees, and then the columns would silently be
+    # apples to oranges. Each member gets its own cash account funded with its weight's
+    # share of the capital, so the solo curves sum to the same starting line — weights
+    # are already normalised, so the shares sum to exactly 1.
+    member_runs: list[dict[str, Any]] = []
+    for item in evaluated:
+        solo = _simulate(
+            frame=item.frame,
+            index=index,
+            entry_long=item.entry_long.reindex(index, fill_value=False).astype(bool).to_numpy(),
+            exit_long=item.exit_long.reindex(index, fill_value=False).astype(bool).to_numpy(),
+            entry_short=(
+                item.entry_short.reindex(index, fill_value=False).astype(bool).to_numpy()
+                if item.entry_short is not None
+                else None
+            ),
+            exit_short=(
+                item.exit_short.reindex(index, fill_value=False).astype(bool).to_numpy()
+                if item.exit_short is not None
+                else None
+            ),
+            stop_long=(
+                item.risk_stop.reindex(index).to_numpy(dtype=float)
+                if item.risk_stop is not None
+                else np.full(len(index), np.nan)
+            ),
+            target_long=(
+                item.risk_target.reindex(index).to_numpy(dtype=float)
+                if item.risk_target is not None
+                else np.full(len(index), np.nan)
+            ),
+            stop_short=(
+                item.risk_stop_short.reindex(index).to_numpy(dtype=float)
+                if item.risk_stop_short is not None
+                else np.full(len(index), np.nan)
+            ),
+            target_short=(
+                item.risk_target_short.reindex(index).to_numpy(dtype=float)
+                if item.risk_target_short is not None
+                else np.full(len(index), np.nan)
+            ),
+            execution=execution,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+            max_position_pct=max_position_pct,
+            capital=capital * item.weight,
+            timeframe=timeframe,
+            strategy_version=item.label,
+        )
+        member_runs.append(
+            {
+                "label": item.label,
+                "weight": item.weight,
+                "initial_capital": capital * item.weight,
+                "final_equity": solo.final_equity,
+                "entries_taken": solo.entries_taken,
+                "metrics": solo.metrics.as_dict(),
+                "equity_curve": solo.equity_curve,
+            }
+        )
+
     return {
         "ensemble_version": ENSEMBLE_VERSION,
         "vote_threshold": vote_threshold,
         "members": member_summary,
+        "member_runs": member_runs,
         "bars_evaluated": len(index),
         "agreement": agreement,
         "metrics": metrics.as_dict(),
         "trades": trades,
         "equity_curve": equity_curve,
-        "final_equity": float(equity_values[-1]) if len(equity_values) else capital,
+        "final_equity": result.final_equity,
         "initial_capital": capital,
-        "engine_version": "ensemble-1.0.0",
+        "engine_version": "ensemble-1.1.0",
         "feature_version": "ensemble",
         "warnings": warnings,
     }

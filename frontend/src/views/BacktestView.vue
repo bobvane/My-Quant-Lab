@@ -5,6 +5,7 @@ import {
   type Asset,
   type BacktestDetail,
   type BacktestSummary,
+  type EnsembleMemberRun,
   type EnsembleResult,
   type ExplainResult,
   type MonteCarloResult,
@@ -178,6 +179,7 @@ function toggleEnsMember(id: number) {
   } else {
     ensSelected.value = [...ensSelected.value, id]
     if (ensWeights.value[id] === undefined) ensWeights.value = { ...ensWeights.value, [id]: 1 }
+    void loadMemberMetrics()
   }
 }
 
@@ -255,54 +257,85 @@ async function loadMemberMetrics() {
 }
 
 /**
- * Whether a member's stored run is even comparable to this ensemble.
+ * Portfolio and member equity curves on one axis.
  *
- * The member columns come from the member's own latest backtest, which may be on a
- * different symbol/timeframe (or a different dataset version) than the vote. Showing
- * those numbers side by side without saying so invites reading a difference as skill
- * when it is only a different data window.
+ * These come from `member_runs`, which the ensemble simulated on its own bars with its
+ * own cost model, so every line starts from its own account's capital and they are
+ * directly comparable. They are *independent* runs, not a concurrent portfolio: the
+ * engine holds one position at a time, so a member line answers "what if only this
+ * member had traded", not "what did this member contribute while the vote ran".
  */
-function memberRunComparability(label: string): { same: boolean; note: string } | null {
-  const run = ensMemberMetrics.value.find((x) => x.label === label)
-  if (!run) return null
-  const ensDataset = ensResult.value?.dataset_version_id ?? null
-  const ensSymbol = ensResult.value?.symbol ?? null
-  if (ensDataset !== null && run.datasetVersionId !== null) {
-    if (run.datasetVersionId === ensDataset) return { same: true, note: '同一数据集' }
-    return {
-      same: false,
-      note: `不同数据集（成员 ${run.symbol ?? '?'} ${run.timeframe ?? '?'}）`,
-    }
-  }
-  if (ensSymbol !== null && run.symbol !== null) {
-    return run.symbol === ensSymbol
-      ? { same: true, note: '同标的' }
-      : { same: false, note: `不同标的（成员 ${run.symbol}）` }
-  }
-  return null
-}
+const ENS_CHART_MEMBERS = 4
 
-/** How many member rows are flagged as a different data window. */
-const ensIncomparableMembers = computed(() =>
-  ensResult.value
-    ? ensResult.value.members.filter((m) => memberRunComparability(m.label)?.same === false).length
-    : 0,
+const ensEquitySeries = computed(() => {
+  const result = ensResult.value
+  if (!result) return []
+  const lines = [
+    {
+      name: '集成组合',
+      emphasis: true,
+      points: (result.equity_curve ?? []).map((p) => ({
+        ts: String((p as Record<string, unknown>).timestamp ?? ''),
+        value: Number((p as Record<string, unknown>).equity ?? 0),
+      })),
+    },
+    ...result.member_runs.slice(0, ENS_CHART_MEMBERS).map((run) => ({
+      name: run.label,
+      emphasis: false,
+      points: (run.equity_curve ?? []).map((p) => ({
+        ts: String((p as Record<string, unknown>).timestamp ?? ''),
+        value: Number((p as Record<string, unknown>).equity ?? 0),
+      })),
+    })),
+  ]
+  return lines.filter((line) => line.points.length > 0)
+})
+
+/** Members whose same-bar run the ensemble reported, keyed by label. */
+const ensRunsByLabel = computed(() => {
+  const map = new Map<string, EnsembleMemberRun>()
+  for (const run of ensResult.value?.member_runs ?? []) map.set(run.label, run)
+  return map
+})
+
+/** How many members were left out of the chart because it holds four lines. */
+const ensChartOmittedMembers = computed(() =>
+  Math.max(0, (ensResult.value?.member_runs.length ?? 0) - ENS_CHART_MEMBERS),
 )
 
-/** Ensemble equity curve reshaped for the shared chart component. */
-const ensEquityPoints = computed(() => {
-  const curve = ensResult.value?.equity_curve ?? []
-  return curve
-    .map((p) => ({
-      timestamp: String((p as Record<string, unknown>).timestamp ?? ''),
-      equity: Number((p as Record<string, unknown>).equity ?? 0),
-    }))
-    .filter((p) => p.timestamp !== '')
-})
+/** One member's same-bar run, or null when the ensemble did not report one. */
+function memberRunFor(label: string): EnsembleMemberRun | null {
+  return ensRunsByLabel.value.get(label) ?? null
+}
 
 /** Metrics of one member's own latest completed backtest, for the comparison table. */
 function memberMetricsFor(label: string): Record<string, number | null> | null {
   return ensMemberMetrics.value.find((x) => x.label === label)?.metrics ?? null
+}
+
+/** One member's numbers for the table: its own same-bar run, else its stored backtest. */
+function memberCompareRow(label: string): {
+  total_return: number | null
+  max_drawdown: number | null
+  sharpe: number | null
+  entries: number | null
+} {
+  const run = memberRunFor(label)
+  if (run) {
+    return {
+      total_return: run.metrics.total_return ?? null,
+      max_drawdown: run.metrics.max_drawdown ?? null,
+      sharpe: run.metrics.sharpe ?? null,
+      entries: run.entries_taken,
+    }
+  }
+  const stored = memberMetricsFor(label)
+  return {
+    total_return: stored?.total_return ?? null,
+    max_drawdown: stored?.max_drawdown ?? null,
+    sharpe: stored?.sharpe ?? null,
+    entries: stored?.number_of_trades ?? null,
+  }
 }
 
 async function runEnsemble() {
@@ -1264,13 +1297,17 @@ onMounted(async () => {
           如果大部分信号都属于这一类，说明成员之间几乎没有共识，而不是「信号很干净」。
         </p>
 
-        <h4 style="margin: 12px 0 4px">集成组合权益曲线</h4>
-        <EquityChart :points="ensEquityPoints" height="260px" />
-
-        <p v-if="ensIncomparableMembers > 0" class="notice" style="margin-top: 10px">
-          有 {{ ensIncomparableMembers }} 个成员的收益/回撤/夏普来自<b>与本次集成不同的数据窗口</b>
-          （见下表标记）。这些数字不能直接与组合比较：差异可能只来自数据区间不同，而不是策略好坏。
-          请先对该成员在当前标的/周期上跑一次回测。
+        <h4 style="margin: 12px 0 4px">集成组合与各成员（同口径）权益曲线</h4>
+        <MultiLineChart :series="ensEquitySeries" height="280px" />
+        <p class="muted" style="margin-top: 6px">
+          每条线都由服务端用<b>同一个模拟器</b>在同一批 {{ ensResult.bars_evaluated }} 根 bar
+          上算出来，成本模型、成交规则与组合完全一致，所以可以直接比较：粗线是集成组合，细线是
+          各成员<span v-if="ensChartOmittedMembers > 0"
+            >（图中只画了前 {{ ENS_CHART_MEMBERS }} 个，另有
+            {{ ensChartOmittedMembers }} 个见下表）</span
+          >。每个成员用的是<b>它自己那份资金</b>（{{ ensResult.initial_capital }} × 权重）的独立账户，
+          即「如果只让这一个成员交易会怎样」，<b>不是</b>组合同时持有了这些仓位 —— 引擎一次只持有
+          一个仓位。它回答「投票有没有比单干更好」，不回答「某个成员在投票运行时贡献了多少」。
         </p>
 
         <table style="margin-top: 10px">
@@ -1302,39 +1339,33 @@ onMounted(async () => {
             <tr v-for="m in ensResult.members" :key="m.label">
               <td class="muted">
                 {{ m.label }}
-                <span
-                  v-if="memberRunComparability(m.label) && !memberRunComparability(m.label)!.same"
-                  class="notice"
-                  style="margin-left: 4px"
-                  >{{ memberRunComparability(m.label)!.note }}</span
+                <span v-if="!memberRunFor(m.label)" class="muted" style="margin-left: 4px"
+                  >（无同口径跑分，回退到历史回测）</span
                 >
               </td>
               <td>{{ m.weight.toFixed(2) }}</td>
-              <td>{{ m.entry_bars }} 根</td>
+              <td>{{ memberCompareRow(m.label).entries ?? '—' }} 根</td>
               <td>
                 {{ m.entry_agreed }} 认同 / {{ m.solo_entries }} 单独
                 <span class="muted" v-if="m.entry_support_rate !== null">
                   （{{ formatPercent(m.entry_support_rate) }}）</span
                 >
               </td>
-              <td :class="toneOf(memberMetricsFor(m.label)?.total_return ?? null)">
-                {{ memberMetricsFor(m.label) ? formatPercent(memberMetricsFor(m.label)!.total_return) : '—' }}
+              <td :class="toneOf(memberCompareRow(m.label).total_return)">
+                {{ formatPercent(memberCompareRow(m.label).total_return) }}
               </td>
-              <td>
-                {{ memberMetricsFor(m.label) ? formatPercent(memberMetricsFor(m.label)!.max_drawdown) : '—' }}
-              </td>
-              <td>
-                {{ memberMetricsFor(m.label) ? formatNumber(memberMetricsFor(m.label)!.sharpe) : '—' }}
-              </td>
+              <td>{{ formatPercent(memberCompareRow(m.label).max_drawdown) }}</td>
+              <td>{{ formatNumber(memberCompareRow(m.label).sharpe) }}</td>
             </tr>
           </tbody>
         </table>
         <p class="muted" style="margin-top: 6px">
-          「自身触发」是各成员自己的信号根数；集成那行是真正开出的仓位数（持仓期间的重复
-          触发不算新仓），因此它必然不超过成员中最少的那个。「认同/否决」里，<b>认同</b>是该成员
-          的信号中票数过阈值的根数，<b>单独</b>是只有它一个人想入场、被投票否决的根数，括号内为
-          认同占自身触发的比例。成员的收益/回撤/夏普来自各自最近一次已完成回测，缺失时显示
-          <code>—</code>；标记为不同数据集的行不可直接比较。
+          「自身触发」是各成员自己在同一批 bar 上开出的仓位数；集成那行是组合真正开出的仓位数
+          （持仓期间的重复触发不算新仓），因此它必然不超过成员中最少的那个。「认同/否决」里，
+          <b>认同</b>是该成员的信号中票数过阈值的根数，<b>单独</b>是只有它一个人想入场、被投票
+          否决的根数，括号内为认同占自身触发的比例。成员的收益/回撤/夏普取自<b>本次集成自己算出的
+          同口径跑分</b>，与组合完全可比；若某成员没有该跑分（旧版服务端），则回退到它最近一次
+          已完成回测并标注，缺失时显示 <code>—</code>。
         </p>
       </div>
     </div>

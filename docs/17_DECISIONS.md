@@ -636,3 +636,37 @@ schema，就可能不一致，而且只在其中一个方言上暴露。所以�
 两个同策略成员 + 一个异策略成员时，被否决方的 `solo_entries == entry_bars` 而组合仍按多数方开仓；
 支持率按并集而非交集计算）；`test_ensemble_api.py` 增加数据集身份与归因自洽断言；
 `test_api.py` 断言回测摘要返回 `symbol` / `timeframe`。
+
+## ADR-050：成员对比由服务端按同一模拟器算出（`member_runs`，docs/24）
+
+**背景**：ADR-049 让前端**标注**了成员历史回测与集成的不可比（不同数据集/成本模型/资金），但那
+只是「据实说明」，没有解决问题：用户仍然拿不到一个同口径的成员对照，于是「集成比单干好吗」这个
+集成最该回答的问题，无法用界面上的数字回答。可用的回退办法（要求用户先在当前标的/周期上跑一次
+该成员的回测）把口径一致性变成用户的义务，且它依赖 UI 状态，无法审计。
+
+**决策**：
+
+1. 把逐 bar 模拟循环从 `run_ensemble` 抽成 `_simulate(*, frame, index, entry_long, exit_long,
+   entry_short, exit_short, stop_long, target_long, stop_short, target_short, execution,
+   fee_rate, slippage_rate, max_position_pct, capital, timeframe, strategy_version)`，返回
+   `_SimResult(equity_curve, trades, metrics, final_equity, entries_taken, in_position)`。
+   组合与成员跑分**走同一个函数**，因此「可比」是结构保证，不是约定。
+2. 响应新增 `member_runs`（与 `members` 等长同序）：每项 `label` / `weight` /
+   `initial_capital`（= 组合初始资金 × 归一化权重，各项之和恰为组合初始资金）/ `final_equity` /
+   `entries_taken` / `metrics` / `equity_curve`。每个成员用**自己那份资金**独立模拟。
+3. 成员跑分用**各成员自己的**风控线与规则，不用组合继承的那一套（否则「成员单干」名不副实）。
+4. 语义边界写进文档：成员曲线是**独立账户**的模拟，不是「组合同时持有多笔仓位」——引擎是单
+   仓位单现金账户。它回答「投票有没有比单干更好」，不回答「某成员在投票运行时贡献了多少」。
+5. `ENSEMBLE_VERSION` 与返回的 `engine_version` 由 `1.0.0` / `ensemble-1.0.0` 提升为
+   `1.1.0` / `ensemble-1.1.0`：响应形状变了，调用方需要能分辨。
+6. 因为响应从几十 KB 涨到 163 KB 级（每人一条曲线），加入 `GZipMiddleware`。
+7. 前端对比表成员列改为优先取 `member_runs`；权益曲线由单线 `EquityChart` 改为
+   `MultiLineChart`，叠加组合（加粗）与各成员（最多 4 条，其余见表格），并删除 v1.3.9 那个
+   「不可比」警告（同口径跑分存在时它已无意义，只在回退到历史回测时标注）。
+
+**理由**：把一个「只存在于用户纪律里」的口径一致性要求，变成服务端一次调用就成立的**结构**保证。
+成员 solo run 复用组合的执行路径，也顺带消除了「成员数字与组合数字来自两套代码」这类漂移风险。
+
+**测试**：`test_ensemble.py` 四条（单成员且权重 1 时 solo 与组合逐项相同；`initial_capital` 按权重
+分配且和为总额；顺序与可复现；成员用自己的止损线）；`test_ensemble_api.py` 三条（同 bar 跑分的
+形状与自洽、组合收益落在成员收益区间内、单成员时与组合一致）+ 一条 gzip 行为测试。

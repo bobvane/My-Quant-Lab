@@ -63,6 +63,7 @@ boundary and the no-lookahead / immutability guarantees.
 | v1.3.7 | 修 `latest` 镜像标签被并发发布互相覆盖（只有最高 tag 才移动 `latest`） |
 | v1.3.8 | 拒绝重复成员（会归一化成「一个参与者却显示为投票」）+ 权重归一/清空按钮 + 零交易文案 |
 | v1.3.9 | 认同归因（ADR-049）：`signalled_bars` / `solo_signalled_bars` / 每成员支持率；对比表标注数据窗口不可比；修做空退出判定残留的 `>=` |
+| v1.4.0 | 同口径成员对比（ADR-050）：`member_runs`（每成员在**同一批 bar、同一套成本模型、各自权重资金**下的独立跑分）+ 引擎版本提升为 `ensemble-1.1.0` + gzip 中间件；前端叠加组合与成员权益曲线 |
 
 **至此 docs/15 的 P0/P1/P2 与 v2 结构性能力清单全部完成。** 后续为打磨与体验改进。
 

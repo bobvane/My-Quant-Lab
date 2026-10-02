@@ -215,10 +215,31 @@ export interface EnsembleMemberOut {
   vote_agreement_rate: number | null
 }
 
+/**
+ * One member run by the ensemble itself, on the ensemble's own bars with its own cost
+ * model — as opposed to that member's stored backtest, which may have used another
+ * window or fee model and would make the comparison table incomparable.
+ *
+ * Each run is funded with `initial_capital` of its own: an independent account, not a
+ * concurrent second position (the engine holds one position at a time).
+ */
+export interface EnsembleMemberRun {
+  label: string
+  weight: number
+  initial_capital: number
+  final_equity: number
+  /** Positions this member would have opened alone; matches `metrics.number_of_trades`. */
+  entries_taken: number
+  metrics: Record<string, number | null>
+  equity_curve: EquityPoint[]
+}
+
 export interface EnsembleResult {
   ensemble_version: string
   vote_threshold: number
   members: EnsembleMemberOut[]
+  /** One entry per member, in the same order as `members`. */
+  member_runs: EnsembleMemberRun[]
   bars_evaluated: number
   agreement: {
     entry_bars: number

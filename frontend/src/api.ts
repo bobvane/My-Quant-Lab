@@ -417,6 +417,10 @@ export const api = {
   signalEvidence: (id: number) => request<Record<string, any>>(`/signals/${id}/evidence`),
   signalOutcomes: (limit = 50) =>
     request<Array<Record<string, any>>>(`/signals/outcomes?limit=${limit}`),
+  signalOutcomeSummary: () =>
+    request<{ evaluated: number; groups: Record<string, Record<string, any>> }>(
+      '/signals/outcome-summary',
+    ),
   scanSignals: () =>
     request<{ evaluated: number; created: number; signals: SignalIntent[]; disclaimer: string }>(
       '/signals/scan',

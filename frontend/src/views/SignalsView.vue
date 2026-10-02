@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { api, type ExplainResult, type SignalRecord } from '@/api'
-import { formatDateTime, formatNumber, toneOf } from '@/format'
+import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 
 const signals = ref<SignalRecord[]>([])
 const stateFilter = ref('')
@@ -17,6 +17,7 @@ const evidence = ref<Record<string, any> | null>(null)
 const evidenceFor = ref('')
 const evidencing = ref<number | null>(null)
 const outcomes = ref<Array<Record<string, any>>>([])
+const outcomeSummary = ref<Record<string, any> | null>(null)
 const showOutcomes = ref(false)
 
 async function toggleOutcomes() {
@@ -26,7 +27,12 @@ async function toggleOutcomes() {
     return
   }
   try {
-    outcomes.value = await api.signalOutcomes()
+    const [rows, summary] = await Promise.all([
+      api.signalOutcomes(),
+      api.signalOutcomeSummary().catch(() => null),
+    ])
+    outcomes.value = rows
+    outcomeSummary.value = summary
     showOutcomes.value = true
   } catch (e) {
     error.value = (e as Error).message
@@ -191,6 +197,30 @@ onMounted(load)
       <p class="muted">
         回填的是「信号发出后价格如何走」：pnl% 为方向化收益，MAE/MFE 为最大不利/有利偏移。
       </p>
+      <div v-if="outcomeSummary?.groups?.ALL" class="row" style="margin-bottom: 8px">
+        <span class="stat small">整体胜率 {{ formatPercent(outcomeSummary.groups.ALL.win_rate) }}</span>
+        <span class="muted">样本 {{ outcomeSummary.groups.ALL.count }} · 平均 {{ formatNumber(outcomeSummary.groups.ALL.avg_pnl_pct, 3) }}% · 累计 {{ formatNumber(outcomeSummary.groups.ALL.total_pnl_pct, 3) }}%</span>
+      </div>
+      <table v-if="outcomeSummary && Object.keys(outcomeSummary.groups).length > 1" style="margin-bottom: 10px">
+        <thead>
+          <tr>
+            <th>分组</th>
+            <th>样本</th>
+            <th>胜率</th>
+            <th>平均 PnL%</th>
+            <th>累计 PnL%</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(g, k) in outcomeSummary.groups" :key="k">
+            <td>{{ k }}</td>
+            <td>{{ g.count }}</td>
+            <td>{{ g.win_rate != null ? formatPercent(g.win_rate) : '—' }}</td>
+            <td :class="toneOf(g.avg_pnl_pct)">{{ g.avg_pnl_pct != null ? formatNumber(g.avg_pnl_pct, 3) + '%' : '—' }}</td>
+            <td :class="toneOf(g.total_pnl_pct)">{{ g.total_pnl_pct != null ? formatNumber(g.total_pnl_pct, 3) + '%' : '—' }}</td>
+          </tr>
+        </tbody>
+      </table>
       <table v-if="outcomes.length">
         <thead>
           <tr>

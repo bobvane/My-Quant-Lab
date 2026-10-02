@@ -118,6 +118,8 @@ function removeChannel(index: number) {
 }
 
 const providers = ref<AIProviderRecord[]>([])
+const aiModels = ref<Array<Record<string, any>>>([])
+const aiUsage = ref<Array<Record<string, any>>>([])
 const providerName = ref('')
 const baseUrl = ref('')
 const apiKey = ref('')
@@ -133,15 +135,19 @@ const busyId = ref<number | null>(null)
 async function load() {
   error.value = ''
   try {
-    const [audit, settings, ai, notification] = await Promise.all([
+    const [audit, settings, ai, notification, models, usage] = await Promise.all([
       api.audit(),
       api.settings(),
       api.aiProviders(),
       api.notificationConfig(),
+      api.aiModels().catch(() => ({ models: [] })),
+      api.aiUsage().catch(() => ({ usage: [] })),
     ])
     events.value = audit.events
     environment.value = (settings.environment as Record<string, unknown>) ?? {}
     providers.value = ai.providers
+    aiModels.value = models.models
+    aiUsage.value = usage.usage
     applyNotification(notification)
   } catch (e) {
     error.value = (e as Error).message
@@ -219,11 +225,19 @@ async function testNotification() {
 }
 
 function modelList(): Array<Record<string, unknown>> {
+  // "model" or "model:capability" or "model:capability:inCost:outCost".
   return modelsCsv.value
     .split(',')
     .map((m) => m.trim())
     .filter(Boolean)
-    .map((model_name) => ({ model_name }))
+    .map((entry) => {
+      const parts = entry.split(':').map((p) => p.trim())
+      const out: Record<string, unknown> = { model_name: parts[0] }
+      if (parts[1]) out.capability_tier = parts[1]
+      if (parts[2]) out.input_cost_per_mtok = Number(parts[2])
+      if (parts[3]) out.output_cost_per_mtok = Number(parts[3])
+      return out
+    })
 }
 
 async function testBeforeSave() {
@@ -394,6 +408,63 @@ onMounted(load)
       <p v-else class="muted">
         尚未配置 AI provider —— 信号与回测的「AI 解释」按钮会在配置后可用。
       </p>
+
+      <p class="muted" style="margin-top: 8px">
+        模型可用 <code>模型名:能力档:输入价:输出价</code> 填写（如
+        <code>gpt-4o-mini:cheap:0.15:0.6</code>）；路由按任务能力档 + 成本 + 预算选模型。
+      </p>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>AI 模型目录（路由用）</h3>
+      <table v-if="aiModels.length">
+        <thead>
+          <tr>
+            <th>供应商</th>
+            <th>模型</th>
+            <th>能力档</th>
+            <th>输入/输出价 (per Mtok)</th>
+            <th>启用</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="m in aiModels" :key="String(m.id)">
+            <td>{{ m.provider }}</td>
+            <td>{{ m.model_name }}</td>
+            <td>{{ m.capability_tier }}</td>
+            <td class="muted">{{ formatNumber(m.input_cost_per_mtok, 3) }} / {{ formatNumber(m.output_cost_per_mtok, 3) }}</td>
+            <td>{{ m.is_active ? '是' : '否' }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">还没有模型条目。</p>
+    </div>
+
+    <div class="card" style="margin-top: 14px">
+      <h3>AI 用量（最近 {{ aiUsage.length }} 条）</h3>
+      <table v-if="aiUsage.length">
+        <thead>
+          <tr>
+            <th>日期</th>
+            <th>供应商</th>
+            <th>任务</th>
+            <th>调用</th>
+            <th>Tokens</th>
+            <th>费用 USD</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="u in aiUsage" :key="String(u.id)">
+            <td>{{ String(u.usage_date).slice(0, 10) }}</td>
+            <td>{{ u.provider_id ?? '—' }}</td>
+            <td>{{ u.task_type }}</td>
+            <td>{{ u.call_count }}</td>
+            <td>{{ u.total_tokens }}</td>
+            <td>{{ formatNumber(u.total_cost_usd, 4) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">暂无 AI 调用记录。</p>
     </div>
 
     <div class="card" style="margin-top: 14px">

@@ -237,6 +237,40 @@ def get_source(source_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
 
+@router.get("/sources/{source_id}/check", summary="Check a source for a new commit (live)")
+def check_source_now(source_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    from fastapi import HTTPException
+
+    from app.data.strategy_service import record_audit
+    from app.importer import GitHubClient, parse_repo_url
+
+    row = db.get(GitHubSource, source_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="github source not found")
+    owner, repo = parse_repo_url(row.repository_url)
+    try:
+        head = GitHubClient().get_head_commit(owner, repo)
+    except Exception as exc:  # noqa: BLE001 - surface a readable error
+        raise HTTPException(status_code=502, detail=f"github check failed: {exc}") from exc
+    new = bool(head and head != row.current_commit)
+    row.last_checked_at = dt.datetime.now(tz=dt.UTC)
+    record_audit(
+        db,
+        event_type="github_source_checked",
+        entity_type="github_source",
+        entity_id=str(source_id),
+        action="check",
+        payload={"head": head, "has_update": new},
+    )
+    db.commit()
+    return {
+        "source_id": source_id,
+        "current_commit": row.current_commit,
+        "head": head,
+        "has_update": new,
+    }
+
+
 @router.get("/sources/{source_id}/snapshots", summary="Snapshots for a GitHub source")
 def list_snapshots(
     source_id: int, db: Session = Depends(get_db), limit: int = 50

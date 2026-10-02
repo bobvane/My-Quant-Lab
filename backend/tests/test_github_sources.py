@@ -44,3 +44,23 @@ def test_import_persists_github_source_and_snapshot(client, db_session) -> None:
 
 def test_import_missing_source_404(client) -> None:
     assert client.get("/api/v1/importer/github/sources/999").status_code == 404
+
+
+def test_check_source_now_reports_update(client, db_session, monkeypatch) -> None:
+    import app.importer as importer
+    from app.domain.models import GitHubSource
+
+    class _FakeClient:
+        def get_head_commit(self, owner, repo):  # noqa: ANN001
+            return "newsha"
+
+    monkeypatch.setattr(importer, "GitHubClient", _FakeClient)
+    source = GitHubSource(repository_url="https://github.com/bobvane/demo", current_commit="old")
+    db_session.add(source)
+    db_session.commit()
+
+    body = client.get(f"/api/v1/importer/github/sources/{source.id}/check").json()
+    assert body["has_update"] is True
+    assert body["head"] == "newsha"
+
+    assert client.get("/api/v1/importer/github/sources/999/check").status_code == 404

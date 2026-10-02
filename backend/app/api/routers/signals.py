@@ -33,6 +33,7 @@ def list_signals(
     asset_id: int | None = None,
     symbol: str | None = None,
     limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ) -> list[SignalOut]:
     stmt = select(Signal)
     if state:
@@ -44,7 +45,7 @@ def list_signals(
         if asset is None:
             return []
         stmt = stmt.where(Signal.asset_id == asset.id)
-    rows = db.scalars(stmt.order_by(Signal.id.desc()).limit(limit)).all()
+    rows = db.scalars(stmt.order_by(Signal.id.desc()).limit(limit).offset(offset)).all()
     return [_serialize_signal(db, row) for row in rows]
 
 

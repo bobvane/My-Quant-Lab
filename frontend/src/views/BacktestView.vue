@@ -124,8 +124,39 @@ const ensThreshold = ref(0.5)
 const ensRunning = ref(false)
 /** Per-member single-strategy metrics, so "is diversifying better?" is answerable. */
 const ensMemberMetrics = ref<Array<{ label: string; versionId: number; metrics: Record<string, number | null> }>>([])
-/** Enough distinct versions to vote with; below two a "vote" is meaningless. */
-const ensCandidates = computed(() => versions.value)
+/**
+ * All versions across every strategy. Candidates must not be limited to the strategy
+ * currently selected for a single-strategy run — voting across strategies is the
+ * whole point of an ensemble, and scoping it made that unreachable in the UI.
+ */
+const ensAllVersions = ref<StrategyVersion[]>([])
+
+/** Candidates grouped by strategy, so the picker reads as "which strategies agree". */
+const ensCandidateGroups = computed(() => {
+  const byStrategy = new Map<number, StrategyVersion[]>()
+  for (const v of ensAllVersions.value) {
+    const list = byStrategy.get(v.strategy_id) ?? []
+    list.push(v)
+    byStrategy.set(v.strategy_id, list)
+  }
+  return [...byStrategy.entries()]
+    .map(([id, list]) => ({
+      strategyId: id,
+      name: strategies.value.find((s) => s.id === id)?.name ?? `#${id}`,
+      versions: [...list].sort((a, b) => b.id - a.id),
+    }))
+    .sort((a, b) => a.strategyId - b.strategyId)
+})
+
+const ensCandidateCount = computed(() => ensAllVersions.value.length)
+
+async function loadEnsCandidates() {
+  try {
+    ensAllVersions.value = await api.allStrategyVersions()
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
 
 function toggleEnsMember(id: number) {
   const idx = ensSelected.value.indexOf(id)
@@ -141,7 +172,10 @@ function toggleEnsMember(id: number) {
 async function loadMemberMetrics() {
   const out: Array<{ label: string; versionId: number; metrics: Record<string, number | null> }> = []
   for (const id of ensSelected.value) {
-    const version = versions.value.find((v) => v.id === id)
+    // Prefer the global list: a member may belong to another strategy, which the
+    // per-strategy `versions` list does not contain.
+    const version =
+      ensAllVersions.value.find((v) => v.id === id) ?? versions.value.find((v) => v.id === id)
     // The API labels members `strategyId@version` (research.py). Building the label
     // from `version` alone produced "1.0.5" and never matched the "1@1.0.5" emitted by
     // the backend, so every comparison cell fell back to "—".
@@ -567,6 +601,9 @@ watch(strategyId, loadVersions)
 onMounted(async () => {
   await load()
   await loadVersions()
+  // Ensemble candidates span every strategy, so they load independently of the
+  // single-strategy selection above.
+  await loadEnsCandidates()
 })
 </script>
 
@@ -1022,32 +1059,43 @@ onMounted(async () => {
         等权两成员时各占 0.5 票，所以 0.5 的阈值意味着<b>两个都同意</b>才算数。
       </p>
 
-      <div v-if="!ensCandidates.length" class="muted">先在上面选择一个策略（需要有多个版本可选）。</div>
+      <div v-if="!ensCandidateCount" class="muted">还没有任何策略版本可参与投票。</div>
       <div v-else>
-        <div class="row" style="flex-wrap: wrap; gap: 8px">
-          <label
-            v-for="v in ensCandidates"
-            :key="v.id"
-            class="muted"
-            style="display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px"
-          >
-            <input
-              type="checkbox"
-              style="width: auto"
-              :checked="ensSelected.includes(v.id)"
-              @change="toggleEnsMember(v.id)"
-            />
-            v{{ v.version }}
-            <input
-              v-if="ensSelected.includes(v.id)"
-              v-model.number="ensWeights[v.id]"
-              type="number"
-              min="0"
-              step="0.5"
-              style="max-width: 70px"
-              title="权重（会被归一化）"
-            />
-          </label>
+        <p class="muted" style="margin: 0 0 6px">
+          共 {{ ensCandidateCount }} 个版本可选，<b>可跨策略</b>投票（下面按策略分组）。
+          勾选后可在同一行填权重，权重会在服务端归一化。
+        </p>
+        <div
+          v-for="g in ensCandidateGroups"
+          :key="g.strategyId"
+          style="margin-bottom: 6px"
+        >
+          <span class="muted" style="margin-right: 8px">#{{ g.strategyId }} {{ g.name }}</span>
+          <span style="display: inline-flex; flex-wrap: wrap; gap: 8px">
+            <label
+              v-for="v in g.versions"
+              :key="v.id"
+              class="muted"
+              style="display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px"
+            >
+              <input
+                type="checkbox"
+                style="width: auto"
+                :checked="ensSelected.includes(v.id)"
+                @change="toggleEnsMember(v.id)"
+              />
+              v{{ v.version }}
+              <input
+                v-if="ensSelected.includes(v.id)"
+                v-model.number="ensWeights[v.id]"
+                type="number"
+                min="0"
+                step="0.5"
+                style="max-width: 70px"
+                title="权重（会被归一化）"
+              />
+            </label>
+          </span>
         </div>
 
         <div class="row" style="margin-top: 8px">

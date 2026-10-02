@@ -476,6 +476,10 @@ export const api = {
       `/backtests${strategyVersionId ? `?strategy_version_id=${strategyVersionId}` : ''}`,
     ),
   backtest: (id: number) => request<BacktestDetail>(`/backtests/${id}`),
+  // Every strategy version across all strategies. The ensemble needs to vote with
+  // versions of *different* strategies, so scoping candidates to one strategy (as
+  // `/strategies/{id}/versions` does) would make cross-strategy voting unreachable.
+  allStrategyVersions: () => request<StrategyVersion[]>('/strategy-versions'),
   compareBacktests: (ids: number[]) =>
     request<{ metrics: string[]; runs: Array<Record<string, any>> }>(
       `/backtests/compare?ids=${ids.join(',')}`,

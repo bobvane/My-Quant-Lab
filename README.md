@@ -165,8 +165,9 @@ RATE_LIMIT_PER_MINUTE=60
 ```
 
 - `API_AUTH_TOKEN` 设置后，除 `/api/v1/healthz` 与 `/api/v1/health` 两个探针外，
-  所有 API 请求都需要 `Authorization: Bearer <token>`；**内置 Web 容器会自动
-  带上它** —— 所以它拦住的是绕过 Web 容器、直连 API 的客户端，经 8081 代理的
+  应用提供的**所有**入口都需要 `Authorization: Bearer <token>`，包括 `/docs` 与
+  `/openapi.json`（它们和 `/api/v1` 一样是 API 的门，见 ADR-103）；**内置 Web 容器
+  会自动带上它** —— 所以它拦住的是绕过 Web 容器、直连 API 的客户端，经 8081 代理的
   局域网访问不受影响。
 - 通知渠道（Webhook / 飞书 / Telegram / PushPlus / Email）的密钥、AI API Key
   均**加密存储、只写入不回显**；审计日志也绝不包含密钥。

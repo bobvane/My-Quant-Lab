@@ -282,9 +282,16 @@ else {
         # are mounted at /api/v1 but openapi_url stays "/openapi.json". Probing
         # $api/openapi.json returns 404, which would make this check pass or fail
         # for entirely the wrong reason (it did exactly that on the first run).
+        #
+        # /docs and /openapi.json are gated by the same token as /api/v1 (ADR-103),
+        # so a deployment that sets API_AUTH_TOKEN must present it here too —
+        # otherwise this step "fails" for a reason that has nothing to do with the
+        # routes it is checking.
         $schemaUrl = "$Base/openapi.json"
+        $schemaHeaders = @{}
+        if ($Token) { $schemaHeaders['Authorization'] = "Bearer $Token" }
         try {
-            $schema = Invoke-RestMethod -Uri $schemaUrl -TimeoutSec 30 -ErrorAction Stop
+            $schema = Invoke-RestMethod -Uri $schemaUrl -Headers $schemaHeaders -TimeoutSec 30 -ErrorAction Stop
         }
         catch {
             throw "无法读取 OpenAPI schema（$schemaUrl）：$($_.Exception.Message)"

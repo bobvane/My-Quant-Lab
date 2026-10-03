@@ -1,7 +1,7 @@
 """A workflow that names a moving target, or accepts a missing report, is a claim.
 
-Two classes of defect live in `.github/workflows/` and neither shows up as a failed
-run:
+Three classes of defect live in `.github/workflows/` and none of them shows up as a
+failed run:
 
 * `uses: actions/checkout@v7` names a tag. A tag is a pointer its owner -- or anyone
   who compromises that repository -- can move to different code, and these workflows
@@ -11,6 +11,10 @@ run:
   report exists" into a green step even when the tests died before writing it, and no
   coverage floor existed anywhere, so the number the artifact carries was never
   enforced (ADR-102).
+* A coverage floor only holds if the number it compares is the number it prints:
+  pytest-cov compares `round(total, precision)`, and its default precision of 0
+  rounded 85.96% up to 86 -- so `--cov-fail-under=86` passed a run that printed
+  `FAIL Required test coverage of 86% not reached` (ADR-105).
 
 These guards read the workflow text. They can prove what the file says; they cannot
 prove how a runner behaves (ADR-068, ADR-075).
@@ -100,12 +104,22 @@ def test_no_workflow_can_accept_a_missing_coverage_report() -> None:
     assert "path: backend/coverage.xml" in text, "the upload no longer names the report"
 
 
-def test_the_coverage_number_is_enforced_not_merely_printed() -> None:
-    """A percentage nobody compares against anything cannot fail a build."""
+def test_the_coverage_floor_means_what_the_run_prints() -> None:
+    """A floor the plugin rounds before comparing is not the floor it prints (ADR-105)."""
 
     text = _text(CI)
-    match = re.search(r"--cov-fail-under=(\d+)", text)
-    assert match, "the suite measures coverage but never requires a floor (ADR-102)"
-    floor = int(match.group(1))
-    assert 50 <= floor <= 100, f"a coverage floor of {floor}% would never fail a realistic run"
+    floor = re.search(r"--cov-fail-under=([\d.]+)", text)
+    assert floor, "the suite measures coverage but never requires a floor (ADR-102)"
+    value = float(floor.group(1))
+    assert 50 <= value <= 100, f"a coverage floor of {value}% would never fail a realistic run"
+    precision = re.search(r"--cov-precision=(\d+)", text)
+    assert precision, (
+        "pytest-cov compares `round(total, precision)` against the floor, and its default "
+        "precision of 0 rounds the total up: 85.96% passed a floor of 86% on the same run "
+        "that printed `FAIL Required test coverage of 86% not reached` (ADR-105)"
+    )
+    assert int(precision.group(1)) >= 2, (
+        "a precision below 2 rounds the total to a number the report does not show, so the "
+        "floor can disagree with the verdict printed next to it (ADR-105)"
+    )
     assert "--cov-report=xml" in text, "the upload has no report to carry"

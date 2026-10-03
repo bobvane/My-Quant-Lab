@@ -123,9 +123,11 @@ def create_app() -> FastAPI:
 
     # Optional bearer auth. Off by default: the API binds to 127.0.0.1 and is
     # reached through the web proxy, so the default deployment is unaffected.
-    # When API_AUTH_TOKEN is set, every /api/v1 route except the two health
-    # probes requires `Authorization: Bearer <token>` (the bundled web container
-    # injects it while proxying /api).
+    # When API_AUTH_TOKEN is set, every route this application serves except the
+    # two health probes requires `Authorization: Bearer <token>` — including
+    # `/docs` and `/openapi.json`, which are doors like any other and used to
+    # answer anyone who could reach the port (ADR-103). The bundled web container
+    # injects the token while proxying, so the browser keeps working.
     open_paths = {f"{settings.api_prefix}/healthz", f"{settings.api_prefix}/health"}
 
     @app.middleware("http")
@@ -134,7 +136,7 @@ def create_app() -> FastAPI:
         if not token or request.method == "OPTIONS":
             return await call_next(request)
         path = request.url.path
-        if not path.startswith(settings.api_prefix) or path in open_paths:
+        if path in open_paths:
             return await call_next(request)
         scheme, _, presented = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer" and secrets.compare_digest(presented, token):

@@ -62,7 +62,15 @@ jobs:
           DATABASE_URL: "sqlite+pysqlite:///:memory:"
           MARKET_DATA_PROVIDER: synthetic
           APP_ENVIRONMENT: test
-        run: pytest -o addopts= --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=86
+        # `--cov-precision=2` is not cosmetic. pytest-cov compares
+        # `round(total, precision)` against the floor, and its default precision
+        # of 0 rounded 85.96 up to 86 -- so `--cov-fail-under=86` passed while
+        # the same run printed "FAIL Required test coverage of 86% not reached.
+        # Total coverage: 85.96%". The floor is 85.5, which is exactly the
+        # threshold precision 0 was really enforcing, and both halves of the
+        # check now read the same number (ADR-105). Measured today: 8178
+        # statements, 1148 missed, 85.96%.
+        run: pytest -o addopts= --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=85.5 --cov-precision=2
 
       - name: Run PostgreSQL regression tests
         env:
@@ -363,6 +371,80 @@ jobs:
             exit 1
           fi
           python3 -c "import json;d=json.load(open('/tmp/scan.json'));assert isinstance(d['evaluated'],int) and d['evaluated']>=0, d;assert d.get('disclaimer'), d;print('evaluated =', d['evaluated'], '| created =', d['created'])"
+
+      - name: "Exposure assertions (ADR-103/104)"
+        run: |
+          set -euo pipefail
+          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.build.yml"
+          API=http://127.0.0.1:8080
+          WEB=http://127.0.0.1:8081
+          TOKEN=ci-exposure-token-1
+
+          # Two documented claims that nothing ever exercised: WEB_BIND=127.0.0.1
+          # really closes the LAN door, and API_AUTH_TOKEN really covers every
+          # route the application serves - /docs and /openapi.json included -
+          # while the web container keeps presenting it for the browser
+          # (ADR-103/104). One recreate, three claims.
+          #
+          # The two overrides go into a copy of the example env file rather than
+          # the shell environment: compose decides what wins between the shell
+          # and `--env-file`, and a step that quietly lost these two values would
+          # assert nothing while reporting success.
+          cp .env.example /tmp/exposure.env
+          {
+            echo "WEB_BIND=127.0.0.1"
+            echo "API_AUTH_TOKEN=$TOKEN"
+          } >> /tmp/exposure.env
+          COMPOSE="$COMPOSE --env-file /tmp/exposure.env"
+          $COMPOSE up -d --no-deps api web
+
+          ok=0
+          for _ in $(seq 1 60); do
+            if curl -fsS "$API/api/v1/healthz" >/dev/null 2>&1; then ok=1; break; fi
+            sleep 3
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "the API never answered again after the token was set"
+            $COMPOSE logs --no-color --tail 100 quantlab-api
+            exit 1
+          fi
+
+          code() { curl -sS -o /dev/null -w '%{http_code}' "$1"; }
+
+          # 1. The documented off switch really closes the door: loopback answers,
+          #    the machine's own LAN address does not.
+          lan=$(hostname -I | awk '{print $1}')
+          [ -n "$lan" ] || { echo "no non-loopback address to probe"; exit 1; }
+          echo "loopback 8081/healthz -> $(code "$WEB/healthz")"
+          [ "$(code "$WEB/healthz")" = "200" ] || { echo "loopback must keep working"; exit 1; }
+          if curl -fsS --max-time 5 -o /dev/null "http://$lan:8081/healthz" 2>/dev/null; then
+            echo "WEB_BIND=127.0.0.1 did not close http://$lan:8081 (ADR-104)"
+            exit 1
+          fi
+          echo "http://$lan:8081 refused, as documented"
+
+          # 2. Straight on the API port, without the header: the two health probes
+          #    answer, everything else - the docs console and the schema included -
+          #    does not (ADR-103).
+          for path in /docs /openapi.json /api/v1/strategies; do
+            got=$(code "$API$path")
+            echo "no token  $path -> $got"
+            [ "$got" = "401" ] || { echo "$path answered $got without a token"; exit 1; }
+          done
+          for path in /api/v1/healthz /api/v1/health; do
+            got=$(code "$API$path")
+            echo "no token  $path -> $got"
+            [ "$got" = "200" ] || { echo "$path is no longer exempt"; exit 1; }
+          done
+
+          # 3. Through the web container the browser sends nothing and everything
+          #    works: the proxy presents the token for /api/, /docs and
+          #    /openapi.json alike.
+          for path in /docs /openapi.json /api/v1/strategies /healthz; do
+            got=$(code "$WEB$path")
+            echo "via web   $path -> $got"
+            [ "$got" = "200" ] || { echo "$path answered $got through the proxy"; exit 1; }
+          done
 
       - name: Dump logs on failure
         if: failure()

@@ -283,6 +283,7 @@ GHCR 镜像保持公开供 NAS 直接拉取。
    单用户 NAS 场景下，V1 仍以「只绑本机 + 网关」为主要边界。
 
 > 修订（ADR-097）：上面第 1 与第 5 条把「API 只绑 127.0.0.1、经 Web 容器代理」当成了边界，实际上 Web 容器发布 `${WEB_BIND:-0.0.0.0}:8081` 并把 `/api` 代理出去（且会注入同一个 token，见第 3 条），所以默认部署对局域网是开放的，token 拦住的是绕过容器的客户端。真正关上它要改 `WEB_BIND=127.0.0.1`，或在前置反向代理 / 防火墙上做。
+> 修订（ADR-103）：上面第 2 条的末句「/docs 与 /openapi.json 不在 /api/v1 下，保持可访问」已被取代 —— 豁免名单现在是一个只有两个探针的清单（`/api/v1/healthz` 与 `/api/v1/health`），文档面与 schema 和 `/api/v1` 一样需要 Token；Web 容器为这三扇门都注入同一个 Token，所以经 8081 的浏览器访问不变，变的是绕过容器直连 API 端口的客户端。
 
 **理由**：docs/14 §4 要求 bearer auth 与 rate limiting，此前缺失；两次安全
 评审都指出无认证会放大 SSRF/端口探测面。以「默认关闭、按需开启、Web 代理
@@ -2234,3 +2235,35 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：ADR-084/090/091 都建立在「守卫会红」之上。守卫问错对象时它比没有守卫更糟 —— 它把「我已经检查过了」写进了绿色。因此收窄判据（`settings.` 前缀、必须有下限、必须写判定、必须点名真实变量）比增加例外名单更接近事实：例外名单会让真正死掉的字段躲在手写理由后面。
 - 影响与兼容：`HOST=` 与 `PORT=` 不再被应用读取（它们本来也没有被任何代码读；入口点读的是壳层 `PORT`，由 compose 提供）；CI 在覆盖率低于 86% 时会失败；Release 说明多一行判定；入口点的诊断文案变化要求同改测试（已同改）。
 - 测试：`backend/tests/test_no_dead_settings.py`（收紧判据，`test_the_knobs_that_did_nothing_are_gone` 增补）、`backend/tests/test_workflow_integrity.py::test_no_workflow_can_accept_a_missing_coverage_report` 与 `::test_the_coverage_number_is_enforced_not_merely_printed`、`backend/tests/test_release_pipeline.py::test_the_release_notes_carry_the_smoke_verdict`、`backend/tests/test_database_wait.py::test_a_permanent_answer_is_not_waited_for`。红证据见 `docs/15` 的 v1.6.9 行。
+> 修订（ADR-105）：上面「影响与兼容」写的「CI 在覆盖率低于 86% 时会失败」当时并不成立 —— `--cov-fail-under=86` 配上 pytest-cov 默认的 `--cov-precision=0` 后，判定用的是 `round(total, 0)`（85.96% 被进位成 86%，于是放行），而同一支运行打印的 `FAIL Required test coverage of 86% not reached` 用的是未取整的 85.96%。v1.7.0 改成 `--cov-fail-under=85.5 --cov-precision=2`：有效阈值与原来的 85.5% 完全相同，但判定与打印从此读同一个数。
+
+## ADR-103：文档面也是 API 的门（豁免名单必须是一个清单，而不是一个前缀）
+
+- 背景：`backend/app/api/main.py` 的鉴权中间件当时按前缀决定放行：`if not path.startswith(settings.api_prefix) or path in open_paths: return await call_next(request)`，即「不在 `/api/v1` 下的一律不管」。而 OpenAPI schema 在应用根 `/openapi.json`、Swagger UI 在 `/docs`（FastAPI 的 `openapi_url` / `docs_url` 默认值），于是这两扇门**按构造**是开的：`.env.example` 声称「除两个 health 探针外所有 API 请求都要 Token」，实际任何能到达 API 端口的客户端都能读到完整 API 形状；而经 8081 时 nginx 会为 `/api/` 注入 Token，所以一个匿名访客只要打开 `/docs`，就能用 Swagger 的「Try it out」以代持身份调用所有端点。ADR-028 第 2 条（`docs/17_DECISIONS.md:277`）把这件事写成了决策（「`/docs` 与 `/openapi.json` 不在 `/api/v1` 下，保持可访问」），`backend/tests/test_api_auth.py:56-58` 的 `test_openapi_is_not_gated` 又把它钉成了断言；`docker/web.nginx.conf` 的 `/api/` location 带 `${AUTH_LINE}`，`/docs` 与 `/openapi.json` 两个 location 不带 —— 同一份配置里两个答案。
+- 决策：
+  1. 中间件只豁免一个清单：`open_paths = {f"{settings.api_prefix}/healthz", f"{settings.api_prefix}/health"}`，其余**所有**路径（含 `/docs`、`/openapi.json`、`/redoc` 与未知路径）在设置了 `API_AUTH_TOKEN` 时都要求 `Authorization: Bearer <token>`。
+  2. `docker/web.nginx.conf` 的 `/docs` 与 `/openapi.json` 两个 location 也注入 `${AUTH_LINE}`，因此浏览器经 8081 打开文档仍然可用（页面自己去取 `/openapi.json` 时同样经这个代理）。
+  3. `scripts/Test-NasDeployment.ps1` 读 schema 时带上与 `Invoke-Api` 相同的 `Authorization` 头，否则设了 Token 的部署会让自检报一个其实是自己 401 的失败。
+  4. ADR-028 第 2 条的末句被本 ADR 取代，已在该条后追加 `> 修订（ADR-103）` 指针。
+- 理由：一扇门要么需要凭证要么不需要，判据应该是「它是不是这个应用提供的入口」，而不是「它的路径长什么样」。旧判据让任何不在 `/api/v1` 下的新路由默认对外，这正是「默认安全」的反面；它与 ADR-090/091（守卫不能按名称放行）和 ADR-095（同一事实不能有两份）是同一类问题在 HTTP 层的实例。豁免名单之所以必须写成清单，是因为清单能被守卫逐字对照文档，而前缀永远无法被对照。
+- 影响与兼容：默认部署（`API_AUTH_TOKEN` 为空）行为完全不变（`${AUTH_LINE}` 展开为空行，中间件直接放行）。设置了 Token 的部署：经 8081 的浏览器访问不受影响（容器代持 Token）；直连 API 端口且不带头的客户端会拿到 401，包括打开 `/docs` —— 这是有意的，`README.md:98`、`.github/workflows/release.yml:292` 与 `scripts/version.sh:157` 宣传的一直是 `http://<nas-ip>:8081/docs`。`/redoc` 同样被门住（未在文档里宣传，故不计入兼容性影响）。
+- 测试：`backend/tests/test_api_auth.py::test_the_documentation_surface_is_gated_too`（设 Token 后 `/docs`、`/openapi.json` 无头 == 401、带头 == 200、错 Token == 401）与 `::test_an_unknown_path_is_not_a_way_around_the_token`（`/redoc` ∈ {401, 404}、`/api/v1/strategies` == 401），原 `test_openapi_is_not_gated` 删除。新守卫 `backend/tests/test_exposure_surface.py`：凡 `proxy_pass http://quantlab-api:8080` 的 location 必须含 `${AUTH_LINE}`、中间件不得再出现 `startswith(settings.api_prefix)`、`.env.example` 写明的豁免与中间件的 `open_paths` 必须一致并点名 `/docs`、NAS 自检的 schema 步骤必须带头。行为侧还有 CI 的《Exposure assertions》步骤（ADR-104）。红证据见 `docs/15` 的 v1.7.0 行。
+
+## ADR-104：已文档化的开关必须被真的按下去过（一次 CI 里按下去，而不是每次靠人记得）
+
+- 背景：`.env.example` 从 v1.6.7 起如实写明「8081 是默认部署唯一对局域网开放的端口，只想自己用就改 `WEB_BIND=127.0.0.1`」，而 `git grep WEB_BIND` 在 `.github/`、`scripts/*.sh`、`scripts/*.ps1` 里**零命中** —— 这条关闭办法从来没有被任何自动化执行过一次。同一份文件里关于 `API_AUTH_TOKEN` 的那句话（「除两个探针外都要 Token」）在 v1.7.0 之前也是错的，而 CI 里同样没有任何一处设置过 Token。两句话都写在文档里，都没有一次运行证明它们存在。
+- 决策：CI 的 compose smoke 作业在默认栈（无 Token、默认绑定）跑完 `Smoke 1/5`–`5/5` 之后新增一步《Exposure assertions (ADR-103/104)》：把 `.env.example` 复制成 `/tmp/exposure.env` 并追加 `WEB_BIND=127.0.0.1` 与 `API_AUTH_TOKEN=ci-exposure-token-1` 两行，再用这个 env file 重建 `api` 与 `web`（`up -d --no-deps`，其余容器不动；不靠壳层环境变量是因为 shell 与 `--env-file` 谁优先由 compose 决定，覆盖值一旦悄悄丢失，这一步就会在什么都没验证的情况下报成功），然后断言三件事 ——(1) `127.0.0.1:8081/healthz` 通，而 `http://<本机非回环地址>:8081/healthz` 必须连不上；(2) 直连 `127.0.0.1:8080` 不带 Token 时 `/docs`、`/openapi.json`、`/api/v1/strategies` 全 401，而 `/api/v1/healthz`、`/api/v1/health` 为 200；(3) 经 8081 不带任何头时 `/docs`、`/openapi.json`、`/api/v1/strategies`、`/healthz` 全 200（Web 容器为每扇门代持了 Token）。默认栈那一步保持不变。
+- 理由：把「文档说的」与「跑过的」绑在一起的代价只有一次容器重建，收益是这两句话从此不可能悄悄变错。审计发现 M3 之后只剩三个选项：改默认绑定（选项 A）、在 preflight 里强制 opt-in（选项 B）、不改行为只验证（选项 C）。选项 A 会改变所有现有用户从别的机器访问 `http://<nas-ip>:8081` 的方式 —— 那是产品决策，不该由补丁版本替用户做；选项 B 只在 CI 与 `Test-NasDeployment.ps1` 里跑，`docker compose up -d` 不经过它，所以它约束的是维护者而不是部署者。本版因此选 C，并把「默认仍是开放的」继续如实写在 `.env.example` 与 `docs/15` 的欠账里。
+- 影响与兼容：CI 的 compose smoke 作业多约一分钟（一次 `up -d --no-deps` 加三组 curl）；本地与 NAS 部署零变化（这一步只在 CI 里改环境变量，末尾仍是 `docker compose … down -v`）。没有 Token 的默认部署不受鉴权与绑定影响。
+- 测试：`backend/tests/test_exposure_surface.py::test_ci_presses_the_documented_off_switch_and_the_token` 断言 `.github/workflows/ci.yml` 里同时存在 `WEB_BIND=127.0.0.1`、`API_AUTH_TOKEN=$TOKEN`、这两个覆盖值确实被写进 `/tmp/exposure.env` 且该 env file 被交给 compose（该路径至少出现两次）、非回环探针 `http://$lan:8081/healthz`、直连三扇门的清单 `/docs /openapi.json /api/v1/strategies` 以及 401/200 的判定（防止这条证据被静默删掉）。红证据见 `docs/15` 的 v1.7.0 行。
+
+## ADR-105：覆盖率下限必须和它打印的判定用同一个数（一个检查的两个半边互相矛盾）
+
+- 背景：ADR-102 给 CI 加了 `--cov-fail-under=86`，守卫 `backend/tests/test_workflow_integrity.py::test_the_coverage_number_is_enforced_not_merely_printed` 断言这个选项存在、数值落在 50–100 —— 它问的是「有没有写」，而不是「写了之后真的会失败吗」。v1.7.0 提交前本地按 CI 的原命令跑了一遍：`pytest -o addopts= --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=86` 输出 `TOTAL 8178 1148 86%` 与 `FAIL Required test coverage of 86% not reached. Total coverage: 85.96%`，而进程退出码是 **0**；v1.6.9 的 ci run `37115089006` 里 `Run tests` 步骤打印了同一行 `FAIL`，而该步骤与整个作业的结论都是 **success**（`gh api /repos/bobvane/My-Quant-Lab/actions/jobs/111180241785` 逐步骤确认；ci.yml 三个作业都没有 `continue-on-error`，也没有自定义 shell）。根因在 pytest-cov 7.1.0 的两条路径：真正的判定在 `pytest_cov/plugin.py:373` 调 `coverage.results.should_fail_under(total, fail_under, precision)`，实现是 `round(total, precision) < fail_under`；而 `pytest_terminal_summary`（`plugin.py:411-421`）只用未取整的 `self.cov_total < self.options.cov_fail_under` 决定打印 `FAIL …` 还是 `reached`。`--cov-precision` 默认 0，于是 85.96 先被进位成 86、判定为「够」（真实阈值是 85.5），打印的那句话却按 85.96 说「没够」—— 同一个检查的两个半边互相矛盾，而且矛盾的方向恰好让失败看起来像成功。
+- 决策：
+  1. `ci.yml` 的 `Run tests` 改成 `--cov-fail-under=85.5 --cov-precision=2`。显式指定精度后，判定比较的是 `round(total, 2) < 85.5`，与打印判定读的是同一个数；85.5 正是原先「精度 0 + 下限 86」真正在执行的阈值（`round(total, 0) >= 86` 等价于 `total >= 85.5`），所以门槛没有被放松，只是被写成它真正的样子。YAML 里附了上面这段理由与本日实测值（8178 statements / 1148 missed / 85.96%）。
+  2. `--cov-precision=2` 同时让覆盖率表格显示 `85.96%` 而不是取整后的 `86%`，不再出现「表里写 86、判定说没到」的观感。
+  3. 守卫改名并改问法：`backend/tests/test_workflow_integrity.py::test_the_coverage_floor_means_what_the_run_prints` 允许下限是小数、且**必须**同时出现 `--cov-precision` 并 ≥ 2 —— 没有精度就不能保证判定与打印读的是同一个数。
+- 理由：一个检查的价值全在「它会不会失败」，而「会不会失败」取决于它拿哪个数去比。`--cov-fail-under` 这个名字与它打印的 `FAIL` 文案都强烈暗示它在失败，实际却为一次 85.96% 的运行放行，v1.6.9 因此把一条从未生效的门禁写进了 ADR-102 的「影响与兼容」。这与 ADR-090（永不失败的检查只是装饰）、ADR-102（守卫必须问对问题）是同一类缺陷的第三种实例：不是没写检查，也不是问错了对象，而是**判定与它自己的输出用了两个不同的数**。显式写出精度是唯一能让「读到的数」与「比对的数」重合的办法。
+- 影响与兼容：CI 的通过门槛从「实际执行 85.5%」变成「声明 85.5%」，数值不变；一条 85.96% 的运行现在打印 `Required test coverage of 85.5% reached. Total coverage: 85.96%` 并以 0 退出；任何让覆盖率跌破 85.5% 的提交从此真的会让 `Run tests` 失败（此前只要小数部分把它抬过线就会被静默放行）。覆盖率表格的显示精度随之提高，`coverage.xml` 一直是全精度、未受影响。
+- 测试：`backend/tests/test_workflow_integrity.py::test_the_coverage_floor_means_what_the_run_prints`（下限可含小数、必须配 `--cov-precision` ≥ 2、仍必须有 `--cov-report=xml`）。行为证据：同一条 CI 命令在改动前打印 `FAIL … Total coverage: 85.96%` 却退出 0；改成 `--cov-fail-under=85.5 --cov-precision=2` 后打印 `Required test coverage of 85.5% reached. Total coverage: 85.96%` 且退出 0；把下限抬到 86（精度 2）后打印 `FAIL … not reached` 且退出 1 —— 两个半边从此一致。红证据见 `docs/15` 的 v1.7.0 行。

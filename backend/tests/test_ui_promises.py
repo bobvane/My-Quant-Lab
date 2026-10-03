@@ -17,6 +17,8 @@ These guards bind the promises to the code:
 * ``已实现（<path>）`` must name files that exist.
 * §4's assumptions block must exist on the backtest page.
 * §5's equity curve and latest-signal list must exist on the paper page.
+* §6's four owed segments must exist on the signal page, and a "current" reading
+  must name the moment it belongs to.
 * §7's four questions must be answered for every metric label, from one source.
 * §9's phone layout must actually be a breakpoint in the stylesheet.
 * the outstanding list in the last section must name exactly the sections that
@@ -38,6 +40,8 @@ MAIN = REPO_ROOT / "frontend" / "src" / "main.ts"
 APP = REPO_ROOT / "frontend" / "src" / "App.vue"
 BACKTEST = REPO_ROOT / "frontend" / "src" / "views" / "BacktestView.vue"
 PAPER = REPO_ROOT / "frontend" / "src" / "views" / "PaperView.vue"
+SIGNALS = REPO_ROOT / "frontend" / "src" / "views" / "SignalsView.vue"
+API = REPO_ROOT / "frontend" / "src" / "api.ts"
 METRICS = REPO_ROOT / "frontend" / "src" / "metrics.ts"
 METRIC_HINT = REPO_ROOT / "frontend" / "src" / "components" / "MetricHint.vue"
 STAT_CARD = REPO_ROOT / "frontend" / "src" / "components" / "StatCard.vue"
@@ -167,6 +171,42 @@ def test_the_paper_page_shows_the_curve_and_the_signals_it_promises() -> None:
         assert rendered in page, (
             f"docs/13 §5 promises a {rendered} the paper page does not use: the page drew "
             "the equity as four numbers and had no signal list (ADR-108)"
+        )
+
+
+def test_the_signal_page_shows_the_segments_it_promises() -> None:
+    """§6 owed four segments: status, strategy history, holdings, risk (ADR-112)."""
+    section = next(body for number, _, body in _sections() if number == 6)
+    for promised in ("当前状态", "策略历史统计", "真实持仓上下文", "风险"):
+        assert promised in section, f"docs/13 §6 no longer promises {promised}"
+
+    page = _text(SIGNALS)
+    for segment in ("当前状态", "策略历史统计", "真实持仓上下文", "风险 / 失效条件"):
+        assert segment in page, (
+            f"docs/13 §6 promises the {segment} segment and the signal page does not render "
+            "it: the page stopped at 结果追踪 / 证据 / AI 解释 (ADR-112)"
+        )
+
+    # A "current" reading has to say which moment it belongs to, and that it is a
+    # closed bar rather than a live quote.
+    assert "最新已收盘 K 线" in page, (
+        "the current-status segment must name the newest *closed* bar: a delayed reading "
+        "that only says 当前状态 is read as real time (ADR-112)"
+    )
+    for source in ("api.latestBars(", "api.strategyEvidence(", "portfolio_context"):
+        assert source in page, f"the signal page reads {source} nowhere: §6 needs it"
+
+    api_text = _text(API)
+    assert "strategyEvidence:" in api_text and "/signals/evidence/" in api_text, (
+        "frontend/src/api.ts has no strategyEvidence method: the strategy-history segment "
+        "has no data source (ADR-112)"
+    )
+
+    # No data must never be rendered as zero.
+    for honest in ("不是零，是还没有数据", "还没有做过 AI 解释"):
+        assert honest in page, (
+            f"the signal page does not say {honest!r} when there is nothing to show: an empty "
+            "box reads as a zero (ADR-112)"
         )
 
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api, type ExplainResult, type SignalRecord } from '@/api'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 
@@ -96,6 +96,196 @@ async function showEvidence(row: SignalRecord) {
     evidencing.value = null
   }
 }
+
+// The four segments `docs/13_UI_UX.md` §6 still owed: 当前状态 / 策略历史统计 /
+// 真实持仓上下文 / 风险失效条件. Nothing here invents a number: the "current" price
+// is the newest *closed* bar of the local dataset, the history is the newest
+// completed backtest, and a signal that has no data says so instead of showing a
+// zero (ADR-112).
+const detailRow = ref<SignalRecord | null>(null)
+const detailBars = ref<Array<{ timestamp: string; close: number }>>([])
+const detailStrategy = ref<Record<string, any> | null>(null)
+const detailOutcome = ref<Record<string, any> | null>(null)
+const detailNote = ref('')
+const detailBarsCapped = ref(false)
+const detailing = ref<number | null>(null)
+
+const BARS_WINDOW = 120
+
+async function showDetail(row: SignalRecord) {
+  error.value = ''
+  detailRow.value = row
+  detailBars.value = []
+  detailStrategy.value = null
+  detailOutcome.value = null
+  detailNote.value = ''
+  detailBarsCapped.value = false
+  detailing.value = row.id
+  try {
+    if (row.symbol) {
+      const bars = await api.latestBars(row.symbol, row.timeframe, BARS_WINDOW)
+      detailBars.value = (bars.bars ?? []).map((bar) => ({
+        timestamp: bar.timestamp,
+        close: bar.close,
+      }))
+      detailBarsCapped.value = detailBars.value.length >= BARS_WINDOW
+    } else {
+      detailNote.value = '这条信号没有代码，读不到最新已收盘 K 线。'
+    }
+    detailStrategy.value = await readStrategyEvidence(row)
+    detailOutcome.value = await api
+      .signalOutcomeSummary(row.symbol ?? undefined)
+      .catch(() => null)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    detailing.value = null
+  }
+}
+
+async function readStrategyEvidence(row: SignalRecord): Promise<Record<string, any> | null> {
+  try {
+    return await api.strategyEvidence(
+      row.strategy_version_id,
+      row.symbol ?? undefined,
+      row.timeframe,
+    )
+  } catch (e) {
+    detailNote.value = `策略证据读取失败：${(e as Error).message}`
+    return null
+  }
+}
+
+function lastClosedBar(): { timestamp: string; close: number } | null {
+  return detailBars.value.length ? detailBars.value[detailBars.value.length - 1] : null
+}
+
+function changeVsReference(): number | null {
+  const reference = detailRow.value?.price_reference
+  const bar = lastClosedBar()
+  if (reference == null || bar === null || !(reference > 0)) return null
+  return (bar.close - reference) / reference
+}
+
+/** Closed bars printed after the signal's own bar (bounded by the fetch window). */
+function barsSinceSignal(): number | null {
+  const stamp = detailRow.value?.bar_timestamp
+  if (!stamp) return null
+  const at = new Date(stamp).getTime()
+  if (Number.isNaN(at)) return null
+  return detailBars.value.filter((bar) => new Date(bar.timestamp).getTime() > at).length
+}
+
+/** A stop / target level's distance from the signal's reference price. */
+function distanceFromReference(level: number | null | undefined): number | null {
+  const reference = detailRow.value?.price_reference
+  if (level == null || reference == null || !(reference > 0)) return null
+  return (level - reference) / reference
+}
+
+/** Ghostfolio reports `allocation_pct` in percent points: 3.4 means 3.4%. */
+function formatPercentPoints(value: number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return 'N/A'
+  return `${formatNumber(value, digits)}%`
+}
+
+const latestStatus = computed(() => {
+  const bar = lastClosedBar()
+  if (bar === null) {
+    return { found: false, time: '—', close: '—', change: '—', barsSince: null, capped: false }
+  }
+  return {
+    found: true,
+    time: formatDateTime(bar.timestamp),
+    close: formatNumber(bar.close),
+    change: formatPercent(changeVsReference()),
+    barsSince: barsSinceSignal(),
+    capped: detailBarsCapped.value,
+  }
+})
+
+const backtestStats = computed(() => {
+  const runs = detailStrategy.value?.layer_2_empirical_stats
+  const run = Array.isArray(runs) && runs.length ? runs[0] : null
+  if (run === null) return { found: false, text: '' }
+  return {
+    found: true,
+    text:
+      `回测 #${run.backtest_run_id} · ${formatDateTime(run.created_at)} · 数据集 ${run.dataset_version ?? '—'} · ` +
+      `样本 ${run.number_of_trades ?? '—'} 笔 · 历史胜率 ${formatPercent(run.win_rate)} · ` +
+      `最大回撤 ${formatPercent(run.max_drawdown)} · 总收益 ${formatPercent(run.total_return)} · ` +
+      `夏普 ${formatNumber(run.sharpe)}`,
+  }
+})
+
+const paperStatsText = computed(() => {
+  const stats = detailStrategy.value?.layer_3_paper_stats
+  if (!stats) return ''
+  return `模拟盘：已平仓 ${stats.paper_trades ?? 0} 笔 · 已实现盈亏 ${formatNumber(stats.realized_pnl)}`
+})
+
+const strategyOutcomeText = computed(() => {
+  const name = detailRow.value?.strategy_name
+  const groups = detailOutcome.value?.groups
+  if (!name || !groups) return ''
+  const bucket = groups[`strategy:${name}`]
+  if (!bucket) return ''
+  return (
+    `信号结果（另一组样本，别和上面的回测混在一起）：已评估 ${bucket.count} 条 · ` +
+    `胜率 ${formatPercent(bucket.win_rate)} · 平均 ${formatPercent(bucket.avg_pnl_pct, 3)} · ` +
+    `累计 ${formatPercent(bucket.total_pnl_pct, 3)}`
+  )
+})
+
+const portfolioText = computed(() => {
+  const context = detailRow.value?.portfolio_context
+  if (!context) return ''
+  const connected = context.ghostfolio_connected
+    ? 'Ghostfolio 已连接'
+    : 'Ghostfolio 未配置或不可达（信号不受影响）'
+  const holding = context.holding
+  const held =
+    holding && holding.quantity != null
+      ? ` · 持有 ${holding.quantity} 股（占比 ${formatPercentPoints(holding.allocation_pct, 2)}）`
+      : ''
+  return `${connected} · ${context.note ?? '—'}${held}`
+})
+
+const layer4Text = computed(() => {
+  const layer = detailStrategy.value?.layer_4_portfolio_context
+  if (!layer) return ''
+  const held = layer.holdings_for_symbol
+  return (
+    `策略侧组合快照：${layer.holdings_count ?? '—'} 个持仓 · 总值 ${formatNumber(layer.total_value)}` +
+    (held ? ` · 本标的 ${held.quantity} 股（占比 ${formatPercentPoints(held.allocation_pct, 2)}）` : '') +
+    ` · ${layer.note ?? '—'}`
+  )
+})
+
+const riskLevels = computed(() => {
+  const row = detailRow.value
+  const show = (level: number | null | undefined) =>
+    level == null
+      ? '未给出'
+      : `${formatNumber(level)}（相对参考价 ${formatPercent(distanceFromReference(level))}）`
+  return { stop: show(row?.stop_reference), target: show(row?.target_reference) }
+})
+
+/** The narrative half of segment 7: only what an explanation actually said. */
+const invalidations = computed(() => {
+  const text = detailRow.value?.explanation
+  const out: string[] = []
+  const push = (value: unknown) => {
+    if (typeof value === 'string' && value.trim()) out.push(value)
+    else if (Array.isArray(value)) {
+      for (const item of value) if (typeof item === 'string' && item.trim()) out.push(item)
+    }
+  }
+  push(text?.what_could_invalidate)
+  push(text?.risks)
+  push(text?.risk_notes)
+  return out
+})
 
 const STATES = ['', 'BUY', 'SELL', 'WAIT', 'NO_SIGNAL']
 
@@ -220,6 +410,9 @@ onMounted(load)
               <button class="ghost" :disabled="evidencing === s.id" @click="showEvidence(s)">
                 {{ evidencing === s.id ? '读取中…' : '证据' }}
               </button>
+              <button class="ghost" :disabled="detailing === s.id" @click="showDetail(s)">
+                {{ detailing === s.id ? '读取中…' : '详情' }}
+              </button>
               <button class="ghost" :disabled="explaining === s.id" @click="explain(s)">
                 {{ explaining === s.id ? '解释中…' : 'AI 解释' }}
               </button>
@@ -247,6 +440,56 @@ onMounted(load)
           {{ loading ? '加载中…' : '加载更多' }}
         </button>
       </div>
+    </div>
+
+    <div v-if="detailRow" class="card" style="margin-top: 14px">
+      <h3>信号详情（#{{ detailRow?.id }} {{ detailRow?.symbol ?? `#${detailRow?.asset_id}` }}）</h3>
+      <p class="muted">
+        `docs/13_UI_UX.md` 第 6 节承诺、此前一直缺的四段：当前状态、策略历史统计、真实持仓上下文、风险与失效条件（第 2、3、5、8 段在上面三张卡片里）。
+      </p>
+      <p v-if="detailNote" class="muted">{{ detailNote }}</p>
+
+      <h4>当前状态</h4>
+      <p class="muted">
+        信号：{{ formatDateTime(detailRow?.bar_timestamp) }} · {{ detailRow?.state }} /
+        {{ detailRow?.direction }} · 参考价
+        {{ detailRow?.price_reference != null ? formatNumber(detailRow?.price_reference) : '—' }}
+      </p>
+      <p v-if="latestStatus.found" class="muted">
+        最新已收盘 K 线（本地数据集里最新的一根，不是实时报价）：{{ latestStatus.time }} · 收盘
+        {{ latestStatus.close }} · 相对参考价 {{ latestStatus.change }}
+        <template v-if="latestStatus.barsSince !== null">
+          · 信号之后已收盘 {{ latestStatus.barsSince }} 根<template v-if="latestStatus.capped"
+            >（已到 {{ BARS_WINDOW }} 根窗口上限，实际可能更多）</template
+          >
+        </template>
+      </p>
+      <p v-else class="muted">还没有可用的已收盘 K 线，因此给不出当前状态。</p>
+
+      <h4>策略历史统计</h4>
+      <p v-if="backtestStats.found" class="muted">{{ backtestStats.text }}</p>
+      <p v-else class="muted">这个策略版本还没有完成的回测，所以没有历史统计（不是零，是还没有数据）。</p>
+      <p v-if="paperStatsText" class="muted">{{ paperStatsText }}</p>
+      <p v-if="strategyOutcomeText" class="muted">{{ strategyOutcomeText }}</p>
+
+      <h4>真实持仓上下文</h4>
+      <p v-if="portfolioText" class="muted">{{ portfolioText }}</p>
+      <p v-else class="muted">
+        这条信号没有留下持仓上下文（扫描时 Ghostfolio 未配置或没有记录）。
+      </p>
+      <p v-if="layer4Text" class="muted">{{ layer4Text }}</p>
+
+      <h4>风险 / 失效条件</h4>
+      <p class="muted">策略价位：止损 {{ riskLevels.stop }} · 目标 {{ riskLevels.target }}</p>
+      <template v-if="invalidations.length">
+        <p class="muted">AI 解释点名的失效条件：</p>
+        <ul class="muted">
+          <li v-for="(item, index) in invalidations" :key="index">{{ item }}</li>
+        </ul>
+      </template>
+      <p v-else class="muted">
+        这条信号还没有做过 AI 解释，所以没有叙述性的失效条件；上面的价位来自策略本身，不是 AI 的判断。
+      </p>
     </div>
 
     <div v-if="showOutcomes" class="card" style="margin-top: 14px">

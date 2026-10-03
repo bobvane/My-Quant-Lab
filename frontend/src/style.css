@@ -154,6 +154,15 @@ a {
   letter-spacing: 0.05em;
 }
 
+/* Sub-headings of the signal-detail card: four segments inside one card (ADR-112). */
+.card h4 {
+  margin: 14px 0 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+}
+
 .stat {
   font-size: 22px;
   font-weight: 650;

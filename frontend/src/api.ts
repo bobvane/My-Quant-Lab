@@ -809,6 +809,15 @@ export const api = {
   acknowledgeSignal: (id: number) =>
     request<Record<string, unknown>>(`/signals/${id}/acknowledge`, { method: 'POST' }),
   signalEvidence: (id: number) => request<Record<string, any>>(`/signals/${id}/evidence`),
+  // The five deterministic layers for one strategy version (rule match → empirical
+  // stats → paper stats → portfolio context → intent). The AI explanation is only
+  // ever *added* on top of these, never substituted for them (ADR-112).
+  strategyEvidence: (strategyVersionId: number, symbol?: string, timeframe = '1d') =>
+    request<Record<string, any>>(
+      `/signals/evidence/${strategyVersionId}?timeframe=${encodeURIComponent(timeframe)}${
+        symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
+      }`,
+    ),
   signalOutcomes: (limit = 50, symbol?: string) =>
     request<Array<Record<string, any>>>(
       `/signals/outcomes?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''}`,

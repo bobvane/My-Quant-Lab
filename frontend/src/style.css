@@ -103,6 +103,15 @@ a {
   color: var(--accent);
 }
 
+/* 导航里的分组标题：高级模式才出现，只说明下面几条属于哪一类（ADR-133）。 */
+.nav-group {
+  margin: 10px 0 2px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
 .main {
   flex: 1;
   min-width: 0;

@@ -201,7 +201,7 @@ onMounted(load)
 <template>
   <section>
     <p>
-      <RouterLink to="/market">← 返回我的策略</RouterLink>
+      <RouterLink to="/strategies">← 返回我的策略</RouterLink>
     </p>
     <h1>{{ strategy?.name ?? `策略 #${strategyId}` }}</h1>
     <p v-if="error" class="error">{{ error }}</p>

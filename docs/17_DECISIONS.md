@@ -2649,3 +2649,49 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 - 测试：`backend/tests/test_frontend_contracts.py::test_the_paper_page_compares_itself_with_a_stored_backtest` 断言 `回测 vs 模拟`、`不是记账工具，而是策略的验证工具`、`comparison`/`loadComparison`、五个 api 调用名（`api.strategyVersions(`/`api.backtests(`/`api.backtest(`/`api.paperPerformance(`/`api.paperEquity(`）、`spanLabel`、两句「不能比」的说明，以及三行读数的取数路径（`run.total_return` + `perf.metrics?.total_return`、`run.max_drawdown` + `perf.metrics?.max_drawdown`、`run.number_of_trades` + `perf.closed_trades`）；`docs/13_UI_UX.md` 第 5 节记录同一套口径。
 
+## ADR-131：把「行情与策略」拆成研究策略 / 我的策略 / 数据三个入口
+
+- 背景：评审 §7 指出 `/market`（`frontend/src/views/StrategiesView.vue`，1381 行）一页同时承担四件事——同步并管理行情数据、创建策略、管理策略版本、从 GitHub 导入仓库并生成版本。对非量化用户来说，「我想研究一个策略」和「我要同步 AAPL 的日线」是两个不同的问题，却挤在同一屏；评审 §19 给出的推荐导航是「研究首页 / 我的策略 / 回测 / 模拟验证 / 信号 / 数据 / 高级工具 / 系统管理」。
+
+- 决策：
+  1. **导航与路由按任务重排**（`frontend/src/main.ts:19-34`、`frontend/src/App.vue:66-79`）：`/` 研究首页（dashboard）、`/research` 研究策略、`/strategies` 我的策略、`/backtest` 回测、`/paper` 模拟验证、`/signals` 信号、`/data` 数据；高级模式下追加「高级」分组标题与 `/resources` 系统资源、`/settings` 系统管理。`/strategy/:strategyId` 详情路由不变（`frontend/src/main.ts:34`）。
+  2. **`/market` 保留为重定向**：`{ path: '/market', redirect: '/strategies' }`，浏览器书签与文档里的旧地址不会 404。重定向路由不匹配文档契约测试的 `_ROUTE`（它要求 `path`/`name`/`component` 三元组），所以既不进导航比对，也不假装成一个页面。
+  3. **同步行情整块搬去 `/data`**（新建 `frontend/src/views/DataView.vue`）：同步表单、系列表、归档/恢复/删除与「显示已归档」复选框原样搬过去，行为未变；新增「质量那一列是什么意思」卡，按 `backend/app/data/market_data_repo.py:45 assess_bars_quality` 的四个取值（`valid`/`partial`/`invalid`/`unknown`）逐条写人话；`GAP_THRESHOLD_DAYS = 5`（同文件 :42）写进文案，因为「partial」的判据就是它。
+  4. **StrategiesView 只留策略**：删掉 `assets`/`symbol`/`series`/`syncing`/`lookbackDays`/`showArchived` 状态与 `assetSymbol()`/`syncData()`/`deleteSeries()`/`restoreSeries()`（`load()` 现在只取 `api.strategies()` + `api.lifecycles()` + GitHub 来源）。策略库表、血统、版本、生命周期、GitHub 导入向导（含七步门禁，见 ADR-113）全部留在这一页，因为文档契约把向导与 `/strategy/` 链接都钉在这个文件上（`backend/tests/test_ui_promises.py` 的 §8 与 §3 两组断言）。
+  5. **普通模式只留任务入口**：`/resources` 与导航里的「高级」分组标题都在 `isAdvanced` 之内；`/settings` 两种模式都在，因为「使用模式」开关就在那个页面上。`frontend/src/wording.ts` 的 `STAGE_PAGES` 与 Dashboard、策略详情页里指向 `/market` 的链接一律改指 `/strategies`。
+
+- 理由：评审 §7 的判断是「职责过多」，而职责过多的解药不是把页面做长，而是让每一页只回答一个问题：`/research` 回答「我下一步做什么」，`/strategies` 回答「我有哪些策略」，`/data` 回答「我的数据够不够、干不干净」。把数据管理从策略页拿走还有个副作用：策略页第一屏重新变成「创建 + 列表」，而同步数据这种需要等待、容易失败的操作不再挡在创建策略前面。保留 `/market` 重定向是因为这次改动会让地址发生变化，而项目里 ADR 与文档都引用过旧地址——让人手上的书签继续可用，比让人重新找页面便宜。
+
+- 影响与兼容：只改前端路由、导航、一个视图的搬迁与 `docs/13_UI_UX.md` 的 §1（同时新增 §11 研究策略、§12 数据，原 §11 欠账改为 §13）。**没有**改后端、没有改 API、没有改数据模型、没有新增依赖；行情同步、归档、删除、恢复走的是同一个 `api.syncMarketData` / `api.deleteSeries` / `api.restoreSeries`，只是按钮换了页面。ADR-081（归档不物理删除）与 ADR-113（门禁）的行为一行未动。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_navigation_splits_research_from_the_strategy_library` 断言导航九条的顺序、`/market` 重定向、`/strategy/:strategyId` 仍在，以及 StrategiesView 里再也找不到 `syncData`/`assetSymbol`（搬迁是搬走而不是复制）；`backend/tests/test_ui_promises.py` 原有的导航树测试会同时比对 `docs/13_UI_UX.md` §1 的文本块与 App.vue 的 `RouterLink` 行。
+
+## ADR-132：人话表单生成策略 DSL，并用 query 把研究流程接到回测页
+
+- 背景：评审 §8 要求普通用户不必写 JSON——给表单或一句人话（「当 20 日均线上穿 50 日均线…」）就能建策略，JSON 编辑器降为高级入口；评审 §22 的 UX-1 要求打通「研究首页 → 选择标的 → 选择策略 → 回测 → 结论 → 下一步」这条主流程。项目里已经有 `api.validateDsl()` 与不可变的策略版本（ADR-113），所以缺的不是能力，而是入口。
+
+- 决策：
+  1. **表单只填不判断**（`frontend/src/views/StrategiesView.vue`）：新增 `formName`/`formFast`/`formSlow`/`formTrendFilter`/`formExitOnFastCross`/`formStopAtr`/`formTakeProfitR` 七个状态，`formDsl()` 把它们写成一份完整 DSL（`schema_version: '1.0'`、`indicators` 两条 EMA、`features: ['atr14']`、entry/exit 的 `crosses_above`/`gt`/`crosses_below`/`lt`、`risk` 的 `stop_loss_atr_multiple` 与 `take_profit_r_multiple`、`execution` 明确写 `fill_model: 'next_bar_open'`/`fee_bps: 10`/`slippage_bps: 5`/`initial_capital: 10000`）。`formSentence` 同时把同一份内容说成人话（「当 20 日均线上穿 50 日均线时买入…」），`formError` 只拦「空名字 / 周期不是正数 / 快线周期 ≥ 慢线周期」这三类一眼错。
+  2. **能否创建由校验器决定**：`createFromForm()` 的顺序是 `applyForm()` → `validate()` → 只有 `validation.is_valid` 才 `createStrategy()`。表单与 JSON 编辑器**共用同一个 `dslText` 草稿**（`watch([...七个 form ref], applyForm)` 单向写入），所以「校验通过」这句话永远是对屏幕上那一份文本说的；已有的 `watch(dslText, …)`（置空 `validation`、把导入向导退回第 5 步）继续生效，两条路走同一道门。
+  3. **JSON 编辑器进高级模式**：`<h3>策略 DSL（声明式，JSON 形式）</h3>` 整卡包进 `<template v-if="isAdvanced">`，卡内说明它和表单是同一份草稿。DSL 能力、校验规则、导入向导一行未删。
+  4. **研究流程靠 query 交接**（新建 `frontend/src/views/ResearchView.vue`）：四步＝① 选择标的（只列已经同步到本地的系列，附覆盖范围与 `quality_status` 警告）② 选择策略与版本 ③ 时间段与仓位（`strategy`/`fixed_fraction`/`risk_per_trade`/`atr_risk`）④ 开始研究；点击后 `router.push({ path: '/backtest', query: { strategy_version_id, symbol, timeframe, run: '1', start?, end?, size_mode?, size_fraction?, size_risk_pct? } })`。
+  5. **回测页把 query 当输入而不是命令**（`frontend/src/views/BacktestView.vue`）：新增 `applyResearchQuery()`，每个值先过白名单（版本号必须是正整数且能在 `api.allStrategyVersions()` 里找到、日期必须匹配 `^\d{4}-\d{2}-\d{2}$`、仓位模式必须是三个已知值之一、比例必须在 (0, 1] 内），任何一个不认识就当没给；参数写进表单后 `router.replace({ path: '/backtest' })` 摘掉 query（刷新不会重复跑），最后才在 `run === '1'` 时调一次 `runNew()`——跑的是同一个函数、同一套校验，没有第二条执行路径。
+
+- 理由：评审 §8 要的是「JSON 不是主入口」，不是「没有 JSON」；把同一份草稿同时暴露成表单与人话句子，普通用户看到的是「我说了什么」，高级用户看到的永远是同一份文本，因此不存在两套真相。query 交接则是把 UX-1 的主流程落成事实：用户在研究页做的选择必须能在回测页原样复现，而实现它只需要把一个可读的地址交给下一页——比在前端塞一个跨页 store 便宜，也让「我这次跑的是什么」留在地址栏里可以复述。所有白名单校验都写在前端，是因为地址栏是用户可以改的；**没有任何一个 query 值能绕过 `runNew()` 自身的检查**。
+
+- 影响与兼容：只改前端（`StrategiesView.vue`、`BacktestView.vue`、`ResearchView.vue`、`api.ts` 新增 `seriesDetail`、`style.css` 新增 `.nav-group`）。**没有**改后端、没有改 DSL schema、没有改校验器、没有改回测引擎或 `result_hash`；表单生成的 DSL 走的就是原有的 `POST /strategies` + `POST /strategies/{id}/versions`，跑的是同一个 `POST /backtests`。默认值（`formFast = 20`、`formSlow = 50`、止损 2×ATR、止盈 2R）是界面的初值，不是对任何标的的建议；页面文案里写明手续费/滑点/成交模型，因为这些假设会出现在回测结果里。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_strategy_library_creates_from_plain_words` 断言七个表单状态、`formDsl(`、`formSentence`、`createFromForm` 里 `validate()` 先于 `createStrategy()`、DSL 卡在 `<template v-if="isAdvanced">` 之后出现，且 StrategiesView 仍然调用 `api.validateDsl(`（导入向导的门禁）；`::test_the_research_page_walks_four_steps_and_hands_off_to_the_backtest` 断言 `ResearchView.vue` 存在、四步标题、`router.push` 的九个 query 键与 `run: '1'`；`::test_the_backtest_page_accepts_a_handoff` 断言 `useRoute`/`useRouter`、`applyResearchQuery`、白名单常量、`router.replace`、`api.allStrategyVersions(`。
+
+## ADR-133：评审 §19 的「高级工具」不开新页面，只做导航分组
+
+- 背景：评审 §19 建议导航里出现「高级工具」，把 OOS、Walk-Forward、Monte Carlo、参数敏感性收在一处。项目已有 ADR-113 的判据：导航条目必须对应一个真的页面，而不是「点了以后跳去别处」。
+
+- 决策：**不新建 `/advanced` 页**。这些专业分析本来就都在 `/backtest` 的高级模式里（`<template v-if="isAdvanced">` 那一段，见 ADR-128），所以导航里只在高级模式下加一行 `class="nav-group"` 的分组标题「高级」，把它下面的 `/resources`（系统资源）归成一类；`/settings`（系统管理）仍然两种模式都看得见，因为「使用模式」开关本身就在那个页面上，把入口藏起来会让普通用户无法切回高级模式。普通模式看不到分组标题与「系统资源」这一条。这个偏差在 `docs/13_UI_UX.md` §1 里写明理由，并在本节记为与评审建议的唯一有意偏离。
+
+- 理由：一个只负责把用户送去 `/backtest` 的页面，会让人以为那里有第五个地方可以看结果；而实际上专业分析的输入是「某一次回测」，没有回测就没有可分析的对象。把它们留在产生它们的那一页，符合 ADR-113，也符合评审 §10 的分层原则（三级指标属于「高级分析」，本来就长在回测结果下面）。
+
+- 影响与兼容：只影响导航文案与一条 `.nav-group` 样式；没有新增路由、没有新增页面、没有改动任何专业分析的端点或结果。评审 §19 的其余条目（研究首页 / 我的策略 / 回测 / 模拟验证 / 信号 / 数据 / 系统管理）全部按原建议实现。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_navigation_splits_research_from_the_strategy_library` 断言「高级」分组标题与「系统资源」写在 `<template v-if="isAdvanced">` 里、`/settings` 在它之外；文档偏差说明由 `docs/13_UI_UX.md` §1 的正文承担（`test_the_navigation_tree_is_the_shipped_navigation` 只比对 `label + path` 行，分组标题绝不能出现在那个文本块里）。
+

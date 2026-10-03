@@ -276,7 +276,7 @@ const nextStep = computed(() => {
   return {
     text: '先到「我的策略」创建或导入一个策略',
     reason: '',
-    to: '/market',
+    to: '/strategies',
     linkText: '去「我的策略」',
   }
 })

@@ -6,29 +6,33 @@
 - `状态：部分实现（缺少 <清单>）` —— 已经做到的部分照实写，缺的部分写在同一行里。
 - `状态：尚未实现（<计划或「未安排」>）` —— 只出现在本文件末尾的欠账一节，正文不再用将来时描述不存在的东西。
 
-守卫 `backend/tests/test_ui_promises.py` 把第 1 节的导航树与 `frontend/src/main.ts:17-23` 的路由、`frontend/src/App.vue:66-76` 的导航标签逐条对照，并核对每个 `已实现` 点名的文件存在 —— 所以这份文件不会再悄悄承诺一个不存在的页面（ADR-107）。
+守卫 `backend/tests/test_ui_promises.py` 把第 1 节的导航树与 `frontend/src/main.ts:19-27` 的路由、`frontend/src/App.vue:66-79` 的导航标签逐条对照，并核对每个 `已实现` 点名的文件存在 —— 所以这份文件不会再悄悄承诺一个不存在的页面（ADR-107）。
 
 ## 1. Navigation
 
 状态：已实现（frontend/src/App.vue, frontend/src/main.ts）
 
-左栏导航与路由一一对应，共 7 条：
+左栏导航与路由一一对应，共 9 条：
 
 ```text
 研究首页          /
-我的策略          /market
-信号              /signals
+研究策略          /research
+我的策略          /strategies
 回测              /backtest
 模拟验证          /paper
+信号              /signals
+数据              /data
 系统资源          /resources
 系统管理          /settings
 ```
 
-导航按**用户要做的事**命名，不按模块命名：`/` 是每天打开的地方，`/market` 是策略库（创建、选择、版本），`/backtest` 是研究的主工具，`/paper` 是验证，`/signals` 是研究信号，`/resources` 与 `/settings` 是运维读数。第 6 条「系统资源」只在高级模式出现，但它是导航树的第 6 条 —— 隐藏一条导航项会改变界面上能点到的东西，用 `v-if` 包起来的 `<RouterLink>` 仍然算在那七条里，因为路由与文档都没变（ADR-126）。
+导航按**用户要做的事**命名，不按模块命名：`/` 是每天打开的地方，`/research` 是从「我想研究 SPY」走到一次回测的四步入口，`/strategies` 是策略库（创建、选择、版本、导入），`/backtest` 是研究的主工具，`/paper` 是验证，`/signals` 是研究信号，`/data` 只管行情数据与数据质量，`/resources` 与 `/settings` 是运维读数。第 8 条「系统资源」只在高级模式出现，它的前面有一条只属于高级模式的「高级」分组标题；用 `v-if` 包起来的 `<RouterLink>` 仍然算在那九条里，因为路由与文档都没变（ADR-126、ADR-131）。
 
-早期版本在这一节画过一棵更长的树：Strategies 下挂 Strategy Library、GitHub Sources、Experimental、Strategy Detail，另有两个顶级项 Portfolio Context 与 Data Health。这些**都不是独立页面**：策略库、GitHub 导入、策略血统与版本、组合概览（Ghostfolio 上下文）、数据健康分别作为 `/market` 与 `/` 的区块存在。本文件按现状记录，不再列不存在的页面。
+v1.9.3 把原来那一页「行情与策略」按评审 §7 拆成三页：`/research`（选标的、选策略、设少量参数、开始研究）、`/strategies`（策略库：我的策略、版本、创建与 GitHub 导入）、`/data`（同步行情、数据质量、删除与归档）。`/market` 保留为重定向到 `/strategies`：它是这套界面前一版唯一的名字，直接 404 会让旧书签与旧文档一起断掉，而重定向没有自己的导航条目，所以它不是第十行（ADR-131）。评审 §19 另外建议一条「高级工具」导航项，这一版**没有**为它新开页面：它点名的东西（样本外分割、滚动 Walk-Forward、参数敏感性、Monte Carlo、策略集成）都已经在 `/backtest` 的高级模式里，一条只负责把用户再送回回测页的导航条目正是「假装成页面的导航条目」（ADR-113），所以导航里只留一个「高级」分组标题，指向真正的高级读数 `/resources`（ADR-133）。
 
-唯一的例外是第 3 节的策略详情页：它有自己的一条路由 `/strategy/:strategyId`（`frontend/src/main.ts:26`），但**不占导航**——它从 `/market` 策略库每一行的「详情」进入，所以上面的七条仍然是七条。守卫把带参数的路由与导航路由分开核对：详情路由不得改变导航树的行数，但必须在本文件里被点名（ADR-114）。
+早期版本在这一节画过一棵更长的树：Strategies 下挂 Strategy Library、GitHub Sources、Experimental、Strategy Detail，另有两个顶级项 Portfolio Context 与 Data Health。这些**都不是独立页面**：策略库、GitHub 导入、策略血统与版本、组合概览（Ghostfolio 上下文）、数据健康分别作为 `/strategies` 与 `/` 的区块存在。本文件按现状记录，不再列不存在的页面。
+
+唯一的例外是第 3 节的策略详情页：它有自己的一条路由 `/strategy/:strategyId`（`frontend/src/main.ts:34`），但**不占导航**——它从 `/strategies` 策略库每一行的「详情」进入，所以上面的九条仍然是九条。守卫把带参数的路由与导航路由分开核对：详情路由不得改变导航树的行数，但必须在本文件里被点名（ADR-114）。
 
 ## 2. Dashboard
 
@@ -49,7 +53,7 @@
 
 状态：已实现（frontend/src/views/StrategyDetailView.vue, frontend/src/main.ts, frontend/src/views/StrategiesView.vue）
 
-`/strategy/:strategyId` 是独立页面，从 `/market` 策略库每一行的「详情」进入（`frontend/src/main.ts:26`），九段都在这一页上（ADR-114）：
+`/strategy/:strategyId` 是独立页面，从 `/strategies` 策略库每一行的「详情」进入（`frontend/src/main.ts:34`），九段都在这一页上（ADR-114）：
 
 1. 概览（Overview）：`GET /strategies/{id}` 的身份字段（ID、Slug、来源类型、状态与生命周期、版本数、创建时间），加上 `GET /lifecycle/strategies/{id}` 的当前阶段、证据支持的下一步、被挡原因、退步标记与逐门通过情况；没有证据支持任何下一步时就写没有，而不是替它建议一个。
 2. 血统（Provenance）：来源类型/地址/许可/作者，以及每个版本的提交、来源地址、提示词版本与不可变哈希。没记下的写「未记录」，不猜。
@@ -116,7 +120,7 @@ AI 区块叫「AI 汇总（只解释已有数字，不重新计算）」，固�
 
 状态：已实现（frontend/src/views/StrategiesView.vue, frontend/src/api.ts）
 
-`/market` 的「从 GitHub 导入（只读分析，不执行仓库代码）」区块是一份七步向导，步骤名与顺序固定：Repository → Analysis → Detected Strategies → Warnings → DSL Preview → Validation → Import（`const WIZARD_STEPS`）。每一步由它自己的证据解锁，而不是由一个按钮解锁（ADR-113）：
+`/strategies` 的「从 GitHub 导入（只读分析，不执行仓库代码）」区块是一份七步向导，步骤名与顺序固定：Repository → Analysis → Detected Strategies → Warnings → DSL Preview → Validation → Import（`const WIZARD_STEPS`）。每一步由它自己的证据解锁，而不是由一个按钮解锁（ADR-113）：
 
 1. **Repository**：仓库地址、分支/tag、最多读取文件数与最长等待秒数、可选 token；地址为空时分析按钮是灰的。
 2. **Analysis**：候选/读取/解析/登记的文件数、coverage 结论、解析失败与被跳过的文件明细。这一步只报告事实，判断对错留给用户。
@@ -144,7 +148,32 @@ AI 区块叫「AI 汇总（只解释已有数字，不重新计算）」，固�
 
 模式是**界面层的开关，不是权限**：它不隐藏任何 API，也不改变任何认证；`/settings` 仍然只有现有认证能进。写在用户可见文案里的原始读数（哈希、枚举、ID）走 `<span v-if="isAdvanced">` 或整卡 `v-if`，不是从数据里删掉。
 
-## 11. 欠账（尚未实现的承诺，按本文件顺序）
+## 11. 研究策略（从想法到一次回测）
+
+状态：已实现（frontend/src/views/ResearchView.vue, frontend/src/views/BacktestView.vue, frontend/src/api.ts）
+
+`/research` 是评审 §4 那条主流程的入口，固定四步，一步一屏：
+
+1. **① 选择标的** —— 只列出真的已经同步下来的系列（`GET /market-data/series`），每条写 `代码 · 周期`；选中后立刻显示这份数据的覆盖范围（`series_start` → `series_end`）、`quality_status` 与 `bar_count`（`GET /market-data/series/{id}`）。质量是 `invalid` / `partial` / `unknown` 时在同一张卡里给出警告，说清结论因此受什么限制；什么都没有时给一个通往 `/data` 的链接，而不是一个空下拉框。
+2. **② 选择策略** —— `GET /strategies` 与 `GET /strategies/{id}/versions` 两个下拉框；版本行写「版本 · 校验状态 · 是否当前」。库里记录的校验状态不是 `valid` 时给出警告。没有策略时链到 `/strategies`。
+3. **③ 设置少量参数** —— 只有两件事：研究哪一段时间（两个日期，留空＝全部已同步数据）与每次用多少钱（沿用策略里的仓位设置 / 固定比例 / 按每笔风险）。其余假设（成交模型、手续费、滑点、初始资金）不在这里改，回测页把它们原样列出来。日期顺序反了或比例越界时按钮不可用并写明原因。
+4. **④ 开始研究** —— 先给一句人话说明接下来会发生什么（`将用「X」的版本 v，在 SYMBOL 的日线上跑一次历史回测，区间 …`），再跳转到 `/backtest?strategy_version_id=…&symbol=…&timeframe=…&run=1[&start=&end=&size_mode=&size_fraction=&size_risk_pct=]`。
+
+回测页读这组 query：选中版本、标的、周期与仓位，填好日期后立刻跑一次，所以「开始研究」到「历史回测结论」之间不需要用户再点一次运行（ADR-132）。**这一页不产生任何量化事实**：覆盖范围、K 线根数、质量、版本与校验状态都是后端已经存下来的读数，回测仍然由引擎在回测页算。普通模式不显示系列 ID、来源与内容哈希，高级模式才出现（ADR-126、ADR-131）。
+
+## 12. 数据
+
+状态：已实现（frontend/src/views/DataView.vue, frontend/src/api.ts）
+
+`/data` 只做数据这一件事，三张卡：
+
+1. **同步行情** —— 输入代码（如 `AAPL`、`QQQ`、`BTC-USD`）选时间跨度后调 `POST /market-data/sync`，成功时报告新增 K 线根数与系列号，并把「已有 K 线、同步无新增」当成正常结果写出来，而不是报错。表格列出代码、周期、数据范围、质量、最后同步时间；高级模式再加系列 ID、来源与数据集版本三列。
+2. **质量那一列是什么意思** —— 只有四种取值，逐条写出人话（与 `backend/app/data/market_data_repo.py` 的 `assess_bars_quality` 同一套判据）：`valid` 每一根 K 线的开高低收都是正数、相邻两根之间没有超过 5 天的空洞；`partial` 数据本身没问题但中间有超过 5 天的空洞；`invalid` 出现非正数或缺失的开高低收，或最高价低于最低价；`unknown` 还没有 K 线。同一张卡写明质量只描述数据、不描述策略，缺口会限制结论成立的范围。
+3. **删除会发生什么** —— 已经被回测引用过的数据不会被真正删除，后端把它改成归档（`is_archived`，ADR-081），因为回测结果的可复现性依赖这份数据；勾上「显示已归档」仍然看得到，可以「恢复」。没有任何回测引用的数据才会真正删除，删除前再确认一次。
+
+高级模式另有「原始读数」按钮（`GET /market-data/series/{id}`）：K 线根数、内容哈希、复权、时区、来源与数据集版本 —— 直接来自后端字段，这一页不重新计算它们。
+
+## 13. 欠账（尚未实现的承诺，按本文件顺序）
 
 （无）
 

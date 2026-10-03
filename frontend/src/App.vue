@@ -65,11 +65,14 @@ onMounted(async () => {
 
       <nav class="nav">
         <RouterLink to="/">研究首页</RouterLink>
-        <RouterLink to="/market">我的策略</RouterLink>
-        <RouterLink to="/signals">信号</RouterLink>
+        <RouterLink to="/research">研究策略</RouterLink>
+        <RouterLink to="/strategies">我的策略</RouterLink>
         <RouterLink to="/backtest">回测</RouterLink>
         <RouterLink to="/paper">模拟验证</RouterLink>
+        <RouterLink to="/signals">信号</RouterLink>
+        <RouterLink to="/data">数据</RouterLink>
         <template v-if="isAdvanced">
+          <div class="nav-group">高级</div>
           <RouterLink to="/resources">系统资源</RouterLink>
         </template>
         <RouterLink to="/settings">系统管理</RouterLink>

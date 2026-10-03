@@ -2,7 +2,6 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import {
   api,
-  type Asset,
   type GithubAnalysis,
   type GithubSnapshot,
   type GithubVersionPlan,
@@ -12,6 +11,7 @@ import {
   type StrategyValidation,
 } from '@/api'
 import { formatDateTime, formatNumber } from '@/format'
+import { isAdvanced } from '@/mode'
 // 阶段名称只有一处定义：普通模式和高阶视图必须用同一句话（ADR-127）。
 import { stageLabel } from '@/wording'
 
@@ -44,18 +44,10 @@ function sourceStatusTone(status: string | null | undefined): string {
 const lifecycles = ref<StrategyLifecycle[]>([])
 const applyingLifecycle = ref<number | null>(null)
 
-const assets = ref<Asset[]>([])
 const strategies = ref<Strategy[]>([])
-const symbol = ref('DEMO-AAPL')
-const series = ref<Array<Record<string, unknown>>>([])
 const signals = ref<SignalIntent[]>([])
 const error = ref('')
 const info = ref('')
-const syncing = ref(false)
-const lookbackDays = ref(400)
-// Archived series are hidden by default: they are kept because backtests still
-// point at them (ADR-081), not because they are still in use.
-const showArchived = ref(false)
 
 const SAMPLE_DSL = {
   schema_version: '1.0',
@@ -93,27 +85,14 @@ const validation = ref<StrategyValidation | null>(null)
 async function load() {
   error.value = ''
   try {
-    const [a, s, sr, lc] = await Promise.all([
-      api.assets(),
-      api.strategies(),
-      api.series(showArchived.value),
-      api.lifecycles(),
-    ])
-    assets.value = a
+    const [s, lc] = await Promise.all([api.strategies(), api.lifecycles()])
     strategies.value = s
-    series.value = sr
     lifecycles.value = lc
     await loadGhSources()
   } catch (e) {
     error.value = (e as Error).message
   }
 }
-
-// Archived rows only exist in the response when they are asked for, so the toggle
-// is a re-fetch rather than a client-side filter.
-watch(showArchived, () => {
-  void load()
-})
 
 function evidenceSummary(row: StrategyLifecycle): string {
   const e = row.evidence
@@ -139,11 +118,6 @@ async function applyLifecycle(row: StrategyLifecycle, target: string | null) {
   } finally {
     applyingLifecycle.value = null
   }
-}
-
-function assetSymbol(assetId: number): string {
-  const found = assets.value.find((a) => a.id === assetId)
-  return found?.symbol ?? `#${assetId}`
 }
 
 const deletingStrategy = ref<number | null>(null)
@@ -227,55 +201,6 @@ async function deleteStrategy(id: number, name: string) {
   }
 }
 
-async function deleteSeries(id: number, symbol: string) {
-  const ok = window.confirm(
-    `确定删除 ${symbol} 的行情数据？没有回测引用时数据会被真正删除且不可恢复；被回测引用时会改为归档（数据保留、可从「显示已归档」恢复）。`,
-  )
-  if (!ok) return
-  error.value = ''
-  info.value = ''
-  try {
-    const result = await api.deleteSeries(id)
-    info.value = result.archived
-      ? `ℹ ${result.message}`
-      : `已删除 ${result.symbol} 的行情数据（系列 #${id}）`
-    await load()
-  } catch (e) {
-    error.value = (e as Error).message
-  }
-}
-
-async function restoreSeries(id: number) {
-  error.value = ''
-  info.value = ''
-  try {
-    await api.restoreSeries(id)
-    info.value = `已恢复系列 #${id} 的行情数据`
-    await load()
-  } catch (e) {
-    error.value = (e as Error).message
-  }
-}
-
-async function syncData() {
-  syncing.value = true
-  error.value = ''
-  info.value = ''
-  try {
-    const result = await api.syncMarketData(symbol.value.trim(), '1d', lookbackDays.value) as Record<string, any>
-    if (result.inserted > 0) {
-      info.value = `✅ 同步完成：${symbol.value} 新增 ${result.inserted} 根 K 线（系列 #${result.series_id}，其中 ${result.closed_bars_in_fetch} 根已收盘）。现在可以去「回测」用它跑回测了。`
-    } else {
-      info.value = `ℹ ${symbol.value} 数据已是最新（${result.message ?? '无新增'}）。可以到「回测」用它跑回测。`
-    }
-    await load()
-  } catch (e) {
-    error.value = (e as Error).message
-  } finally {
-    syncing.value = false
-  }
-}
-
 async function validate() {
   error.value = ''
   try {
@@ -297,6 +222,124 @@ async function createStrategy() {
   } catch (e) {
     error.value = (e as Error).message
   }
+}
+
+// A 普通用户 creates a strategy by answering a few questions, not by writing JSON
+// (评审 §8, ADR-132). The form builds the same DSL document the advanced editor
+// shows, and writes it into the *same* draft (`dslText`), so there is exactly one
+// draft on this page: whoever edits the JSON later is editing what the form made —
+// not a second copy that can drift. The numbers the form does not ask about
+// (fee/slippage/fill model/initial capital) are printed next to it rather than
+// hidden, and they are the values the engine will read.
+const formName = ref('均线交叉策略')
+const formFast = ref(20)
+const formSlow = ref(50)
+const formTrendFilter = ref(true)
+const formExitOnFastCross = ref(true)
+const formStopAtr = ref(2)
+const formTakeProfitR = ref(2)
+const EMA_FAST_ID = 'fast'
+const EMA_SLOW_ID = 'slow'
+
+/** The DSL the form describes. Same shape as SAMPLE_DSL above. */
+function formDsl(): Record<string, unknown> {
+  const exitAny: Array<Record<string, unknown>> = []
+  if (formExitOnFastCross.value) {
+    exitAny.push({ op: 'crosses_below', left: EMA_FAST_ID, right: EMA_SLOW_ID })
+  }
+  if (!exitAny.length) {
+    exitAny.push({ op: 'lt', left: 'close', right: EMA_FAST_ID })
+  }
+  const entryAll: Array<Record<string, unknown>> = [
+    { op: 'crosses_above', left: EMA_FAST_ID, right: EMA_SLOW_ID },
+  ]
+  if (formTrendFilter.value) {
+    entryAll.push({ op: 'gt', left: 'close', right: EMA_FAST_ID })
+  }
+  return {
+    schema_version: '1.0',
+    strategy: {
+      id: `ema-cross-${formFast.value}-${formSlow.value}`,
+      name: formName.value,
+      version: '1.0.0',
+    },
+    market: { asset_classes: ['stock', 'crypto'], timeframes: ['1d'] },
+    indicators: [
+      { id: EMA_FAST_ID, type: 'EMA', period: formFast.value, input: 'close' },
+      { id: EMA_SLOW_ID, type: 'EMA', period: formSlow.value, input: 'close' },
+    ],
+    features: ['atr14'],
+    entry: { long: { all: entryAll } },
+    exit: { long: { any: exitAny } },
+    risk: {
+      stop_loss_atr_multiple: formStopAtr.value,
+      take_profit_r_multiple: formTakeProfitR.value,
+    },
+    execution: {
+      fill_model: 'next_bar_open',
+      fee_bps: 10,
+      slippage_bps: 5,
+      initial_capital: 10000,
+    },
+  }
+}
+
+/** The rule in words, so the reader can check the JSON against a sentence. */
+const formSentence = computed(
+  () =>
+    `当 ${formFast.value} 日均线${formTrendFilter.value ? '上穿' : '高于'} ` +
+    `${formSlow.value} 日均线${formTrendFilter.value ? `，并且收盘价在 ${formFast.value} 日均线上方时买入` : '时买入'}；` +
+    (formExitOnFastCross.value
+      ? `${formFast.value} 日均线跌破 ${formSlow.value} 日均线时卖出。`
+      : `收盘价跌破 ${formFast.value} 日均线时卖出。`) +
+    `止损用 ${formStopAtr.value} 倍 ATR，止盈 ${formTakeProfitR.value} 倍风险。`,
+)
+
+const formError = computed(() => {
+  if (!formName.value.trim()) return '策略名不能为空。'
+  if (!(formFast.value > 0) || !(formSlow.value > 0)) return '均线周期必须是正整数。'
+  if (formFast.value >= formSlow.value) return '快线周期需要小于慢线周期，否则没有交叉。'
+  return ''
+})
+
+/** Writes the form's document into the one draft, which also withdraws a stale verdict. */
+function applyForm() {
+  if (formError.value) return
+  dslText.value = JSON.stringify(formDsl(), null, 2)
+  strategyName.value = formName.value.trim()
+}
+
+async function validateForm() {
+  applyForm()
+  if (formError.value) {
+    error.value = formError.value
+    return
+  }
+  await validate()
+}
+
+// The form and the JSON editor describe one document, so the draft follows the form
+// as it changes — and a passing validation made about earlier numbers is dropped by
+// the `watch(dslText, …)` below, exactly as it is for a hand edit (ADR-113).
+watch(
+  [formName, formFast, formSlow, formTrendFilter, formExitOnFastCross, formStopAtr, formTakeProfitR],
+  applyForm,
+)
+
+/** Create from the form: the validator still decides, not the button (ADR-113). */
+async function createFromForm() {
+  applyForm()
+  if (formError.value) {
+    error.value = formError.value
+    return
+  }
+  await validate()
+  if (!validation.value?.is_valid) {
+    info.value = ''
+    error.value = error.value || '校验没有通过，先按上面的问题改一改。'
+    return
+  }
+  await createStrategy()
 }
 
 const ghSources = ref<Array<Record<string, any>>>([])
@@ -723,7 +766,8 @@ onMounted(load)
   <div>
     <h1 class="page-title">我的策略</h1>
     <p class="page-sub">
-      这是你的策略库：同步标准化 OHLCV、创建与导入策略、管理策略版本。版本一旦创建即不可修改。
+      这是你的策略库：用一句人话创建策略、管理版本、从 GitHub 导入策略。版本一旦创建即不可修改。
+      行情数据现在在「数据」页；从想法到回测的四步在「研究策略」页（评审 §7、§8；ADR-131、ADR-132）。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -731,70 +775,59 @@ onMounted(load)
 
     <div class="grid cols-2">
       <div class="card">
-        <h3>行情同步</h3>
+        <h3>用一句人话创建策略</h3>
         <p class="muted" style="margin-bottom: 8px">
-          输入 Yahoo Finance 代码（美股如 AAPL、MSFT，ETF 如 SPY、QQQ，加密货币如 BTC-USD），
-          点击同步获取真实日线。
+          回答几个问题就能建一个策略：系统把你的回答写成规则，规则就是这份策略的版本内容。
+          想直接写 JSON 的话，高级模式下有「策略 DSL」编辑器（评审 §8；ADR-132）。
         </p>
-        <div class="row" style="margin-bottom: 10px">
-          <input
-            v-model="symbol"
-            list="symbol-suggestions"
-            style="max-width: 220px"
-            placeholder="输入代码，如 AAPL、QQQ、BTC-USD"
-            @keyup.enter="syncData"
-          />
-          <datalist id="symbol-suggestions">
-            <option v-for="a in assets" :key="a.id" :value="a.symbol" />
-            <option value="SPY" />
-            <option value="QQQ" />
-            <option value="MSFT" />
-            <option value="BTC-USD" />
-          </datalist>
-          <select v-model.number="lookbackDays" style="max-width: 140px">
-            <option :value="90">近 3 个月</option>
-            <option :value="180">近 6 个月</option>
-            <option :value="365">近 1 年</option>
-            <option :value="730">近 2 年</option>
-            <option :value="1825">近 5 年</option>
-            <option :value="3650">近 10 年</option>
-          </select>
-          <button :disabled="syncing || !symbol.trim()" @click="syncData">
-            {{ syncing ? '同步中…（可能需要几秒）' : '同步日线数据' }}
-          </button>
+        <div class="row" style="margin-bottom: 8px">
+          <input v-model="formName" style="max-width: 190px" placeholder="策略名" />
+          <label class="muted">
+            快线
+            <input v-model.number="formFast" type="number" min="2" max="200" style="max-width: 80px" />
+          </label>
+          <label class="muted">
+            慢线
+            <input v-model.number="formSlow" type="number" min="3" max="400" style="max-width: 80px" />
+          </label>
         </div>
-        <label class="muted">
-          <input v-model="showArchived" type="checkbox" /> 显示已归档（有回测使用，数据为可复现而保留）
-        </label>
-        <table v-if="series.length">
-          <thead>
-            <tr>
-              <th>代码</th>
-              <th>周期</th>
-              <th>数据范围</th>
-              <th>质量</th>
-              <th>最后同步</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="s in series" :key="String(s.id)">
-              <td>
-                {{ assetSymbol(Number(s.asset_id)) }}
-                <span v-if="s.is_archived" class="badge WAIT">已归档</span>
-              </td>
-              <td>{{ s.timeframe }}</td>
-              <td class="muted">{{ String(s.series_start ?? '').slice(0, 10) }} → {{ String(s.series_end ?? '').slice(0, 10) }}</td>
-              <td>{{ s.quality_status }}</td>
-              <td>{{ formatDateTime(String(s.last_sync_at ?? '')) }}</td>
-              <td>
-                <button v-if="s.is_archived" class="ghost" @click="restoreSeries(Number(s.id))">恢复</button>
-                <button v-else class="ghost" @click="deleteSeries(Number(s.id), assetSymbol(Number(s.asset_id)))">删除</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-else class="muted">还没有数据，在上面输入代码点同步。</p>
+        <div class="row" style="margin-bottom: 8px">
+          <label class="muted">
+            <input v-model="formTrendFilter" type="checkbox" /> 要求收盘价在快线上方
+          </label>
+          <label class="muted">
+            <input v-model="formExitOnFastCross" type="checkbox" /> 快线跌破慢线时卖出
+          </label>
+        </div>
+        <div class="row" style="margin-bottom: 8px">
+          <label class="muted">
+            止损（ATR 倍数）
+            <input v-model.number="formStopAtr" type="number" min="0.5" max="10" step="0.5" style="max-width: 90px" />
+          </label>
+          <label class="muted">
+            止盈（风险倍数）
+            <input v-model.number="formTakeProfitR" type="number" min="0.5" max="10" step="0.5" style="max-width: 90px" />
+          </label>
+        </div>
+        <p class="conclusion-sentence">{{ formSentence }}</p>
+        <p v-if="formError" class="error">{{ formError }}</p>
+        <div class="row" style="margin: 8px 0">
+          <button class="ghost" :disabled="validating || !!formError" @click="validateForm">
+            {{ validating ? '校验中…' : '校验这套规则' }}
+          </button>
+          <button :disabled="!!formError" @click="createFromForm">创建策略与版本</button>
+        </div>
+        <p v-if="validation" class="notice" :class="{ warn: !validation.is_valid }">
+          {{
+            validation.is_valid
+              ? '校验通过：这套规则可以用。'
+              : '校验没有通过，具体问题列在下面「策略 DSL」编辑器里。'
+          }}
+        </p>
+        <p class="muted">
+          这里的文本与高级模式下的「策略 DSL」是同一份草稿：表单生成它、编辑器改它，两者不会各存一份。
+          表单不问、但引擎真正会用的假设是：手续费 10bp、滑点 5bp、次日开盘成交、初始资金 10000。
+        </p>
       </div>
 
       <div class="card">
@@ -971,23 +1004,29 @@ onMounted(load)
       <p v-else class="muted">还没有策略。</p>
     </div>
 
-    <div class="card" style="margin-top: 14px">
-      <h3>策略 DSL（声明式，JSON 形式）</h3>
-      <div class="row" style="margin-bottom: 10px">
-        <input v-model="strategyName" style="max-width: 260px" />
-        <button class="ghost" @click="validate">校验 DSL</button>
-        <button @click="createStrategy">创建策略与版本</button>
+    <!-- 评审 §8：普通用户看上面的表单，JSON 编辑器属于高级层（ADR-132）。 -->
+    <template v-if="isAdvanced">
+      <div class="card" style="margin-top: 14px">
+        <h3>策略 DSL（声明式，JSON 形式）</h3>
+        <p class="muted">
+          这里和上面的表单共用同一份草稿：表单会把它写进这个文本框，你在这里改完，回到表单也会跟着变。
+        </p>
+        <div class="row" style="margin-bottom: 10px">
+          <input v-model="strategyName" style="max-width: 260px" />
+          <button class="ghost" @click="validate">校验 DSL</button>
+          <button @click="createStrategy">创建策略与版本</button>
+        </div>
+        <textarea v-model="dslText" spellcheck="false" />
+        <div v-if="validation" style="margin-top: 10px">
+          <p v-if="validation.is_valid" class="notice">校验通过：规则列与数据来源均合法。</p>
+          <ul v-else class="error">
+            <li v-for="(i, idx) in validation.issues" :key="idx">
+              [{{ i.severity }}] {{ i.code }} — {{ i.message }}
+            </li>
+          </ul>
+        </div>
       </div>
-      <textarea v-model="dslText" spellcheck="false" />
-      <div v-if="validation" style="margin-top: 10px">
-        <p v-if="validation.is_valid" class="notice">校验通过：规则列与数据来源均合法。</p>
-        <ul v-else class="error">
-          <li v-for="(i, idx) in validation.issues" :key="idx">
-            [{{ i.severity }}] {{ i.code }} — {{ i.message }}
-          </li>
-        </ul>
-      </div>
-    </div>
+    </template>
 
     <div class="card" style="margin-top: 14px">
       <h3>从 GitHub 导入（只读分析，不执行仓库代码）</h3>

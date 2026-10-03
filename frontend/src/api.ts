@@ -723,6 +723,10 @@ export const api = {
     request<Array<Record<string, unknown>>>(
       `/market-data/series${includeArchived ? '?include_archived=true' : ''}`,
     ),
+  // One series with its raw readings (bar count, content hash, source): the data
+  // page shows these in advanced mode only (评审 §7、§19；ADR-131).
+  seriesDetail: (seriesId: number) =>
+    request<Record<string, any>>(`/market-data/series/${seriesId}`),
   latestBars: (symbol: string, timeframe = '1d', limit = 120) =>
     request<{ bars: Array<{ timestamp: string; close: number; high: number; low: number; open: number }> }>(
       `/market-data/latest/${encodeURIComponent(symbol)}?timeframe=${timeframe}&limit=${limit}`,

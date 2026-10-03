@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   api,
   type Asset,
@@ -33,6 +34,8 @@ const onlyVersionFilter = ref(false)
 const detail = ref<BacktestDetail | null>(null)
 const error = ref('')
 const busy = ref(false)
+const route = useRoute()
+const router = useRouter()
 
 const strategies = ref<Strategy[]>([])
 const versions = ref<StrategyVersion[]>([])
@@ -1057,16 +1060,75 @@ const evidenceSentence = computed(() => {
   return `已经做完的是${doneText}；还没有做的是${missing.join('、')} —— 上面的结论只在做过的这几层里成立。`
 })
 
+/**
+ * 「研究策略」页把这一页填好并直接开跑（评审 §7、§19；ADR-132）。
+ * Query 是用户能改的输入，所以每个值先过一遍白名单：不认识就当没给，
+ * 页面仍然只是「默认状态」，不会因为一个手改的地址就出错。
+ */
+const RESEARCH_SIZE_MODES = ['fixed_fraction', 'risk_per_trade', 'atr_risk'] as const
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
+
+/** One query value as trimmed text; a repeated key yields '' (ambiguous → ignore). */
+function queryText(key: string): string {
+  const raw = route.query[key]
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+async function applyResearchQuery() {
+  const requestedVersion = Number(queryText('strategy_version_id'))
+  const requestedSymbol = queryText('symbol')
+  const requestedTimeframe = queryText('timeframe')
+  const requestedMode = queryText('size_mode')
+  const requestedFraction = Number(queryText('size_fraction'))
+  const requestedRisk = Number(queryText('size_risk_pct'))
+  const requestedStart = queryText('start')
+  const requestedEnd = queryText('end')
+  const shouldRun = queryText('run') === '1'
+
+  let handedOver = false
+  if (Number.isInteger(requestedVersion) && requestedVersion > 0) {
+    try {
+      const all = await api.allStrategyVersions()
+      const target = all.find((v) => v.id === requestedVersion)
+      if (target) {
+        strategyId.value = target.strategy_id
+        await loadVersions()
+        versionId.value = requestedVersion
+        handedOver = true
+      }
+    } catch (e) {
+      error.value = (e as Error).message
+    }
+  }
+  if (requestedSymbol) {
+    symbol.value = requestedSymbol
+    handedOver = true
+  }
+  if (requestedTimeframe) timeframe.value = requestedTimeframe
+  if (DATE_ONLY.test(requestedStart)) startDate.value = requestedStart
+  if (DATE_ONLY.test(requestedEnd)) endDate.value = requestedEnd
+  if ((RESEARCH_SIZE_MODES as readonly string[]).includes(requestedMode)) {
+    sizeMode.value = requestedMode as (typeof RESEARCH_SIZE_MODES)[number]
+    if (requestedFraction > 0 && requestedFraction <= 1) sizeFraction.value = requestedFraction
+    if (requestedRisk > 0 && requestedRisk <= 1) sizeRiskPct.value = requestedRisk
+  }
+  if (!handedOver) return
+  // 参数已经落到表单里，地址栏再留着它们只会让刷新重复跑一次。
+  await router.replace({ path: '/backtest' })
+  if (shouldRun) await runNew()
+}
+
 watch(strategyId, loadVersions)
 watch(evidenceStrategyId, loadLifecycle)
 onMounted(async () => {
-  await load()
-  await loadVersions()
-  await loadLifecycle()
-  // Ensemble candidates span every strategy, so they load independently of the
-  // single-strategy selection above.
-  await loadEnsCandidates()
-})
+    await load()
+    await loadVersions()
+    await loadLifecycle()
+    // Ensemble candidates span every strategy, so they load independently of the
+    // single-strategy selection above.
+    await loadEnsCandidates()
+    await applyResearchQuery()
+  })
 </script>
 
 <template>

@@ -47,6 +47,9 @@ METRICS = (SRC / "metrics.ts").read_text(encoding="utf-8")
 STAT_CARD = (COMPONENTS / "StatCard.vue").read_text(encoding="utf-8")
 METRIC_HINT = (COMPONENTS / "MetricHint.vue").read_text(encoding="utf-8")
 UI_SPEC = (REPO_ROOT / "docs" / "13_UI_UX.md").read_text(encoding="utf-8")
+MAIN_TS = (SRC / "main.ts").read_text(encoding="utf-8")
+RESEARCH = (VIEWS / "ResearchView.vue").read_text(encoding="utf-8")
+DATA = (VIEWS / "DataView.vue").read_text(encoding="utf-8")
 
 # Fields the outcome API sends as fractions. `_pct` in the name does not mean the
 # value was multiplied by 100 — that is the whole bug (ADR-087).
@@ -204,7 +207,9 @@ def test_every_destructive_button_asks_first() -> None:
 
     cases = (
         (STRATEGIES, "deleteStrategy"),
-        (STRATEGIES, "deleteSeries"),
+        # The series delete moved to the data page with the button it belongs to, so the
+        # guard moved with it — the behaviour is still one-click-plus-confirm (ADR-131).
+        (DATA, "deleteSeries"),
         (BACKTEST, "removeRun"),
         (SETTINGS, "remove"),
         (PAPER, "resetAccount"),
@@ -537,3 +542,211 @@ def test_the_paper_page_compares_itself_with_a_stored_backtest() -> None:
     assert "run.number_of_trades" in PAPER and "perf.closed_trades" in PAPER
 
     assert "回测 vs 模拟" in UI_SPEC
+
+
+def test_the_navigation_splits_research_from_the_strategy_library() -> None:
+    """One page called「行情与策略」became three entries with one job each (ADR-131).
+
+    The audit's section 7 finding was about *responsibility*, not about length: syncing
+    data, creating a strategy, versioning it and importing a repository were all on the
+    same screen. So the split is checked here as a move, not as an addition — the data
+    controls must exist on the data page and must be *gone* from the strategy page, or the
+    job was merely duplicated.
+    """
+
+    nav = re.findall(r'<RouterLink to="([^"]+)">([^<]+)</RouterLink>', APP)
+    assert [label for _, label in nav] == [
+        "研究首页",
+        "研究策略",
+        "我的策略",
+        "回测",
+        "模拟验证",
+        "信号",
+        "数据",
+        "系统资源",
+        "系统管理",
+    ]
+    assert [path for path, _ in nav] == [
+        "/",
+        "/research",
+        "/strategies",
+        "/backtest",
+        "/paper",
+        "/signals",
+        "/data",
+        "/resources",
+        "/settings",
+    ]
+
+    # The group heading and the engineering page are advanced-only; settings stays
+    # reachable in both modes because the mode switch itself lives there (ADR-133).
+    start = APP.index('<template v-if="isAdvanced">')
+    gated = APP[start : APP.index("</template>", start)]
+    assert '<div class="nav-group">高级</div>' in gated
+    assert 'to="/resources"' in gated
+    assert 'to="/settings"' not in gated
+
+    # The old address keeps working without becoming a tenth navigation row.
+    assert "{ path: '/market', redirect: '/strategies' }" in MAIN_TS
+    assert "{ path: '/research'" in MAIN_TS
+    assert "{ path: '/data'" in MAIN_TS
+    assert "{ path: '/strategy/:strategyId'" in MAIN_TS
+
+    # The move happened: data lives on the data page now.
+    for text in (
+        "同步行情",
+        "api.syncMarketData(",
+        "api.seriesDetail(",
+        "api.deleteSeries(",
+        "api.restoreSeries(",
+        "QUALITY_MEANING",
+        "quality_status",
+        "bar_count",
+        "显示已归档",
+    ):
+        assert text in DATA, text
+    for status in ("valid", "partial", "invalid", "unknown"):
+        assert f"status: '{status}'" in DATA, status
+    # Engineering readings stay in advanced mode on the new page too.
+    assert '<th v-if="isAdvanced">系列 ID</th>' in DATA
+    assert "isAdvanced && rawSeries" in DATA
+
+    for gone in ("syncData", "assetSymbol", "lookbackDays", "api.series("):
+        assert gone not in STRATEGIES, gone
+    # …and the strategy page still owns the library, its versions and the import wizard.
+    assert "api.strategies(" in STRATEGIES
+    assert "const WIZARD_STEPS = [" in STRATEGIES
+    assert '"/strategy/"' in STRATEGIES or "/strategy/" in STRATEGIES
+
+    assert "/research" in UI_SPEC and "/data" in UI_SPEC and "/market" in UI_SPEC
+
+
+def test_the_research_page_walks_four_steps_and_hands_off_to_the_backtest() -> None:
+    """「我想研究一个策略」is four questions, answered on one page (ADR-132).
+
+    The handoff is a query string rather than a shared front-end store: the address is
+    readable, it survives a refresh, and it lets the backtest page stay the only place
+    that can start a run.
+    """
+
+    for step in ("① 选择标的", "② 选择策略", "③ 设置少量参数", "④ 开始研究"):
+        assert f"<h3>{step}</h3>" in RESEARCH, step
+
+    assert "router.push(" in RESEARCH
+    for key in (
+        "strategy_version_id",
+        "symbol",
+        "timeframe",
+        "run: '1'",
+        "start",
+        "end",
+        "size_mode",
+        "size_fraction",
+        "size_risk_pct",
+    ):
+        assert key in RESEARCH, key
+
+    # Every value the handoff needs is already an existing endpoint.
+    for call in (
+        "api.assets(",
+        "api.series(",
+        "api.seriesDetail(",
+        "api.strategies(",
+        "api.strategyVersions(",
+    ):
+        assert call in RESEARCH, call
+
+    # Data problems are stated before the run, not discovered after it.
+    assert "quality_status" in RESEARCH
+    assert "planSentence" in RESEARCH
+    # Engineering readings (series id, source, hash) are advanced-only here as well.
+    assert 'v-if="isAdvanced' in RESEARCH
+
+    assert "研究策略" in UI_SPEC
+
+
+def test_the_strategy_library_creates_from_plain_words() -> None:
+    """A form writes the DSL, and the validator still decides (audit section 8, ADR-132).
+
+    The JSON editor is not deleted, it moves behind the mode switch. The load-bearing
+    detail is the order inside ``createFromForm``: the draft is regenerated from the form,
+    then validated, and only a passing validation may create a version — a button may not
+    skip the gate the import wizard has to respect.
+    """
+
+    for ref in (
+        "formName",
+        "formFast",
+        "formSlow",
+        "formTrendFilter",
+        "formExitOnFastCross",
+        "formStopAtr",
+        "formTakeProfitR",
+    ):
+        assert f"const {ref} = ref(" in STRATEGIES, ref
+
+    assert "function formDsl(" in STRATEGIES
+    assert "formSentence" in STRATEGIES
+    assert "formError" in STRATEGIES
+    # The form owns the same draft the JSON editor edits, in that direction only.
+    assert "watch(\n  [" in STRATEGIES
+    assert "applyForm," in STRATEGIES
+    assert "dslText.value =" in STRATEGIES
+
+    body = _function_body(STRATEGIES, "createFromForm")
+    assert body.index("await validate()") < body.index("await createStrategy()")
+    assert "formError.value" in body
+
+    # The form's own error check is about obvious mistakes only, never about rules.
+    assert "策略名不能为空。" in STRATEGIES
+    assert "快线周期需要小于慢线周期" in STRATEGIES
+    assert "均线周期必须是正整数。" in STRATEGIES
+
+    # The JSON editor survives, behind the advanced switch, and still validates.
+    assert "<h3>策略 DSL（声明式，JSON 形式）</h3>" in STRATEGIES
+    gated = STRATEGIES.index('<template v-if="isAdvanced">')
+    assert gated < STRATEGIES.index("<h3>策略 DSL（声明式，JSON 形式）</h3>")
+    assert "api.createStrategy(" in STRATEGIES
+    assert STRATEGIES.count("api.validateDsl(") >= 2
+
+    assert "人话" in UI_SPEC or "表单" in UI_SPEC
+
+
+def test_the_backtest_page_accepts_a_handoff_without_trusting_it() -> None:
+    """The backtest page may be told what to run, but the URL is user input (ADR-132).
+
+    A query string arrives from a link, so every value is whitelisted before it reaches a
+    form field, the query is cleared after it is applied (a refresh must not re-run a
+    backtest), and the run itself goes through ``runNew`` — the same function the button
+    calls, with the same validation.
+    """
+
+    assert "useRoute()" in BACKTEST and "useRouter()" in BACKTEST
+    assert "applyResearchQuery" in BACKTEST
+    assert "await applyResearchQuery()" in BACKTEST
+
+    # Whitelists, not blind assignment.
+    assert "RESEARCH_SIZE_MODES" in BACKTEST
+    assert "DATE_ONLY" in BACKTEST
+    assert "typeof raw === 'string'" in BACKTEST
+    assert "api.allStrategyVersions(" in BACKTEST
+
+    # Applied once, then removed from the address bar; the run is the page's own.
+    assert "await router.replace({ path: '/backtest' })" in BACKTEST
+    assert "if (shouldRun) await runNew()" in BACKTEST
+
+    body = _function_body(BACKTEST, "applyResearchQuery")
+    assert "router.replace" in body
+    assert "runNew" in body
+    for key in (
+        "strategy_version_id",
+        "symbol",
+        "timeframe",
+        "size_mode",
+        "size_fraction",
+        "size_risk_pct",
+        "start",
+        "end",
+        "run",
+    ):
+        assert key in body, key

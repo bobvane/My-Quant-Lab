@@ -427,7 +427,7 @@ def test_the_strategy_detail_page_shows_its_nine_sections() -> None:
     assert DETAIL.exists(), (
         "docs/13 §3 promises an independent strategy detail page and "
         "frontend/src/views/StrategyDetailView.vue does not exist: the nine parts stayed "
-        "spread over /market, /backtest, /paper and /signals (ADR-114)"
+        "spread over /strategies, /backtest, /paper and /signals (ADR-114)"
     )
     page = _text(DETAIL)
     for name in DETAIL_SECTIONS:

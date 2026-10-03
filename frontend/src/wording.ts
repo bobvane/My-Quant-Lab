@@ -61,8 +61,8 @@ export function nextStepText(stage: string | null | undefined): string {
 
 /** Where that next step is actually carried out, so the home page can link to it. */
 const STAGE_PAGES: Record<string, { to: string; label: string }> = {
-  imported: { to: '/market', label: '去「我的策略」' },
-  normalized: { to: '/market', label: '去「我的策略」' },
+  imported: { to: '/strategies', label: '去「我的策略」' },
+  normalized: { to: '/strategies', label: '去「我的策略」' },
   validated: { to: '/backtest', label: '去「回测」' },
   backtested: { to: '/backtest', label: '去「回测」' },
   oos_tested: { to: '/paper', label: '去「模拟验证」' },

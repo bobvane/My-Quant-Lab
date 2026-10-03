@@ -1839,3 +1839,33 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
   - `default-page`（web 只答 nginx 欢迎页）→ `api_ok=1 web_ok=0`；
   - `spa-fallback`（所有路径都回应用外壳，含缺失资源）→ `api_ok=1 web_ok=0`。
   - 同一替身上跑**旧的** API-Only 判据：三种模式全是 `healthy=1`，即旧代码在 web 一半坏掉时照样宣布 `SMOKE_TEST_OK`。
+- v1.5.14 把这段判定抽成唯一一份 `scripts/verify-stack.sh`：release 的 smoke 步骤改为调用它，nightly 也开始用同一份（见 ADR-076）。
+
+## ADR-076：夜间的镜像必须是一套能起来的、且证明过的镜像（`nightly.yml` 的镜像集合与验收）
+
+- 背景：`.github/workflows/nightly.yml` 每夜把 main 构建成两个镜像推到 GHCR —— `ghcr.io/<owner>/my-quant-lab-backend:nightly` 与 `-web:nightly`（`:34`、`:43`），推完即结束。四件事同时成立，而且每一件都能从别处证明：
+  - **集合不完整**：`release.yml` 发布**三个**镜像（`docker/Dockerfile.backend`、`docker/Dockerfile.proxy`、`docker/Dockerfile.web`），nightly 少了 proxy。而 `docker-compose.yml:106-131` 的 `quantlab-docker-proxy` 是默认服务、不在任何 `profiles:` 里，镜像名是 `ghcr.io/bobvane/my-quant-lab-docker-proxy:${MQL_VERSION:-latest}`（`:110`）。于是 `MQL_VERSION=nightly docker compose up -d` **必然**拉不到 `my-quant-lab-docker-proxy:nightly` —— `:nightly` 不是一套可以部署的镜像，它连仓库自己的 stock compose 文件都起不来。
+  - **缓存是单向的**：两个 build 步骤都只有 `cache-from: type=gha`、没有 `cache-to`（`:35`、`:44`），而 `release.yml` 的三处是成对的（`:98-99`、`:131-132`、`:142-143`）。夜里那次构建只是读一份自己从不贡献的缓存。
+  - **从来没有被启动过**：推完镜像就结束，没有任何一步问过「这套镜像能不能起来」。ADR-073 已经把这件事记在案（docs/17:1748：「`.github/workflows/nightly.yml` 只重建镜像，没有任何自检作业，所以这些脚本全靠人手跑」），但记在案不等于有人做。
+  - **判定的位置**：v1.5.13 的验收（ADR-075）是内联在 `release.yml` 的 smoke 步骤里的（30 行轮询加判定），只在 release 那条路上存在。nightly 若照抄一份，两份判定必然漂移 —— ADR-070 已经为审计账本定过这条规矩：一个事实只有一个出口。
+- 决策：
+  1. 验收只有一份实现：新增 `scripts/verify-stack.sh`，问两半 —— API 的存活端点是否答，web 边缘是否在服务应用（`/healthz` 通、`/` 里有 `id="app"`、缺失的哈希资源是 404 而不是应用外壳，ADR-068）。参数为 `--api`/`--web-base`/`--attempts`/`--interval`；退出码 0 = 两半都答了，1 = 至少一半没有，**2 = 参数错**（问不出问题的调用不算通过）。
+  2. `release.yml` 的 smoke 步骤不再自己轮询，改为 `bash scripts/verify-stack.sh`，并用 `set -o pipefail` 让脚本的退出码穿过 `tee` 写进 step summary；工作流保留拉镜像、诊断、`down -v`，以及 `SMOKE_TEST_FAILED`/`SMOKE_TEST_OK` 的结论。
+  3. `nightly.yml` 补齐第三个镜像（与 release 同一集合），三处 build 都补上 `cache-to: type=gha,mode=max`；新增 `verify` 作业（`needs: images`、独立 runner），把 `:nightly` 从 registry 里拉回来、用 `MQL_VERSION=nightly` 起 stock compose、调用同一份判定，失败时 `NIGHTLY_VERIFY_FAILED` 加 `exit 1`，最后 `down -v` 收拾干净。
+  4. 守卫：新增 `backend/tests/test_nightly_pipeline.py`，并改写 `backend/tests/test_release_pipeline.py` 里那条 web 断言 —— 夜里构建的镜像集合必须与 release 一致、每个 `cache-from: type=gha` 必须在同一文件里有配对的 `cache-to`、verify 作业必须按 nightly tag 拉起三个镜像并调用同一份判定、两条流水线都必须调用 `scripts/verify-stack.sh`、判定脚本必须是 LF 且必须能失败。
+- 理由：
+  - **一个 tag 就是一句承诺**：`:nightly` 承诺「main 上最新的一套镜像」；少了 proxy 就不是一套，「最新」也就没有意义。
+  - **判定是代码，不是配置**：写成脚本才能被两条流水线调用、才能在本地被证明会失败；内联两份必然漂移，而漂移的判定比没有判定更糟 —— 它看起来像有。
+  - **独立作业比同作业多一步更强**：镜像必须从 registry 里再取回来，而不是复用构建作业留在本地的层。
+  - **`cache-from` 没有 `cache-to` 是单向声明**：它读一份自己从不写的缓存；守卫把它变成可见的等式，而不是读代码时靠印象。
+  - 与 ADR-072/ADR-073/ADR-075 是同一条线：能失败、结论变成退出码、发布的验收必须决定运行的结论 —— 这里补上最后一环：**夜间的产物也要有一条结论**。
+- 影响与兼容：
+  - `:nightly` 现在多一个 proxy 镜像，且每次构建都要验收通过才算完成；夜里验收失败时运行会变红（以前永远是绿的）——那是本版的目的，代价是「镜像已推、但 tag 不可信」这个中间状态第一次变得可见。
+  - nightly 现在也写 GHA 缓存（`mode=max`），会占缓存配额；换来的是它不再白读。
+  - `release.yml` 从 305 行降到 279 行，判定搬进 129 行的脚本；两处行为在 good/default-page/spa-fallback/api-down 四态下逐字比对过（见「测试」）。
+  - 本机没有 Docker，无法在本地真跑 compose：脚本级证明用替身完成；真机证明是 v1.5.14 自己的 release 运行（走同一份脚本）与手工触发的 nightly 运行。
+- 测试：
+  - `backend/tests/test_release_pipeline.py`（改后 7 条）与 `backend/tests/test_nightly_pipeline.py`（6 条）。**先红后绿**：把 HEAD 版（v1.5.13）的 `nightly.yml`/`release.yml` 放回原位跑这两个文件 → **6 failed, 7 passed**，失败信息逐条点名：`the nightly and release pipelines build different image sets, so :nightly is not a usable tag: nightly=['docker/Dockerfile.backend', 'docker/Dockerfile.web'] release=[... 'docker/Dockerfile.proxy' ...]`、`a workflow reads a build cache it never writes: ['nightly.yml: 2 cache-from, 0 cache-to']`、`no job named 'verify'`、`the smoke test no longer asks the shared verdict`；随后工作副本按 SHA256 逐字还原（两处 `RESTORED`）。
+  - 行为证据（标准库替身扮演两个容器、直接跑真脚本）：`good → exit 0 / api_ok: 1 web_ok: 1 / VERIFY_STACK_OK`；`default-page`（web 只答 nginx 欢迎页）`→ exit 1 / web_ok: 0`；`spa-fallback`（所有路径都回应用外壳，含缺失资源）`→ exit 1 / web_ok: 0`；`api-down`（API 503）`→ exit 1 / api_ok: 0`；`--nonsense → exit 2`。
+  - 语法与解析：PyYAML 解析 `ci.yml`/`release.yml`/`nightly.yml` 成功（`nightly.yml` 的作业为 `images` 与 `verify`）；三条工作流里每个 `run:` 体经 `bash -n` 全部 exit 0；`release.yml` 保持 CRLF 干净（279 行、0 bare LF），`nightly.yml` 与 `scripts/verify-stack.sh` 保持 LF。
+  - 边界：这些守卫读文本，它们能证明集合一致、判定被接上、脚本会失败；它们不能证明某个 runner 上容器真的起来了 —— 那由 release 与 nightly 两条流水线的真机运行回答。

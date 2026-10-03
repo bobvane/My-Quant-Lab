@@ -14,6 +14,11 @@ The same step only ever asked the API container (`127.0.0.1:8080`): `docker comp
 up -d` returns 0 even when the web container crash loops, so a release whose UI never
 came up produced `SMOKE_TEST_OK` too.
 
+The step itself no longer knows how to answer that question: the verdict — the API
+answers, the web edge serves the application, a missing hashed asset is a 404 — lives
+in `scripts/verify-stack.sh`, because the nightly pipeline asks the same question of
+the images it publishes, and two copies of a verdict drift (ADR-070, ADR-076).
+
 These guards read the workflow text. They can prove that the verdict is not swallowed
 and that both containers are interrogated; they cannot prove how a runner behaves
 (ADR-068 draws the same line for the nginx config, and ADR-075 for this one).
@@ -27,6 +32,7 @@ import re
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 RELEASE = WORKFLOWS / "release.yml"
+VERIFY_STACK = REPO_ROOT / "scripts" / "verify-stack.sh"
 
 # Steps sit six spaces deep under `jobs.<id>.steps`; a step ends where the next begins.
 _STEP = re.compile(r"^ {6}- name: (?P<name>.+)$", re.MULTILINE)
@@ -91,21 +97,32 @@ def test_no_workflow_swallows_a_step_failure():
     )
 
 
-def test_the_release_smoke_test_asks_the_web_container_too():
-    """One release publishes three images; one verdict must cover the serving half."""
+def test_the_release_smoke_test_asks_the_shared_verdict():
+    """One release publishes three images; one script decides whether they served."""
 
     body = _uncommented(_step(_text(RELEASE), "Smoke test the released images"))
-    assert "8080" in body, "the smoke test no longer asks the API"
-    assert "8081" in body, "the smoke test never asks the web container"
-    assert "web_ok" in body, "the web half contributes nothing to the verdict"
+    assert "bash scripts/verify-stack.sh" in body, (
+        "the smoke test no longer asks the shared verdict"
+    )
+    assert "verify_rc" in body, "the shared verdict's exit status does not reach this step's status"
+    # ... and the failure exit must be the one that consults it.
+    before_failure = body.split("SMOKE_TEST_FAILED")[0]
+    assert "verify_rc" in before_failure[-400:], "the failure exit ignores the shared verdict"
+
+
+def test_the_shared_verdict_asks_the_web_container_too():
+    """The serving half is asserted where the verdict lives, not merely fetched."""
+
+    script = _uncommented(_text(VERIFY_STACK))
+    assert "8080" in script, "the verdict no longer asks the API"
+    assert "8081" in script, "the verdict never asks the web container"
+    assert "web_ok" in script, "the web half contributes nothing to the verdict"
     # The web half must assert, not merely fetch: liveness, the app's mount point, and
     # the edge contract ADR-068 made real (a missing asset is a 404, not the shell).
-    assert "/healthz" in body
-    assert 'id="app"' in body
-    assert "/assets/" in body and "404" in body
-    # ... and it must reach the same verdict as the API half.
-    before_failure = body.split("SMOKE_TEST_FAILED")[0]
-    assert "web_ok" in before_failure[-400:], "the failure exit ignores the web half"
+    assert "/healthz" in script
+    assert 'id="app"' in script
+    assert "/assets/" in script and "404" in script
+    assert "exit 1" in script and "VERIFY_STACK_FAILED" in script, "the verdict cannot fail"
 
 
 def test_the_release_smoke_test_can_fail_its_step():

@@ -16,6 +16,7 @@ These guards bind the promises to the code:
   not ``已实现`` must say what is missing.
 * ``已实现（<path>）`` must name files that exist.
 * §4's assumptions block must exist on the backtest page.
+* §5's equity curve and latest-signal list must exist on the paper page.
 * the outstanding list in the last section must name exactly the sections that
   are not implemented.
 
@@ -34,6 +35,7 @@ SPEC = REPO_ROOT / "docs" / "13_UI_UX.md"
 MAIN = REPO_ROOT / "frontend" / "src" / "main.ts"
 APP = REPO_ROOT / "frontend" / "src" / "App.vue"
 BACKTEST = REPO_ROOT / "frontend" / "src" / "views" / "BacktestView.vue"
+PAPER = REPO_ROOT / "frontend" / "src" / "views" / "PaperView.vue"
 
 _ROUTE = re.compile(
     r"\{\s*path:\s*'(?P<path>[^']*)'\s*,\s*name:\s*'(?P<name>[^']*)'\s*,"
@@ -142,6 +144,20 @@ def test_the_backtest_page_shows_the_assumptions_it_promises() -> None:
     )
     for field in ("成交模型", "订单类型", "手续费", "滑点"):
         assert field in page, f"the assumptions area does not list {field}"
+
+
+def test_the_paper_page_shows_the_curve_and_the_signals_it_promises() -> None:
+    """§5 was the one promise that had neither a chart nor a list behind it (ADR-108)."""
+    section = next(body for number, _, body in _sections() if number == 5)
+    for promised in ("权益曲线", "最新信号"):
+        assert promised in section, f"docs/13 §5 no longer promises {promised}"
+
+    page = _text(PAPER)
+    for rendered in ("<EquityChart", "最新信号", "curve_note", "paperEquity"):
+        assert rendered in page, (
+            f"docs/13 §5 promises a {rendered} the paper page does not use: the page drew "
+            "the equity as four numbers and had no signal list (ADR-108)"
+        )
 
 
 def test_the_outstanding_list_covers_exactly_the_unfinished_sections() -> None:

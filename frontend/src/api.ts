@@ -830,6 +830,18 @@ export const api = {
   paperAccounts: () => request<PaperAccount[]>('/paper/accounts'),
   paperPerformance: (accountId: number) =>
     request<Record<string, any>>(`/paper/accounts/${accountId}/performance`),
+  // The curve is a history: its last point is net deposits + realized P&L, and a deposit
+  // is a step in it rather than a gain (ADR-108).
+  paperEquity: (accountId: number) =>
+    request<{
+      account_id: number
+      cash: number
+      net_deposits: number
+      realized_pnl: number
+      trades_count: number
+      equity_curve: Array<{ timestamp: string; equity: number }>
+      curve_note: string
+    }>(`/paper/accounts/${accountId}/equity`),
   paperPositions: (accountId: number) =>
     request<PaperPosition[]>(`/paper/accounts/${accountId}/positions`),
   executePaperSignal: (accountId: number, signalId: number) =>

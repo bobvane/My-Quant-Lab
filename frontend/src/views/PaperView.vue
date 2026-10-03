@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api, type PaperAccount, type PaperPosition } from '@/api'
+import { api, type PaperAccount, type PaperPosition, type SignalRecord } from '@/api'
+import EquityChart from '@/components/EquityChart.vue'
 import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, toneOf } from '@/format'
 
@@ -19,6 +20,46 @@ const busy = ref<number | null>(null)
 const performance = ref<Record<string, any> | null>(null)
 const perfAccount = ref<number | null>(null)
 const loadingPerf = ref<number | null>(null)
+
+const equityCurve = ref<Array<{ timestamp: string; equity: number }>>([])
+const equityNote = ref('')
+const equityAccount = ref<number | null>(null)
+const loadingEquity = ref<number | null>(null)
+const recentSignals = ref<SignalRecord[]>([])
+const loadingSignals = ref(false)
+
+async function loadEquity(accountId: number) {
+  error.value = ''
+  loadingEquity.value = accountId
+  try {
+    const body = await api.paperEquity(accountId)
+    equityCurve.value = body.equity_curve
+    equityNote.value = body.curve_note
+    equityAccount.value = body.account_id
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    loadingEquity.value = null
+  }
+}
+
+/** The most recent persisted signals, so a signal can be executed without its id. */
+async function loadRecentSignals() {
+  loadingSignals.value = true
+  try {
+    recentSignals.value = await api.signals(undefined, 10)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    loadingSignals.value = false
+  }
+}
+
+async function executeFromPanel(account: PaperAccount, id: number) {
+  signalId.value = id
+  await executeSignal(account)
+  await loadRecentSignals()
+}
 
 async function loadPerformance(accountId: number) {
   error.value = ''
@@ -148,7 +189,10 @@ async function loadPositions(accountId: number) {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  void loadRecentSignals()
+})
 </script>
 
 <template>
@@ -210,6 +254,9 @@ onMounted(load)
               <button class="ghost" @click="loadPositions(a.id)">持仓</button>
               <button class="ghost" :disabled="loadingPerf === a.id" @click="loadPerformance(a.id)">
                 {{ loadingPerf === a.id ? '计算中…' : '绩效' }}
+              </button>
+              <button class="ghost" :disabled="loadingEquity === a.id" @click="loadEquity(a.id)">
+                {{ loadingEquity === a.id ? '读取中…' : '权益曲线' }}
               </button>
               <button
                 v-if="a.status === 'active'"
@@ -309,6 +356,55 @@ onMounted(load)
       </div>
       <p v-if="performance.metrics.total_return === null" class="muted" style="margin-top: 10px">
         {{ performanceNotice(performance) }}
+      </p>
+    </div>
+
+    <div v-if="equityCurve.length" class="card" style="margin-top: 14px">
+      <h3>权益曲线（账户 #{{ equityAccount }}）</h3>
+      <EquityChart :points="equityCurve" />
+      <p class="muted" style="margin-top: 10px">{{ equityNote }}</p>
+    </div>
+
+    <div v-if="accounts.length" class="card" style="margin-top: 14px">
+      <h3>最新信号</h3>
+      <p class="muted">最近 10 条已持久化的信号。可以直接对某个账户执行，不必手抄信号 ID。</p>
+      <p v-if="loadingSignals" class="muted">读取中…</p>
+      <table v-else-if="recentSignals.length">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>生成时间</th>
+            <th>资产</th>
+            <th>周期</th>
+            <th>方向</th>
+            <th>状态</th>
+            <th>执行</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="s in recentSignals" :key="s.id">
+            <td>{{ s.id }}</td>
+            <td>{{ formatDateTime(s.generated_at) }}</td>
+            <td>{{ s.symbol }}</td>
+            <td>{{ s.timeframe }}</td>
+            <td>{{ s.direction }}</td>
+            <td>{{ s.state }}</td>
+            <td>
+              <button
+                v-for="a in accounts"
+                :key="`${s.id}-${a.id}`"
+                class="ghost"
+                :disabled="busy === a.id"
+                @click="executeFromPanel(a, s.id)"
+              >
+                → {{ a.name }}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">
+        还没有持久化信号。到「信号」页跑一次扫描并持久化，或等定时任务产生信号。
       </p>
     </div>
 

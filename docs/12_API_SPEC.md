@@ -266,7 +266,13 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
 `GET /paper/accounts` [已实现] —— 列出模拟账户。
 `POST /paper/accounts` [已实现] —— 创建模拟账户。
 `GET /paper/accounts/{account_id}` [已实现] —— 取单个模拟账户。
-`GET /paper/accounts/{account_id}/equity` [已实现] —— 账户权益曲线。
+`GET /paper/accounts/{account_id}/equity` [已实现] —— 账户权益曲线：响应除快照字段
+（`cash`、`net_deposits`、`realized_pnl`、`positions`、`trades_count`）外还带
+`equity_curve`（按时间升序的 `[{timestamp, equity}]`）与 `curve_note`。
+曲线是**重放出来的历史**，不是拿今天的净入金倒推：起点是账户创建（或上次重置）时的
+期初现金，入金/提现按发生时抬高或压低基准，每笔已平仓交易加上它的 `pnl`，
+最后一点等于 `net_deposits + realized_pnl`。入金在曲线上是一级台阶，不是收益；
+重置会删掉全部交易并换一个新基准，所以曲线只覆盖账户当前这段生命周期（ADR-108）。
 `GET /paper/accounts/{account_id}/trades` [已实现] —— 账户成交列表。
 `POST /paper/accounts/{account_id}/reset` [已实现] —— 重置账户（强提醒并生成审计事件）。
 

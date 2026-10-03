@@ -6,6 +6,7 @@ their own tables, are funded with virtual cash and can never write to Ghostfolio
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -23,7 +24,7 @@ from app.api.schemas import (
 )
 from app.core.db import get_db
 from app.data.strategy_service import record_audit
-from app.domain.models import PaperAccount, PaperOrder, PaperPosition, PaperTrade, Signal
+from app.domain.models import AuditLog, PaperAccount, PaperOrder, PaperPosition, PaperTrade, Signal
 from app.simulation.paper_engine import (
     PaperError,
     PaperExecutionSettings,
@@ -75,6 +76,62 @@ def get_account(account_id: int, db: Session = Depends(get_db)) -> PaperAccountO
     return PaperAccountOut.model_validate(account)
 
 
+def _aware(moment: dt.datetime) -> dt.datetime:
+    """SQLite hands back naive timestamps while the audit log writes UTC-aware ones."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=dt.UTC)
+
+
+def replay_equity_curve(db: Session, account: PaperAccount) -> list[dict[str, float | str]]:
+    """Rebuild an account's equity history from the events that moved it (ADR-108).
+
+    Funding is read back from the audit log instead of assumed, because a deposit
+    moves the baseline: a curve drawn as "today's net deposits plus realized P&L"
+    would rewrite the past every time money entered or left the account.
+    """
+    closed = list(
+        db.scalars(
+            select(PaperTrade)
+            .where(PaperTrade.account_id == account.id, PaperTrade.exit_time.is_not(None))
+            .order_by(PaperTrade.exit_time)
+        ).all()
+    )
+    events = db.scalars(
+        select(AuditLog)
+        .where(
+            AuditLog.entity_type == "paper_account",
+            AuditLog.entity_id == str(account.id),
+            AuditLog.event_type.in_(("paper_account_funded", "paper_account_reset")),
+        )
+        .order_by(AuditLog.created_at)
+    ).all()
+    resets = [event for event in events if event.event_type == "paper_account_reset"]
+    # A reset deletes the trades and installs a new opening cash, so the curve covers
+    # the current life of the account and nothing before it.
+    start = _aware(resets[-1].created_at) if resets else _aware(account.created_at)
+    flows = [
+        (_aware(event.created_at), float((event.payload_json or {}).get("amount") or 0.0))
+        for event in events
+        if event.event_type == "paper_account_funded" and _aware(event.created_at) >= start
+    ]
+    moves: list[tuple[dt.datetime, float]] = list(flows)
+    moves += [
+        (_aware(trade.exit_time), float(trade.pnl or 0))
+        for trade in closed
+        if trade.exit_time is not None and _aware(trade.exit_time) >= start
+    ]
+    moves.sort(key=lambda move: move[0])
+    # Whatever was not put in after the opening is what the account started with.
+    opening = float(account.initial_cash) - sum(amount for _, amount in flows)
+    points: list[dict[str, float | str]] = [
+        {"timestamp": start.isoformat(), "equity": round(opening, 4)}
+    ]
+    equity = opening
+    for moment, delta in moves:
+        equity += delta
+        points.append({"timestamp": moment.isoformat(), "equity": round(equity, 4)})
+    return points
+
+
 @router.get("/accounts/{account_id}/equity", summary="Equity curve of a paper account")
 def account_equity(account_id: int, db: Session = Depends(get_db)) -> dict:
     account = db.get(PaperAccount, account_id)
@@ -89,6 +146,7 @@ def account_equity(account_id: int, db: Session = Depends(get_db)) -> dict:
     positions = db.scalars(
         select(PaperPosition).where(PaperPosition.account_id == account_id)
     ).all()
+    curve = replay_equity_curve(db, account)
     return {
         "account_id": account_id,
         "cash": float(account.cash),
@@ -104,6 +162,13 @@ def account_equity(account_id: int, db: Session = Depends(get_db)) -> dict:
             for p in positions
         ],
         "trades_count": len(trades),
+        "equity_curve": curve,
+        "curve_note": (
+            "权益曲线的每个点都是那个时刻的账户权益：入金/提现抬高或压低基准"
+            "（钱进来不是盈利，见 ADR-066），已平仓交易加上它的已实现盈亏；"
+            "最后一个点等于 净入金 + 已实现盈亏。重置会删掉全部交易并把基准"
+            "重新设成新的期初现金，所以曲线只覆盖账户当前这段生命周期（ADR-108）。"
+        ),
         "note": (
             "Paper accounts are virtual and fully isolated from real holdings. "
             "net_deposits is the money the account was funded with (deposits minus "
@@ -133,6 +198,9 @@ def account_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
         ).all()
     )
     net_deposits = float(account.initial_cash)
+    # The metrics stay measured against the current baseline: the equity curve publishes
+    # funding as the step it is, and feeding that series here would report a deposit as a
+    # gain (ADR-108).
     equity = [net_deposits]
     for trade in trades:
         equity.append(equity[-1] + float(trade.pnl or 0))

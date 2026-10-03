@@ -19,6 +19,21 @@ export PYTHONUNBUFFERED=1
 
 log() { echo "[entrypoint] $*"; }
 
+# Report a configuration error before anything starts waiting for the database.
+# Reading the settings is what raises, and the old order (wait_for_db first) hid
+# the reason: a refused SECRET_KEY looked like 60 s of "waiting for database"
+# followed by "migrations failed", which names the wrong cause entirely
+# (ADR-077).
+check_settings() {
+    environment=$(python -c 'from app.core.config import settings; print(settings.environment)' 2>&1) && {
+        log "configuration accepted (environment=${environment})"
+        return 0
+    }
+    log "ERROR: configuration is not usable; refusing to start"
+    printf '%s\n' "$environment" | sed 's/^/[entrypoint] /'
+    return 1
+}
+
 dump_context() {
     log "---- diagnostics ----"
     log "role=$ROLE port=$PORT"
@@ -83,6 +98,7 @@ run_migrations() {
 
 case "$ROLE" in
     api)
+        check_settings || exit 1
         wait_for_db
         run_migrations
         log "starting API on port ${PORT}"
@@ -92,17 +108,20 @@ case "$ROLE" in
             --no-server-header
         ;;
     worker)
+        check_settings || exit 1
         wait_for_db
         log "starting celery worker"
         exec celery -A app.workers.celery_app.celery_app worker \
             --loglevel=INFO --concurrency="${CELERY_CONCURRENCY:-2}"
         ;;
     scheduler)
+        check_settings || exit 1
         wait_for_db
         log "starting celery beat"
         exec celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
         ;;
     migrate)
+        check_settings || exit 1
         wait_for_db
         run_migrations
         log "migrations complete"

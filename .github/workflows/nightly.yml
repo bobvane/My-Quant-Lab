@@ -96,8 +96,13 @@ jobs:
           docker pull "${WEB_IMAGE}:${VERSION}"
           docker pull "${PROXY_IMAGE}:${VERSION}"
 
-          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-smoke-password/' .env.example
-          sed -i 's/^SECRET_KEY=.*/SECRET_KEY=ci-smoke-secret-key-0123456789abcdef/' .env.example
+          # The stock file ships example values. A real deployment generates
+          # its own, and the application refuses to serve production with a
+          # secret that is published in this repository (ADR-077). Exported
+          # values win over --env-file, so the compose file is still used
+          # exactly as a NAS would use it.
+          export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
+          export SECRET_KEY="$(openssl rand -hex 32)"
 
           export MQL_VERSION="${VERSION}"
 

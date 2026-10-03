@@ -11,10 +11,46 @@ import re
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app import __version__ as package_version
+
+# The values that ship in `.env.example` or in the setup instructions. `secret_key`
+# is not just a signing seed: `app.infrastructure.secrets` derives the at-rest
+# encryption key from it, so a deployment that keeps a published value hands
+# anyone holding a copy of the database -- or of this repository -- the provider
+# API keys stored in it (ADR-077).
+#
+# Two kinds of published value need two kinds of match. Markers are instruction
+# words: any secret containing one was never generated. Published secrets are
+# literals this repository handed out, and they are compared *exactly*, because a
+# legitimate random secret may happen to start with the same hex digits -- the
+# test suite's own secret did (ADR-077).
+_SECRET_PLACEHOLDERS = (
+    "change-me",
+    "change_me",
+    "changeme",
+    "your-",
+    "replace-me",
+    "example",
+    "placeholder",
+    "insecure",
+)
+_PUBLISHED_SECRETS = (
+    "change-me-openssl-rand-hex-32",
+    "change-me-in-production",
+    "0123456789abcdef0123456789abcdef",
+)
+_SECRET_MIN_LENGTH = 32
+
+
+def _refused_secret_message(reason: str) -> str:
+    return (
+        f"SECRET_KEY {reason}; it is the key material for at-rest encryption, "
+        "so a published value protects nothing. Generate one with "
+        "`openssl rand -hex 32` and set SECRET_KEY in .env"
+    )
 
 
 class Settings(BaseSettings):
@@ -126,6 +162,42 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     log_json: bool = True
+
+    @model_validator(mode="after")
+    def _refuse_the_example_secret_in_production(self) -> Settings:
+        """Refuse to serve production with a secret that is in the repository.
+
+        The example values shipped in `.env.example` are public, and the at-rest
+        key for stored provider credentials is derived from this value, so a
+        deployment that keeps one is not protecting anything (ADR-077). Local
+        development and test environments keep working unchanged.
+        """
+
+        if not self.is_production:
+            return self
+        secret = self.secret_key.strip()
+        if not secret:
+            raise ValueError(
+                "SECRET_KEY is empty; generate one with `openssl rand -hex 32` and set it in .env"
+            )
+        lowered = secret.lower()
+        for marker in _SECRET_PLACEHOLDERS:
+            if marker in lowered:
+                raise ValueError(
+                    _refused_secret_message(
+                        f"still holds an example value (it contains {marker!r})"
+                    )
+                )
+        for published in _PUBLISHED_SECRETS:
+            if lowered == published:
+                raise ValueError(_refused_secret_message("is a value this repository published"))
+        if len(secret) < _SECRET_MIN_LENGTH:
+            raise ValueError(
+                f"SECRET_KEY must be at least {_SECRET_MIN_LENGTH} characters in "
+                "production; generate one with `openssl rand -hex 32` and set "
+                "SECRET_KEY in .env"
+            )
+        return self
 
     @field_validator("api_auth_token", mode="before")
     @classmethod

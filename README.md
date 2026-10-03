@@ -50,7 +50,15 @@
 
    ```ini
    POSTGRES_PASSWORD=你的数据库密码
-   SECRET_KEY=0123456789abcdef0123456789abcdef
+   SECRET_KEY=你自己生成的 64 位十六进制
+   ```
+
+   `SECRET_KEY` 用来派生数据库里加密保存的 API 密钥，必须**自己生成**，
+   不能照抄示例、也不能用网上现成的字符串——凡是本仓库里出现过的值都等于公开密钥，
+   生产模式下应用会直接拒绝启动。生成一条：
+
+   ```bash
+   openssl rand -hex 32
    ```
 
 4. 在容器管理界面里：Compose / 项目 → 选择该目录 → 拉取并启动
@@ -63,7 +71,8 @@ mkdir -p /vol1/1000/Docker/My-Quant-Lab && cd /vol1/1000/Docker/My-Quant-Lab
 # 把 docker-compose.yml 与 .env.example 放进来，后者改名 .env 并改两处密码
 cp .env.example .env
 sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=你的密码/' .env
-sed -i 's/^SECRET_KEY=.*/SECRET_KEY=0123456789abcdef0123456789abcdef/' .env
+# SECRET_KEY 必须自己生成：仓库里出现过的值会被生产模式拒绝（ADR-077）
+sed -i "s/^SECRET_KEY=.*/SECRET_KEY=$(openssl rand -hex 32)/" .env
 
 docker compose pull && docker compose up -d
 ```

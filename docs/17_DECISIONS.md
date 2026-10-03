@@ -1206,7 +1206,7 @@ watcher 路径不需要额外请求：它比较的本来就是 `get_head_commit(
   `[entrypoint] ERROR: migrations failed; refusing to start`，容器被判 unhealthy。
 - v1.5.2 的 CI 因此变红（run `37084884774`，headSha `b6e2c6d3c`）：`backend tests + lint` 的
   「Run PostgreSQL regression tests」四条 setup error 全是这条 `DataError`，
-  `docker compose smoke test` 的「Boot the stack」也是同一个原因；同一提交的 `frontend build` 与 release 流水线是绿的。
+  `docker compose smoke test` 的「Boot the stack」也是同一个原因；同一提交的 `frontend build` 与 release 流水线是绿的——那条绿色的 release 流水线自己其实打印了 `SMOKE_TEST_FAILED`，只是被 `continue-on-error` 挡在结论之外（见 ADR-075）。
 - 为什么本地一路看不出来：本地 581 条测试跑在 **SQLite** 上（`alembic upgrade head` 到临时文件），SQLite
   不强制列长度，迁移成功；而唯一会碰 PostgreSQL 的 `backend/tests/test_postgres_triggers.py` 四条在本地因
   `TEST_POSTGRES_URL` 未设置被 **skip**。也就是说「只在 Postgres 上必炸」的缺陷在本地没有任何一条路径能暴露它。
@@ -1791,3 +1791,51 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 测试：
   - `backend/tests/test_api_contract.py`：八条。`test_the_client_source_is_where_this_guard_expects_it`（文件与默认基址 `/api/v1` 都还在，防止守卫指向错文件而「通过」）、`test_the_scan_finds_the_calls_and_the_doors`（四条下限）、`test_every_client_call_names_a_door_the_api_serves`、`test_the_client_sends_only_declared_query_keys`、`test_the_client_sends_every_required_query_key`、`test_the_client_declares_no_field_the_api_never_sends`（并要求 `compared >= 20`）、`test_the_contract_checker_bites_on_a_broken_client`、`test_the_contract_checker_accepts_a_client_that_keeps_the_contract`。
   - 审计与注入证据（`%TEMP%` 下的一次性脚本，不入库）：门/旋钮探针在真实 `api.ts` 上找到 80 个调用点、78 个落到真实门（另 2 个是条件查询串归一化假象，随后修正）；深度感知的字段探针比对 27 份响应、0 个问题；负向注入四处改动各产生恰好一条：`GET /backtests/compare_all`（门不存在）、`DELETE /strategies`（方法不对）、`GET /backtests/compare: omits required query key 'ids'`、`SensitivityResult for POST /research/sensitivity: declares field 'nonsense_field' the response schema does not describe`；未改动的原文 0 条。
+
+## ADR-075：发布的验收必须决定运行的结论（`release.yml` 的 `SMOKE_TEST_FAILED` 与 `continue-on-error`）
+
+### 背景
+
+- `release.yml` 打完三镜像（backend/proxy/web）之后，用仓库自己的 `docker-compose.yml` 起一次真栈做「发布后验收」：按 `:${VERSION}` 拉取刚推上去的镜像、`docker compose up -d`、轮询健康，最后打印 `SMOKE_TEST_OK` 或 `SMOKE_TEST_FAILED`。
+- v1.5.2 的那次发布（run **`37084889121`**，headSha `b6e2c6d3c`，镜像元数据 `version=1.5.2`）验收**失败**了。日志原文：`compose up exit: 1   healthy: 0` → `SMOKE_TEST_FAILED` → `##[error]Process completed with exit code 1.`；起因就是 ADR-064 那条迁移 id 放不进 `alembic_version.version_num VARCHAR(32)`：
+
+  ```
+  psycopg.errors.StringDataRightTruncation: value too long for type character varying(32)
+  [entrypoint] ERROR: migrations failed; refusing to start
+  dependency failed to start: container quantlab-api is unhealthy
+  ```
+
+  也就是说：**那一版发布出去的镜像起不来**。
+- 而这次运行报告的结论是 **success**，`Smoke test the released images` 这一步在运行摘要里也显示成 `completed/success`；GitHub Release v1.5.2 照常创建，发布说明还写着 `docker compose pull && docker compose up -d`。
+- 原因是一行 YAML：`release.yml:147 continue-on-error: true`（全仓库唯一一处 `continue-on-error`）。它把验收的失败从「运行的结论」里摘了出去，只留在没人会因为一枚绿色徽章去翻的日志里。ADR-064 记录了同一提交的 CI 是红的，所以缺陷 16 分钟后就被修掉（`97f9dab58`，v1.5.3）；但**发布流水线自己的判断**沉默了一整轮。
+- 同一处验收还有第二个洞：它只问 API（`curl http://127.0.0.1:8080/api/v1/healthz`）。`docker compose up -d` 在 web 容器崩溃重启时同样返回 0，所以「web 镜像起不来」在旧验收下一样会得到 `SMOKE_TEST_OK`。
+
+### 决策
+
+1. 删掉 `continue-on-error: true`。`Generate release notes` 与 `Create GitHub Release` 两步本来就带 `if: always()`，所以**发布照旧发生、运行的结论改成失败**——`if: always()` 才是「失败了也要接着做」的表达方式，`continue-on-error` 是「失败了就当没发生」。工作流里留了注释说明为什么不能把它加回去。
+2. 验收同时问两个容器：轮询里维护 `api_ok` 与 `web_ok`。`web_ok` 要求三件事同时成立——`http://127.0.0.1:8081/healthz` 通、`/` 返回的页面里有 `id="app"`（是应用而不是 nginx 欢迎页）、缺失的哈希资源返回 404 而不是应用外壳（把 ADR-068 的边界契约放到真部署上再验一次）。最终结论要求 `up_rc = 0` 且 `api_ok = 1` 且 `web_ok = 1`；失败时把三者一起打印，诊断摘要里补上 `quantlab-web` 的日志。
+3. 新增离线守卫 `backend/tests/test_release_pipeline.py`（6 条，读工作流文本、不需要 Docker）：任何工作流都不得再出现 `continue-on-error`；验收步骤必须同时引用 8080 与 8081；`web_ok` 必须真的来自断言而不是只取一次响应（`healthz`、`id="app"`、`/assets/` 与 `404`）；失败分支必须看 `web_ok`；验收必须能 `exit 1`；`Create GitHub Release` 必须保留 `if: always()` 且排在验收之后；验收必须拉 `:${VERSION}` 而不是 `latest`。
+
+### 理由
+
+- **判断的意义在于有人读到它**：ADR-072 说「部署自检的每一步都必须能失败」，ADR-073 说「自检的结论必须变成退出码」，这一条是同一句话的第三面——结论必须进入**流水线自己的记录**。我向用户汇报「已发布、CI 与 release 全绿」时读的就是这个结论；被 `continue-on-error` 摘掉的失败会让我把一个起不来的版本说成可以部署，这才是真正的危害。
+- **发布与验收是两件事，顺序是刻意的**：镜像在验收之前就已经推进 GHCR，Release 页面是 NAS 用户唯一的入口；扣住它既不会撤回镜像，又会藏掉「怎么固定版本」的说明。要改的是结论，不是发布。
+- **一个版本三个镜像，就该有一个覆盖三者的结论**：只问 API，等于用一半的证据宣布另一半没问题。
+- **注释不是配置**：守卫读工作流文本时先丢掉 `#` 开头的行，否则它会栽在自己写下的解释上（这次实现时第一跑就被咬到：注释里出现了 `continue-on-error` 与 `SMOKE_TEST_FAILED` 两个词）。
+
+### 影响与兼容
+
+- 从此 release 运行的**红**意味着「已发布，但别部署」。诊断（起栈退出码、两个容器的状态与日志）在设计上已经写在步骤摘要里，因为它们在 `exit 1` 之前收集。
+- 若验收因为环境原因偶发失败（例如 runner 上 8081 被占），运行会变红——它说的是「这次验收没通过」，不是「镜像坏了」，诊断里能分辨这两者；这是刻意接受的代价，比沉默更便宜。
+- NAS 的部署方式不变（`docker compose pull && docker compose up -d`），用 `MQL_VERSION` 固定版本的做法不变。
+- v1.5.13 自己的 release 运行是第一个「验收结论参与运行结论」的发布：它必须是绿的，且日志必须以 `SMOKE_TEST_OK` 结尾。
+
+### 测试
+
+- `backend/tests/test_release_pipeline.py` 6 passed（先写守卫再改工作流：改之前 2 failed / 4 passed，红点正是 `release.yml:147: continue-on-error: true` 与 `the smoke test never asks the web container`）。
+- 语法与解析：`bash -n` 检查从工作流里抽出的步骤脚本 exit 0；PyYAML 解析 `ci.yml`/`release.yml`/`nightly.yml` 三个文件，`Smoke test the released images` 的键只剩 `env/id/name/run`。
+- 行为复核（本机没有 Docker，用标准库替身在 127.0.0.1:8080/8081 扮演两个容器，把工作流里那段轮询原样抽出来跑（用 Actions 的方式 `bash -eo pipefail`，`seq 1 30` 改成 `seq 1 1`））：
+  - `good`（API 存活 + 应用外壳 + 缺失资源 404）→ `api_ok=1 web_ok=1`；
+  - `default-page`（web 只答 nginx 欢迎页）→ `api_ok=1 web_ok=0`；
+  - `spa-fallback`（所有路径都回应用外壳，含缺失资源）→ `api_ok=1 web_ok=0`。
+  - 同一替身上跑**旧的** API-Only 判据：三种模式全是 `healthy=1`，即旧代码在 web 一半坏掉时照样宣布 `SMOKE_TEST_OK`。

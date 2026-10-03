@@ -144,7 +144,13 @@ jobs:
 
       - name: Smoke test the released images
         id: smoke
-        continue-on-error: true
+        # Deliberately no `continue-on-error` here. On the v1.5.2 release this step
+        # printed `SMOKE_TEST_FAILED` -- the images could not boot, because the migration
+        # id did not fit `alembic_version.version_num` (ADR-064) -- while the run reported
+        # success, and the release page still advertised `docker compose pull && docker
+        # compose up -d`. Keeping the publish alive is what the `if: always()` on the
+        # notes and release steps is for; the verdict itself must decide the run
+        # (ADR-075).
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -163,10 +169,35 @@ jobs:
           docker compose --env-file .env.example up -d
           up_rc=$?
 
-          healthy=0
+          api_ok=0
+          web_ok=0
           for i in $(seq 1 30); do
+            # A release publishes three images and serves through two of them, and the
+            # web half is the half a user sees: `docker compose up -d` exits 0 even when
+            # the web container crash loops, so an API-only check used to certify a
+            # broken UI with the same "OK" (ADR-075).
+            api_ok=0
             if curl -fsS http://127.0.0.1:8080/api/v1/healthz >/dev/null 2>&1; then
-              healthy=1
+              api_ok=1
+            fi
+
+            web_ok=0
+            if curl -fsS http://127.0.0.1:8081/healthz >/dev/null 2>&1; then
+              shell=$(curl -fsS http://127.0.0.1:8081/ 2>/dev/null || true)
+              missing=$(curl -sS -o /dev/null -w '%{http_code}' \
+                http://127.0.0.1:8081/assets/does-not-exist.js 2>/dev/null || echo 000)
+              case "$shell" in
+                # The shell has to be the application, not an nginx welcome page, and a
+                # missing hashed asset has to be a 404 rather than that shell (ADR-068).
+                *'id="app"'*)
+                  if [ "$missing" = "404" ]; then
+                    web_ok=1
+                  fi
+                  ;;
+              esac
+            fi
+
+            if [ "$api_ok" -eq 1 ] && [ "$web_ok" -eq 1 ]; then
               break
             fi
             sleep 5
@@ -176,7 +207,7 @@ jobs:
             echo "## Release smoke test (${VERSION})"
             echo
             echo '```'
-            echo "compose up exit: ${up_rc}   healthy: ${healthy}"
+            echo "compose up exit: ${up_rc}   api_ok: ${api_ok}   web_ok: ${web_ok}"
             echo
             echo "### compose ps -a"
             docker compose --env-file .env.example ps -a 2>&1
@@ -197,13 +228,16 @@ jobs:
             echo
             echo "### quantlab-api logs"
             docker compose --env-file .env.example logs --no-color --tail 300 quantlab-api 2>&1
+            echo
+            echo "### quantlab-web logs"
+            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-web 2>&1
             echo '```'
           } 2>&1 | tee -a "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 
           docker compose --env-file .env.example down -v 2>&1
 
-          if [ "$up_rc" -ne 0 ] || [ "$healthy" -ne 1 ]; then
-            echo "SMOKE_TEST_FAILED"
+          if [ "$up_rc" -ne 0 ] || [ "$api_ok" -ne 1 ] || [ "$web_ok" -ne 1 ]; then
+            echo "SMOKE_TEST_FAILED (compose up exit ${up_rc}, api_ok ${api_ok}, web_ok ${web_ok})"
             exit 1
           fi
           echo "SMOKE_TEST_OK"

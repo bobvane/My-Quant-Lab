@@ -1080,7 +1080,7 @@ watcher 路径不需要额外请求：它比较的本来就是 `get_head_commit(
 
 **决策**
 
-1. `strategy_service` 新增 `next_version(existing: Iterable[str]) -> str`：空 → `1.0.0`；否则取 `major/minor/patch` **整数**三元的最大值再补丁 +1（`1.0.9` → `1.0.10`，`1.9.0` → `1.10.0`——字符串比较会得到 `1.9.1`）。出现读不成 `major.minor.patch` 的版本时 `raise ValueError("cannot assign a version: existing version 'v2-beta' is not major.minor.patch, so name the version explicitly")`。
+1. `strategy_service` 新增 `next_version(existing: Iterable[str]) -> str`：空 → `1.0.0`；否则取 `major/minor/patch` **整数**三元的最大值再补丁 +1（`1.0.9` → `1.0.10`；同时存在 `1.9.0` 与 `1.10.0` 时下一个是 `1.10.1`，而按字符串比较会得到 `1.9.1`）。出现读不成 `major.minor.patch` 的版本时 `raise ValueError("cannot assign a version: existing version 'v2-beta' is not major.minor.patch, so name the version explicitly")`。
 2. `strategy_service` 新增 `strategy_version_plan(db, name) -> dict`：返回 `{name, slug, strategy_id, versions, next_version, can_assign, reason}`——账本在哪里、下一个是什么、能不能自动分配。`can_assign` 为假时 `next_version` 为 `None`、`reason` 说明原因。
 3. `GithubImportRequest.version` 由 `str = "1.0.0"` 改为 `str | None = None`；`import_strategy` 在省略时走 `strategy_version_plan`，`can_assign` 为假就 422（把 `reason` 当成 detail），否则用 `next_version`。人工命名的版本仍按原样使用。
 4. 导入响应新增 `version_assigned`（布尔），`evidence_json` 与审计 payload 也记录它——事后能分辨"这一版是谁定的号"。
@@ -1098,3 +1098,38 @@ watcher 路径不需要额外请求：它比较的本来就是 `get_head_commit(
 **测试**
 
 `backend/tests/test_importer.py` 新增 `test_import_endpoint_assigns_the_next_version_when_none_is_named`（两次不带 `version` 的导入 → `1.0.0`、`1.0.1`，`version_assigned` 皆为真，且 `strategy_id` 相同）、`test_import_endpoint_keeps_the_version_the_reviewer_names`（`2.5.0` 原样使用且 `version_assigned` 为假，重复 → 422，随后不带版本 → `2.5.1`）、`test_version_ledger_reports_what_would_be_assigned`（导入前后 `GET /versions` 的完整字典与 `1.0.0` → `1.0.1`）、`test_version_ledger_refuses_to_increment_a_version_it_cannot_read`（种入 `v2-beta` → `can_assign` 假、理由点名它、不带版本 422、显式 `1.0.0` 仍 201）。`backend/scripts/probe_version_ledger.py` 离线用内存 SQLite 打印五个 `next_version` 用例（含 `1.9.0` / `1.10.0` 的整数比较）、不可读版本的拒绝，以及三次账本快照。
+
+## ADR-062：草案不合格时无人值守的导入必须停下来说明（`review_required`、`pending_review_commit`、docs/05 §7.2）
+
+**背景**
+
+1. `dsl_builder` **从不生成离场规则**（ADR-059 同族：读到了 ≠ 看懂了 → 这里更进一步，"抽出来了" ≠ "能导入"）：`backend/app/importer/dsl_builder.py:159` 无条件写 `"exit": {}`，只在警告里说 `no exit rules are auto-generated; add exit conditions manually before importing`。所以一份机器草案**必然**通不过 `parse_spec`（`app/strategies/dsl.py:278`：`at least one exit rule is required`），`"if not draft"` 那条分支实际上永远不会命中——草案 dict 永远非空。
+2. `check_source` 仍然把这份草案直接交给 `create_strategy_version`，而这个调用**不在任何 try/except 里**（同一函数里包住 fetch/analyze 的 try 在更上面）。实测（`C:\Users\bobvane\AppData\Local\Temp\mql_probe_ownership_today.py`，内存 SQLite + 真 `check_source`）：`ValueError: invalid strategy DSL -> : Value error, at least one exit rule is required`，栈 `app/workers/tasks.py:333` → `app/data/strategy_service.py:163`。
+3. 后果不只是"这一轮没导入"：异常逃出 `check_source` → Celery 任务崩掉，**不写快照、不更新 `last_import_status`**，来源行看起来什么都没发生；而 `check_github_sources` 的 `for source in sources` 循环随之中断，**排在坏来源后面的来源再也不会被检查**——一个仓库的失败变成了整轮监视的失败。
+4. 触发条件不是罕见输入：`Strategy.source_url == GitHubSource.repository_url`（人工导入会写这个字段）加上上游有新 commit，就必然走到这里。
+5. 同族还有第二条"两套规则"：`check_source` 自己用 `_bump_version` 编号，它套的是项目**发布**节奏（`patch >= 10 → minor += 1`，实测 `1.0.9 → 1.1.0`），而 ADR-061 刚把同一列的编号权交给 `strategy_service.next_version`（整数补丁，`1.0.9 → 1.0.10`）。
+6. 还有一半是**安静**的：`create_strategy_version` 里 `validate_strategy` 判 `invalid` 并不抛错，只把 `validation_status="invalid"` 落库。只挡 `parse_spec` 的异常，等于放行"能解析但不合规"的草案。
+
+**决策**
+
+1. 无人值守导入与人工导入共用**同一个裁决者**：`strategy_service.strategy_dsl_problem(dsl)`（`parse_spec` + `validate_strategy`），在写任何东西之前先问；返回 `None` 才继续导入，否则把裁决原话记下来。两条路径问同一个函数，才不会出现"人工导入被拒绝、watcher 却写进去了"这种分叉。
+2. 裁决不通过 → 结果记为新的 `review_required`：快照 `reason="requires_review"`、`detail` 是裁决文本、`transient=false`、`imported=false`，`last_import_status="review_required"`，**不创建任何版本**。
+3. 该 commit 写进新的可空列 `GitHubSource.pending_review_commit`（迁移 `0008_github_source_pending_review`）。`current_commit` 同时推进（同一个 commit 再抓一次也只会得到同一个结论），但"还在等人工"必须由独立列表达：否则下一次 beat 看到 `head == current_commit` 直接报 `unchanged`，把等待状态抹掉。
+4. 等待中的 commit 不再抓取：`check_source` 在 `head == current_commit` 判定**之前**先比 `pending_review_commit == head`，命中即返回 `review_required`（只花一次 HEAD 请求）。顺序是关键——放在后面就等于允许"unchanged"覆盖等待。
+5. 人工导入**那个** commit 会清空 `pending_review_commit`（`_persist_github_source` 里逐 commit 比较）；导入别的 commit 不清空——等待属于某个修订，不属于仓库。
+6. 更新的 commit 取代旧等待：head 变了就走常规路径，能导入则一并清空等待。
+7. 删掉 `_bump_version`，watcher 改用 `strategy_service.next_version`，同一列只有一套编号规则。
+8. 导入期任何异常都不再逃出 `check_source`：记录 `last_import_status="error"` + 快照 `reason="import_failed"` + `detail`（`sanitize_untrusted_text`），且**不推进** `current_commit`（下一轮重试）；`check_github_sources` 逐来源再兜一层（`db.rollback()` + `logger.warning` + 记 `error`），一个来源崩掉不影响后面的来源。
+9. sources 的三个响应（列表、详情、`/check`）都返回 `pending_review_commit`；前端状态列显示「待人工审阅」+ 待审阅 commit 短 SHA（`wait` 色调，不是错误色），快照详情用 `detail` 说明"补上缺失的规则后人工导入这个 commit"。
+
+**理由**
+
+"拒绝导入"和"导入失败"是两种不同的事，混成一种会让两边的用户都看不懂：前者是**设计**（草案本来就不该由机器补出离场规则，那是一个交易决策），后者是**故障**。所以前者要有自己的持久状态和解释文本，而不是一个 exception traceback。
+
+把等待放进独立列，是因为 `current_commit` 语义上只说"我读到过哪个修订"，它无法同时表达"我拒绝了这个修订、并且在等一个人"。硬把它塞进 `current_commit`（比如不推进）会让每轮重复抓取同一份东西、每轮再拒绝一次，把一次性的等待变成持续的流量；塞进 `last_import_status` 又会被下一轮的 `unchanged` 冲掉。ADR-057 已经有过同型的结论：**状态需要一列就给它一列**。
+
+"先问再写"而不是"写完再修"：`create_strategy_version` 的 `validation_status="invalid"` 会把一个不合规的版本留在不可变账本里（策略版本一旦创建不可修改）。机器没有资格往账本里写它自己都不信的东西。
+
+**测试**
+
+`backend/tests/test_github_watch.py`：新增 `test_the_import_gate_names_what_blocks_an_unattended_import`（合法草案 `None`；缺离场规则 → `invalid strategy DSL -> : Value error, at least one exit rule is required`；引用 `future_close` 的可解析草案 → `invalid strategy DSL -> entry.long.right:` 且含 `unavailable future data`，即校验器那条**安静**分支也被挡住）、`test_an_exit_less_draft_is_refused_instead_of_crashing`（`review_required` + 快照 `requires_review` + `detail` 含离场规则 + `pending_review_commit`、版本数不变、`current_commit` 推进）、`test_a_pending_review_survives_the_next_run_without_refetching`（假 client 的 `fetch_repository` 直接 `AssertionError` → 仍然 `review_required`、零快照）、`test_a_new_commit_clears_a_review_that_was_never_done`（head 变新 → 正常导入且清空等待）、`test_an_import_that_raises_is_recorded_not_raised`（`create_strategy_version` 抛 `RuntimeError("ledger exploded")` → `error`、`import_failed`、`current_commit` 不变）、`test_a_source_with_nothing_linked_says_so`（`no_linked_strategy` 与 `dsl_unchanged` 区分开）、`test_a_source_that_crashes_does_not_stop_the_run`（两个来源，第一个抛错 → `{"checked": 2, "error": 1, "unchanged": 1}` 且第二个仍被检查）、`test_the_watcher_numbers_versions_with_the_ledger`（删掉 `test_bump_version_scheme`，改断言账本的整数编号）。`backend/tests/test_github_sources.py`：新增 `test_importing_the_pending_commit_clears_the_review` 与 `test_importing_another_commit_keeps_the_pending_review`。`backend/scripts/probe_watch_refusal.py` 离线跑真 `check_source` 三次（拒绝 → 再问一次不重抓 → 新 commit 取代并清空等待）并打印快照原因与 `detail`。

@@ -31,11 +31,14 @@ function stageLabel(stage: string | null | undefined): string {
 
 // What a check actually did. ``checked`` is what older rows stored for all three
 // non-events, so it is labelled as history rather than guessed at (ADR-058).
+// ``review_required`` is not a failure: the watcher refused to import a draft
+// that does not pass the validator and is waiting for a human (ADR-062).
 const SOURCE_STATUS_LABELS: Record<string, string> = {
   imported: '已导入新版本',
   no_change: '已检查，策略无变化',
   unchanged: '未变化（同一 commit）',
   incomplete: '未完整读取，未导入',
+  review_required: '待人工审阅',
   error: '检查失败',
   checked: '已检查（旧记录）',
 }
@@ -48,6 +51,7 @@ function sourceStatusLabel(status: string | null | undefined): string {
 function sourceStatusTone(status: string | null | undefined): string {
   if (status === 'error') return 'error'
   if (status === 'incomplete') return 'error'
+  if (status === 'review_required') return 'wait'
   return 'muted'
 }
 
@@ -354,6 +358,20 @@ function snapshotExplanation(snapshot: GithubSnapshot | null): string {
       ? extraction.files_unparsed.map((f: Record<string, unknown>) => String(f.path)).join('、')
       : ''
     return `${files} 个 Python 文件下载到了但解析失败${names ? `（${names}）` : ''}，它们里面的规则无法进入草案；重读不会让它们变得可解析，所以这个 commit 已标记为处理过，不会自动导入。`
+  }
+  if (reason === 'requires_review') {
+    const detail = String(extraction.detail ?? '')
+    return `草案没有通过导入校验${detail ? `（${detail}）` : ''}：机器不会替你做这个决定。补上缺失的规则后人工导入这个 commit；自动化在此之前不会导入它，也不会重复抓取它（同一个 commit 的结论是一样的）。`
+  }
+  if (reason === 'import_failed') {
+    const detail = String(extraction.detail ?? '')
+    return `导入失败${detail ? `：${detail}` : ''}。这个 commit 没有标记为已处理，下一轮检查会重试。`
+  }
+  if (reason === 'no_linked_strategy') {
+    return '读取了这个 commit，但没有任何策略声明来源于这个仓库，所以没有可更新的版本。'
+  }
+  if (reason === 'dsl_unchanged') {
+    return '读取了这个 commit，抽取出的策略与最新版本一致，没有导入。'
   }
   if (reason === 'manual_import') return '这个 commit 是人工审核后导入的。'
   if (extraction.imported === true) return '已从这个 commit 生成新的策略版本。'
@@ -987,6 +1005,9 @@ onMounted(load)
                 <span v-else :class="sourceStatusTone(s.last_import_status)">
                   {{ sourceStatusLabel(s.last_import_status) }}
                 </span>
+                <span v-if="s.pending_review_commit" class="muted" style="display: block">
+                  待审阅 commit <code>{{ shortCommit(String(s.pending_review_commit)) }}</code>
+                </span>
               </td>
               <td>
                 <button class="ghost" :disabled="checkingSource === s.id" @click="checkSourceNow(s)">
@@ -1003,9 +1024,12 @@ onMounted(load)
                 <template v-else>
                   <p
                     :class="
-                      ['incomplete_analysis', 'unparseable_python'].includes(
-                        String(latestSnapshot(s)?.extraction?.reason ?? ''),
-                      )
+                      [
+                        'incomplete_analysis',
+                        'unparseable_python',
+                        'requires_review',
+                        'import_failed',
+                      ].includes(String(latestSnapshot(s)?.extraction?.reason ?? ''))
                         ? 'error'
                         : 'muted'
                     "

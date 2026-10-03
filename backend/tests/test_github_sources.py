@@ -89,6 +89,76 @@ def test_import_missing_source_404(client) -> None:
     assert client.get("/api/v1/importer/github/sources/999").status_code == 404
 
 
+def test_importing_the_pending_commit_clears_the_review(client, db_session) -> None:
+    """A human importing the commit the watcher refused ends the wait (ADR-062)."""
+
+    from app.domain.models import GitHubSource
+
+    db_session.add(
+        GitHubSource(
+            repository_url="https://github.com/bobvane/demo",
+            current_commit="oldsha",
+            pending_review_commit=_COMMIT,
+            is_watched=True,
+        )
+    )
+    db_session.commit()
+
+    response = client.post(
+        "/api/v1/importer/github/import",
+        json={
+            "repo_url": "https://github.com/bobvane/demo",
+            "name": "GIT Review Cleared",
+            "version": "1.0.0",
+            "dsl": _DSL,
+            "ref": "main",
+            "commit": _COMMIT,
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    db_session.expire_all()
+    source = db_session.query(GitHubSource).one()
+    assert source.current_commit == _COMMIT
+    assert source.pending_review_commit is None
+    listed = client.get("/api/v1/importer/github/sources").json()
+    assert listed[0]["pending_review_commit"] is None
+
+
+def test_importing_another_commit_keeps_the_pending_review(client, db_session) -> None:
+    """Only the reviewed commit ends the wait; a different revision is still unseen."""
+
+    from app.domain.models import GitHubSource
+
+    db_session.add(
+        GitHubSource(
+            repository_url="https://github.com/bobvane/demo",
+            current_commit="oldsha",
+            pending_review_commit="a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            is_watched=True,
+        )
+    )
+    db_session.commit()
+
+    response = client.post(
+        "/api/v1/importer/github/import",
+        json={
+            "repo_url": "https://github.com/bobvane/demo",
+            "name": "GIT Review Kept",
+            "version": "1.0.0",
+            "dsl": _DSL,
+            "ref": "main",
+            "commit": _COMMIT,
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    db_session.expire_all()
+    source = db_session.query(GitHubSource).one()
+    assert source.current_commit == _COMMIT
+    assert source.pending_review_commit == "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+
+
 def test_a_second_record_for_the_same_commit_updates_the_first(db_session) -> None:
     """Snapshots are unique per (source, commit), so later observations refresh.
 

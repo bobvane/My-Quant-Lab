@@ -302,6 +302,12 @@ textarea {
   font-size: 12.5px;
 }
 
+/* Something a human has to finish, and nothing is broken (ADR-062). */
+.wait {
+  color: var(--wait);
+  font-size: 12.5px;
+}
+
 .chart {
   width: 100%;
   height: 300px;

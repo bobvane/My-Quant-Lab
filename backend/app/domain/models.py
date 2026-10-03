@@ -784,6 +784,11 @@ class GitHubSource(Base, TimestampMixin):
     is_watched: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_import_status: Mapped[str | None] = mapped_column(String(32))
+    # The commit whose draft is waiting for a human. The watcher analysed it and
+    # refused to import it (a draft never invents exit rules, or the version ledger
+    # would not number it), so the row has to keep saying a review is outstanding
+    # instead of collapsing into "unchanged" on the next beat (ADR-062).
+    pending_review_commit: Mapped[str | None] = mapped_column(String(64))
 
     snapshots: Mapped[list[GitHubSnapshot]] = relationship(
         back_populates="source", cascade="all, delete-orphan"

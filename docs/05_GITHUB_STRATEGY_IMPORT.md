@@ -94,7 +94,7 @@ watcher 里这条区别决定了是否"记为已见"：上限造成的缺口是�
 
 策略版本一旦创建就不可修改，所以"这个名字的第几版"是一份**账本**，它的所有者是服务端，不是调用方。旧实现把这个决定推给了调用方：`GithubImportRequest.version` 直接默认 `"1.0.0"`，Web UI 更是在 `importReviewed` 里硬编码 `'1.0.0'`——于是同一个仓库第二次导入必然撞上 `version '1.0.0' already exists for this strategy`（422），而页面上没有任何地方能改版本号。调用方既看不到已有版本，也无从知道该填什么；它唯一能做的就是猜，猜错就失败。
 
-- `GithubImportRequest.version` 变成**可选**（`None` = 由服务端分配）。省略时 `import_strategy` 调用 `strategy_version_plan`（`app/data/strategy_service.py`），用 `next_version` 取**下一个空闲补丁号**：没有任何版本 → `1.0.0`；已有 `1.0.0` → `1.0.1`；已有 `1.0.0`/`1.0.9` → `1.0.10`。比较按 `major/minor/patch` 三个整数做，所以 `1.9.0` 之后是 `1.10.0` 而不是字符串比较得到的 `1.9.1`。
+- `GithubImportRequest.version` 变成**可选**（`None` = 由服务端分配）。省略时 `import_strategy` 调用 `strategy_version_plan`（`app/data/strategy_service.py`），用 `next_version` 取**下一个空闲补丁号**：没有任何版本 → `1.0.0`；已有 `1.0.0` → `1.0.1`；已有 `1.0.0`/`1.0.9` → `1.0.10`。比较按 `major/minor/patch` 三个整数做，所以同时存在 `1.9.0` 与 `1.10.0` 时下一个是 `1.10.1`，而按字符串比较会得到 `1.9.1`。
 - 账本里出现**读不成 `major.minor.patch` 的版本**（例如审阅者自己命名的 `v2-beta`）时，服务端**拒绝分配**（422，理由里点名那个版本），而不是发明一个可能撞车的号；此时调用方必须显式给版本号。人工命名的版本仍然合法，它只是不能被自动递增。
 - `GET /importer/github/versions?name=...` 在**写任何东西之前**回答"这个名字现在有什么、下一个会是什么"：`{name, slug, strategy_id, versions, next_version, can_assign, reason}`。UI 用它来（a）显示"将新建策略 / 将在策略 #N 上创建版本 x.y.z"，（b）在审阅者手填的版本号已经存在时直接禁用导入按钮——不再让人点下去才发现 422。
 - 导入响应新增 `version_assigned`（`true` = 服务端分配），`evidence_json` 与审计记录也记它。`version` 由审阅者命名时行为不变（重复仍然 422）。
@@ -161,6 +161,7 @@ old commit
 | `no_change` | 抓取并分析了一个新 commit，但抽出的 DSL 没有变化（或没有草案） | 推进 |
 | `imported` | 从新 commit 生成了新的策略版本 | 推进 |
 | `incomplete` | 读取不完整（还有 Python 文件没读到），拒绝无人值守导入 | 结构性缺口推进；瞬时缺口（`transient`）不推进，下轮重试 |
+| `review_required` | 草案没通过导入校验（或缺离场规则），等人工审阅 | 推进（同一 commit 结论相同，重抓无意义） |
 | `error` | 网络/解析失败，没有结论 | 不变 |
 
 在 v1.4.8 之前，`unchanged`、`no_change` 与「已检查但没有变化」这三种截然不同的结果**全部**被写成 `last_import_status = "checked"`，于是 UI 里一行「已检查」既可能是「没有任何新东西」，也可能是「抓取并分析过了，策略没变」——用户无法分辨 watcher 到底有没有干活。旧记录里残留的 `checked` 属于历史值，UI 明确标注为「已检查（旧记录）」，不猜测它的具体含义。
@@ -168,6 +169,31 @@ old commit
 `check_github_sources` 的汇总不再硬编码状态列表：它先返回 `checked`（本轮检查过的来源数），再把**本轮实际产生的每一种结果**按原样附上，因此汇总与 `check_source` 的词表不会各自漂移。
 
 原因（`imported` / `reason` / `transient` / `coverage` / `warnings`）写在 `GitHubSnapshot.extraction_json` 里，`GET /importer/github/sources/{id}/snapshots` 必须把它返回给调用方——只返回 commit 等于把「为什么是这个状态」留在数据库里，用户看到的就只是一个英文枚举。人工导入产生的快照同样记录 `{"imported": true, "reason": "manual_import"}`，不留空对象。
+
+### 7.2 草案不合格时无人值守的导入必须停下来说明（ADR-062）
+
+`dsl_builder` **从不生成离场规则**（§4.3），所以一份机器草案的 `exit` 永远是 `{}`，`parse_spec` 必然拒绝它。在 v1.5.2 之前，`check_source` 仍然直接把这份草案交给 `create_strategy_version`，于是：
+
+- `ValueError: invalid strategy DSL -> : Value error, at least one exit rule is required` 从 `check_source` 里逃出来，Celery 任务崩掉；
+- 不写快照、不更新 `last_import_status`，来源看起来「什么都没发生」；
+- `check_github_sources` 的循环在第一个坏来源处中断，**排在它后面的来源再也不会被检查**。
+
+触发条件不是罕见输入：只要一个策略是人工从 GitHub 导入的（`Strategy.source_url == GitHubSource.repository_url`），上游一旦有新 commit 而草案与最新版本不同，就必然走到这条路径。
+
+决策：
+
+| # | 规则 |
+| --- | --- |
+| 1 | 无人值守导入必须问人工导入路径**同一个裁决者**：`strategy_service.strategy_dsl_problem(dsl)`（`parse_spec` + `validate_strategy`），在写任何东西之前先问。 |
+| 2 | 裁决不通过时结果记为 `review_required`：快照 `reason="requires_review"`、`detail` 是裁决原话、`transient=false`；`last_import_status="review_required"`。 |
+| 3 | 该 commit 记进新列 `GitHubSource.pending_review_commit`。`current_commit` 一并推进（同一个 commit 重抓也只会得到同一个结论），但「还在等人工」由独立列表达——否则下一次 beat 会因为 `head == current_commit` 报 `unchanged`，把等待抹掉。 |
+| 4 | 等待中的 commit 不再抓取：`check_source` 先比 `pending_review_commit == head`，命中即返回 `review_required`（只花一次 HEAD 请求，不重新 fetch）。 |
+| 5 | 人工导入**那个** commit 会清空 `pending_review_commit`；导入别的 commit 不清空——等待是针对某个修订的，不是针对仓库的。 |
+| 6 | 更新的 commit 取代旧等待：head 变了就走常规路径，若这次能导入则同时清空等待。 |
+| 7 | 版本号交给账本：watcher 删掉自己的 `_bump_version`（它用的是项目**发布**节奏，`1.0.9 → 1.1.0`），改用 `strategy_service.next_version`（整数补丁，`1.0.9 → 1.0.10`），同一列只有一套规则。 |
+| 8 | 导入期任何异常都不再逃出 `check_source`：记录 `error` + 快照 `reason="import_failed"` + `detail`，且**不推进** `current_commit`（下一轮重试）；`check_github_sources` 也逐来源兜底，一个来源崩掉只记一次 `error`，后面的来源照常检查。 |
+
+UI 侧：状态列显示「待人工审阅」并在其下给出待审阅 commit 的短 SHA；快照详情用 `extraction.detail` 解释「补上缺失的规则后人工导入这个 commit，自动化在此之前不会导入它，也不会重复抓取它」。
 
 ## 8. License handling
 

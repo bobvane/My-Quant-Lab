@@ -201,21 +201,44 @@ def purge_resources() -> dict:
     return {"deleted": deleted}
 
 
-def _bump_version(version: str) -> str:
-    """1.0.9 -> 1.0.10, 1.0.10 -> 1.1.0 (project scheme)."""
+def _record_review(
+    db: Any,
+    source: Any,
+    head: str,
+    draft: dict[str, Any],
+    coverage: dict[str, Any],
+    warnings: list[str],
+    detail: str,
+) -> str:
+    """Record "a human has to finish this commit" without creating a version (ADR-062).
 
-    parts = [int(p) for p in str(version).split(".")]
-    while len(parts) < 3:
-        parts.append(0)
-    major, minor, patch = parts[:3]
-    patch += 1
-    if patch >= 10:
-        patch = 0
-        minor += 1
-        if minor >= 10:
-            minor = 0
-            major += 1
-    return f"{major}.{minor}.{patch}"
+    The commit is marked as seen (the same commit yields the same verdict, so
+    re-fetching it would only repeat the request) and remembered in
+    ``pending_review_commit`` so the row keeps saying a review is outstanding on
+    the next run instead of collapsing into "unchanged".
+    """
+
+    from app.data.github_source_service import record_snapshot
+    from app.data.strategy_service import immutable_hash
+
+    source.pending_review_commit = head
+    source.current_commit = head
+    source.last_import_status = "review_required"
+    record_snapshot(
+        db,
+        source.id,
+        head,
+        immutable_hash(draft, "review"),
+        {
+            "imported": False,
+            "reason": "requires_review",
+            "detail": detail,
+            "transient": False,
+            "coverage": coverage,
+            "warnings": warnings,
+        },
+    )
+    return "review_required"
 
 
 def check_source(db: Any, source: Any) -> str:
@@ -225,7 +248,9 @@ def check_source(db: Any, source: Any) -> str:
     is the one already seen, nothing was fetched), ``"no_change"`` (a new commit
     was fetched and analysed, but the DSL did not change), ``"imported"``,
     ``"incomplete"`` (a read gap, or a Python file that did not parse, left rules
-    unknown) or ``"error"``.
+    unknown), ``"review_required"`` (the draft cannot be imported without a human:
+    it failed the same check the manual import path applies, or the version ledger
+    refused to number it) or ``"error"``.
 
     ``source.last_import_status`` used to collapse all three non-events into
     ``"checked"``, which left a user staring at a row unable to tell "nothing to
@@ -238,7 +263,12 @@ def check_source(db: Any, source: Any) -> str:
     from sqlalchemy import select
 
     from app.data.github_source_service import record_snapshot
-    from app.data.strategy_service import create_strategy_version, immutable_hash
+    from app.data.strategy_service import (
+        create_strategy_version,
+        immutable_hash,
+        strategy_dsl_problem,
+    )
+    from app.data.strategy_service import next_version as assign_next_version
     from app.domain.models import Strategy, StrategyVersion
     from app.importer import (
         GitHubClient,
@@ -248,6 +278,7 @@ def check_source(db: Any, source: Any) -> str:
         coverage_warnings,
         parse_repo_url,
     )
+    from app.importer.sanitize import sanitize_untrusted_text
 
     source.last_checked_at = dt.datetime.now(tz=dt.UTC)
     try:
@@ -258,6 +289,13 @@ def check_source(db: Any, source: Any) -> str:
         logger.warning("github watch failed for %s: %s", source.repository_url, exc)
         source.last_import_status = "error"
         return "error"
+    if source.pending_review_commit and source.pending_review_commit == head:
+        # A commit that is waiting for a human is not "seen": the row has to keep
+        # saying so until the review happens, without re-fetching the repository on
+        # every beat (ADR-062). Note this runs before the "nothing new" check
+        # below, which would otherwise overwrite the state with "unchanged".
+        source.last_import_status = "review_required"
+        return "review_required"
     if not head or head == source.current_commit:
         source.last_import_status = "unchanged"
         return "unchanged"
@@ -315,41 +353,98 @@ def check_source(db: Any, source: Any) -> str:
         )
         return "incomplete"
 
+    problem = strategy_dsl_problem(draft)
+    if problem:
+        # Unattended import: the machine will not finish what a human has to
+        # finish. No exit rule is ever invented for a draft (docs/05 §4.3), so a
+        # repository that declares entries only produces a draft the DSL parser
+        # rejects; handing that to ``create_strategy_version`` raised out of this
+        # function and killed the whole scheduled run, leaving no snapshot, no
+        # status and every later source unchecked (ADR-062). Refuse it, name the
+        # reason, and wait for a human.
+        return _record_review(db, source, head, draft, coverage, warnings, problem)
+
     strategies = db.scalars(
         select(Strategy).where(Strategy.source_url == source.repository_url)
     ).all()
-    imported = False
-    next_version = "1.0.0"
-    for strategy in strategies:
-        latest = db.scalars(
-            select(StrategyVersion)
-            .where(StrategyVersion.strategy_id == strategy.id)
-            .order_by(StrategyVersion.id.desc())
-            .limit(1)
-        ).first()
-        if latest and latest.dsl_json == draft:
-            continue
-        next_version = _bump_version(latest.version) if latest else "1.0.0"
-        create_strategy_version(
-            db,
-            strategy,
-            version=next_version,
-            dsl=draft,
-            source_commit=head,
-            source_url=source.repository_url,
-            evidence={"importer": "github-watch", "repository": source.repository_url, "ref": head},
-            make_current=True,
-        )
-        imported = True
+    planned: list[tuple[Any, str]] = []
+    try:
+        for strategy in strategies:
+            latest = db.scalars(
+                select(StrategyVersion)
+                .where(StrategyVersion.strategy_id == strategy.id)
+                .order_by(StrategyVersion.id.desc())
+                .limit(1)
+            ).first()
+            if latest and latest.dsl_json == draft:
+                continue
+            existing_versions = db.scalars(
+                select(StrategyVersion.version).where(StrategyVersion.strategy_id == strategy.id)
+            ).all()
+            planned.append((strategy, assign_next_version(existing_versions)))
+    except ValueError as exc:
+        # The ledger owns the numbering (ADR-061): a version it cannot read is a
+        # question for a human, not something the watcher may guess at.
+        return _record_review(db, source, head, draft, coverage, warnings, str(exc))
 
+    imported_versions: list[str] = []
+    try:
+        for strategy, version in planned:
+            create_strategy_version(
+                db,
+                strategy,
+                version=version,
+                dsl=draft,
+                source_commit=head,
+                source_url=source.repository_url,
+                evidence={
+                    "importer": "github-watch",
+                    "repository": source.repository_url,
+                    "ref": head,
+                },
+                make_current=True,
+            )
+            imported_versions.append(version)
+    except Exception as exc:  # noqa: BLE001 - one bad strategy must not stop the watch
+        logger.warning("github watch import failed for %s: %s", source.repository_url, exc)
+        source.last_import_status = "error"
+        record_snapshot(
+            db,
+            source.id,
+            head,
+            immutable_hash(draft, "error"),
+            {
+                "imported": False,
+                "reason": "import_failed",
+                "detail": sanitize_untrusted_text(str(exc)),
+                "coverage": coverage,
+                "warnings": warnings,
+            },
+        )
+        return "error"
+
+    imported = bool(imported_versions)
     source.current_commit = head
+    source.pending_review_commit = None  # nothing is owed for a commit that landed
     source.last_import_status = "imported" if imported else "no_change"
+    if imported:
+        reason = "imported"
+    elif strategies:
+        reason = "dsl_unchanged"
+    else:
+        reason = "no_linked_strategy"
     record_snapshot(
         db,
         source.id,
         head,
-        immutable_hash(draft, next_version),
-        {"imported": imported, "coverage": coverage, "warnings": warnings},
+        immutable_hash(draft, imported_versions[-1] if imported_versions else "no_change"),
+        {
+            "imported": imported,
+            "reason": reason,
+            "versions": imported_versions,
+            "coverage": coverage,
+            "warnings": warnings,
+        },
     )
     return "imported" if imported else "no_change"
 
@@ -366,7 +461,18 @@ def check_github_sources() -> dict:
     with session_scope() as db:
         sources = db.scalars(select(GitHubSource).where(GitHubSource.is_watched.is_(True))).all()
         for source in sources:
-            status = check_source(db, source)
+            url = source.repository_url
+            try:
+                status = check_source(db, source)
+            except Exception as exc:  # noqa: BLE001 - one source must not stop the rest
+                # check_source handles its own failures; this is the last resort, so
+                # a scheduled run always returns a summary with every source
+                # accounted for instead of dying on the first bad one. The rollback
+                # also drops this run's uncommitted updates, which the next run
+                # rebuilds from the commits themselves (ADR-062).
+                logger.warning("github watch crashed for %s: %s", url, exc)
+                db.rollback()
+                status = "error"
             outcomes[status] = outcomes.get(status, 0) + 1
         # ``checked`` stays the number of sources examined; every outcome the run
         # actually produced is reported beside it, so the summary cannot drift

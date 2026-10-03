@@ -28,6 +28,7 @@ __all__ = [
     "parse_spec",
     "record_audit",
     "slugify",
+    "strategy_dsl_problem",
     "strategy_version_plan",
 ]
 
@@ -92,6 +93,29 @@ def next_version(existing: Iterable[str]) -> str:
 
     major, minor, patch = max(parsed)
     return f"{major}.{minor}.{patch + 1}"
+
+
+def strategy_dsl_problem(dsl: dict[str, Any]) -> str | None:
+    """Return why this DSL could not be imported unattended, or ``None`` if it can.
+
+    The watcher imports with no human in the loop, so it has to ask the same judge
+    the human import path asks: ``parse_spec`` then ``validate_strategy``. Asking
+    first is what keeps an unimportable draft from being handed to
+    ``create_strategy_version`` inside a Celery task, where the ``ValueError`` used
+    to escape ``check_source`` and kill the whole scheduled run (ADR-062).
+    """
+
+    try:
+        spec = parse_spec(dsl)
+    except ValueError as exc:
+        return str(exc)
+
+    report = validate_strategy(spec)
+    if report.is_valid:
+        return None
+    return "invalid strategy DSL -> " + "; ".join(
+        f"{issue.path or ''}: {issue.message}".lstrip(": ") for issue in report.errors
+    )
 
 
 def strategy_version_plan(db: Session, name: str) -> dict[str, Any]:

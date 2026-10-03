@@ -439,13 +439,29 @@ findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
   structural and is marked as seen.
 - `last_import_status` uses the watcher's outcome vocabulary (ADR-058): `unchanged`
   (the commit was already seen, nothing was fetched), `no_change` (a new commit was
-  fetched and analysed, the DSL did not change), `imported`, `incomplete`, `error`.
-  Rows written before v1.4.8 still say `checked`, which collapsed all three non-events;
-  clients should render it as a historical value rather than reinterpreting it.
+  fetched and analysed, the DSL did not change), `imported`, `incomplete`,
+  `review_required`, `error`. Rows written before v1.4.8 still say `checked`, which
+  collapsed all three non-events; clients should render it as a historical value rather
+  than reinterpreting it.
+- `review_required` (ADR-062) means the watcher fetched a new commit, built a draft, and
+  refused to import it because `strategy_dsl_problem` (the gate the manual import path
+  uses: `parse_spec` + `validate_strategy`) rejected it — normally because the builder
+  never invents exit rules, so the draft has an empty `exit`. The run does not raise, the
+  refusal is recorded as a snapshot, and the commit is stored in
+  `pending_review_commit`: the next check of that same commit returns `review_required`
+  from a single HEAD request without re-fetching. Every source response
+  (`GET /importer/github/sources`, `.../sources/{id}`, `.../sources/{id}/check`) carries
+  `pending_review_commit` (null when nothing is waiting). Importing that commit through
+  `POST /importer/github/import` clears it; importing a different commit does not — the
+  wait belongs to one revision.
 - `GET /importer/github/sources/{id}/snapshots` returns `id`, `source_id`, `commit`,
   `content_hash`, `fetched_at` and `extraction`. `extraction` is the stored reason
   (`imported`, `reason`, `transient`, `coverage`, `files_unparsed`, `warnings`);
-  snapshots written before v1.4.8 from the manual import path may be `{}`.
+  `reason` is one of `manual_import`, `imported`, `dsl_unchanged`, `no_linked_strategy`,
+  `incomplete_analysis`, `unparseable_python`, `requires_review`, `import_failed`.
+  `requires_review` and `import_failed` also carry `detail`, the gate's or the
+  exception's own words (sanitised), because "waiting for a human" has to say what for.
+  Snapshots written before v1.4.8 from the manual import path may be `{}`.
 
 ## GitHub Snapshots
 

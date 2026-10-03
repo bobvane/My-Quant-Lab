@@ -66,6 +66,10 @@ def _persist_github_source(
     ``commit`` is a SHA, not a ref: the source row and the snapshot both have to
     name the revision a human actually reviewed, otherwise the watcher compares a
     branch name with a SHA and the "source commit" column shows a moving target.
+
+    Importing the commit the watcher was waiting for also clears
+    ``pending_review_commit``: the review it was asking for has just happened
+    (ADR-062).
     """
 
     url = f"https://github.com/{owner}/{repo}"
@@ -77,6 +81,11 @@ def _persist_github_source(
     else:
         source.current_commit = commit
         source.last_checked_at = dt.datetime.now(tz=dt.UTC)
+        if source.pending_review_commit == commit:
+            # The human just did the review the watcher was waiting for. A pending
+            # marker that points at some *other* commit stays: that revision is
+            # still unreviewed (ADR-062).
+            source.pending_review_commit = None
     # One row per (source, commit): re-importing or re-checking a commit has to
     # refresh its explanation, not insert a duplicate (ADR-058).
     record_snapshot(
@@ -271,6 +280,9 @@ def list_sources(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
             "is_watched": row.is_watched,
             "last_checked_at": row.last_checked_at,
             "last_import_status": row.last_import_status,
+            # A commit whose draft is waiting for a human reviewer. It is not a
+            # per-run outcome, so the row has to carry it (ADR-062).
+            "pending_review_commit": row.pending_review_commit,
         }
         for row in rows
     ]
@@ -293,6 +305,7 @@ def get_source(source_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
         "is_watched": row.is_watched,
         "last_checked_at": row.last_checked_at,
         "last_import_status": row.last_import_status,
+        "pending_review_commit": row.pending_review_commit,
     }
 
 
@@ -327,6 +340,7 @@ def check_source_now(source_id: int, db: Session = Depends(get_db)) -> dict[str,
         "current_commit": row.current_commit,
         "head": head,
         "has_update": new,
+        "pending_review_commit": row.pending_review_commit,
     }
 
 

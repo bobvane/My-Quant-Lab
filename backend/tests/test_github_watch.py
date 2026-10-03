@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
+
 from app.data.github_source_service import record_snapshot
 from app.domain.models import GitHubSnapshot, GitHubSource, Strategy, StrategyVersion
 from app.importer.extract import AnalysisResult, SkippedFile
 from app.importer.github_client import FetchCoverage
-from app.workers.tasks import _bump_version, check_source
+from app.workers.tasks import check_source
 
 _REPO = "https://github.com/bobvane/demo"
 _DRAFT = {
@@ -17,6 +19,9 @@ _DRAFT = {
     "exit": {"long": {"any": [{"op": "lt", "left": "close", "right": "ema20"}]}},
     "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5},
 }
+# What the importer actually produces: exit rules are never invented, so the
+# draft has an empty exit block and the DSL parser rejects it (ADR-062).
+_EXIT_LESS_DRAFT = {**_DRAFT, "exit": {}}
 
 
 def _complete_coverage(**overrides) -> FetchCoverage:
@@ -37,22 +42,17 @@ def _complete_coverage(**overrides) -> FetchCoverage:
     return FetchCoverage(**fields)
 
 
-def test_bump_version_scheme() -> None:
-    assert _bump_version("1.0.0") == "1.0.1"
-    assert _bump_version("1.0.8") == "1.0.9"
-    assert _bump_version("1.0.9") == "1.1.0"
-    assert _bump_version("1.9.9") == "2.0.0"
-
-
 def _install_fake_client(
     monkeypatch,
     head: str,
     coverage: FetchCoverage | None = None,
     findings: AnalysisResult | None = None,
+    draft: dict | None = None,
 ):
     import app.importer as importer
 
     report = coverage or _complete_coverage()
+    drafted = _DRAFT if draft is None else draft
 
     class _FakeClient:
         def __init__(self) -> None:
@@ -68,7 +68,7 @@ def _install_fake_client(
     monkeypatch.setattr(
         importer, "analyze_repository_files", lambda files: findings or AnalysisResult()
     )
-    monkeypatch.setattr(importer, "build_draft_dsl", lambda meta, findings: (_DRAFT, []))
+    monkeypatch.setattr(importer, "build_draft_dsl", lambda meta, findings: (drafted, []))
 
 
 def test_check_source_imports_new_commit(db_session, monkeypatch) -> None:
@@ -309,6 +309,159 @@ def test_re_checking_a_commit_refreshes_its_snapshot(db_session, monkeypatch) ->
     assert snapshots[0].extraction_json["transient"] is True
 
 
+def test_the_watcher_numbers_versions_with_the_ledger() -> None:
+    """One numbering rule per ledger, not a second one for the watcher (ADR-061).
+
+    ``_bump_version`` used the project's *release* cadence (a tenth patch rolls the
+    minor on), so the watcher wrote the same column ``strategy_service`` numbers,
+    with different arithmetic: 1.0.9 became 1.1.0 for the watcher and 1.0.10 for
+    the ledger. It is gone; the ledger decides.
+    """
+
+    from app.data.strategy_service import next_version
+
+    assert next_version([]) == "1.0.0"
+    assert next_version(["1.0.9"]) == "1.0.10"
+    # Integer comparison, not string comparison: "1.9.0" sorts above "1.10.0" as
+    # text, so the next version used to be 1.9.1 while another strategy already
+    # had 1.10.0.
+    assert next_version(["1.9.0"]) == "1.9.1"
+    assert next_version(["1.9.0", "1.10.0"]) == "1.10.1"
+
+
+def test_the_import_gate_names_what_blocks_an_unattended_import() -> None:
+    """One gate for both import paths, and it says which rule refused (ADR-062).
+
+    ``parse_spec`` catches a draft that cannot be a strategy at all; a draft that
+    parses but fails validation was the quiet case, because the validator only
+    records it and the ledger would still store an ``invalid`` row.
+    """
+
+    from app.data.strategy_service import strategy_dsl_problem
+
+    assert strategy_dsl_problem(_DRAFT) is None
+    assert strategy_dsl_problem(_EXIT_LESS_DRAFT) == (
+        "invalid strategy DSL -> : Value error, at least one exit rule is required"
+    )
+
+    future = copy.deepcopy(_DRAFT)
+    future["entry"] = {"long": {"all": [{"op": "gt", "left": "close", "right": "future_close"}]}}
+    problem = strategy_dsl_problem(future) or ""
+    assert problem.startswith("invalid strategy DSL -> entry.long.right:")
+    assert "unavailable future data" in problem
+
+
+def test_an_exit_less_draft_is_refused_instead_of_crashing(db_session, monkeypatch) -> None:
+    """The watcher must be able to say "a human has to finish this" (ADR-062).
+
+    No exit rule is ever invented for a draft, so every draft the importer builds
+    fails ``parse_spec``. Handing it to ``create_strategy_version`` raised out of
+    ``check_source``: the scheduled run died, no snapshot was written, no status
+    was stored, and every source after this one was never checked. The refusal is
+    now the recorded outcome.
+    """
+
+    _install_fake_client(monkeypatch, "newsha", draft=_EXIT_LESS_DRAFT)
+    source = _seed_importable_source(db_session)
+
+    assert check_source(db_session, source) == "review_required"
+    assert source.last_import_status == "review_required"
+    assert source.pending_review_commit == "newsha"
+    assert source.current_commit == "newsha"  # the same commit yields the same verdict
+    assert db_session.query(StrategyVersion).count() == 1  # nothing was imported
+    db_session.commit()
+    snapshot = db_session.query(GitHubSnapshot).one()
+    assert snapshot.extraction_json["reason"] == "requires_review"
+    assert "at least one exit rule is required" in snapshot.extraction_json["detail"]
+    assert snapshot.extraction_json["imported"] is False
+    assert snapshot.extraction_json["transient"] is False
+
+
+def test_a_pending_review_survives_the_next_run_without_refetching(db_session, monkeypatch) -> None:
+    """The wait is remembered, and asking again costs one request, not a fetch.
+
+    ``current_commit`` advances when a commit is refused, so a plain
+    "head == current_commit" check would report ``unchanged`` and erase the fact
+    that a review is outstanding (ADR-062).
+    """
+
+    import app.importer as importer
+
+    class _NoFetch:
+        def __init__(self) -> None:
+            pass
+
+        def get_head_commit(self, owner: str, repo: str) -> str:
+            return "newsha"
+
+        def fetch_repository(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("a commit waiting for review must not be re-fetched")
+
+    monkeypatch.setattr(importer, "GitHubClient", _NoFetch)
+    source = GitHubSource(
+        repository_url=_REPO,
+        current_commit="newsha",
+        pending_review_commit="newsha",
+        is_watched=True,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    assert check_source(db_session, source) == "review_required"
+    assert source.last_import_status == "review_required"
+    assert db_session.query(GitHubSnapshot).count() == 0
+    assert db_session.query(StrategyVersion).count() == 0
+
+
+def test_a_new_commit_clears_a_review_that_was_never_done(db_session, monkeypatch) -> None:
+    """A newer commit supersedes the one nobody reviewed, and is imported normally."""
+
+    _install_fake_client(monkeypatch, "newer")
+    source = _seed_importable_source(db_session)
+    source.pending_review_commit = "newsha"
+    db_session.commit()
+
+    assert check_source(db_session, source) == "imported"
+    assert source.pending_review_commit is None
+    assert source.current_commit == "newer"
+
+
+def test_an_import_that_raises_is_recorded_not_raised(db_session, monkeypatch) -> None:
+    """An unexpected failure is an outcome, not the end of the scheduled run."""
+
+    import app.data.strategy_service as strategy_service
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("ledger exploded")
+
+    _install_fake_client(monkeypatch, "newsha")
+    source = _seed_importable_source(db_session)
+    monkeypatch.setattr(strategy_service, "create_strategy_version", _boom)
+
+    assert check_source(db_session, source) == "error"
+    assert source.last_import_status == "error"
+    assert source.current_commit == "oldsha"  # not seen: the next run retries
+    db_session.commit()
+    snapshot = db_session.query(GitHubSnapshot).one()
+    assert snapshot.extraction_json["reason"] == "import_failed"
+    assert "ledger exploded" in snapshot.extraction_json["detail"]
+
+
+def test_a_source_with_nothing_linked_says_so(db_session, monkeypatch) -> None:
+    """Watching a repository nobody imported is not "the DSL did not change"."""
+
+    _install_fake_client(monkeypatch, "newsha")
+    source = GitHubSource(repository_url=_REPO, current_commit="oldsha", is_watched=True)
+    db_session.add(source)
+    db_session.commit()
+
+    assert check_source(db_session, source) == "no_change"
+    db_session.commit()
+    snapshot = db_session.query(GitHubSnapshot).one()
+    assert snapshot.extraction_json["reason"] == "no_linked_strategy"
+    assert snapshot.extraction_json["versions"] == []
+
+
 def test_the_task_summary_names_the_statuses_the_run_produced(db_session, monkeypatch) -> None:
     """The summary is derived from the run, not a hardcoded list (ADR-058).
 
@@ -342,6 +495,52 @@ def test_the_task_summary_names_the_statuses_the_run_produced(db_session, monkey
 
     assert summary["checked"] == 2
     assert summary["unchanged"] == 2
+
+
+def test_a_source_that_crashes_does_not_stop_the_run(db_session, monkeypatch) -> None:
+    """The beat task always returns a summary, with the crash counted (ADR-062).
+
+    A handler that raises used to end the run: the sources after the broken one
+    were never examined and the operator got an exception instead of a report.
+    """
+
+    from contextlib import contextmanager
+
+    import app.workers.tasks as tasks
+
+    _install_fake_client(monkeypatch, "oldsha")
+    for slug in ("demo-a", "demo-b"):
+        db_session.add(
+            GitHubSource(
+                repository_url=f"https://github.com/bobvane/{slug}",
+                current_commit="oldsha",
+                is_watched=True,
+            )
+        )
+    db_session.commit()
+
+    real = tasks.check_source
+    calls: list[str] = []
+
+    def _sometimes_crash(db, source):  # noqa: ANN001, ANN202
+        calls.append(source.repository_url)
+        if source.repository_url.endswith("demo-a"):
+            raise RuntimeError("boom")
+        return real(db, source)
+
+    @contextmanager
+    def _scope():  # noqa: ANN202 - test double for session_scope()
+        yield db_session
+
+    monkeypatch.setattr(tasks, "session_scope", _scope)
+    monkeypatch.setattr(tasks, "check_source", _sometimes_crash)
+
+    summary = tasks.check_github_sources()
+
+    assert summary["checked"] == 2
+    assert summary["error"] == 1
+    assert summary["unchanged"] == 1
+    assert len(calls) == 2  # the second source was still checked
 
 
 def test_a_fetch_that_ran_out_of_time_is_retried_next_run(db_session, monkeypatch) -> None:

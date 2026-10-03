@@ -839,7 +839,7 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ key, value }),
     }),
-  audit: () => request<{ total: number; events: Array<Record<string, unknown>> }>('/settings/audit'),
+  audit: () => request<{ total: number; events: Array<Record<string, unknown>> }>('/audit/logs'),
   analyzeGithubRepo: (
     repoUrl: string,
     ref?: string,

@@ -493,10 +493,17 @@ def test_settings_never_return_secrets(client) -> None:
 
 
 def test_audit_log_records_events(client) -> None:
-    client.post("/api/v1/strategies", json={"name": "Audited"})
-    audit = client.get("/api/v1/settings/audit")
+    strategy = client.post("/api/v1/strategies", json={"name": "Audited"}).json()
+    client.post(
+        f"/api/v1/strategies/{strategy['id']}/versions",
+        json=StrategyVersionCreate(version="1.0.0", dsl=DSL).model_dump(),
+    )
+    audit = client.get("/api/v1/audit/logs")
     assert audit.status_code == 200
-    assert audit.json()["total"] >= 0
+    body = audit.json()
+    assert body["total"] >= 1
+    assert any(e["event_type"] == "strategy_version_created" for e in body["events"])
+    assert all("actor" in e for e in body["events"])
 
 
 def test_no_broker_endpoint_exists(client) -> None:

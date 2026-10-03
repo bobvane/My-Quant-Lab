@@ -503,10 +503,15 @@ findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
 `GET /audit/logs`
 `GET /audit/logs/entity/{entity_type}/{entity_id}`
 
+- `total` 是「符合条件的事件总数」，不是这一页的条数：`limit` 只减 `events`，不减 `total`，
+  所以调用方能分清「账本里只有 3 条」和「只取回了 3 条」（ADR-070）。
+- 每条事件都带 `actor`（`system` 表示定时任务或服务自己写的，`user` 表示由人工动作写出）。
 - `action` 是审计记录里「这条记录说了什么发生了」的字段，界面直接渲染它。
   对 `strategy_lifecycle_changed` 它只有四个取值：`promote`（流水线内前进一步）、
   `degrade`（被标记为降级）、`retire`（人工退休）、`restore`（从终态回到流水线）。
   `retired` 不是「前进到最高阶段」，所以退休**不得**记为 `promote`（ADR-063）。
+- 审计只有这一个出口。`GET /settings/audit` 曾经返回同一批记录、但**不带** `actor`，
+  已删除（ADR-070）——同一个事实有两个出口，就会有两个慢慢长歪的答案。
 
 ## System Settings
 

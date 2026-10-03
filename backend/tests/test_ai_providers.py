@@ -155,7 +155,7 @@ def test_delete_removes_unused_provider(client) -> None:
 
 def test_audit_records_provider_changes_without_secrets(client) -> None:
     client.post("/api/v1/settings/ai/providers", json=_create_payload())
-    audit = client.get("/api/v1/settings/audit").json()
+    audit = client.get("/api/v1/audit/logs").json()
     events = [e for e in audit["events"] if e["event_type"].startswith("ai_provider")]
     assert events
     assert "sk-super-secret-value" not in str(audit)

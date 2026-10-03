@@ -199,7 +199,7 @@ def test_update_rejects_bad_url_and_quiet_hours(client) -> None:
 
 def test_audit_records_config_change_without_secrets(client) -> None:
     client.put("/api/v1/notifications/config", json={"webhook_url": URL})
-    audit = client.get("/api/v1/settings/audit").json()
+    audit = client.get("/api/v1/audit/logs").json()
     events = [e for e in audit["events"] if e["event_type"] == "notification_config_updated"]
     assert events
     assert URL not in str(audit)

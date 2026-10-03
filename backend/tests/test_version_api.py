@@ -36,7 +36,7 @@ def test_activate_version_switches_current(client) -> None:
     refreshed = client.get(f"/api/v1/strategy-versions/{v2['id']}").json()
     assert refreshed["is_current"] is False
 
-    audit = client.get("/api/v1/settings/audit").json()
+    audit = client.get("/api/v1/audit/logs").json()
     assert any(e["event_type"] == "strategy_version_activated" for e in audit["events"])
 
 

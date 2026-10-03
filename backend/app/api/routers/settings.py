@@ -253,30 +253,6 @@ def test_new_provider(payload: dict[str, Any]) -> dict[str, Any]:
     return test_connection(spec.base_url, spec.api_key)
 
 
-@router.get("/audit", summary="Recent audit events")
-def audit_log(db: Session = Depends(get_db), limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    from app.domain.models import AuditLog
-
-    rows = db.scalars(
-        select(AuditLog).order_by(AuditLog.id.desc()).limit(min(limit, 500)).offset(offset)
-    ).all()
-    return {
-        "total": len(rows),
-        "events": [
-            {
-                "id": r.id,
-                "event_type": r.event_type,
-                "entity_type": r.entity_type,
-                "entity_id": r.entity_id,
-                "action": r.action,
-                "payload": r.payload_json,
-                "created_at": r.created_at,
-            }
-            for r in rows
-        ],
-    }
-
-
 @router.get("/ghostfolio/test", summary="Test Ghostfolio connection")
 def test_ghostfolio() -> dict[str, Any]:
     from app.data.ghostfolio import GhostfolioAdapter, GhostfolioError

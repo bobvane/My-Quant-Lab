@@ -1650,3 +1650,28 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 测试：
   - `backend/tests/test_health_probe.py`（**13 条**）：上限被传进 `connection_for_read`/`ensure_connection`/`ping`（这条是本次缺陷的回归守卫——旧代码是直接 `control.ping(timeout=1.0)`）；broker 不通 → `"unknown"` 且从不 ping；连上了没人答 → `"0 online"`；ping 抛错 → `"unknown"`；关闭失败不改变结论；redis 探针的 `socket_connect_timeout`/`socket_timeout` 被传下去；Redis 拒连 → `"unavailable"`；`/health` 的键集合与 `workers` 词表三种取值不变；预热按 `redis → workers` 顺序各跑一次；预热抛错被吞且线程结束；`create_app()` 进入 lifespan 时确实调用预热（monkeypatch `app.api.main.warm_dependency_probes`）。
   - `backend/scripts/probe_health_latency.py`：修复前打出 `workers -> unknown in 11.76s`、合计 `15.10s`、`RESULT: failures`；修复后 `RESULT: every dependency probe answers inside its budget`。
+
+## ADR-070：一个事实只有一个出口（删除 `GET /settings/audit`、`total` 必须真的是总数）
+
+- 背景：
+  - 给 v1.5.4 的 NAS 部署做体检时对端点逐个探查，发现同一个账本有**两个出口**：`GET /settings/audit`（`backend/app/api/routers/settings.py:256`）与 `GET /audit/logs`（`backend/app/api/routers/audit.py:17`）返回同一批 **44 行**记录。前者**不带** `actor`，后者带；`docs/12_API_SPEC.md` 的 §Audit Logs 只记录了后者；前端读的却是前者（`frontend/src/api.ts` 的 `audit()`，`frontend/src/views/SettingsView.vue` 渲染）。
+  - 两个出口各自手写一遍序列化字典，所以已经分叉：复制出来的那份丢了 `actor`——而「谁做的」是审计日志的第一个问题。改一处不会改另一处，两个答案只会越差越远。
+  - 两个出口的 `total` 都是 `total: len(rows)`：`limit=2` 时 `total` 也是 2，于是「账本里一共有多少条」在 API 上**无法回答**——用一个页长冒充总数。`/settings/audit` 连参数校验都没有（`min(limit, 500)`，负数会直接传进 SQL），而 `/audit/logs` 有 `Query(ge=1, le=500)`。
+- 决策：
+  1. 审计只留一个出口：`GET /audit/logs` 与 `GET /audit/logs/entity/{entity_type}/{entity_id}`（也就是 docs/12 已经记录的那两个）。**删除** `GET /settings/audit`，不做别名、不做转发——转发只会让旧路径继续存在、继续被调用，重复就还在。
+  2. `total` 由 `SELECT count(*)`（与 `events` 用同一个 `where`）回答，不再用 `len(rows)`。`limit`/`offset` 只影响 `events`。
+  3. 前端改读 `/audit/logs`（`frontend/src/api.ts` 的 `audit()`）。
+  4. 审计表新增「操作者」列渲染 `actor`，标题同时写「最近 N 条，共 M 条」，让 `total` 在界面上也有兑现，而不是只存在于 JSON 里。
+  5. 把审计当断言工具的 4 个测试（`test_version_api.py`、`test_notifications.py`、`test_ai_providers.py`、`test_api.py`）改读 `/audit/logs`；其中 `test_api.py` 那条 `total >= 0`（恒真）改成「至少有一条 `strategy_version_created`，且每条事件都带 `actor`」。
+- 理由：
+  - 同一个事实有两个出口，就会有两个慢慢长歪的答案——其中一个已经丢了 `actor`。删掉一个出口，比让两个出口永远保持同步便宜，也更诚实。
+  - `total: len(rows)` 是最容易骗人的字段名：调用方读到 3 会以为账本里有 3 条，其实那只是这一页。既然分页参数存在，「这一页多少条」已经由 `len(events)` 回答了，`total` 必须回答另一个问题，否则它没有存在的理由。
+  - 这是一次**破坏性**变更（一个路由消失）。它从未出现在 docs/12 里，只有前端与 4 个测试在用，都在本次一并改掉；NAS 冒烟脚本 `scripts/Test-NasDeployment.ps1` 没有用它。
+- 影响与兼容：
+  - `GET /settings/audit` 现在返回 **404**（有测试守着，防止它悄悄回来）。
+  - `GET /audit/logs` 的每条事件多了 `actor`（前端此前的类型是 `Record<string, unknown>`，不必改类型）。
+  - `total` 的语义变了：以前恒等于 `len(events)`，现在等于匹配总数。任何一直拿它当分页长度用的调用方会看到更大的数字——那正是这个字段应该回答的问题。
+  - 没有数据库迁移：只是查询与序列化的方式变了。
+- 测试：
+  - `backend/tests/test_audit_api.py`：`limit=2` 时 3 条记录仍然 `total == 3` 而 `events` 只有 2 条、`offset=2` 后 `total` 仍为 3；`/audit/logs/entity/signal/42` 在 `limit=1` 时 `total == 2`；`actor == "user"` 能被读回；`GET /settings/audit` 是 404。
+  - `backend/tests/test_api.py::test_audit_log_records_events`：不再断言恒真的 `total >= 0`，而是断言至少一条 `strategy_version_created` 且每条事件都有 `actor`。

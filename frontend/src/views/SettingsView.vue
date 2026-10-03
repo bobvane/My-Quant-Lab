@@ -11,6 +11,7 @@ import {
 import { formatDateTime, formatNumber } from '@/format'
 
 const events = ref<Array<Record<string, unknown>>>([])
+const auditTotal = ref(0)
 const environment = ref<Partial<AppSettingsEnvironment>>({})
 const systemSettings = ref<Array<Record<string, any>>>([])
 const newSettingKey = ref('')
@@ -157,6 +158,7 @@ async function loadEntityAudit() {
   try {
     const result = await api.auditForEntity(filterEntityType.value.trim(), filterEntityId.value.trim())
     events.value = result.events
+    auditTotal.value = result.total
   } catch (e) {
     error.value = (e as Error).message
   }
@@ -192,6 +194,7 @@ async function load() {
     aiPrompts.value = prompts.prompts
     aiTasks.value = tasks
     events.value = audit.events
+    auditTotal.value = audit.total
     environment.value = settings.environment ?? {}
     systemSettings.value = settings.settings ?? []
     providers.value = ai.providers
@@ -806,7 +809,7 @@ onMounted(load)
     </div>
 
     <div class="card" style="margin-top: 14px">
-      <h3>审计日志（最近 {{ events.length }} 条）</h3>
+      <h3>审计日志（最近 {{ events.length }} 条，共 {{ auditTotal }} 条）</h3>
       <div class="row" style="margin-bottom: 8px">
         <input v-model="filterEntityType" style="max-width: 160px" placeholder="实体类型（如 strategy）" />
         <input v-model="filterEntityId" style="max-width: 140px" placeholder="实体 ID（如 1）" />
@@ -822,6 +825,7 @@ onMounted(load)
             <th>事件</th>
             <th>对象</th>
             <th>动作</th>
+            <th>操作者</th>
             <th>详情</th>
           </tr>
         </thead>
@@ -831,6 +835,7 @@ onMounted(load)
             <td>{{ e.event_type }}</td>
             <td>{{ e.entity_type }}#{{ e.entity_id }}</td>
             <td>{{ e.action }}</td>
+            <td>{{ e.actor ?? '—' }}</td>
             <td><code>{{ JSON.stringify(e.payload ?? {}) }}</code></td>
           </tr>
         </tbody>

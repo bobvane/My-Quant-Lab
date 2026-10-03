@@ -13,6 +13,7 @@ from typing import Annotated
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from sqlalchemy import URL
 
 from app import __version__ as package_version
 
@@ -81,9 +82,20 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
 
-    database_url: str = Field(
-        default="postgresql+psycopg://quantlab:quantlab@quantlab-postgres:5432/quantlab"
-    )
+    # The database URL is assembled from its parts, never concatenated (ADR-098).
+    # A password pasted into a URL breaks it in two ways: `@`, `:` and `/` make
+    # SQLAlchemy parse the wrong host, and a bare `%` used to make alembic's
+    # ConfigParser raise before a single connection was attempted. The parts are
+    # given to PostgreSQL (the `POSTGRES_*` variables) and to us, so the value is
+    # encoded exactly once, here.
+    postgres_user: str = "quantlab"
+    postgres_password: str = "quantlab"
+    postgres_db: str = "quantlab"
+    postgres_host: str = "quantlab-postgres"
+    postgres_port: int = 5432
+    # An explicit DATABASE_URL still wins: tests and probe scripts point the app
+    # at SQLite, and an operator who sets it means it.
+    database_url: str = ""
     database_echo: bool = False
     db_pool_size: int = 5
     db_max_overflow: int = 10
@@ -121,7 +133,11 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 60
     ghostfolio_base_url: str | None = None
     ghostfolio_api_key: str | None = None
-    market_data_provider: str = "yahoo_finance"
+    # The default is the provider that works with no network and no API key, and
+    # it is the one `.env.example` and docker-compose ship: a default nobody
+    # deploys is a second answer to the same question (ADR-100). Real market data
+    # is an explicit choice, `MARKET_DATA_PROVIDER=yahoo_finance`.
+    market_data_provider: str = "synthetic"
     # Symbols the scheduled sync keeps warm. Empty means "use whatever the
     # active provider declares", which avoids hard-coding DEMO-* tickers that
     # only exist for the synthetic provider.
@@ -156,6 +172,26 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     log_json: bool = True
+
+    @model_validator(mode="after")
+    def _assemble_the_database_url(self) -> Settings:
+        """Build the URL from its parts unless the deployment gave us one.
+
+        ``URL.create`` percent-encodes the password, so the value that reaches
+        ``create_engine`` says exactly what the deployment said, whatever it
+        contains (ADR-098).
+        """
+
+        if not self.database_url:
+            self.database_url = URL.create(
+                "postgresql+psycopg",
+                username=self.postgres_user,
+                password=self.postgres_password,
+                host=self.postgres_host,
+                port=self.postgres_port,
+                database=self.postgres_db,
+            ).render_as_string(hide_password=False)
+        return self
 
     @model_validator(mode="after")
     def _refuse_the_example_secret_in_production(self) -> Settings:

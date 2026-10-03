@@ -25,7 +25,15 @@ x-backend-image: &backend-image
 
 x-backend-env: &backend-env
   APP_ENVIRONMENT: ${APP_ENVIRONMENT:-production}
-  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-quantlab}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@quantlab-postgres:5432/${POSTGRES_DB:-quantlab}
+  # The connection URL is assembled inside the app from these parts (ADR-098):
+  # the same POSTGRES_* values the database container gets, so a password with
+  # `@`, `:`, `/` or `%` reaches PostgreSQL unchanged instead of breaking the
+  # URL parser or alembic's ConfigParser.
+  POSTGRES_USER: ${POSTGRES_USER:-quantlab}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+  POSTGRES_DB: ${POSTGRES_DB:-quantlab}
+  POSTGRES_HOST: quantlab-postgres
+  POSTGRES_PORT: "5432"
   REDIS_URL: redis://quantlab-redis:6379/0
   CELERY_BROKER_URL: redis://quantlab-redis:6379/1
   CELERY_RESULT_BACKEND: redis://quantlab-redis:6379/2
@@ -169,8 +177,13 @@ services:
         condition: service_healthy
       quantlab-redis:
         condition: service_healthy
+      # `service_healthy`, not `service_started`: the api role is the only one
+      # that runs migrations (docker/entrypoint.sh), so a worker or beat that
+      # starts first can fire a task against a schema that does not exist yet.
+      # quantlab-web already used service_healthy; this was an oversight, not a
+      # decision (ADR-099).
       quantlab-api:
-        condition: service_started
+        condition: service_healthy
       quantlab-docker-proxy:
         condition: service_started
     networks:
@@ -194,8 +207,9 @@ services:
         condition: service_healthy
       quantlab-redis:
         condition: service_healthy
+      # See quantlab-worker: migrations run in the api role only (ADR-099).
       quantlab-api:
-        condition: service_started
+        condition: service_healthy
     networks:
       - backend
     healthcheck:

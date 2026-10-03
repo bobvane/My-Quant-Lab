@@ -68,8 +68,22 @@ def _consumer_text() -> str:
     return "\n".join(chunks)
 
 
+def _validator_reads() -> str:
+    """References a field makes to itself inside ``config.py``.
+
+    A module-level validator is a real reader: ``_assemble_the_database_url``
+    consumes the five ``postgres_*`` parts to build the URL that every other
+    consumer reads. An exemption list would let a genuinely dead field hide
+    behind a hand-written reason, so the guard looks for the reference instead.
+    """
+
+    return "\n".join(
+        line for line in CONFIG.read_text(encoding="utf-8").splitlines() if "self." in line
+    )
+
+
 def test_every_setting_is_read_somewhere() -> None:
-    text = _consumer_text()
+    text = _consumer_text() + "\n" + _validator_reads()
     unread = sorted(
         name for name in _settings_fields() if not re.search(rf"\.{re.escape(name)}\b", text)
     )

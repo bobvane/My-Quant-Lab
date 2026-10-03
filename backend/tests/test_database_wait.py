@@ -265,7 +265,41 @@ def test_the_transient_path_still_lets_alembic_report_the_error() -> None:
 @pytest.mark.parametrize("role", ROLES)
 def test_every_role_refuses_to_start_when_the_database_is_refused(role: str) -> None:
     branch = _role_branch(_text(), role)
-    assert "wait_for_db || exit 1" in branch, f"{role} would carry on without a database"
+    assert "wait_for_db" in branch, f"{role} would carry on without a database"
+    assert "|| exit 1" in branch, f"{role} ignores the wait's verdict"
+
+
+def test_the_roles_without_migrations_make_a_dead_database_fatal() -> None:
+    """api and migrate have alembic behind them to name the real error.
+
+    worker and scheduler do not: with the soft exit they stayed up and failed
+    every task while compose (which only pings celery) called them healthy
+    (ADR-099).
+    """
+
+    text = _text()
+    assert "wait_for_db --required || exit 1" in _role_branch(text, "worker")
+    assert "wait_for_db --required || exit 1" in _role_branch(text, "scheduler")
+    for role in ("api", "migrate"):
+        assert "--required" not in _role_branch(text, role), (
+            f"{role} runs migrations; alembic has a better message than the wait"
+        )
+    wait = text[text.index("wait_for_db() {") : text.index("run_migrations() {")]
+    assert 'if [ "${1:-}" = "--required" ]; then' in wait
+    assert "this role runs no migrations, so nothing else would report it" in wait
+
+
+@needs_bash
+def test_a_worker_with_no_database_never_reaches_celery(tmp_path: pathlib.Path) -> None:
+    output, rc, probes, alembic_calls = _drive(
+        tmp_path, "refused", APP_ROLE="worker", DB_WAIT_ATTEMPTS="2", DB_WAIT_INTERVAL="0"
+    )
+    assert rc == 1, "a worker that cannot reach its database must not report success"
+    assert probes == 2, "it must still use the whole budget before giving up"
+    assert alembic_calls == 0
+    assert "this role runs no migrations, so nothing else would report it" in output
+    assert "continuing so alembic reports the real error" not in output
+    assert "starting celery worker" not in output, "the worker started anyway"
 
 
 # --- what the container actually prints and exits with ---------------------

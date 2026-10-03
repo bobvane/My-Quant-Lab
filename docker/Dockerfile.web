@@ -21,7 +21,8 @@ RUN chmod +x /docker-entrypoint.d/40-api-auth.sh
 
 EXPOSE 80
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD wget -qO- http://127.0.0.1/healthz || exit 1
+# The probe lives in docker-compose.yml (one place, the one that runs): the
+# copy here said 30s/3, compose said 20s/5, and compose's line is what Docker
+# actually used (ADR-100).
 
 CMD ["nginx", "-g", "daemon off;"]

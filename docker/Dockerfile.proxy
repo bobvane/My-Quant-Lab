@@ -11,12 +11,16 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 COPY docker/readonly_proxy.py /app/readonly_proxy.py
 
-RUN addgroup -g 10002 proxy && adduser -D -u 10002 -G proxy proxy
-USER proxy
+# Root on purpose, and docker-compose.yml no longer overrides it: the Docker
+# socket is owned by root with a GID that differs across NAS platforms, so a
+# static `group_add` is fragile. It is safe because readonly_proxy.py limits the
+# process to two GET endpoints, the port is never published, and container root
+# is not host root (ADR-024, ADR-100).
+USER root
 
 EXPOSE 9100
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD python -c "import socket;s=socket.create_connection(('127.0.0.1',9100),3);s.close()" || exit 1
+# The probe is declared in docker-compose.yml, next to the socket mount it
+# checks (ADR-100).
 
 CMD ["python", "-u", "readonly_proxy.py"]

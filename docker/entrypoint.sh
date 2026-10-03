@@ -87,7 +87,17 @@ database_error_is_permanent() {
 # Wait for PostgreSQL, then give up and let alembic report the real error.
 # The budget is an environment variable so the ceiling stays a decision:
 # defaults 30 x 2 s = 60 s, inside the container healthcheck budget (ADR-080).
+#
+# `wait_for_db --required` is for the roles that never run migrations: they have
+# no alembic behind them to name the reason, so a budget that runs out must stop
+# the container. Without it a worker whose database is unreachable stayed up and
+# failed every task while compose (which only pings celery) called it healthy
+# (ADR-099).
 wait_for_db() {
+    required=0
+    if [ "${1:-}" = "--required" ]; then
+        required=1
+    fi
     attempts="${DB_WAIT_ATTEMPTS:-30}"
     interval="${DB_WAIT_INTERVAL:-2}"
     i=0
@@ -112,6 +122,11 @@ wait_for_db() {
         log "waiting for database ($i/$attempts)"
         sleep "$interval"
     done
+    if [ "$required" -eq 1 ]; then
+        log "ERROR: database not ready after $((attempts * interval))s ($attempts attempts); this role runs no migrations, so nothing else would report it"
+        log "reason: $last_reason"
+        return 1
+    fi
     log "WARNING: database not ready after $((attempts * interval))s ($attempts attempts); continuing so alembic reports the real error"
     return 0
 }
@@ -149,14 +164,14 @@ case "$ROLE" in
         ;;
     worker)
         check_settings || exit 1
-        wait_for_db || exit 1
+        wait_for_db --required || exit 1
         log "starting celery worker"
         exec celery -A app.workers.celery_app.celery_app worker \
             --loglevel=INFO --concurrency="${CELERY_CONCURRENCY:-2}"
         ;;
     scheduler)
         check_settings || exit 1
-        wait_for_db || exit 1
+        wait_for_db --required || exit 1
         log "starting celery beat"
         exec celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
         ;;

@@ -9,9 +9,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# libpq for psycopg, curl for healthchecks
+# libpq for psycopg, curl for healthchecks, procps for the scheduler's `pgrep`
+# probe. Without procps that probe exited 127 forever, so quantlab-scheduler sat
+# at `unhealthy` in every deployment while `docker compose up -d` still reported
+# success (ADR-099).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpq5 curl \
+    && apt-get install -y --no-install-recommends libpq5 curl procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Dependencies first so code edits do not invalidate the layer
@@ -31,9 +34,11 @@ ENV APP_ROLE=api \
 
 EXPOSE 8080
 
-# Liveness only: /healthz touches no dependency, so a PostgreSQL/Redis blip
-# cannot mark the API container dead. Full dependency state is at /api/v1/health.
-HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
-    CMD curl -fsS "http://127.0.0.1:${PORT}/api/v1/healthz" || exit 1
+# No HEALTHCHECK here on purpose. docker-compose.yml declares one for every
+# service it starts, and the probe belongs to the role, not to the shared image:
+# this image also runs the Celery worker and beat, which have no HTTP server, so
+# a curl probe could never pass for them. The two copies that used to exist here
+# and in compose disagreed about the budget (30s/5 vs 45s/6) and only one of them
+# ever ran (ADR-100). Running this image without compose? Pass --health-cmd.
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -2170,3 +2170,42 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：边界不是承诺，是配置的后果。默认部署对局域网开放是 NAS 的使用方式决定的（用户从自己的 PC 浏览器访问），不能靠改默认值来「修」；能修的是文档不再说反话，并把唯一真正能关上的开关指出来。这是 ADR-090/091 的主题在文档层的第二个实例。
 - 影响与兼容：没有任何行为变化；默认部署仍然局域网可达，Token 的语义也没有变化（只是被写清楚了）。`API_BIND=127.0.0.1` 依旧关住 8080 直连。
 - 测试：`backend/tests/test_boundary_claims.py` **6 passed**。红证据（`git worktree` 在 v1.6.6 `f7fcd93d8` 上跑同一份守卫）4 条红：`.env.example` 同时含 `局域网无法直连` 与 `避免无认证暴露`；端口段没有说「局域网开放」；鉴权段没有说「绕过 Web 容器」；`README.md` 仍写 `局域网无法直连`。
+
+## ADR-098：密码不是 URL 的一部分（一个地方组装它）
+
+- 背景：密码里只要出现 `%`、`@`、`:`、`/` 之一，四个角色的 alembic 都会在建立任何连接之前失败，而且**没有任何写法能同时满足两个读取方**。`backend/alembic/env.py` 曾把 `settings.database_url` 交给 alembic 的 `Config`（`config.set_main_option("sqlalchemy.url", …)`，旧 `:24`），而那个 `ConfigParser` 使用 BasicInterpolation —— 裸 `%` 直接抛 `ValueError: invalid interpolation syntax`；同时 `docker-compose.yml`（旧 `:28`）把 `${POSTGRES_PASSWORD}` 原样拼进 `DATABASE_URL`，同一个变量又原样交给 `quantlab-postgres`（旧 `:72`），所以按 ConfigParser 的要求写 `%%` 会让数据库容器真的收到 `pa%%ss`；至于 `@`、`:`、`/`，它们会让 SQLAlchemy 把密码的后半截解析成 host/port/database。`.env.example:7` 却写着「随便设一个强密码」，`scripts/preflight.sh:260` 只对长度 warn。
+- 决策：
+  1. 设置层持有**分量**而不是 URL：`postgres_user`/`postgres_password`/`postgres_db`/`postgres_host`/`postgres_port`（`backend/app/core/config.py:91-95`，均带默认值），由 `_assemble_the_database_url`（`:177-195`）用 `URL.create(…).render_as_string(hide_password=False)` 组装 `database_url`。显式设置的 `DATABASE_URL` 仍然优先（`:96-98`），`backend/tests/conftest.py:18` 的 SQLite 内存库与探针脚本不受影响。
+  2. alembic 不再持有 URL：`backend/alembic/env.py` 改为 `create_engine(settings.database_url, poolclass=pool.NullPool)`，`backend/alembic.ini` 里没有 `sqlalchemy.url`（注释说明原因）；该文件也必须保持纯 ASCII —— alembic 按本机 locale 读取它，一个 em dash 就足以让测试套件在 Windows 上抛 `UnicodeDecodeError`。
+  3. compose 只传分量：应用拿到的 `POSTGRES_USER/PASSWORD/DB`（`docker-compose.yml:32-34`）与数据库容器拿到的是同一批变量（`:79-81`），地址由 `POSTGRES_HOST`/`POSTGRES_PORT`（`:35-36`）给出。
+- 理由：百分号编码只能发生一次，而且必须发生在「知道哪个分量是哪个」的那一层。同一个密码既要原样进 postgres 容器、又要进应用，任何在中间层转义的写法都会让两边看到不同的字符串 —— 所以转义点必须在最末端（SQLAlchemy 的 URL 构造器），而不是在配置文本里。URL 是派生事实，不是来源；这是 ADR-091「同一事实不能有两份答案」在配置层的实例。
+- 影响与兼容：没有行为变化（默认值相同）。密码现在可以包含 `@ : / %`（包括 `%25` 这类看起来已编码的形态）并原样送达驱动；`DATABASE_URL` 显式设置仍然取胜，四个探针脚本与单测路径不变。
+- 测试：`backend/tests/test_deploy_defaults.py` 的 `test_the_deployment_no_longer_hands_a_url_to_a_configparser`（alembic 不再 `set_main_option`、`alembic.ini` 无 `sqlalchemy.url` 且为纯 ASCII）、`test_the_configparser_would_have_refused_a_typical_password`（钉住机制本身，免得禁令看起来是凭空的）、`test_every_awkward_password_survives_the_round_trip`（参数化 `pa@ss`/`pa:ss`/`pa/ss`/`pa%ss`/`p%25ss@x/y:z`/`plain`，`make_url` 往返后 password、host、port、database、username 全部一致）、`test_the_database_parts_compose_passes_are_the_parts_the_app_expects`（`x-backend-env` 里不得再出现 `DATABASE_URL`）。红证据（`git worktree` 在 v1.6.7 `b9ad69921` 上跑同一份守卫）见 `docs/15` 的 v1.6.8 行。
+
+## ADR-099：会失败的检查必须先能跑起来（探针的二进制、依赖的顺序、没有迁移的角色要硬失败）
+
+- 背景：三条同源的编排缺陷。
+  1. `docker-compose.yml:216` 给 `quantlab-scheduler` 的探针是 `pgrep -f 'celery.*beat' || exit 1`，而镜像（`docker/Dockerfile.backend:12-17`）基于 `python:3.12-slim`，从不安装 procps —— 容器里没有 `pgrep`，探针恒以 127 退出，scheduler 自上线起一直 `unhealthy`，而 `docker compose up -d` 对 unhealthy 的容器仍返回 0，所以本地和流水线都没人发现；同一缺依赖让 `.github/workflows/release.yml:218` 的诊断 `ps aux` 只打印 not found。
+  2. worker 与 scheduler 曾以 `depends_on: quantlab-api: condition: service_started` 启动（旧 `docker-compose.yml:172-173`、`:197-198`），而迁移只在 api 角色执行（`docker/entrypoint.sh`）—— 全新建库时 beat 的 `collect-resources` 可以在建表之前触发并逐个失败。同文件的 `quantlab-web` 早就用 `service_healthy`，说明这是漏改而不是决策。
+  3. `wait_for_db` 预算耗尽时 `return 0`（旧 `docker/entrypoint.sh:115-116`）：api 角色后面有 alembic 把真正的错误抛出来，worker 与 scheduler 后面没有这一层，于是「连不上库、每个任务都失败」的 worker 在探针（只 ping celery）与流水线里都算健康。
+- 决策：
+  1. 镜像安装 `procps`（`docker/Dockerfile.backend:17`），让已经写在 compose 里的 `pgrep` 探针真的能跑；注释点名这次事故。
+  2. worker 与 scheduler 的 api 依赖改成 `condition: service_healthy`（`docker-compose.yml:185-186`、`:211-212`），队列与 beat 都在 schema 就绪之后才启动。
+  3. `wait_for_db` 接受 `--required`（`docker/entrypoint.sh:96-133`）：对不跑迁移的角色，预算耗尽要打印 `ERROR: database not ready after …s (… attempts); this role runs no migrations, so nothing else would report it` 与最后一次失败原因并 `return 1`；worker/scheduler 的调用改成 `wait_for_db --required || exit 1`（`:167`、`:174`），api 与 migrate 保持原样（`:157`、`:180`），继续让 alembic 报真错。
+- 理由：不会失败的检查有两种 —— 二进制不存在的检查，和后面没人接住失败的检查。前者是 ADR-090 的同型问题（断言不存在，看着却像通过）；后者把「暂时连不上」和「永远连不上」混为一谈，只有确实存在下一层会报错的角色才有资格放行。
+- 影响与兼容：`docker compose up -d` 仍返回 0，但数据库不可达时 worker/scheduler 现在以非零码退出、探针显示 unhealthy（api 行为不变，仍由 alembic 报错）。`backend/tests/test_database_wait.py` 新增 2 条，其中一条用 bash stub driver 真跑 `entrypoint.sh`（`APP_ROLE=worker`、`DB_WAIT_ATTEMPTS=2`、`DB_WAIT_INTERVAL=0`），断言 `rc == 1`、恰好探测 2 次、从未调用 alembic、且输出中不出现 `starting celery worker`。
+- 测试：`backend/tests/test_deploy_defaults.py` 的 `test_the_scheduler_probe_can_actually_run_where_it_is_declared`（探针里有 `pgrep` 就必须在镜像里装上 `procps`）、`test_migrations_finish_before_the_queues_start`（worker/scheduler 的 api 依赖必须是 `service_healthy`），以及 `backend/tests/test_database_wait.py` 的两条新用例。红证据见 `docs/15` 的 v1.6.8 行。
+
+## ADR-100：同一事实只能有一份默认值（默认值与探针各只有一处声明）
+
+- 背景：两类「同一件事写了两遍」。
+  1. 部署默认值：`docker-compose.yml:37` 的 `MARKET_DATA_PROVIDER` 默认 `synthetic`、`backend/app/core/config.py:122` 默认 `yahoo_finance`；compose `:47` 默认启用 docker proxy，`config.py:150` 的 `DOCKER_PROXY_URL` 默认 `None`；compose `:60` 的 NO_PROXY 结尾有 `,.internal`，`.env.example` 没有；compose `:55` 的 CORS 默认含 `5173`，`.env.example` 只给 `8081`。
+  2. 探针与用户：镜像自带 `HEALTHCHECK`（`docker/Dockerfile.backend:36-37` 30s/5、`docker/Dockerfile.web:24-25` 30s/3、`docker/Dockerfile.proxy`）而 compose 为每个服务另写一份（`:160-165` 45s/6、`:236` 20s/5 …），compose 的值总是取胜，镜像里那份从不执行却读起来像契约；compose 的 api 探针写死 `8080` 而同服务端口是变量；`docker/Dockerfile.proxy:15` 声明 `USER proxy`，又被 `docker-compose.yml:117` 的 `user: root` 覆盖。
+- 决策：
+  1. 三个镜像的 `HEALTHCHECK` 全部删除，探针只在 compose 里声明一次 —— compose 按角色写，用的就是该角色真实的命令（api 的 `curl …:8080/api/v1/healthz` 与同服务的 `PORT: "8080"` 一致）；镜像注释写明「单跑镜像请用 `--health-cmd`」。
+  2. `docker/Dockerfile.proxy` 不再切换用户（`USER root`，`:19`），因为 Docker socket 归 root，各 NAS 的 GID 又各不相同 —— compose 不必再用 `user: root` 去覆盖镜像，两处说法一致。
+  3. 应用默认值向部署对齐：`market_data_provider` 默认改为 `synthetic`（`backend/app/core/config.py:140`，仓内 `backend/tests/conftest.py:19` 本来就覆盖它），`.env.example` 补上 `,.internal` 与 `http://localhost:5173`，并补一行注释说明 `POSTGRES_HOST`/`POSTGRES_PORT` 的用途。
+  4. 守卫 `backend/tests/test_deploy_defaults.py`：扫描 compose 中所有 `${VAR:-default}`，要求每一项都能在 `.env.example` 找到同一个值（例外只有 `MQL_VERSION`，因为 `.env.example` 钉住的是随包发布的版本号）；另比对 12 个部署旋钮的代码默认值与文档值（`CODE_EXCEPTIONS` 三项各自注明理由）；并要求每个服务都声明探针、且没有任何镜像再自带 `HEALTHCHECK`。
+- 理由：默认值写两份就会产生两个答案，而答案是哪一个取决于谁最后说话；探针写在镜像里、compose 又覆盖它，等于让「哪个探针在跑」变成需要人工核对的事实。这是 ADR-091「同一事实不能有两份答案」在部署配置上的实例：可以派生的就不要重复声明，必须声明的就让它只有一处。
+- 影响与兼容：`docker run` 不带 `--health-cmd` 的镜像不再自带探针（Dockerfile 注释里写明）；compose 的行为除探针归属外没有变化；`MARKET_DATA_PROVIDER` 的默认值从 `yahoo_finance` 改为 `synthetic`，与 `.env.example`/compose/测试夹具一致 —— 本地与 CI 都不会因此去请求外网。
+- 测试：`backend/tests/test_deploy_defaults.py` 的 `test_every_default_compose_writes_is_the_one_the_example_documents`、`test_every_required_variable_is_documented`、`test_the_code_defaults_are_the_ones_the_example_documents`、`test_every_service_declares_the_probe_that_runs`、`test_the_proxy_runs_as_the_user_both_files_name`。红证据见 `docs/15` 的 v1.6.8 行。

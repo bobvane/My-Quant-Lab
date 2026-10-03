@@ -1520,3 +1520,97 @@ app.data.ghostfolio.GhostfolioError: GHOSTFOLIO_BASE_URL is not configured
   返回 **502**，`detail` 含 `GHOSTFOLIO_BASE_URL is not configured`。修复前该断言拿到 500。
 - 浏览器验收（`%TEMP%\mql-ui-paper-contributions-v155.mjs`）：「零 console 错误」这一条
   在未配置 Ghostfolio 的验证栈上必须通过——后端不再产生 500，前端不再发这条请求。
+
+## ADR-068：边缘必须分得清「这个文件不存在」和「这是应用」（静态资源 404、gzip、不可变缓存、favicon）
+
+### 背景
+
+v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web 容器逐项动手试出四条
+事实：
+
+1. **缺失的静态资源返回 200 + HTML**。`GET /assets/index-DOESNOTEXIST.js` →
+   `200`、`Content-Type: text/html`、579 字节——就是 `index.html`。原因在
+   `docker/web.nginx.conf`：只有一条 `location / { try_files $uri $uri/ /index.html; }`，
+   没有单独的 `/assets/`。后果是浏览器读到一句最没用的错误：它缓存了旧的外壳、外壳引用
+   了这次部署已经删掉的 bundle，于是把 HTML 当 JavaScript 解析，报「Unexpected token
+   '<'」。外部探针也没法用状态码区分「有这个文件」和「没有」。
+2. **整站没有压缩**。带 `Accept-Encoding: gzip, deflate` 请求
+   `/assets/index-Be_RqsH4.js`，返回仍是 **1,289,010 字节**，响应里没有
+   `Content-Encoding`。nginx 的 `gzip` 默认是 off。对照之下 API 的响应带着
+   `Vary: Accept-Encoding`（FastAPI 的 `GZipMiddleware`）——同一个域里，API 压缩、
+   静态资源不压缩。
+3. **内容哈希文件名没有任何缓存指令**。响应只有 `ETag: "6ac05d04-13ab32"` 与
+   `Last-Modified`。构建工具已经把内容摘要写进文件名，却让浏览器每次加载都回来校验。
+4. **没有图标**。`frontend/index.html` 没有 `<link rel="icon">`，构建产物里也没有图标
+   文件，于是 `/favicon.ico` 同样落到 SPA 回退、返回 `index.html`（200）。
+
+四条事实形状相同：**边缘把「我不知道」答成了「这是应用」**。SPA 回退是给**路由**用的
+（`/signals`、`/paper` 这类前端路径），不是给**文件**用的；`/assets/` 下面只可能有
+带内容哈希的构建产物，那里的「没有」必须是一个明确的「没有」。
+
+### 决策
+
+1. `/assets/` 单独成 location：
+   `try_files $uri =404;`，再 `add_header Cache-Control "public, max-age=31536000, immutable";`。
+   哈希文件名按内容寻址 —— 命中就永久缓存（`immutable` 连条件请求都省掉），缺失就是 404。
+   用 `add_header` 而不是 `expires`，避免同一个响应里出现两个 `Cache-Control`。
+2. `location /` 保留 SPA 回退，并加 `Cache-Control "no-cache"`：外壳必须每次回源校验
+   （响应带 `ETag`，没变就是 304）。不这么做，新部署之后浏览器还在用旧外壳，而旧外壳
+   引用的资源已经不在。
+3. 打开压缩：`gzip on; gzip_vary on; gzip_min_length 1024; gzip_proxied any;`
+   `gzip_types application/javascript text/css application/json text/plain image/svg+xml;`。
+   `gzip_vary` 不是可选项：没有它，中间缓存可能把压缩后的字节发给不支持压缩的客户端。
+4. 交付图标：`frontend/index.html` 增加
+   `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`，新增
+   `frontend/public/favicon.svg`；并让 `location = /favicon.ico` 明确回答 **204** ——
+   我们确实没有 `.ico`，就不拿 HTML 冒充。
+5. 配置模板的约束固化成测试：`docker/web-entrypoint.sh` 只做
+   `envsubst '${AUTH_LINE}'`，所以该文件里除 `${AUTH_LINE}` 之外不允许出现任何
+   `${...}`（nginx 自己的 `$uri`、`$host` 必须原样留下）。
+6. 这些行为只在容器里成立，因此**在 CI 里验证**：`ci.yml` 的 docker compose smoke 作业
+   增加一步「Web edge assertions」，在真实 web 镜像上用 curl 断言 404 / 压缩 /
+   `immutable` / `no-cache` / 204 / 深链 200。
+
+### 理由
+
+- **一个状态码就是一句话**。`/assets/*.js` 返回 200 的 HTML 是假话，而假话比 404 更难
+  查：404 指向「文件不在」，200+HTML 指向「语法错误」。这个项目在别处反复选择「让答案
+  说出真正的原因」——ADR-062 把「草案不合格」答成 `review_required` 而不是
+  `import_failed`，ADR-066 让提空的账户说「没有分母」而不是「曲线太短」——边缘不该例外。
+- **SPA 回退的范围要写进配置，而不是靠约定**。`try_files ... /index.html` 的服务对象是
+  前端路由；把 `/assets/` 单独拆出来，就是把这条边界写成 nginx 能执行的东西。
+- **哈希即内容寻址，可永久缓存**。文件名里的内容摘要已经由构建付出成本，不利用它等于
+  白付。
+- **压缩是同一份内容的体积减半**：1,289,010 字节的 bundle，构建日志里 gzip 后是
+  429.33 kB。NAS 在局域网里，但「加载一次要传多少字节」对任何部署都是同一个问题。
+- **只在 CI 验证，并且把这个区别说清楚**。本地是 Windows、没有容器运行时，而 CI 的
+  smoke 作业本来就构建并启动真实的 web 镜像、用真实的生产 compose 文件——那是唯一能
+  看到 nginx 真实行为的地方。仓库里那 7 条读配置文本的测试是**守卫**：它们能在 `pytest`
+  里五秒失败，但它们**不证明**行为，证明行为的是那一步 curl。
+
+### 影响与兼容
+
+- **无 API、无数据模型变更**：`/api/`、`/docs`、`/openapi.json`、`/healthz` 的行为与
+  之前完全一致（它们各自有独立的 location，不继承 `/` 的缓存头）。
+- 部署后有两处状态码变化，都是本次的目的：`/assets/` 下不存在的路径由
+  200(HTML) 变 **404**；`/favicon.ico` 由 200(HTML) 变 **204**。
+- `immutable` 依赖「`assets/` 里只有带内容哈希的文件」。目前构建产物是
+  `assets/index-<hash>.js`、`assets/index-<hash>.css`，外壳 `index.html` 在
+  `location /`。以后若有**不带哈希**的文件被放进 `assets/`，它会被永久缓存——这是这条
+  决策的代价，写在这里以免以后被当成 bug。
+- `no-cache` 不禁止缓存，只要求校验：已有的中间缓存仍会带 `ETag` 回源（304）。
+- 红线不变：本次改动全在静态交付层，不写库、不触发交易、不影响回测可复现性。
+
+### 测试
+
+- `backend/tests/test_web_edge.py`（7 条，纯仓库、不需要容器）：`/assets/` 的
+  `try_files $uri =404`；`immutable` 与 `max-age=31536000`；`location /` 的
+  `no-cache`；`gzip on;` 与 `gzip_types` 含 `application/javascript`、`text/css`；
+  `location = /favicon.ico` 的 `return 204`；`index.html` 链接的
+  `frontend/public/favicon.svg` 确实存在；模板里只有 `${AUTH_LINE}` 一个占位符。
+- `.github/workflows/ci.yml` 的「Web edge assertions (ADR-068)」（真实容器，唯一的
+  行为验证）：缺失资源 404 且响应体不是 `<!doctype`；`/` 带 `Cache-Control: no-cache`
+  且链接图标；`/favicon.svg` 200、`/favicon.ico` 204；bundle 带
+  `Content-Encoding: gzip` 且小于 1,000,000 字节、带 `immutable`；`/signals` 深链仍
+  200。
+- 事实来源：NAS 上对 v1.5.4 web 容器的四条实测，见「背景」。

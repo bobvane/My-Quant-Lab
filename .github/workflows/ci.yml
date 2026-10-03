@@ -200,6 +200,47 @@ jobs:
           curl -fsS http://127.0.0.1:8081/healthz
           curl -fsS http://127.0.0.1:8081/ | head -c 200
 
+      - name: Web edge assertions (ADR-068)
+        run: |
+          set -euo pipefail
+          WEB=http://127.0.0.1:8081
+
+          # A missing hashed asset is a 404, not the SPA's HTML: a page that
+          # asks for a bundle a newer deploy deleted must be told it is missing.
+          code=$(curl -sS -o /tmp/missing.out -w '%{http_code}' "$WEB/assets/does-not-exist.js")
+          echo "missing asset -> HTTP $code"
+          [ "$code" = "404" ] || { echo "expected 404, got $code"; exit 1; }
+          if head -c 15 /tmp/missing.out | grep -qi '<!doctype'; then
+            echo "a missing asset was answered with the application shell"
+            exit 1
+          fi
+
+          # The shell is served, revalidated, and links an icon that exists.
+          curl -fsS -D /tmp/shell.headers "$WEB/" -o /tmp/shell.html
+          grep -qi '^cache-control:.*no-cache' /tmp/shell.headers || {
+            echo "index.html is cacheable, so a stale page can outlive its assets"; exit 1; }
+          grep -q '/favicon\.svg' /tmp/shell.html || { echo "the shell links no icon"; exit 1; }
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "$WEB/favicon.svg")
+          [ "$code" = "200" ] || { echo "favicon.svg -> $code"; exit 1; }
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "$WEB/favicon.ico")
+          [ "$code" = "204" ] || { echo "/favicon.ico -> $code, expected 204"; exit 1; }
+
+          # The bundle arrives compressed and may be cached forever.
+          asset=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' /tmp/shell.html | head -1)
+          [ -n "$asset" ] || { echo "the shell references no bundle"; exit 1; }
+          curl -fsS -H 'Accept-Encoding: gzip' -D /tmp/asset.headers -o /tmp/asset.js "$WEB$asset"
+          grep -qi '^content-encoding:.*gzip' /tmp/asset.headers || {
+            echo "$asset was sent uncompressed"; exit 1; }
+          grep -qi '^cache-control:.*immutable' /tmp/asset.headers || {
+            echo "$asset is not immutably cacheable"; exit 1; }
+          size=$(wc -c < /tmp/asset.js)
+          echo "$asset -> $size compressed bytes"
+          [ "$size" -lt 1000000 ] || { echo "the compressed bundle is $size bytes"; exit 1; }
+
+          # SPA deep links still fall back to the shell.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "$WEB/signals")
+          [ "$code" = "200" ] || { echo "deep link -> $code"; exit 1; }
+
       - name: "Smoke 1/5: sync market data"
         env:
           APP_ENVIRONMENT: ci

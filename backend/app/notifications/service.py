@@ -222,7 +222,14 @@ def notify_pending_signals(db: Session, *, now: dt.datetime | None = None) -> di
 
     candidates = db.scalars(
         select(Signal)
-        .where(Signal.notified_at.is_(None), Signal.state.in_(config.eligible_states))
+        .where(
+            Signal.notified_at.is_(None),
+            Signal.state.in_(config.eligible_states),
+            # A signal the user already acknowledged is handled. Pushing it anyway
+            # made "acknowledge" mean nothing on the dashboard (ADR-115);
+            # ``notified_at`` keeps recording that it *was* pushed.
+            Signal.status != "acknowledged",
+        )
         .order_by(Signal.id)
     ).all()
     # Never dump a backlog: only signals generated after notifications were

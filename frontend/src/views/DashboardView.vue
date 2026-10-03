@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { api, type AIStatus, type ExplainResult, type HealthResponse, type PaperAccount, type SignalIntent, type SystemInfo } from '@/api'
 import StatCard from '@/components/StatCard.vue'
-import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, toneOf } from '@/format'
+import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, signalDirection, toneOf } from '@/format'
 
 const health = ref<HealthResponse | null>(null)
 const healthError = ref('')
@@ -308,7 +308,7 @@ onMounted(load)
               <td>{{ s.symbol ?? '—' }}</td>
               <td>{{ s.timeframe ?? '—' }}</td>
               <td><span class="badge" :class="s.state">{{ s.state }}</span></td>
-              <td>{{ s.direction }}</td>
+              <td>{{ signalDirection(s.direction, s.closes_direction) }}</td>
               <td>{{ formatNumber(s.price_reference) }}</td>
               <td>{{ formatNumber(s.stop_reference) }}</td>
               <td>{{ formatNumber(s.target_reference) }}</td>

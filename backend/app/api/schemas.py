@@ -511,6 +511,8 @@ class SignalOut(BaseModel):
     bar_timestamp: dt.datetime
     state: str
     direction: str
+    #: Set when the signal closes a position ("LONG"/"SHORT"); null otherwise.
+    closes_direction: str | None = None
     price_reference: float | None
     stop_reference: float | None
     target_reference: float | None

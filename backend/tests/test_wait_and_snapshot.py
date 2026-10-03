@@ -31,6 +31,21 @@ _DSL = {
     "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5},
 }
 
+# ``close < ema20`` is not a recommendation here, it is the comparison that holds
+# on the last bar of the shared ``sample_bars`` fixture. The persistence tests
+# need an intent that is genuinely fresh on the latest closed bar: under ADR-115
+# an exit is an event (this fixture's decline started long before its last bar,
+# so there is nothing to persist) and a stale level is not a signal either. The
+# exit is the entry's inverse, so it cannot have just fired on that same bar.
+_DSL_FIRES_ON_LATEST = {
+    "schema_version": "1.0",
+    "strategy": {"id": "ws-latest", "name": "WS-latest", "version": "1.0.0"},
+    "market": {"asset_classes": ["stock"], "timeframes": ["1d"]},
+    "entry": {"long": {"all": [{"op": "lt", "left": "close", "right": "ema20"}]}},
+    "exit": {"long": {"any": [{"op": "gt", "left": "close", "right": "ema20"}]}},
+    "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5},
+}
+
 
 def _frame(close: float, ema20: float, ema50: float) -> pd.DataFrame:
     index = pd.date_range("2024-01-01", periods=5, freq="D", tz="UTC")
@@ -78,7 +93,7 @@ def _seed_series(db, bars):
     version = StrategyVersion(
         strategy_id=strategy.id,
         version="1.0.0",
-        dsl_json=_DSL,
+        dsl_json=_DSL_FIRES_ON_LATEST,
         immutable_hash="w" * 64,
         validation_status="valid",
         is_current=True,
@@ -102,6 +117,12 @@ def _seed_series(db, bars):
 def test_signal_persists_feature_snapshot_evidence(db_session, client, sample_bars) -> None:
     version, series = _seed_series(db_session, sample_bars)
     signal = scan_series(db_session, version, series)
+    # ``scan_series`` returns None when the latest closed bar holds no fresh
+    # event; the fixture's entry does hold, so a None here means the fixture or
+    # the freshness rule changed (ADR-115).
+    assert signal is not None
+    assert signal.state == "BUY"
+    assert signal.closes_direction is None
 
     snapshot = db_session.query(FeatureSnapshot).one()
     assert snapshot.input_hash == signal.feature_snapshot_hash
@@ -122,6 +143,7 @@ def test_feature_snapshot_endpoint_validates_series(client) -> None:
 def test_signal_evidence_endpoint(client, db_session, sample_bars) -> None:
     version, series = _seed_series(db_session, sample_bars)
     signal = scan_series(db_session, version, series)
+    assert signal is not None
 
     body = client.get(f"/api/v1/signals/{signal.id}/evidence").json()
     assert body["signal_id"] == signal.id

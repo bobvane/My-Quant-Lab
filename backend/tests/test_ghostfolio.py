@@ -263,8 +263,12 @@ def test_signal_persists_portfolio_context(db_session, sample_bars) -> None:
         "schema_version": "1.0",
         "strategy": {"id": "gf", "name": "GF", "version": "1.0.0"},
         "market": {"asset_classes": ["stock"], "timeframes": ["1d"]},
-        "entry": {"long": {"all": [{"op": "gt", "left": "close", "right": "ema20"}]}},
-        "exit": {"long": {"any": [{"op": "lt", "left": "close", "right": "ema20"}]}},
+        # ``close < ema20`` holds on the last bar of the shared ``sample_bars``
+        # fixture, and the exit is its inverse so it cannot have just fired: this
+        # test needs an intent that is fresh on the latest closed bar, since exits
+        # are events and stale levels are not signals (ADR-115).
+        "entry": {"long": {"all": [{"op": "lt", "left": "close", "right": "ema20"}]}},
+        "exit": {"long": {"any": [{"op": "gt", "left": "close", "right": "ema20"}]}},
         "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5},
     }
     strategy = Strategy(name="GF", slug="gf-snap")
@@ -294,5 +298,7 @@ def test_signal_persists_portfolio_context(db_session, sample_bars) -> None:
 
     signal = scan_series(db_session, version, series)
     # Ghostfolio is unconfigured in tests, so the context records that honestly.
+    assert signal is not None
+    assert signal.state == "BUY"
     assert signal.portfolio_context_json is not None
     assert signal.portfolio_context_json["ghostfolio_connected"] is False

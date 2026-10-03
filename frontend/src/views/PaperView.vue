@@ -3,7 +3,7 @@ import { onMounted, ref } from 'vue'
 import { api, type PaperAccount, type PaperPosition, type SignalRecord } from '@/api'
 import EquityChart from '@/components/EquityChart.vue'
 import StatCard from '@/components/StatCard.vue'
-import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, toneOf } from '@/format'
+import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, signalDirection, toneOf } from '@/format'
 
 const accounts = ref<PaperAccount[]>([])
 const error = ref('')
@@ -387,7 +387,7 @@ onMounted(() => {
             <td>{{ formatDateTime(s.generated_at) }}</td>
             <td>{{ s.symbol }}</td>
             <td>{{ s.timeframe }}</td>
-            <td>{{ s.direction }}</td>
+            <td>{{ signalDirection(s.direction, s.closes_direction) }}</td>
             <td>{{ s.state }}</td>
             <td>
               <button

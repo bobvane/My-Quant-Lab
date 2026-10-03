@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.domain.models import MarketDataSeries, Signal, SignalOutcome
@@ -37,22 +37,44 @@ def evaluate_pending_outcomes(
     * ``mae``: worst adverse excursion from the signal close
     * ``mfe``: best favourable excursion from the signal close
 
-    Returns counts: {"evaluated": N, "insufficient_data": M, "skipped": K}.
+    Only *entries* are evaluated: an exit is not a position, so asking what the
+    price did after it is a different question with a different sign. The query
+    excludes them instead of skipping them in the loop, so a table full of exits
+    cannot fill the pending window and stall the entries behind it (ADR-115).
+
+    Returns counts: {"evaluated": N, "insufficient_data": M, "skipped": K,
+    "not_an_entry": E} — ``E`` counts the closing signals, which are not work.
     """
 
     from app.data.market_data_repo import load_bars
 
-    # Find signals without an outcome row.
+    # Find entry signals without an outcome row.
     pending = db.scalars(
         select(Signal)
         .outerjoin(SignalOutcome, SignalOutcome.signal_id == Signal.id)
-        .where(SignalOutcome.id.is_(None))
+        .where(
+            SignalOutcome.id.is_(None),
+            Signal.closes_direction.is_(None),
+            Signal.direction.in_(("LONG", "SHORT")),
+        )
         .order_by(Signal.id)
         .limit(200)
     ).all()
 
+    not_an_entry = db.scalar(
+        select(func.count())
+        .select_from(Signal)
+        .outerjoin(SignalOutcome, SignalOutcome.signal_id == Signal.id)
+        .where(SignalOutcome.id.is_(None), Signal.closes_direction.is_not(None))
+    )
+
     if not pending:
-        return {"evaluated": 0, "insufficient_data": 0, "skipped": 0}
+        return {
+            "evaluated": 0,
+            "insufficient_data": 0,
+            "skipped": 0,
+            "not_an_entry": int(not_an_entry or 0),
+        }
 
     # Cache series → bars to avoid re-loading for multiple signals on the same series.
     series_cache: dict[int, list] = {}
@@ -122,7 +144,12 @@ def evaluate_pending_outcomes(
         evaluated += 1
 
     db.commit()
-    return {"evaluated": evaluated, "insufficient_data": insufficient, "skipped": skipped}
+    return {
+        "evaluated": evaluated,
+        "insufficient_data": insufficient,
+        "skipped": skipped,
+        "not_an_entry": int(not_an_entry or 0),
+    }
 
 
 def _close_at_or_before(bars, timestamp) -> float | None:

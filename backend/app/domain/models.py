@@ -428,6 +428,10 @@ class Signal(Base):
     bar_timestamp: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
     direction: Mapped[str] = mapped_column(String(8), default="FLAT", nullable=False)
+    #: Which position an exit closes ("LONG"/"SHORT"); NULL when it closes
+    #: nothing. A bare ``direction="FLAT"`` said only "no direction", so an exit
+    #: and a non-event looked identical downstream (ADR-115).
+    closes_direction: Mapped[str | None] = mapped_column(String(8))
     price_reference: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     stop_reference: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     target_reference: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))

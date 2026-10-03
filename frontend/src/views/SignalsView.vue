@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api, type ExplainResult, type SignalRecord } from '@/api'
-import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
+import { formatDateTime, formatNumber, formatPercent, signalDirection, toneOf } from '@/format'
 
 const signals = ref<SignalRecord[]>([])
 const stateFilter = ref('')
@@ -401,7 +401,7 @@ onMounted(load)
             <td>{{ s.strategy_name ?? '—' }} <span class="muted">v{{ s.strategy_version }}</span></td>
             <td>{{ s.timeframe }}</td>
             <td><span class="badge" :class="s.state">{{ s.state }}</span></td>
-            <td>{{ s.direction }}</td>
+            <td>{{ signalDirection(s.direction, s.closes_direction) }}</td>
             <td>{{ s.price_reference != null ? formatNumber(s.price_reference) : '—' }}</td>
             <td class="muted">{{ (s.triggered_rules || []).join(', ') || '—' }}</td>
             <td class="muted">{{ contextNote(s) }}</td>
@@ -452,7 +452,7 @@ onMounted(load)
       <h4>当前状态</h4>
       <p class="muted">
         信号：{{ formatDateTime(detailRow?.bar_timestamp) }} · {{ detailRow?.state }} /
-        {{ detailRow?.direction }} · 参考价
+        {{ signalDirection(detailRow?.direction, detailRow?.closes_direction) }} · 参考价
         {{ detailRow?.price_reference != null ? formatNumber(detailRow?.price_reference) : '—' }}
       </p>
       <p v-if="latestStatus.found" class="muted">
@@ -548,7 +548,7 @@ onMounted(load)
         <tbody>
           <tr v-for="o in outcomes" :key="String(o.signal_id)">
             <td>#{{ o.signal_id }}</td>
-            <td>{{ o.direction }}</td>
+            <td>{{ signalDirection(o.direction, o.closes_direction) }}</td>
             <td>{{ o.timeframe }}</td>
             <td class="muted">{{ formatDateTime(String(o.bar_timestamp)) }}</td>
             <td class="muted">{{ o.entry_time ? formatDateTime(String(o.entry_time)) : '—' }}</td>

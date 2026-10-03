@@ -324,7 +324,18 @@ denominator`），前端据此显示「—」而不是 `NaN%`/`-100%`。
 `GET /signals/outcome-summary` [已实现]  (win rate / avg PnL grouped by direction/timeframe/state/strategy)
 `POST /signals/scan` [已实现] —— 干跑一次扫描；`persist=false`（默认）只算不落库，`persist=true` 才写入信号（去重）。
 `POST /signals/{signal_id}/explain` [已实现] —— 解释一个已落库的信号。
-`POST /signals/{signal_id}/acknowledge` [已实现] —— 确认一个信号。
+`POST /signals/{signal_id}/acknowledge` [已实现] —— 确认一个信号；已确认的信号不再被通知任务推送。
+
+两种模式共用同一条新鲜度门禁：`NO_SIGNAL` 不是信号，既不落库也不计入 `created`。`persist=true`
+返回的 `created` 是**真的新建**了几行（过去它靠「最老一条 signal 的 id 有没有变」猜，既算错又会在
+并发扫描撞上 `uq_signal_event` 时 500）。每个 series × current 版本最多一次评估，返回的 `signals`
+里每行带 `persisted`：`true` 表示这一行是一个真实事件、此刻已经在库里（可能是本次新建，也可能是
+此前那次扫描已经写过 —— 新建了几行只看 `created`），`false` 表示这次扫描没有任何东西可以记录（ADR-115）。
+
+信号行上的 `direction` 与 `closes_direction`：`BUY` 是 `LONG`，做空入场是 `SHORT`，平仓是
+`SELL` + `direction=FLAT` + `closes_direction=LONG|SHORT`（说明它平掉的是哪一边）。入场是电平（成立
+期间每根 K 线都报），出场是事件（只在第一次成立的那根报）。`/signals/outcomes` 只评估入场信号，
+`not_an_entry` 计的是被跳过的平仓指令。
 
 `/signals/outcome-summary` 的胜率永远跟它的分母一起返回（ADR-065）：
 

@@ -154,6 +154,7 @@ def latest_intent_for_series(
     # (docs/09 §4: one event, one signal).
     state = intent.get("state", "NO_SIGNAL")
     direction = intent.get("direction", "FLAT")
+    closes_direction = intent.get("closes_direction")
     triggered = intent.get("triggered_rules", [])
     event_bar_time = intent.get("bar_time")
     is_fresh = state != "NO_SIGNAL" and event_bar_time is not None
@@ -165,12 +166,18 @@ def latest_intent_for_series(
             f"entry conditions partially met on the last closed bar ({last_ts.isoformat()}); "
             "waiting for the remaining conditions"
         )
+    elif closes_direction is not None:
+        reason = (
+            f"the exit rule for a {closes_direction} position first held on the last closed bar "
+            f"({last_ts.isoformat()}); this closes {closes_direction}, it does not open anything"
+        )
     else:
         reason = f"rules matched on the last closed bar ({last_ts.isoformat()})"
 
     return ScanResult(
         state=state,
         direction=direction,
+        closes_direction=closes_direction,
         reason=reason,
         bar_time=last_ts,
         event_bar_time=event_bar_time,
@@ -234,6 +241,7 @@ def persist_signal(
         bar_timestamp=bar_time,
         state=intent["state"],
         direction=intent["direction"],
+        closes_direction=intent.get("closes_direction"),
         price_reference=intent.get("price_reference"),
         stop_reference=intent.get("stop_reference"),
         target_reference=intent.get("target_reference"),
@@ -286,18 +294,59 @@ def _persist_feature_snapshot(
     )
 
 
-def scan_series(db: Session, strategy_version: StrategyVersion, series: MarketDataSeries) -> Signal:
-    """Evaluate and persist a signal, respecting the de-duplication rule."""
+def scan_series(
+    db: Session, strategy_version: StrategyVersion, series: MarketDataSeries
+) -> Signal | None:
+    """Evaluate and persist a signal, respecting the de-duplication rule.
+
+    Returns ``None`` when the latest closed bar produced nothing to record. A
+    NO_SIGNAL row is not a signal: persisting one wrote a row per series per
+    strategy version on every manual scan, which then showed up in the signal
+    list, in the outcome counts and in the evaluator's pending queue (ADR-115).
+    """
 
     intent = latest_intent_for_series(db, strategy_version, series)
+    if not intent.get("is_fresh"):
+        return None
     signal, _created = persist_signal(
         db, strategy_version, series, intent, holdings=load_portfolio_holdings()
     )
     return signal
 
 
+def _scan_row(
+    version: StrategyVersion,
+    series: MarketDataSeries,
+    asset: Asset | None,
+    intent: ScanResult,
+    *,
+    persisted: bool | None = None,
+) -> dict[str, Any]:
+    """One row of a scan report. The same shape for dry runs and real runs."""
+
+    row: dict[str, Any] = {
+        "strategy_version_id": version.id,
+        "strategy_id": version.strategy_id,
+        "symbol": asset.symbol if asset else series.asset_id,
+        "timeframe": series.timeframe,
+        "state": intent["state"],
+        "direction": intent["direction"],
+        "closes_direction": intent.get("closes_direction"),
+        "reason": intent["reason"],
+        "bar_time": intent["bar_time"],
+        "price_reference": intent.get("price_reference"),
+        "stop_reference": intent.get("stop_reference"),
+        "target_reference": intent.get("target_reference"),
+        "triggered_rules": intent.get("triggered_rules", []),
+        "scanned_at": dt.datetime.now(tz=dt.UTC).isoformat(),
+    }
+    if persisted is not None:
+        row["persisted"] = persisted
+    return row
+
+
 def scan_all(db: Session, *, asset_ids: list[int] | None = None) -> list[dict[str, Any]]:
-    """Scan every current strategy version against every series."""
+    """Scan every current strategy version against every series (dry run)."""
 
     results: list[dict[str, Any]] = []
     versions = db.scalars(select(StrategyVersion).where(StrategyVersion.is_current.is_(True))).all()
@@ -314,23 +363,7 @@ def scan_all(db: Session, *, asset_ids: list[int] | None = None) -> list[dict[st
                 logger.exception("scan failed for version=%s series=%s", version.id, series.id)
                 continue
             asset = db.get(Asset, series.asset_id)
-            results.append(
-                {
-                    "strategy_version_id": version.id,
-                    "strategy_id": version.strategy_id,
-                    "symbol": asset.symbol if asset else series.asset_id,
-                    "timeframe": series.timeframe,
-                    "state": intent["state"],
-                    "direction": intent["direction"],
-                    "reason": intent["reason"],
-                    "bar_time": intent["bar_time"],
-                    "price_reference": intent.get("price_reference"),
-                    "stop_reference": intent.get("stop_reference"),
-                    "target_reference": intent.get("target_reference"),
-                    "triggered_rules": intent.get("triggered_rules", []),
-                    "scanned_at": dt.datetime.now(tz=dt.UTC).isoformat(),
-                }
-            )
+            results.append(_scan_row(version, series, asset, intent))
     return results
 
 
@@ -339,11 +372,13 @@ def scan_and_persist(db: Session, *, asset_ids: list[int] | None = None) -> dict
 
     This is the scheduled-scanner path (docs/09 §2): evaluate on closed bars,
     persist de-duplicated signals, and report how many were newly created so the
-    caller can notify on exactly the new ones.
+    caller can notify on exactly the new ones. The per-row report is returned too,
+    so a manual scan and a scheduled scan describe the same evaluation.
     """
 
     created = 0
     evaluated = 0
+    results: list[dict[str, Any]] = []
     holdings = load_portfolio_holdings()  # fetched once per scan, not per signal
     versions = db.scalars(select(StrategyVersion).where(StrategyVersion.is_current.is_(True))).all()
     series_stmt = select(MarketDataSeries).where(MarketDataSeries.is_archived.is_(False))
@@ -364,6 +399,8 @@ def scan_and_persist(db: Session, *, asset_ids: list[int] | None = None) -> dict
             # bar. NO_SIGNAL rows and stale historical matches are skipped so the
             # table does not grow one row per bar and nothing gets re-notified.
             if not intent.get("is_fresh"):
+                asset = db.get(Asset, series.asset_id)
+                results.append(_scan_row(version, series, asset, intent, persisted=False))
                 continue
             try:
                 _signal, was_created = persist_signal(
@@ -375,4 +412,6 @@ def scan_and_persist(db: Session, *, asset_ids: list[int] | None = None) -> dict
                 continue
             if was_created:
                 created += 1
-    return {"evaluated": evaluated, "created": created}
+            asset = db.get(Asset, series.asset_id)
+            results.append(_scan_row(version, series, asset, intent, persisted=True))
+    return {"evaluated": evaluated, "created": created, "signals": results}

@@ -48,3 +48,29 @@ export function formatPaperPnlPct(
   const pct = paperPnlPct(netDeposits, cash)
   return pct === null ? '—' : formatPercent(pct)
 }
+
+/**
+ * Direction of a signal event, in the words the panel uses.
+ *
+ * A closing signal names what it closes: its own `direction` is `FLAT`, which
+ * reads as "no direction" and hides whether the long or the short was closed
+ * (ADR-115).
+ */
+export function signalDirection(
+  direction: string | null | undefined,
+  closesDirection?: string | null,
+): string {
+  const closes = (closesDirection ?? '').toUpperCase()
+  if (closes === 'LONG') return '平多'
+  if (closes === 'SHORT') return '平空'
+  switch ((direction ?? '').toUpperCase()) {
+    case 'LONG':
+      return '做多'
+    case 'SHORT':
+      return '做空'
+    case 'FLAT':
+      return '—'
+    default:
+      return direction || '—'
+  }
+}

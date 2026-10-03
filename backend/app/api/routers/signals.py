@@ -19,7 +19,11 @@ from app.data.market_data_repo import load_bars
 from app.data.strategy_service import load_spec
 from app.domain.models import Asset, MarketDataSeries, Signal, Strategy, StrategyVersion
 from app.features.engine import build_features
-from app.simulation.signal_engine import latest_intent_for_series, scan_all, scan_series
+from app.simulation.signal_engine import (
+    latest_intent_for_series,
+    scan_all,
+    scan_and_persist,
+)
 from app.strategies.executor import run_strategy
 
 logger = logging.getLogger(__name__)
@@ -64,6 +68,7 @@ def _serialize_signal(db: Session, row: Signal) -> SignalOut:
         bar_timestamp=row.bar_timestamp,
         state=row.state,
         direction=row.direction,
+        closes_direction=row.closes_direction,
         price_reference=float(row.price_reference) if row.price_reference else None,
         stop_reference=float(row.stop_reference) if row.stop_reference else None,
         target_reference=float(row.target_reference) if row.target_reference else None,
@@ -277,31 +282,26 @@ def acknowledge(signal_id: int, db: Session = Depends(get_db)) -> dict:
 
 @router.post("/scan", summary="Evaluate every current strategy on every series")
 def scan(db: Session = Depends(get_db), persist: bool = False) -> dict[str, Any]:
-    """Dry-run a scan. With ``persist=true`` signals are stored (deduplicated)."""
+    """Dry-run a scan. With ``persist=true`` signals are stored (deduplicated).
 
-    results = scan_all(db)
-    created = 0
-    if persist:
-        for row in results:
-            version = db.get(StrategyVersion, row["strategy_version_id"])
-            series = db.get(MarketDataSeries, _series_id_for(db, row["symbol"], row["timeframe"]))
-            if version is None or series is None:
-                continue
-            before = db.scalar(select(Signal).where(Signal.strategy_version_id == version.id))
-            scan_series(db, version, series)
-            after = db.scalar(
-                select(Signal).where(
-                    Signal.strategy_version_id == version.id,
-                    Signal.asset_id == series.asset_id,
-                    Signal.bar_timestamp == row["bar_time"],
-                )
-            )
-            if after is not None and (before is None or before.id != after.id):
-                created += 1
+    The persisting path is the same one the scheduler uses, so a manual scan
+    cannot store what a scheduled scan would refuse to store (ADR-115).
+    """
+
+    if not persist:
+        results = scan_all(db)
+        return {
+            "evaluated": len(results),
+            "created": 0,
+            "signals": results,
+            "disclaimer": "Signals are research information only. No order is ever placed.",
+        }
+
+    outcome = scan_and_persist(db)
     return {
-        "evaluated": len(results),
-        "created": created,
-        "signals": results,
+        "evaluated": outcome["evaluated"],
+        "created": outcome["created"],
+        "signals": outcome["signals"],
         "disclaimer": "Signals are research information only. No order is ever placed.",
     }
 

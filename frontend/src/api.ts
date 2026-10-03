@@ -546,6 +546,12 @@ export interface SignalRecord {
   bar_timestamp: string
   state: string
   direction: string
+  /**
+   * Set on a closing signal: which side it closes. `direction` is `FLAT` there,
+   * so without this the panel cannot tell a closed long from a closed short
+   * (ADR-115).
+   */
+  closes_direction: string | null
   price_reference: number | null
   stop_reference: number | null
   target_reference: number | null
@@ -560,6 +566,7 @@ export interface SignalRecord {
 export interface SignalIntent {
   state: string
   direction: string
+  closes_direction?: string | null
   reason?: string
   bar_time?: string | null
   price_reference?: number | null

@@ -29,11 +29,19 @@ class SignalIntent:
     price_reference: float | None = None
     stop_reference: float | None = None
     target_reference: float | None = None
+    #: Which position this intent closes, when it closes one ("LONG"/"SHORT").
+    #:
+    #: An exit used to be reported as ``SELL``/``FLAT``, which says nothing about
+    #: what is being sold: an outcome evaluator then scored the exit as if it
+    #: were a fresh short entry, and the paper ledger tried to sell a long it did
+    #: not hold (ADR-115). ``None`` means "this intent closes nothing".
+    closes_direction: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "state": self.state,
             "direction": self.direction,
+            "closes_direction": self.closes_direction,
             "bar_time": self.bar_time.isoformat() if self.bar_time is not None else None,
             "triggered_rules": self.triggered_rules,
             "price_reference": self.price_reference,
@@ -235,30 +243,74 @@ def _last_intent(out: pd.DataFrame, triggered: dict[str, set[pd.Timestamp]]) -> 
     A historical match is no longer projected onto the latest bar: if nothing
     fires on the last closed bar, the state is NO_SIGNAL (or WAIT when the entry
     conditions are only partially met).
+
+    Two deliberate asymmetries (ADR-115):
+
+    * Entries are *levels*. BUY/SELL reports "the entry rule holds on this bar",
+      which is what docs/09 §1 defines it to mean, and it keeps being reported
+      for as long as the rule holds.
+    * Exits are *events*. A SELL is reported only on the bar the exit rule first
+      holds, because it is a statement about one position. A scan that reported
+      "close the long" on every bar of a two-month decline would send the same
+      instruction sixty times (docs/09 §7).
     """
 
     if out.empty:
-        return {"state": "NO_SIGNAL", "direction": "FLAT", "bar_time": None}
+        return {
+            "state": "NO_SIGNAL",
+            "direction": "FLAT",
+            "closes_direction": None,
+            "bar_time": None,
+        }
 
     ts = out.index[-1]
 
     def flag(name: str) -> bool:
-        return bool(out.at[ts, name]) if name in out.columns else False
+        return _is_true(out.at[ts, name]) if name in out.columns else False
+
+    def rising(name: str) -> bool:
+        """True when ``name`` first holds on the latest closed bar.
+
+        A single-bar frame has no earlier bar to compare against: the rule holds
+        on the earliest bar we can see, so it counts as an event rather than
+        being dropped silently.
+        """
+
+        if not flag(name):
+            return False
+        if len(out.index) < 2:
+            return True
+        return not _is_true(out.at[out.index[-2], name])
 
     entry = flag("entry_long")
     entry_short = flag("entry_short")
-    exit_long = flag("exit_long")
-    exit_short = flag("exit_short")
+    exit_long = rising("exit_long")
+    exit_short = rising("exit_short")
     partial = flag("entry_long_partial") or flag("entry_short_partial")
+
+    fired = [rule for rule, hits in triggered.items() if ts in hits]
+
+    if exit_long or exit_short:
+        # A closing instruction outranks a standing entry level: the entry will
+        # still hold on the next bar, this event will not. When both exits fire
+        # on the same bar the long is named, because a long is V1's default
+        # position (docs/04).
+        return SignalIntent(
+            state="SELL",
+            direction="FLAT",
+            closes_direction="LONG" if exit_long else "SHORT",
+            bar_time=ts,
+            triggered_rules=sorted(fired),
+            price_reference=_as_float(out.at[ts, "close"]),
+            stop_reference=_as_float(out.at[ts, "risk_stop"]),
+            target_reference=_as_float(out.at[ts, "risk_target"]),
+        ).as_dict()
 
     if entry:
         state, direction = "BUY", "LONG"
     elif entry_short:
         state, direction = "SELL", "SHORT"
-    elif exit_long or exit_short:
-        state, direction = "SELL", "FLAT"
     elif partial:
-        fired = [rule for rule, hits in triggered.items() if ts in hits]
         return SignalIntent(
             state="WAIT",
             direction="FLAT",
@@ -269,9 +321,13 @@ def _last_intent(out: pd.DataFrame, triggered: dict[str, set[pd.Timestamp]]) -> 
             target_reference=_as_float(out.at[ts, "risk_target"]),
         ).as_dict()
     else:
-        return {"state": "NO_SIGNAL", "direction": "FLAT", "bar_time": None}
+        return {
+            "state": "NO_SIGNAL",
+            "direction": "FLAT",
+            "closes_direction": None,
+            "bar_time": None,
+        }
 
-    fired = [rule for rule, hits in triggered.items() if ts in hits]
     return SignalIntent(
         state=state,
         direction=direction,
@@ -281,6 +337,19 @@ def _last_intent(out: pd.DataFrame, triggered: dict[str, set[pd.Timestamp]]) -> 
         stop_reference=_as_float(out.at[ts, "risk_stop"]),
         target_reference=_as_float(out.at[ts, "risk_target"]),
     ).as_dict()
+
+
+def _is_true(value: Any) -> bool:
+    """NaN-safe boolean read: a NaN is *not* a hold, it is a missing bar."""
+
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return False
+    return bool(value)
 
 
 def _as_float(value: Any) -> float | None:

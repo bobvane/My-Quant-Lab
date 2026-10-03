@@ -1811,19 +1811,40 @@ onMounted(async () => {
               <td>特征版本</td>
               <td>{{ detail.feature_version }}</td>
             </tr>
-            <tr>
-              <td>成交模型</td>
-              <td>
-                {{ detail.execution_model.fill_model }} · 订单
-                {{ detail.execution_model.entry_order_type || 'market' }}（有效期
-                {{ detail.execution_model.order_valid_bars ?? 1 }} bar）· 手续费
-                {{ detail.execution_model.fee_bps }}bps · 滑点
-                {{ detail.execution_model.slippage_bps }}bps
-              </td>
-            </tr>
           </tbody>
         </table>
         <p v-else class="muted">选择一条回测记录查看详情。</p>
+      </div>
+
+      <div class="card" style="margin-top: 14px">
+        <h3>查看假设</h3>
+        <table v-if="detail">
+          <tbody>
+            <tr>
+              <td>成交模型</td>
+              <td>{{ detail.execution_model.fill_model }}</td>
+            </tr>
+            <tr>
+              <td>订单类型</td>
+              <td>
+                {{ detail.execution_model.entry_order_type || 'market' }}（有效期
+                {{ detail.execution_model.order_valid_bars ?? 1 }} bar）
+              </td>
+            </tr>
+            <tr>
+              <td>手续费</td>
+              <td>{{ detail.execution_model.fee_bps }} bps</td>
+            </tr>
+            <tr>
+              <td>滑点</td>
+              <td>{{ detail.execution_model.slippage_bps }} bps</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted">
+          这四项就是这次回测实际使用的成交假设：换个手续费或滑点，同一批信号会给出不同的成交与收益，
+          所以它们和上面的结果哈希一起构成这次回测的复现记录。
+        </p>
       </div>
     </div>
 

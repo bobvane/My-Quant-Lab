@@ -1,122 +1,115 @@
 # 13 UI/UX Specification
 
+本文件描述界面**现在**长什么样，以及哪些还只是计划。每一节都带一行 `状态：`，取值只有三种：
+
+- `状态：已实现（<路径>）` —— 括号里点名交付它的文件，必须真的存在；一个已实现的承诺必须指得出代码。
+- `状态：部分实现（缺少 <清单>）` —— 已经做到的部分照实写，缺的部分写在同一行里。
+- `状态：尚未实现（<计划或「未安排」>）` —— 只出现在本文件末尾的欠账一节，正文不再用将来时描述不存在的东西。
+
+守卫 `backend/tests/test_ui_promises.py` 把第 1 节的导航树与 `frontend/src/main.ts:16-22` 的路由、`frontend/src/App.vue:60-68` 的导航标签逐条对照，并核对每个 `已实现` 点名的文件存在 —— 所以这份文件不会再悄悄承诺一个不存在的页面（ADR-107）。
+
 ## 1. Navigation
 
+状态：已实现（frontend/src/App.vue, frontend/src/main.ts）
+
+左栏导航与路由一一对应，共 7 条：
+
 ```text
-Dashboard
-Strategies
-  ├─ Strategy Library
-  ├─ GitHub Sources
-  ├─ Experimental
-  └─ Strategy Detail
-Backtest Lab
-Paper Trading
-Signals
-Portfolio Context
-Data Health
-Settings
+研究仪表盘        /
+行情与策略        /market
+信号              /signals
+回测实验室        /backtest
+模拟盘            /paper
+系统资源          /resources
+系统与审计        /settings
 ```
+
+早期版本在这一节画过一棵更长的树：Strategies 下挂 Strategy Library、GitHub Sources、Experimental、Strategy Detail，另有两个顶级项 Portfolio Context 与 Data Health。这些**都不是独立页面**：策略库、GitHub 导入、策略血统与版本、组合概览（Ghostfolio 上下文）、数据健康分别作为 `/market` 与 `/` 的区块存在。本文件按现状记录，不再列不存在的页面。
 
 ## 2. Dashboard
 
-### 今日
-- BUY/SELL signals count
-- high-priority alerts
-- WAIT observations
+状态：已实现（frontend/src/views/DashboardView.vue）
 
-### 我的资产
-- Ghostfolio current value/weight summary
-- concentration warnings
+`/` 从上到下：
 
-### 我的策略
-- strategy status changes
-- new GitHub imports
-- recent backtest/paper updates
+### 顶部状态卡
+- 版本与引擎/特征版本
+- 数据库与市场数据状态
+- 数据新鲜度
+
+### 我的 Ghostfolio 持仓
+- 当前市值与权重
+- 集中度提醒（真实持仓只读，与模拟盘完全隔离）
+
+### 组合概览
+### 数据健康
+- 覆盖范围与最近一次同步情况
+### 信号扫描（只用已收盘 K 线）
+### 模拟账户（与真实持仓完全隔离）
+### 系统构成
 
 ## 3. Strategy Detail
 
-分成：
+状态：部分实现（缺少 独立的策略详情页：Overview、Rules、Current Signals、AI Explanation 四段在 `/market` 上没有对应区块）
 
-- Overview
-- Rules
-- Provenance
-- Backtest
-- OOS / Walk-forward
-- Paper Trading
-- Current Signals
-- AI Explanation
-- Version History
+策略的细节目前分布在三个页面，而不是一个九段的详情页：
 
-## 4. Backtest UI
+- 策略库与策略血统（Provenance）：`frontend/src/views/StrategiesView.vue` 的「策略血统」区块
+- 版本历史（Version History）与生命周期：「策略 #<id> 版本」「策略生命周期（基于证据，无 AI 介入）」
+- 规则（Rules）：同页的「策略 DSL（声明式，JSON 形式）」
+- 回测与样本外/滚动验证（Backtest、OOS / Walk-forward）：`frontend/src/views/BacktestView.vue`
+- 模拟盘（Paper Trading）：`frontend/src/views/PaperView.vue`
+- 当前信号与 AI 解释（Current Signals、AI Explanation）：`frontend/src/views/SignalsView.vue`
 
-顶部配置：
-- strategy
-- symbol(s)
-- timeframe
-- date range
-- initial capital
-- fees
-- slippage
+九段式详情页仍是计划，尚未实现。
 
-结果：
-- equity curve
-- drawdown curve
-- trades
-- monthly/yearly view
-- metric cards
-- OOS split
-- parameter info
+## 4. Backtest Lab
 
-必须有“查看假设”区域，列出成交模型、费用和滑点。
+状态：已实现（frontend/src/views/BacktestView.vue）
 
-## 5. Paper Trading UI
+顶部配置：strategy、symbol(s)、timeframe、date range、initial capital、fees、slippage。
 
-显示：
-- cash
-- equity
-- unrealized P/L
-- realized P/L
-- positions
-- equity curve
-- latest signals
+结果区：权益曲线、回撤曲线、指标明细（metric cards）、交易明细、月度/年度视图、OOS 分割、滚动 Walk-Forward、参数敏感性、Monte Carlo 重采样、策略集成与投票阈值扫描、参数信息、AI 解读（只解释已有数字）。
 
-## 6. Signal Detail UI
+「查看假设」是一个独立区块，列出这次回测实际使用的成交模型、订单类型与有效期、手续费、滑点；结果可复现性区块列出结果哈希、数据集哈希、引擎版本、特征版本。两者相邻，因为假设本来就是复现记录的一部分（ADR-107）。
 
-使用以下顺序：
+## 5. Paper Trading
 
-1. 当前状态
-2. 发生了什么
-3. 为什么触发
-4. 策略历史统计
-5. 最近模拟情况
-6. 真实持仓上下文
-7. 风险/失效条件
-8. 专业技术数据
+状态：部分实现（缺少 权益曲线区块与「最新信号」区块）
+
+`/paper` 现有：新建模拟账户、账户明细（cash / equity / 未实现与已实现盈亏）、持仓、执行信号（虚拟成交）、绩效（期末权益、总收益、最大回撤、胜率）。权益曲线目前只在绩效卡片里以数字呈现，没有图；「最新信号」区块也没有。
+
+## 6. Signal Detail
+
+状态：部分实现（缺少 第 1 段「当前状态」、第 4 段「策略历史统计」、第 6 段「真实持仓上下文」、第 7 段「风险/失效条件」）
+
+`/signals` 现在按「信号结果追踪」→「信号证据」→「AI 解释」三段呈现，覆盖了原计划的第 2 段（发生了什么：证据与指标）、第 3 段（为什么触发：规则命中与 AI 解释）、第 5 段（最近模拟情况：结果追踪）、第 8 段（专业技术数据：证据明细）。四个缺口见上面的状态行。
 
 ## 7. 初学者友好
 
-所有专业指标提供 tooltip：
-- 是什么
-- 怎么算
-- 为什么看它
-- 注意什么
+状态：部分实现（缺少 专业指标的 tooltip：现在只有图表 hover 的数值 tooltip 与 StatCard 的 `sub` 短说明，没有「是什么 / 怎么算 / 为什么看它 / 注意什么」四问）
 
-不要默认让用户看到公式墙。
+设计原则不变：不默认把公式墙推给用户；任何专业指标都应该能在原地解释自己。
 
-## 8. GitHub Import UI
+## 8. GitHub Import
 
-流程向导：
+状态：部分实现（缺少 七步向导：Repository → Analysis → Detected Strategies → Warnings → DSL Preview → Validation → Import）
 
-```text
-1. Repository
-2. Analysis
-3. Detected Strategies
-4. Warnings
-5. DSL Preview
-6. Validation
-7. Import
-```
+`/market` 的「从 GitHub 导入（只读分析，不执行仓库代码）」区块把分析结果、检测到的策略、警告与导入放在一个页面里一次呈现，「已导入来源（自动监视更新）」列出后续同步。导入仍然是只读分析：仓库代码永不执行。
 
 ## 9. Mobile/desktop
 
-优先 desktop，但 signal/detail pages 应适配手机宽度，方便查看 NAS 发来的通知链接。
+状态：尚未实现（frontend/src/style.css 里没有任何 `@media` 查询）
+
+优先桌面端，但信号页与详情页应适配手机宽度，方便点开 NAS 发来的通知链接。这仍然是一个明确的需求，只差实现。
+
+## 10. 欠账（尚未实现的承诺，按本文件顺序）
+
+- 独立的策略详情页与其中的 Overview、Rules、Current Signals、AI Explanation 四段（第 3 节）
+- 模拟盘权益曲线图与「最新信号」区块（第 5 节）
+- 信号页的第 1、4、6、7 段（第 6 节）
+- 专业指标 tooltip（第 7 节）
+- GitHub 导入七步向导（第 8 节）
+- 移动端适配（第 9 节）
+
+这一节是上面 `尚未实现` / `缺少` 的汇总视图；两份清单必须一致，守卫会核对。

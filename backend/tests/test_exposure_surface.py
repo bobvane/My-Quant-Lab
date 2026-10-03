@@ -19,6 +19,11 @@ Three claims used to live only in prose:
   before a single assertion. A step is only a check if its command can run —
   and recreating the two containers also means carrying over the per-run secrets
   the boot step generated, or the API is handed the example defaults (ADR-106).
+* That same step waited for the API to answer again but not for the web edge,
+  so its first assertion could run while nginx was still binding the port it had
+  just been given and read `curl: (56) Recv failure: Connection reset by peer`
+  as a failure of the off switch it was checking (ADR-109). A check that races
+  the thing it probes reports the wrong verdict for the wrong reason.
 
 The guards here are text-level on purpose: the behaviour they pin is spread over
 an nginx config, a compose deployment, a PowerShell script and a workflow, none
@@ -207,3 +212,30 @@ def test_the_ci_step_leaves_the_api_on_the_database_it_was_given() -> None:
         "answered again` for a reason that has nothing to do with the token (ADR-106)"
     )
     assert "SECRET_KEY" in step, "the per-run secret key is not carried over either"
+
+
+def test_the_ci_step_waits_for_the_web_edge_before_asserting() -> None:
+    """A check that races the container it probes fails for the wrong reason (ADR-109)."""
+    text = _text(CI)
+    step = text[text.index("Exposure assertions") : text.index("Dump logs on failure")]
+    waits = re.findall(r"for _ in \$\(seq 1 (?P<attempts>\d+)\); do", step)
+    assert len(waits) >= 2, (
+        "the exposure step recreates two containers but waits for only "
+        f"{len(waits)} of them: the second one's first assertion can run before it "
+        "binds its port, and the step then reports the wrong verdict (ADR-109)"
+    )
+    assert all(int(attempts) <= 120 for attempts in waits), (
+        f"a wait of {waits} attempts is not a wait but a hang (ADR-109)"
+    )
+    assert '"$WEB/healthz"' in step, (
+        "nothing in the step polls the web edge, so its first assertion can race "
+        "nginx's bind and read `Connection reset by peer` as a closed door (ADR-109)"
+    )
+    assert "the web edge never answered" in step, (
+        "the wait cannot report which container stayed silent: it has to say so and "
+        "dump that container's logs, or the next failure is a guessing game (ADR-109)"
+    )
+    assert step.index("the web edge never answered") < step.index("loopback must keep working"), (
+        "the wait runs after the assertion that needs it, which is the race it was "
+        "added to remove (ADR-109)"
+    )

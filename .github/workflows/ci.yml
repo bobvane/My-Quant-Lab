@@ -418,6 +418,23 @@ jobs:
             exit 1
           fi
 
+          # The web container has to bind a port too, and it was recreated a
+          # moment ago: an assertion that runs the instant `up -d` returns is
+          # testing the scheduler instead of the policy. That is how this step
+          # failed once, with the API healthy and nginx still binding:
+          # `curl: (56) Recv failure: Connection reset by peer` -> 000, reported
+          # as if WEB_BIND had not closed the door (ADR-109).
+          web_ok=0
+          for _ in $(seq 1 60); do
+            if [ "$(curl -sS -o /dev/null -w '%{http_code}' "$WEB/healthz")" = "200" ]; then web_ok=1; break; fi
+            sleep 2
+          done
+          if [ "$web_ok" -ne 1 ]; then
+            echo "the web edge never answered on $WEB"
+            $COMPOSE logs --no-color --tail 100 quantlab-web
+            exit 1
+          fi
+
           code() { curl -sS -o /dev/null -w '%{http_code}' "$1"; }
 
           # 1. The documented off switch really closes the door: loopback answers,

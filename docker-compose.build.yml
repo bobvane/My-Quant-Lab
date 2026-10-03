@@ -1,7 +1,12 @@
 # My Quant Lab — 本地构建覆盖文件（开发者 / CI 专用）。
 #
 # 生产 compose（docker-compose.yml）只引用 GHCR 预构建镜像，不含 build 段，
-# 因此 NAS 上只需要两个文件即可运行。
+# 因此 NAS 上只需要两个文件即可运行（README「部署只需要两个文件」）。
+#
+# 每一个项目镜像的 build 段都必须在本文件里，不能留在主文件：主文件一旦带上
+# build 段，只拿到两个文件的部署就会去要一个它没有的 Dockerfile，而报错会指向
+# 找不到源码，而不是「镜像拉不下来」。test_deploy_preflight.py (ADR-078) 强制
+# 这条不变量：主文件零 build 段，且本文件覆盖主文件里的每一个项目镜像。
 #
 # 需要从源码构建时（本地开发、CI 冒烟测试），叠加本文件：
 #
@@ -31,3 +36,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.web
+
+  quantlab-docker-proxy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.proxy

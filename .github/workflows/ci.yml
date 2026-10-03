@@ -125,6 +125,17 @@ jobs:
           APP_ENVIRONMENT: ci
         run: |
           set +e
+          # Generated per run (ADR-077): shell values win over --env-file, so the
+          # compose file is still read from the stock .env.example.
+          export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
+          export SECRET_KEY="$(openssl rand -hex 32)"
+          # The deployment check has to be able to fail this pipeline, so it runs
+          # here, where the exported secrets are visible, and never as a separate
+          # step whose success could be followed by a failing `up` (ADR-078).
+          bash scripts/preflight.sh --env-file .env.example || {
+            echo "=== pre-flight refused the deployment ==="
+            exit 1
+          }
           docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example up -d
           rc=$?
           echo "=== compose up exit code: $rc ==="

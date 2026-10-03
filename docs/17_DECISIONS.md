@@ -1883,3 +1883,52 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：「示例值存在」与「示例值可用」是两件事，`${VAR:?required}` 只能保证前者，所以校验必须落在读到值的那一层（应用），而不是落在编排层。校验只在生产生效，是因为这个默认值本来就是给本地开发用的，把它一并禁掉只会让本地跑不起来而不增加安全性。拒绝理由要包含补救命令，是因为失败信息是正在部署的人唯一会读的文档。`secret_key` 被用作 KDF 输入这一点让它的取值变成安全属性而非风格问题：公开的值等于公开的派生密钥，所以「仓库里曾出现过的值」必须按已泄露处理。两类发布值用两种匹配：占位标记用子串（包含 `change-me` 的不可能是生成出来的），发布过的字面值用精确比较——第一版把 `0123456789abcdef` 也当子串标记，全量测试当场指出它会连带拒掉测试库自己的 `test-secret-key-0123456789abcdef` 以及任何以这 16 位开头的真随机密钥，而这类拒绝换不来任何安全性，所以改成整值比较。入口点先自检再等库，是因为配置错误会在等待循环里伪装成数据库慢；把真实异常原样打出来，是把 75 秒的误导换成 3 秒的答案。CI 用的固定密钥与本版修的是同一个缺陷的另一种形态——流水线自己的密钥也不该是仓库里的字面值。
 - 影响与兼容：**破坏性变更（有意）**：`APP_ENVIRONMENT=production` 且 `SECRET_KEY` 仍是示例值、README 旧值、或短于 32 字符的部署，现在会在启动时被拒并打印补救命令；按 README 新说明生成密钥即可。`test`/`development` 与 CI 不受影响（`ci.yml` 的 compose 作业显式设 `APP_ENVIRONMENT: ci`，`scripts/Invoke-Tests.ps1:37` 设 `test`，`scripts/Start-LocalStack.ps1:28` 设 `development`）。`scripts/preflight.sh:44-53` 对 `.env` 的占位检查仍在（面向 `docker compose` 之前的人），现在应用自身也拒绝，属两道门而非重复。发布过的字面值按整值比较，随机密钥只有整个值正好撞上才会被拒（16⁻³² 量级）；以那 16 位开头的密钥照常可用。NAS 部署者若之前照抄 README 的旧值，需要重新生成密钥；已经用旧值加密保存的 provider 密钥要用新密钥重新存一遍才能被读回。
 - 测试：`backend/tests/test_production_secret.py` 13 条全绿（`Invoke-Tests.ps1 -Keyword production_secret` = `13 passed, 664 deselected`），`ruff check app tests` 与 `ruff format --check app tests` 干净。红证据：把 `backend/app/core/config.py`、`docker/entrypoint.sh`、`.github/workflows/release.yml`、`.github/workflows/nightly.yml`、`README.md` 五个文件换回 HEAD（v1.5.14）后跑同一批守卫 = **9 failed / 4 passed**，随后逐字节还原（五个文件 SHA256 全部 `match=True`）。行为证据：在 `backend` 目录下用真 `docker/entrypoint.sh` + `APP_ENVIRONMENT=production` + 示例密钥 = **exit 1、耗时 3 秒、`waiting for database` 0 行**，日志里同时出现 `configuration is not usable; refusing to start` 与 `SECRET_KEY still holds an example value (it contains 'change-me')`；换成 `openssl rand -hex 32` 后同一份 `check_settings` 打印 `configuration accepted (environment=production)`。
+
+
+## ADR-078：部署自检必须读正在部署的那两个文件（`scripts/preflight.sh` 重写、`build:` 段的归属、CI 必须在起栈前跑它）
+
+- 背景：把 NAS 部署的体检推到「起栈之前」这一步时，逐行读 `scripts/preflight.sh`（当时的 99 行）读出三个洞，每一个都能让它说「通过」而部署起不来：
+  - **镜像清单是手写的，少一个**：`:60-61` 只对 backend 与 web 各做一次 `docker manifest inspect`，proxy 缺席。而 `docker-compose.yml:106-131` 的 `quantlab-docker-proxy` 是默认服务、不在任何 `profiles:` 里、镜像名是 `ghcr.io/bobvane/my-quant-lab-docker-proxy:${MQL_VERSION:-latest}`（`:110`）—— 这正是 ADR-076 在 nightly 里修掉的同一个集合不完整，只是在自检脚本里又出现一次：`docker compose up -d` 会去拉它，而自检从没问过它。
+  - **它读的是检出的仓库，不是部署**：`:23-25` 把 `docker/Dockerfile.backend`、`docker/Dockerfile.web`、`docker/entrypoint.sh`、`docker/web.nginx.conf`、`backend/requirements.txt` 当硬要求，而 `README.md:41` 明说 NAS 部署**只需要两个文件**（`docker-compose.yml` + `.env`）。加上脚本开头 `REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$REPO_ROOT"`，它永远检查脚本所在的检出目录：两文件部署里根本没有这个脚本，带脚本的检出里又被要求交出源码。README 允许的两种部署形状，脚本对其中一种必然判 FAIL。
+  - **没有人跑它**：`git grep preflight` 当时只命中 `docs/17_DECISIONS.md` 的 ADR 正文（`:1744`、`:1884`），没有任何工作流、脚本或文档调用它。一次没有入口的检查等于没有检查 —— 与 ADR-072（每一步都必须能失败）、ADR-073（结论必须变成退出码）是同一条线，这一版补的是入口。
+  - 顺带一处让「源码是否必需」无法回答的结构问题：`docker-compose.yml:107-109` 是主文件里唯一的 `build:` 段（proxy，`context: .` + `dockerfile: docker/Dockerfile.proxy`），而 `docker-compose.build.yml:3-4` 的头注声称「生产 compose 只引用 GHCR 预构建镜像，不含 build 段」—— 这个不变量已经破了。
+- 决策：
+  1. `docker-compose.yml` 只留发布产物：proxy 的 `build:` 段移进 `docker-compose.build.yml`（补 `quantlab-docker-proxy`，`docker/Dockerfile.proxy`）。主文件零 `build:` 段，覆盖文件覆盖全部 5 个项目服务；这条不变量由守卫锁住。
+  2. `scripts/preflight.sh` 重写为读**部署文件**：`--compose PATH`（默认 `docker-compose.yml`）、`--env-file PATH`（默认 `.env`）、`-h/--help`，未知参数 exit 2；不再 `cd`。
+  3. 镜像集合**派生**自 compose（`compose_images()`：取 `image:` 行、按 compose 的规则展开 `${VAR}` 与 `${VAR:-default}`、只留含 `my-quant-lab` 的项目镜像 → backend/proxy/web 三个），脚本里不再出现任何镜像名。每个镜像先 `docker image inspect`（本地已有即通过，CI 路径）再退到 `docker manifest inspect`（NAS 路径），两者都失败才 FAIL，并点名镜像与 GHCR 包页。
+  4. 源码文件只在 compose 里存在 `build:` 段时才是硬要求（Dockerfile 同样从 `dockerfile:` 行派生）；两文件部署给一条 WARN 说明「镜像来自注册表，不需要源码」，不再判死。
+  5. 取值优先级与 `docker compose` 一致：`env_value()` 先 `printenv`（shell）再 grep env-file，去掉 CR 与首尾引号；密钥判定的三张表 `SECRET_PLACEHOLDERS` / `PUBLISHED_SECRETS` / `SECRET_MIN_LENGTH = 32` 与 `backend/app/core/config.py` 逐字相同（bash 数组 ↔ 模块常量，守卫断言两边相等）。
+  6. CI 必须跑它，且必须在**起栈那个 step 内**、`up -d` 之前：`ci.yml` 的 `Boot the stack` 先 `export POSTGRES_PASSWORD="$(openssl rand -hex 16)"` 与 `export SECRET_KEY="$(openssl rand -hex 32)"`，再 `bash scripts/preflight.sh --env-file .env.example || { echo "=== pre-flight refused the deployment ==="; exit 1; }`，最后才是 `docker compose … up -d`。不能放成独立 step —— 那样上一步 export 的值不在环境里，`.env.example` 的示例密钥会让自检拒绝一次本来合法的 CI 起栈。
+  7. 守卫 `backend/tests/test_deploy_preflight.py`（14 条）：主文件零 `build:` 段；覆盖文件为每个项目镜像给出 Dockerfile 且文件存在；proxy 在部署镜像集合里；preflight 不出现 `ghcr.io/bobvane/my-quant-lab` 字面量（清单必须派生）；两张密钥表与 `config.py` 相等；源码文件只在有 `build:` 段时被要求；`printenv` 出现在 env-file 的 grep 之前；`docker image inspect` 出现在 `manifest inspect` 之前；失败与用法两条出口都存在；CI 在起栈 step 内且排在 `up -d` 之前；两条真跑 bash 的行为守卫（派生出的集合与 compose 一致且不重复行、shell 的值在真运行里胜过 env-file）。
+- 理由：
+  - 「自检通过」必须等价于「这份部署能起来」，所以它要读的是**即将被执行的那两个文件**，而不是作者检出的仓库。否则 README 允许的两种形状里总有一种被自己的工具判错，而工具的名字（pre-flight）让它的结论看起来比实际更权威。
+  - 清单必须派生而不是维护：手写清单漏掉 proxy 不是笔误，是结构（ADR-076 同一个洞）。派生之后「少问一个镜像」在结构上不可能发生，守卫只需要证明「这份清单是派生的」。
+  - 本地已有镜像也算通过，是因为 NAS 上最常见的是「已经 pull 过、只是注册表暂时连不上」；此时判死比放过更糟（它挡住一次完全能起来的部署）。但注册表与本地都没有时必须失败。
+  - `build:` 段的归属决定「源码是否必需」能否被回答，所以先修文件结构再修脚本：主文件是**部署形状**（只引用镜像），覆盖文件是**构建形状**（只补 build 段），各自只有一个职责。
+- 影响与兼容：
+  - 旧的调用方式（无参数、在仓库根目录跑）行为不变：默认 `docker-compose.yml` + `.env` 相对**当前目录**解析（在仓库根目录跑时路径与以前相同）。
+  - `docker compose -f docker-compose.yml up -d` 仍会拉 `ghcr.io/...docker-proxy:${MQL_VERSION:-latest}`；只有叠加 `docker-compose.build.yml` 的本地构建路径会构建它（README 的本地构建用法不变）。
+  - CI 多了一道门：自检失败时 `docker compose smoke test` 作业在起栈前就退出，`up -d` 不再有机会把一个起不来的部署送进验收（这是本版的目的）。
+  - NAS 部署者若手上有完整检出，可以在起栈前自查：`bash scripts/preflight.sh --compose /vol1/1000/Docker/My-Quant-Lab/docker-compose.yml --env-file /vol1/1000/Docker/My-Quant-Lab/.env`。
+- 测试：
+  - `backend/tests/test_deploy_preflight.py` 14 条；连同 `backend/tests/test_release_version_scheme.py` 一起跑 = **22 passed / 1 failed**，唯一失败是 `version.txt` 当时还是 `v1.5.15`（ADR-079 的守卫，等 `set v1.6.0` 转绿）；`ruff check app tests` 与 `ruff format --check app tests` 干净。
+  - **先红后绿**：用 `git worktree` 在 HEAD（v1.5.15）检出干净副本，把两个新测试文件放进去跑 = **14 failed / 9 passed**。逐条点名：`docker-compose.yml` 仍在 `:107` 有 `build:` 段、`quantlab-docker-proxy` 不在覆盖文件的 build 段里、preflight 硬编码镜像名、`v1.5.15 breaks the carry rule`，以及 `version.sh set v1.5.16` 在旧脚本上 **rc 0 并打印 `version set to v1.5.16`**（规则被破掉的那个入口）。
+  - 行为证据（本机没有 Docker，用一个只实现 `info` / `image inspect` / `manifest inspect` / `compose version` / `compose config` 的替身放在 PATH 前面，直接跑真脚本；替身与部署目录都在 `%TEMP%` 下，不进仓库）：
+    - 两文件部署（目录里只有 `docker-compose.yml` 与 `.env`，没有源码、不是 git 仓库）→ **exit 0**、`Pre-flight passed`，三个项目镜像逐个报 `image reachable in the registry`；
+    - **同一个目录跑旧脚本** → **exit 1**，五条 `docker/Dockerfile.backend is missing — your copy is incomplete or out of date`（`Dockerfile.web`、`entrypoint.sh`、`web.nginx.conf`、`backend/requirements.txt`）—— 这就是 README 允许的部署形状被自己的自检判死的现场；
+    - 注册表里缺 proxy（替身只让 `*docker-proxy*` 的 `manifest inspect` 失败）→ **exit 1** 并点名 `ghcr.io/bobvane/my-quant-lab-docker-proxy:1.6.0`（旧脚本从不问这个镜像）；
+    - 注册表不可达但镜像已在本地 → **exit 0**（`image present locally`）；
+    - `.env` 保留 `.env.example` 的 `change-me-openssl-rand-hex-32` → **exit 1** 并给出 `openssl rand -hex 32`（与 ADR-077 的应用层拒绝同一条规则）；
+    - 同一个 `.env`、但 `SECRET_KEY` 由 shell 导出 → **exit 0**（shell 优先，与 `docker compose` 一致）。
+  - 边界：守卫读文本与派生结果，它们能证明集合一致、入口被接上、脚本会失败；它们不能证明某个 NAS 上容器真的起来了 —— 那由部署者手上的 `Test-NasDeployment.ps1` 与 release/nightly 两条流水线的真机运行回答。
+
+## ADR-079：版本号的第三段只占一位（进位规则与 `version.sh set` 的守卫）
+
+- 背景：`scripts/version.sh` 的文件头（`:4-5`）本来就写着正确的进位规则（`v0.0.1 → … → v0.0.9 → v0.0.10 → … → v0.1.0`，`Each component counts 0-9 and carries over at 10`），`bump_version()`（`:41-50`）的进位也是对的（`patch < 9` 时 +1，否则 `minor + 1, patch = 0`，`minor > 9` 时 `major + 1`）。出错的只有入口：`cmd_set()`（`:100`）的校验正则 `^v?[0-9]+\.[0-9]+\.[0-9]+$` 允许第三段是**多位**，于是 v1.5.9 之后连续发布了 v1.5.10 … v1.5.15 六个版本（tag 已发布，是既成事实），而头注释里作为例子的 `v0.0.10` 正是那个入口的说明书。规则本身来自维护者：「以后版本v1.5.9之后就应该逢10进位，后续要记得改进。下一个版本进位到v1.6.0。」（m11491）
+- 决策：
+  1. `scripts/version.sh` 的文件头改成只说进位：第三段**永远是一位** —— `v1.5.8 → v1.5.9 → v1.6.0 → … → v1.6.9 → v1.7.0 → … → v1.9.9 → v2.0.0`，并删掉 `v0.0.10` 那个例子（它是入口的辩护词，不是规则的一部分）。
+  2. `cmd_set()` 的校验正则收紧为 `^v?[0-9]+\.[0-9]+\.[0-9]$`，并显式拒绝 `minor > 9`；两处都在**写任何文件之前** exit 2，报错文案含 `carries over at 10` 与 `one digit`。
+  3. 守卫 `backend/tests/test_release_version_scheme.py`（9 条）：`version.txt` 必须匹配 `^v\d+\.\d+\.\d$`；文件头必须含 `carries over at 10` 与 `v1.5.9 → v1.6.0`、且不含 `v0.0.10`；六处版本引用与 `version.txt` 一致（`.env.example` 的 `MQL_VERSION`、`backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/package-lock.json` 两处）；`set v1.5.16` 必须被拒（rc 2、两条文案、`version.txt` 未被改动）；临时目录里 `set v1.6.0` 必须同步六处；`bump_version` 的进位表参数化（v1.5.8→v1.5.9、v1.5.9→v1.6.0、**v1.5.15→v1.6.0**、v1.6.8→v1.6.9、v1.6.9→v1.7.0、v1.9.9→v2.0.0）——做法是把脚本截断在 `case "${1:-show}" in` 之前再 `source`，因此不触发任何写入。
+- 理由：规则早就在注释里、进位函数也早就正确，唯一出错的是「入口接不接受一个不合规的版本号」——所以修入口而不是写文档。守卫写成可执行的等式（六处同步 + 进位表 + 拒绝多位），是因为这类漂移发生在人手里而不是代码里：文档里的例子会被照抄，而失败的 `set` 不会被无视。历史 tag 不改写（v1.5.10–v1.5.15 保留原样）；编号从 v1.5.15 直接跳到 v1.6.0，回到收敛路径。
+- 影响与兼容：`version.sh set` 现在拒绝多位第三段（包括本地临时用法），`bump` 不变（本来就正确）；已发布的 tag 与 Release 不受影响；下一个版本号是 v1.6.0。
+- 测试：与 ADR-078 同一次运行（22 passed / 1 failed → `set v1.6.0` 之后全绿）；红证据里 `version.sh set v1.5.16` 在旧脚本上 rc 0 并打印 `version set to v1.5.16`，新脚本 rc 2 并说明进位规则。

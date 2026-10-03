@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # My Quant Lab — version and release helper.
 #
-# Version scheme (project decision): v0.0.1 → … → v0.0.9 → v0.0.10 → … →
-# v0.1.0 → … Each component counts 0-9 and carries over at 10.
+# Version scheme (project decision, ADR-079): every component counts 0-9 and
+# carries over at 10, so the third field is ALWAYS a single digit:
+#
+#   v1.5.8 → v1.5.9 → v1.6.0 → … → v1.6.9 → v1.7.0 → … → v1.9.9 → v2.0.0
+#
+# There is no v1.5.10: the release after v1.5.9 is v1.6.0. `set` refuses a
+# version that breaks the carry, because a tag that breaks it cannot be named
+# by the next bump.
 #
 #   ./scripts/version.sh show              print the current version
 #   ./scripts/version.sh bump [--tag]      bump version.txt, commit, tag, push
@@ -96,9 +102,17 @@ cmd_show() {
 }
 
 cmd_set() {
-    local version="${1:-}"
-    if ! printf '%s' "$version" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+    local version="${1:-}" minor
+    if ! printf '%s' "$version" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]$'; then
         echo "usage: $0 set vX.Y.Z" >&2
+        echo "  every component counts 0-9 and carries over at 10 (ADR-079), so the" >&2
+        echo "  third field is always one digit: after v1.5.9 comes v1.6.0, never v1.5.10." >&2
+        exit 2
+    fi
+    minor="$(printf '%s' "${version#v}" | cut -d. -f2)"
+    if [ "$minor" -gt 9 ]; then
+        echo "refusing $version: minor versions count 0-9 and carry over at 10" >&2
+        echo "  (v1.9.9 → v2.0.0), so a v1.${minor}.x release cannot exist (ADR-079)." >&2
         exit 2
     fi
     write_version "$version"

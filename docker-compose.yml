@@ -104,9 +104,9 @@ services:
   # Docker socket. stdlib-only, ~20 MB RSS, whitelist of two GET endpoints and
   # nothing else. Never publish its port; only the backend network reaches it.
   quantlab-docker-proxy:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.proxy
+    # No build: section here: source builds live in docker-compose.build.yml.
+    # A deployment that ships only this file and .env must never be asked for a
+    # Dockerfile it does not have. Guarded by test_deploy_preflight.py (ADR-078).
     image: ghcr.io/bobvane/my-quant-lab-docker-proxy:${MQL_VERSION:-latest}
     container_name: quantlab-docker-proxy
     restart: unless-stopped

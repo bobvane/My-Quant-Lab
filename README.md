@@ -75,6 +75,13 @@ sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=你的密码/' .env
 sed -i "s/^SECRET_KEY=.*/SECRET_KEY=$(openssl rand -hex 32)/" .env
 
 docker compose pull && docker compose up -d
+
+（可选）如果你手上是**完整仓库**而不是只有那两个文件，可以在起栈前先跑一遍部署自检 —— 它读的是你这次要部署的 `docker-compose.yml` 与 `.env`，镜像清单从 compose 里派生出来（ADR-078）；CI 每次起栈前跑的是同一份脚本：
+
+```bash
+bash scripts/preflight.sh --compose /vol1/1000/Docker/My-Quant-Lab/docker-compose.yml \
+                         --env-file /vol1/1000/Docker/My-Quant-Lab/.env
+```
 ```
 
 ### 锁定版本（可选）

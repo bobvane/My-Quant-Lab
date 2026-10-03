@@ -60,7 +60,7 @@ def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)) -
         entity_type="paper_account",
         entity_id=str(account.id),
         action="create",
-        payload={"name": account.name, "initial_cash": str(account.initial_cash)},
+        payload={"name": account.name, "net_deposits": str(account.initial_cash)},
     )
     db.commit()
     db.refresh(account)
@@ -92,7 +92,7 @@ def account_equity(account_id: int, db: Session = Depends(get_db)) -> dict:
     return {
         "account_id": account_id,
         "cash": float(account.cash),
-        "initial_cash": float(account.initial_cash),
+        "net_deposits": float(account.initial_cash),
         "realized_pnl": realized,
         "positions": [
             {
@@ -104,7 +104,11 @@ def account_equity(account_id: int, db: Session = Depends(get_db)) -> dict:
             for p in positions
         ],
         "trades_count": len(trades),
-        "note": "Paper accounts are virtual and fully isolated from real holdings.",
+        "note": (
+            "Paper accounts are virtual and fully isolated from real holdings. "
+            "net_deposits is the money the account was funded with (deposits minus "
+            "withdrawals) and is the baseline for its P&L (ADR-066)."
+        ),
     }
 
 
@@ -128,8 +132,8 @@ def account_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
             .order_by(PaperTrade.exit_time)
         ).all()
     )
-    initial = float(account.initial_cash)
-    equity = [initial]
+    net_deposits = float(account.initial_cash)
+    equity = [net_deposits]
     for trade in trades:
         equity.append(equity[-1] + float(trade.pnl or 0))
     trade_dicts = [
@@ -144,11 +148,18 @@ def account_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
     metrics = compute_metrics(np.asarray(equity, dtype=float), trade_dicts, timeframe="1d")
     return {
         "account_id": account_id,
-        "initial_cash": initial,
+        "net_deposits": net_deposits,
         "final_equity": equity[-1],
         "closed_trades": len(trades),
         "metrics": metrics.as_dict(),
-        "note": "指标由已平仓交易的权益序列计算；持仓未实现盈亏不计入。",
+        # Why a metric is missing is part of the answer: without this the caller only
+        # sees `null` and has to guess (ADR-066).
+        "metric_notes": metrics.notes,
+        "note": (
+            "指标由已平仓交易的权益序列计算；持仓未实现盈亏不计入。"
+            "期末权益 = 净入金（入金 − 提现）+ 已实现盈亏；"
+            "净入金 ≤ 0 时不发布收益率类指标（ADR-066）。"
+        ),
     }
 
 
@@ -376,19 +387,30 @@ def fund_account(account_id: int, payload: PaperFundRequest, db: Session = Depen
     if new_cash < 0:
         raise HTTPException(status_code=422, detail="withdrawal exceeds available cash")
     account.cash = new_cash
-    if amount > 0:
-        # Additional funding raises the baseline so the P&L percentage stays sane.
-        account.initial_cash = Decimal(str(account.initial_cash)) + amount
+    # Money entering or leaving the account is not trading performance: the baseline
+    # moves with the flow in both directions, so the published P&L is measured against
+    # the net deposits the account actually holds (ADR-066). Withdrawing used to lower
+    # only `cash`, which showed up as a trading loss and left `final_equity` describing
+    # a baseline the money had already left.
+    account.initial_cash = Decimal(str(account.initial_cash)) + amount
     record_audit(
         db,
         event_type="paper_account_funded",
         entity_type="paper_account",
         entity_id=str(account_id),
         action="fund",
-        payload={"amount": str(amount), "cash": str(new_cash)},
+        payload={
+            "amount": str(amount),
+            "cash": str(new_cash),
+            "net_deposits": str(account.initial_cash),
+        },
     )
     db.commit()
-    return {"account_id": account_id, "cash": float(account.cash)}
+    return {
+        "account_id": account_id,
+        "cash": float(account.cash),
+        "net_deposits": float(account.initial_cash),
+    }
 
 
 @router.post("/accounts/{account_id}/reset", summary="Reset a paper account (audited)")
@@ -421,6 +443,10 @@ def reset_account(
     return {
         "account_id": account_id,
         "cash": float(account.cash),
+        "net_deposits": float(account.initial_cash),
         "reset_count": account.reset_count,
-        "warning": "All virtual positions and trades were deleted. This cannot be undone.",
+        "warning": (
+            "All virtual positions and trades were deleted and the funding baseline was "
+            "reset to the new opening cash. This cannot be undone."
+        ),
     }

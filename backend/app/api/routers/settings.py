@@ -293,8 +293,11 @@ def test_ghostfolio() -> dict[str, Any]:
 def ghostfolio_holdings(debug: bool = False) -> dict[str, Any]:
     from app.data.ghostfolio import GhostfolioAdapter, GhostfolioError
 
-    adapter = GhostfolioAdapter()
     try:
+        # The constructor is inside the try on purpose: an unconfigured Ghostfolio
+        # raises while reading the settings, so construction outside the handler turned
+        # a missing configuration into an unhandled 500 (ADR-067).
+        adapter = GhostfolioAdapter()
         if debug:
             # Shape introspection only: key names / container types, never values.
             payload = adapter.get_holdings()

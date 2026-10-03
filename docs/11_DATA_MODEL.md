@@ -108,7 +108,8 @@ unique(strategy_id, version)
 - id
 - name
 - base_currency
-- initial_cash
+- initial_cash（**历史命名**：入金与提现都会加减它，所以它存的其实是净入金；对外发布的
+  名字是 `net_deposits`，见 ADR-066）
 - cash
 - status
 - created_at

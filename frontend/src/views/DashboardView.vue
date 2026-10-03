@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { api, type AIStatus, type ExplainResult, type HealthResponse, type PaperAccount, type SignalIntent, type SystemInfo } from '@/api'
 import StatCard from '@/components/StatCard.vue'
-import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
+import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, toneOf } from '@/format'
 
 const health = ref<HealthResponse | null>(null)
 const info = ref<SystemInfo | null>(null)
@@ -35,14 +35,14 @@ function qualityTone(status: string): string {
 async function load() {
   error.value = ''
   try {
-    const [h, i, a, ai, gf, assetsList, sList] = await Promise.all([
+    const [h, i, a, ai, assetsList, sList, appSettings] = await Promise.all([
       api.health(),
       api.systemInfo(),
       api.paperAccounts(),
       api.aiStatus().catch(() => null),
-      api.getGhostfolioHoldings().catch(() => null),
       api.assets().catch(() => []),
       api.series().catch(() => []),
+      api.settings().catch(() => null),
     ])
     health.value = h
     info.value = i
@@ -50,6 +50,12 @@ async function load() {
     aiStatus.value = ai
     assets.value = assetsList
     seriesList.value = sList
+    // Only ask for holdings when Ghostfolio is configured. Asking anyway makes
+    // an unconfigured optional integration answer 502 on every page load, which
+    // the browser reports as a failed request (ADR-067).
+    const gf = appSettings?.environment.ghostfolio_configured
+      ? await api.getGhostfolioHoldings().catch(() => null)
+      : null
     if (gf?.holdings) {
       gfHoldings.value = gf.holdings
       gfSummary.value = gf
@@ -321,7 +327,7 @@ onMounted(load)
           <thead>
             <tr>
               <th>名称</th>
-              <th>初始资金</th>
+              <th>净入金</th>
               <th>当前现金</th>
               <th>状态</th>
             </tr>
@@ -329,10 +335,10 @@ onMounted(load)
           <tbody>
             <tr v-for="a in accounts" :key="a.id">
               <td>{{ a.name }}</td>
-              <td>{{ formatNumber(a.initial_cash) }} {{ a.base_currency }}</td>
-              <td :class="toneOf(a.cash - a.initial_cash)">
+              <td>{{ formatNumber(a.net_deposits) }} {{ a.base_currency }}</td>
+              <td :class="toneOf(a.cash - a.net_deposits)">
                 {{ formatNumber(a.cash) }}
-                <span class="muted">({{ formatPercent((a.cash - a.initial_cash) / a.initial_cash) }})</span>
+                <span class="muted">({{ formatPaperPnlPct(a.net_deposits, a.cash) }})</span>
               </td>
               <td>{{ a.status }}</td>
             </tr>

@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import {
   api,
   type AIProviderRecord,
+  type AppSettingsEnvironment,
   type NotificationConfig,
   type NotificationTestResult,
   type ProviderTestResult,
@@ -10,7 +11,7 @@ import {
 import { formatDateTime, formatNumber } from '@/format'
 
 const events = ref<Array<Record<string, unknown>>>([])
-const environment = ref<Record<string, unknown>>({})
+const environment = ref<Partial<AppSettingsEnvironment>>({})
 const systemSettings = ref<Array<Record<string, any>>>([])
 const newSettingKey = ref('')
 const newSettingValue = ref('')
@@ -191,8 +192,8 @@ async function load() {
     aiPrompts.value = prompts.prompts
     aiTasks.value = tasks
     events.value = audit.events
-    environment.value = (settings.environment as Record<string, unknown>) ?? {}
-    systemSettings.value = (settings.settings as Array<Record<string, any>>) ?? []
+    environment.value = settings.environment ?? {}
+    systemSettings.value = settings.settings ?? []
     providers.value = ai.providers
     aiModels.value = models.models
     aiUsage.value = usage.usage

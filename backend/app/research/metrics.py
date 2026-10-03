@@ -85,7 +85,22 @@ def compute_metrics(
     final = float(equity[-1]) if len(equity) else 0.0
     metrics = Metrics(initial_capital=initial, final_equity=final, notes=notes)
 
-    if len(equity) < 2 or initial <= 0:
+    if len(equity) == 0:
+        notes.append("equity curve too short for ratio metrics")
+        return metrics
+
+    if initial <= 0:
+        # A return needs a positive denominator. A paper account withdrawn down to (or
+        # past) its deposits, and a backtest with no starting capital, both land here:
+        # report the equity that exists and withhold the ratios rather than divide by it
+        # (ADR-066). This is checked before the curve length: an account withdrawn to
+        # zero has a one-point curve, and "too short" would answer the wrong question —
+        # the ratios are missing because there is nothing to divide by, not because the
+        # account is young.
+        notes.append("initial capital is not positive, so ratio metrics have no denominator")
+        return metrics
+
+    if len(equity) < 2:
         notes.append("equity curve too short for ratio metrics")
         return metrics
 

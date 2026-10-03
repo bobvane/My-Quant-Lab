@@ -426,13 +426,15 @@ class PaperAccountCreate(BaseModel):
 
 
 class PaperAccountOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: int
     name: str
     strategy_id: int | None
     base_currency: str
-    initial_cash: float
+    # The DB column is still called `initial_cash`, but funding moves it in both
+    # directions, so what it holds is the account's net deposits (ADR-066).
+    net_deposits: float = Field(validation_alias="initial_cash")
     cash: float
     status: str
     reset_count: int

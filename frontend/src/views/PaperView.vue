@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { api, type PaperAccount, type PaperPosition } from '@/api'
 import StatCard from '@/components/StatCard.vue'
-import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
+import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, toneOf } from '@/format'
 
 const accounts = ref<PaperAccount[]>([])
 const error = ref('')
@@ -31,6 +31,13 @@ async function loadPerformance(accountId: number) {
   } finally {
     loadingPerf.value = null
   }
+}
+
+/** Why the return metrics are missing, in the backend's own words when it says so. */
+function performanceNotice(value: Record<string, any>): string {
+  const notes = Array.isArray(value.metric_notes) ? value.metric_notes.join('；') : ''
+  if (notes) return `没有发布收益率类指标：${notes}`
+  return '净入金为 0 或为负（提现已经取走了全部本金），此时收益率没有分母，因此不发布收益率类指标。'
 }
 
 async function load() {
@@ -151,8 +158,8 @@ onMounted(load)
         :key="a.id"
         :label="a.name"
         :value="formatNumber(a.cash)"
-        :tone="toneOf(a.cash - a.initial_cash)"
-        :sub="`初始 ${formatNumber(a.initial_cash)} ${a.base_currency} · 盈亏 ${formatPercent((a.cash - a.initial_cash) / a.initial_cash)}`"
+        :tone="toneOf(a.cash - a.net_deposits)"
+        :sub="`净入金 ${formatNumber(a.net_deposits)} ${a.base_currency} · 盈亏 ${formatPaperPnlPct(a.net_deposits, a.cash)}`"
       />
     </div>
 
@@ -163,7 +170,7 @@ onMounted(load)
           <tr>
             <th>ID</th>
             <th>名称</th>
-            <th>初始资金</th>
+            <th>净入金</th>
             <th>当前现金</th>
             <th>状态</th>
             <th>重置次数</th>
@@ -175,8 +182,8 @@ onMounted(load)
           <tr v-for="a in accounts" :key="a.id">
             <td>{{ a.id }}</td>
             <td>{{ a.name }}</td>
-            <td>{{ formatNumber(a.initial_cash) }}</td>
-            <td :class="toneOf(a.cash - a.initial_cash)">{{ formatNumber(a.cash) }}</td>
+            <td>{{ formatNumber(a.net_deposits) }}</td>
+            <td :class="toneOf(a.cash - a.net_deposits)">{{ formatNumber(a.cash) }}</td>
             <td>{{ a.status }}</td>
             <td>{{ a.reset_count }}</td>
             <td>{{ formatDateTime(a.created_at) }}</td>
@@ -273,11 +280,14 @@ onMounted(load)
       <h3>绩效（账户 #{{ perfAccount }}）</h3>
       <p class="muted">{{ performance.note }}</p>
       <div class="grid cols-4">
-        <StatCard label="期末权益" :value="formatNumber(performance.final_equity)" sub="初始资金 + 已实现" />
+        <StatCard label="期末权益" :value="formatNumber(performance.final_equity)" sub="净入金 + 已实现" />
         <StatCard label="总收益" :value="formatPercent(performance.metrics.total_return)" :tone="toneOf(performance.metrics.total_return)" sub="已平仓" />
         <StatCard label="最大回撤" :value="formatPercent(performance.metrics.max_drawdown)" :tone="toneOf(performance.metrics.max_drawdown)" sub="越小越好" />
         <StatCard label="胜率" :value="formatPercent(performance.metrics.win_rate)" :sub="`交易 ${performance.closed_trades} 次`" />
       </div>
+      <p v-if="performance.metrics.total_return === null" class="muted" style="margin-top: 10px">
+        {{ performanceNotice(performance) }}
+      </p>
     </div>
 
     <p v-if="!accounts.length" class="muted" style="margin-top: 14px">

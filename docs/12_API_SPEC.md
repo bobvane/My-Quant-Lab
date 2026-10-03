@@ -273,6 +273,23 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
 `GET /paper/accounts/{id}/trades`
 `POST /paper/accounts/{id}/reset`（强提醒并生成审计事件）
 
+账户响应里的资金字段是 `net_deposits`（净入金 = 入金 − 提现）与 `cash`（当前现金），
+**没有** `initial_cash`：基准会随入金与提现一起上下移动，所以“初始资金”这个名字会说谎
+（ADR-066）。创建时的请求体仍然是 `initial_cash`——那一刻它确实等于净入金；
+`POST /paper/accounts`、`GET /paper/accounts`、`GET /paper/accounts/{id}` 的响应字段都是
+`net_deposits`（数据库列名 `initial_cash` 保留，只是历史命名）。
+
+`POST /paper/accounts/{id}/fund` 的 `amount` 正负都改变基准：入金抬高、提现降低，
+返回 `{account_id, cash, net_deposits}`，审计 payload 同步记录 `net_deposits`。
+于是不变量 `final_equity == net_deposits + 已实现盈亏`（空仓时等于 `cash`）恒成立，
+取钱不会被记成亏钱。`POST /paper/accounts/{id}/reset` 的响应也带 `net_deposits`
+（重置把基准一并设为期初现金）。
+
+`net_deposits ≤ 0` 时没有收益率的分母：`GET /paper/accounts/{account_id}/performance`
+的 `metrics.total_return`（以及其它比率类指标）为 `null`，原因写在新增的
+`metric_notes` 数组里（例如 `initial capital is not positive, so ratio metrics have no
+denominator`），前端据此显示「—」而不是 `NaN%`/`-100%`。
+
 ## Paper Positions
 
 `GET /paper/accounts/{account_id}/positions`

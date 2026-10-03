@@ -1325,3 +1325,198 @@ watcher 路径不需要额外请求：它比较的本来就是 `get_head_commit(
 - `test_the_summary_only_counts_the_symbol_it_names`、`test_an_unknown_symbol_is_an_empty_scope_not_a_global_average`、
   `test_an_outcome_without_a_pnl_is_not_a_decided_signal`；原 `test_outcome_summary_groups` 改用 `decided`
   并断言 `bars_after == 10`（`backend/tests/test_outcome_summary.py`，6 passed）。
+
+## ADR-066：取钱不是亏钱：资金进出必须与盈亏分开（`net_deposits`，docs/08 §3、docs/12 Paper Accounts）
+
+### 背景
+
+- `POST /paper/accounts/{id}/fund` 的 `amount` 是带符号的：正数是入金，负数是提现。
+  但基准只在**入金**时跟着走：
+
+  ```python
+  account.cash = new_cash
+  if amount > 0:
+      # Additional funding raises the baseline so the P&L percentage stays sane.
+      account.initial_cash = Decimal(str(account.initial_cash)) + amount
+  ```
+
+  于是提现只减 `cash`，基准留在原地——**账户里少了的钱被记成了交易亏损**。
+- 后果在一个从未交易过的 10,000 账户上最干净：提现 4,000 之后，账户列表的「盈亏」
+  `(cash - initial_cash) / initial_cash` 变成 **-40%**；而同时
+  `GET /paper/accounts/{id}/performance` 的 `final_equity` 仍是 10,000——它描述的钱
+  已经不在账户里了（`cash` 只剩 6,000）。一个赚了 1,000 的账户提现 4,000，会被显示成
+  **-30%**。全部提空则是 -100%。
+- 这不是舍入问题，而是账目问题：做除法的那个数（基准）和账户实际持有的钱已经不是
+  同一个东西，权益曲线从一个「已经离开的钱」起算。
+- 探针 `backend/scripts/probe_paper_contributions.py` 把六种走法打在同一张表上，用真的
+  `fund_account` / `account_equity` / `account_performance` 跑出来（修复前）：
+
+  | 走法 | cash | 净入金 | 界面盈亏 | final_equity |
+  | --- | --- | --- | --- | --- |
+  | 不动 | 10,000 | 10,000 | 0% | 10,000 |
+  | 入金 +5,000 | 15,000 | 15,000 | 0% | 15,000 |
+  | 提现 -4,000 | 6,000 | **10,000** | **-40%** | **10,000** |
+  | 赚 1,000 后提现 -4,000 | 7,000 | **10,000** | **-30%** | **11,000** |
+  | 提空 10,000 | 0 | 10,000 | -100% | 10,000 |
+
+### 决策
+
+1. `fund_account` 对基准做**对称**更新：入金与提现都改 `initial_cash`，删掉
+   `if amount > 0:` 这个不对称分支。基准从此的含义是**净入金**（入金 − 提现）。
+2. 恢复一条可检验的不变量：`final_equity == net_deposits + 已实现盈亏`；空仓时它等于
+   `cash`。提现是资金的移动而不是盈亏，所以它同时进基准与现金，两边一起走。
+3. 对外发布的名字从 `initial_cash` 改为 **`net_deposits`**：`GET /paper/accounts`、
+   `GET /paper/accounts/{id}`、`GET /paper/accounts/{id}/equity`、
+   `GET /paper/accounts/{id}/performance` 的响应里不再有 `initial_cash`。
+   数据库列名 `initial_cash` 保留（不值得为此迁移），创建请求体仍是 `initial_cash`——
+   创建那一刻它确实等于净入金。`PaperAccountOut.net_deposits` 用
+   `Field(validation_alias="initial_cash")` 读那一列。
+4. `POST /paper/accounts/{id}/fund` 与 `/reset` 的响应都带 `net_deposits`，审计 payload 也
+   记录它，让账本能重放资金流。
+5. 基准不 > 0 时**不发布**收益率类指标：`compute_metrics` 原有的 `initial <= 0` 守卫保留，
+   但说明从「equity curve too short for ratio metrics」拆出来，改成
+   `initial capital is not positive, so ratio metrics have no denominator`。绩效响应新增
+   `metric_notes`（即 `metrics.notes`）——指标为什么缺席也是答案的一部分。
+   **分母检查排在曲线长度检查之前**：提空之后的账户只有单点权益曲线，若先判长度，
+   卡片会把「没有分母」说成「账户太年轻」（v1.5.5 的真浏览器验收抓到的正是这一句），
+   而长度检查仍保留给「基准正常但还没有交易」的账户。空曲线的判定（`len(equity) == 0`）
+   单独放在最前面，避免把「没有曲线」也说成分母问题。
+6. 前端：账户表的「初始资金」列改名「净入金」，绩效卡片副标题改「净入金 + 已实现」，
+   盈亏百分比走新的 `formatPaperPnlPct()`：净入金 ≤ 0 时显示「—」而不是 `-100%`/`NaN%`
+   （`frontend/src/format.ts`，`PaperView.vue` 与 `DashboardView.vue` 共用）。
+7. 提现仍然不能超过可用现金（422 `withdrawal exceeds available cash`）——本 ADR 只改记账，
+   不放宽风控。
+
+### 理由
+
+- **做除法的那个数必须等于账户真正持有的钱**。入金抬高基准是为了不把入金算成收益；
+  提现不同步降低基准，就是把「钱离开账户」算成「交易亏掉了钱」——同一个错误的镜像。
+  对称修正是唯一自洽的选择。
+- **不变量比公式好检查**。`final_equity == net_deposits + 已实现盈亏` 一句话就能在 API 层
+  断言（探针与测试都这么做）；原来的公式要解释「为什么 `final_equity` 比 `cash` 多出
+  4,000」，没有诚实的解释。
+- **字段名要说真话**。既然入金和提现都会改它，`initial_cash` 在任何一次资金流动之后都是
+  错的。上一版（ADR-065）已经为同一个理由把 `evaluated` 改名为 `decided`：一个数只能有
+  一个名字，而那个名字必须描述它现在装的是什么。
+- **没有分母时不要生产百分比**。提空之后的 `-100%` 看起来像结论，其实是 `0/10,000` 这种
+  没有意义的算式；`null` 加说明才是诚实的结果，界面显示「—」。
+- 保留数据库列名是**有意的妥协**：改名要迁移、要回填、要在 Postgres 与 SQLite 上一致，
+  而收益只是列名好看。把历史命名写进 docs/11 比假装它不存在更便宜。
+
+### 影响与兼容
+
+- **破坏性 API 变更**：读 `initial_cash` 的调用方改用 `net_deposits`（前端已同步）。创建与
+  重置的**请求**参数不变。
+- 已有账户：过去把入金折进基准、提现没有折，历史基准无法追溯修正（从当前的
+  `initial_cash` 反推不出当年的资金流）。从本版起新的资金流动是对称的；docs/11 注明
+  该列名的历史含义。
+- 未平仓持仓与本 ADR 无关：`final_equity` 只算已实现盈亏，`cash + 持仓成本` 才是总权益，
+  差额仍是持仓。探针刻意只用空仓账户，于是 `final_equity == cash` 是可直接断言的等式。
+- 红线不变：这些字段只存在于 paper 表，与真实持仓严格隔离。
+
+### 测试
+
+- `test_a_withdrawal_is_not_a_trading_loss`：提现 4,000 后 `cash == net_deposits == 6,000`，
+  `equity.realized_pnl == 0`，列表里该账户 `net_deposits == 6,000`，且响应里没有
+  `initial_cash`。
+- `test_a_profitable_account_still_reports_a_profit_after_a_withdrawal`：赚 1,000 的账户提现
+  4,000 → `net_deposits 6,000`、`final_equity == cash == 7,000`、`total_return ≈ +16.67%`。
+- `test_withdrawing_past_the_deposits_publishes_no_return`：提现 11,000 → `net_deposits -1,000`、
+  `final_equity 0`、`total_return is None`、`max_drawdown is None`，`metric_notes` 含
+  `no denominator`。
+- `test_an_emptied_account_names_the_denominator_it_lost`：**没有交易**的账户提空到 0 →
+  `metric_notes` 恰好是 `["initial capital is not positive, so ratio metrics have no denominator"]`
+  （回归测试：这条曾经被「曲线太短」抢走，是浏览器验收发现的）。
+- `test_api_fund_and_withdraw_limits`：入金 500 → `net_deposits 1,500`；超额提现仍 422。
+- 探针 `backend/scripts/probe_paper_contributions.py`：六种走法全部通过，末行
+  `RESULT: money in and money out move the baseline, and never the P&L`。
+- 聚焦测试 `scripts/Invoke-Tests.ps1 -Keyword 'paper or metrics or api_paper'`：31 passed。
+
+## ADR-067：未配置的 Ghostfolio 不是 500：构造失败也要走已经写好的 502 分支（`settings.py`）
+
+### 背景
+
+v1.5.5 的真浏览器验收在仪表盘上抓到一条服务端错误：
+
+```
+Failed to load resource: the server responded with a status of 500 (Internal Server Error)
+  <http://127.0.0.1:4173/api/v1/settings/ghostfolio/holdings>
+```
+
+服务端日志（`app.api.main`）给出根因：
+
+```
+unhandled error on /api/v1/settings/ghostfolio/holdings
+...
+  File ".../app/api/routers/settings.py", line 296, in ghostfolio_holdings
+    adapter = GhostfolioAdapter()
+  File ".../app/data/ghostfolio.py", line 40, in __init__
+    raise GhostfolioError("GHOSTFOLIO_BASE_URL is not configured")
+app.data.ghostfolio.GhostfolioError: GHOSTFOLIO_BASE_URL is not configured
+```
+
+三件事实放在一起就是缺陷：
+
+1. `GhostfolioAdapter.__init__` 在读取配置时就可能抛 `GhostfolioError`（`GHOSTFOLIO_BASE_URL`
+   或 `GHOSTFOLIO_API_KEY` 为空），**不是**只有调用网络时才抛。
+2. `ghostfolio_holdings` 写了 `except GhostfolioError → HTTPException(502)`，但
+   `adapter = GhostfolioAdapter()` 写在这个 `try` **之外**，于是那道分支覆盖不到构造失败。
+3. 同一个文件里的兄弟端点 `/settings/ghostfolio/test` 把构造放在 `try` **里面**——所以这
+   不是设计选择，是漏改一处。
+
+触发条件是最普通的安装方式：按 `.env.example` 复制 `.env`、不填 Ghostfolio（它是可选
+依赖）。此时每次打开仪表盘都会产生一个 500。前端把这条请求 `.catch(() => null)` 掉了
+（`frontend/src/views/DashboardView.vue`），所以页面仍然能渲染，问题只表现在两处：
+服务端把一个「没配置」的事实报成 500，控制台留下一条红色错误。
+
+把 500 改成 502 之后，控制台的那条红色错误**仍然在**：浏览器把任何非 2xx 的请求都记成
+一条 failed request，前端 `.catch()` 拦得住异常，拦不住控制台。于是「未配置的可选集成
+在页面上看起来像坏了」这半个问题只靠后端修不掉。
+
+### 决策
+
+1. 把 `adapter = GhostfolioAdapter()` 移进 `try`，让**已经存在**的
+   `except GhostfolioError → 502` 分支真正生效。
+2. 状态码不新增、不改：仍然是 502，`detail` 就是适配器给的那句话
+   （`GHOSTFOLIO_BASE_URL is not configured`）。本 ADR 只修「错误分支够不到」，不重新
+   定义「未配置」在语义上该是什么码。
+3. 加一条 API 级测试：清空 `settings.ghostfolio_base_url` 后请求
+   `/api/v1/settings/ghostfolio/holdings`，断言 502 与 detail 内容。
+4. 仪表盘**不再明知故问**：`GET /settings` 早就返回
+   `environment.ghostfolio_configured`（后端就是 `bool(settings.ghostfolio_base_url)`），
+   所以 `DashboardView` 先取它，为假时**不请求**持仓；`api.ts` 的 `settings()` 由
+   `Record<string, unknown>` 升级为真实的 `AppSettings` 类型，让这件事有类型可依，而不是
+   靠运行时猜。未配置时的 502 因此只会在有人**直接调用**这个端点时出现——那正是它该出现
+   的地方。
+
+### 理由
+
+- **写好的错误分支不能是死代码**。`except` 在那里，覆盖不到任何东西，比没有 `except`
+  更危险：它让读者以为这条路已经被处理过了。这一版（v1.5.5）的另一半是 ADR-066，而
+  v1.5.1 的 ADR-062、v1.5.3 的 ADR-064 处理的是同一类问题——异常跑出了本该接住它的
+  范围。
+- **502 是这个项目里「上游接不通」的既有答案**（ADR-039 已经这样定义 Ghostfolio
+  连接失败）。配置缺失是上游不可用的一种，沿用它，界面与日志的词汇表不变。
+- **500 的语义是「我们不知道发生了什么」**。这里我们完全知道：没配 `GHOSTFOLIO_BASE_URL`。
+  把一个可以命名的事实降级成未命名异常，正是 docs/17 里反复拒绝的做法。
+- 只改这一处、不顺手把 `ghostfolio_holdings` 的响应体改个形状：修缺陷的 diff 越小，
+  越容易在事后证明它只修了缺陷。
+- **端点是给调用方用的，页面要自己知道自己问得对不对**。已经有一个字段说明「配没配」，
+  却不看它、每次都发一个注定失败的请求，这不是「健壮」，是把噪声当成了正常。真浏览器
+  验收里这条失败请求是控制台上唯一一条错误——验收脚本卡在它上面，于是才被发现。
+
+### 影响与兼容
+
+- **无破坏性变更**：配置好 Ghostfolio 的部署完全不变（仍然请求持仓、仍然显示卡片）；
+  未配置的部署从「每次加载都发一条注定 502 的请求」变成「根本不发」。直接调用
+  `/settings/ghostfolio/holdings` 的调用方得到 502 + 明确 detail。
+- `/settings/ghostfolio/test` 的行为不变（它本来就返回 `{ok: false, detail}`）。
+- 红线不变：这两个端点都是只读，不写库、不触发交易。
+
+### 测试
+
+- `backend/tests/test_ghostfolio.py::test_holdings_endpoint_reports_an_unconfigured_ghostfolio`：
+  `monkeypatch` 清空 `settings.ghostfolio_base_url` → `GET /api/v1/settings/ghostfolio/holdings`
+  返回 **502**，`detail` 含 `GHOSTFOLIO_BASE_URL is not configured`。修复前该断言拿到 500。
+- 浏览器验收（`%TEMP%\mql-ui-paper-contributions-v155.mjs`）：「零 console 错误」这一条
+  在未配置 Ghostfolio 的验证栈上必须通过——后端不再产生 500，前端不再发这条请求。

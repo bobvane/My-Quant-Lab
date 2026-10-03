@@ -305,9 +305,123 @@ def test_api_fund_and_withdraw_limits(client) -> None:
     account = client.post(
         "/api/v1/paper/accounts", json={"name": "Fund PA", "initial_cash": 1000}
     ).json()
+    # Responses name the money the account holds, not the number typed at creation:
+    # funding moves the baseline, so `initial_cash` would be a lie (ADR-066).
+    assert account["net_deposits"] == pytest.approx(1000)
+    assert "initial_cash" not in account
+
     added = client.post(f"/api/v1/paper/accounts/{account['id']}/fund", json={"amount": 500})
     assert added.status_code == 200
     assert added.json()["cash"] == pytest.approx(1500)
+    assert added.json()["net_deposits"] == pytest.approx(1500)
 
     too_much = client.post(f"/api/v1/paper/accounts/{account['id']}/fund", json={"amount": -9999})
     assert too_much.status_code == 422
+
+
+def _book_a_closed_trade(db, *, account_id: int, pnl: float, cash: float) -> None:
+    """Record a closed trade and the cash it left behind, as the engine would."""
+    asset = Asset(symbol=f"PA-{account_id}-{int(pnl)}", asset_class="stock")
+    db.add(asset)
+    db.flush()
+    db.add(
+        PaperTrade(
+            account_id=account_id,
+            asset_id=asset.id,
+            direction="LONG",
+            entry_time=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+            entry_price=10.0,
+            exit_time=dt.datetime(2026, 1, 2, tzinfo=dt.UTC),
+            exit_price=11.0,
+            quantity=1.0,
+            pnl=pnl,
+        )
+    )
+    account = db.get(PaperAccount, account_id)
+    account.cash = cash
+    db.commit()
+
+
+def test_a_withdrawal_is_not_a_trading_loss(client) -> None:
+    """Taking money out lowers the baseline with it (ADR-066).
+
+    A withdrawal used to lower only `cash`, so an account nobody had traded was
+    published as -40% and `final_equity` kept describing money that had already left.
+    """
+    account = client.post(
+        "/api/v1/paper/accounts", json={"name": "Withdraw PA", "initial_cash": 10_000}
+    ).json()
+
+    moved = client.post(f"/api/v1/paper/accounts/{account['id']}/fund", json={"amount": -4_000})
+    assert moved.status_code == 200
+    assert moved.json()["cash"] == pytest.approx(6_000)
+    assert moved.json()["net_deposits"] == pytest.approx(6_000)
+
+    equity = client.get(f"/api/v1/paper/accounts/{account['id']}/equity").json()
+    assert equity["cash"] == pytest.approx(6_000)
+    assert equity["net_deposits"] == pytest.approx(6_000)
+    assert equity["realized_pnl"] == pytest.approx(0)
+    # Nothing was traded: cash equals the money the account holds, so the P&L is zero.
+    assert equity["cash"] - equity["net_deposits"] == pytest.approx(0)
+
+    row = next(
+        item for item in client.get("/api/v1/paper/accounts").json() if item["id"] == account["id"]
+    )
+    assert row["net_deposits"] == pytest.approx(6_000)
+    assert "initial_cash" not in row
+
+
+def test_a_profitable_account_still_reports_a_profit_after_a_withdrawal(client, db_session) -> None:
+    account = client.post(
+        "/api/v1/paper/accounts", json={"name": "Winner PA", "initial_cash": 10_000}
+    ).json()
+    _book_a_closed_trade(db_session, account_id=account["id"], pnl=1_000.0, cash=11_000.0)
+
+    moved = client.post(f"/api/v1/paper/accounts/{account['id']}/fund", json={"amount": -4_000})
+    assert moved.json()["cash"] == pytest.approx(7_000)
+    assert moved.json()["net_deposits"] == pytest.approx(6_000)
+
+    body = client.get(f"/api/v1/paper/accounts/{account['id']}/performance").json()
+    assert body["net_deposits"] == pytest.approx(6_000)
+    assert body["final_equity"] == pytest.approx(7_000)
+    assert body["final_equity"] == pytest.approx(moved.json()["cash"])
+    # +1,000 booked on 6,000 of the account's own money.
+    assert body["metrics"]["total_return"] == pytest.approx(1_000 / 6_000, rel=1e-9)
+    assert body["metrics"]["total_return"] > 0
+
+
+def test_withdrawing_past_the_deposits_publishes_no_return(client, db_session) -> None:
+    """When net deposits are not positive there is no denominator, so no percentage."""
+    account = client.post(
+        "/api/v1/paper/accounts", json={"name": "Past PA", "initial_cash": 10_000}
+    ).json()
+    _book_a_closed_trade(db_session, account_id=account["id"], pnl=1_000.0, cash=11_000.0)
+
+    moved = client.post(f"/api/v1/paper/accounts/{account['id']}/fund", json={"amount": -11_000})
+    assert moved.json()["cash"] == pytest.approx(0)
+    assert moved.json()["net_deposits"] == pytest.approx(-1_000)
+
+    body = client.get(f"/api/v1/paper/accounts/{account['id']}/performance").json()
+    assert body["final_equity"] == pytest.approx(0)
+    assert body["metrics"]["total_return"] is None
+    assert body["metrics"]["max_drawdown"] is None
+    assert "no denominator" in " ".join(body["metric_notes"])
+
+
+def test_an_emptied_account_names_the_denominator_it_lost(client, db_session) -> None:
+    """An account withdrawn to zero has a one-point curve; the missing denominator is
+    still the reason the ratios are withheld, and it must be the reason that is said
+    out loud (found by the v1.5.5 browser check, where the card blamed a young account)."""
+    account = client.post(
+        "/api/v1/paper/accounts", json={"name": "Emptied PA", "initial_cash": 10_000}
+    ).json()
+
+    moved = client.post(f"/api/v1/paper/accounts/{account['id']}/fund", json={"amount": -10_000})
+    assert moved.json()["net_deposits"] == pytest.approx(0)
+
+    body = client.get(f"/api/v1/paper/accounts/{account['id']}/performance").json()
+    assert body["final_equity"] == pytest.approx(0)
+    assert body["metrics"]["total_return"] is None
+    assert body["metric_notes"] == [
+        "initial capital is not positive, so ratio metrics have no denominator"
+    ]

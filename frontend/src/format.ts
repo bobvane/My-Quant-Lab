@@ -24,3 +24,27 @@ export function formatDateTime(value: string | null | undefined): string {
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleString('zh-CN', { hour12: false })
 }
+
+/**
+ * P&L of a paper account as a fraction of the money it was funded with.
+ * `null` when there is no positive net-deposit baseline to divide by: an account
+ * withdrawn down to (or past) its deposits has no meaningful return percentage,
+ * and printing `-100%`/`NaN%` there would read as a trading loss (ADR-066).
+ */
+export function paperPnlPct(
+  netDeposits: number | null | undefined,
+  cash: number | null | undefined,
+): number | null {
+  if (netDeposits === null || netDeposits === undefined) return null
+  if (cash === null || cash === undefined) return null
+  if (!(netDeposits > 0)) return null
+  return (cash - netDeposits) / netDeposits
+}
+
+export function formatPaperPnlPct(
+  netDeposits: number | null | undefined,
+  cash: number | null | undefined,
+): string {
+  const pct = paperPnlPct(netDeposits, cash)
+  return pct === null ? '—' : formatPercent(pct)
+}

@@ -561,10 +561,31 @@ export interface SignalIntent {
   strategy_version_id?: number
 }
 
+export interface AppSettingsEnvironment {
+  app_version: string
+  environment: string
+  market_data_provider: string
+  default_currency: string
+  default_timezone: string
+  ai_daily_budget_usd: number
+  /**
+   * True when the backend has a Ghostfolio base URL. The dashboard must not ask
+   * for holdings when this is false: an optional integration that was never
+   * configured must not look broken on every page load (ADR-067).
+   */
+  ghostfolio_configured: boolean
+}
+
+export interface AppSettings {
+  settings: Array<Record<string, unknown>>
+  environment: AppSettingsEnvironment
+}
+
 export interface PaperAccount {
   id: number
   name: string
-  initial_cash: number
+  /** Money the account was funded with: deposits minus withdrawals (ADR-066). */
+  net_deposits: number
   cash: number
   base_currency: string
   status: string
@@ -812,7 +833,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, initial_cash: initialCash }),
     }),
-  settings: () => request<Record<string, unknown>>('/settings'),
+  settings: () => request<AppSettings>('/settings'),
   updateSetting: (key: string, value: string) =>
     request<Record<string, unknown>>('/settings', {
       method: 'PUT',

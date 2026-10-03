@@ -225,6 +225,23 @@ def test_portfolio_context_matches_crypto_alias() -> None:
     assert "11.30%" in context["note"]
 
 
+def test_holdings_endpoint_reports_an_unconfigured_ghostfolio(client, monkeypatch) -> None:
+    """A missing base URL is a configuration answer, not an unhandled 500.
+
+    The handler already mapped ``GhostfolioError`` to 502, but the adapter was built
+    outside the ``try``, so an unconfigured install raised before the handler existed:
+    the dashboard logged a 500 on every load (ADR-067).
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ghostfolio_base_url", "")
+
+    response = client.get("/api/v1/settings/ghostfolio/holdings")
+
+    assert response.status_code == 502
+    assert "GHOSTFOLIO_BASE_URL is not configured" in response.json()["detail"]
+
+
 def test_portfolio_context_when_ghostfolio_unconfigured() -> None:
     context = portfolio_context_for("AAPL", None)
     assert context["ghostfolio_connected"] is False

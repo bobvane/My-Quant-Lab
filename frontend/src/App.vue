@@ -67,13 +67,13 @@ onMounted(async () => {
         <RouterLink to="/settings">系统与审计</RouterLink>
       </nav>
 
-      <div style="margin-top: 24px" class="muted">
+      <div class="sidebar-meta muted" style="margin-top: 24px">
         <div>引擎 {{ health?.engine_version ?? '—' }}</div>
         <div>特征 {{ health?.feature_version ?? '—' }}</div>
         <div>数据库 {{ health?.database ?? '—' }}</div>
       </div>
 
-      <p class="notice warn" style="margin-top: 20px">
+      <p class="sidebar-note notice warn" style="margin-top: 20px">
         研究工具，不自动交易。<br />所有数字由量化引擎计算。
       </p>
     </aside>

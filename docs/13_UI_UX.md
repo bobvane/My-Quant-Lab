@@ -91,9 +91,9 @@
 
 ## 7. 初学者友好
 
-状态：部分实现（缺少 专业指标的 tooltip：现在只有图表 hover 的数值 tooltip 与 StatCard 的 `sub` 短说明，没有「是什么 / 怎么算 / 为什么看它 / 注意什么」四问）
+状态：已实现（frontend/src/metrics.ts, frontend/src/components/MetricHint.vue, frontend/src/components/StatCard.vue）
 
-设计原则不变：不默认把公式墙推给用户；任何专业指标都应该能在原地解释自己。
+不默认把公式墙推给用户：任何专业指标都能在旁边就地解释自己。`frontend/src/metrics.ts` 是唯一的事实来源，每个指标固定回答四条 —— 是什么 / 怎么算 / 为什么看它 / 注意什么；`frontend/src/components/MetricHint.vue` 把它渲染成指标名旁边的「四问」按钮（悬停先给出「是什么」，点开列出四条），`StatCard.vue` 让每一张指标卡自动带上它，回测里按指标名成行的表格（样本内 / 样本外）也逐行带上。不需要解释的标签必须显式列进 `metrics.ts` 的 `NOT_A_METRIC`（目前只有「系统状态」与「版本」两个读数），否则守卫会让它红 —— 新指标要么解释自己，要么被点名承认自己不是指标。
 
 ## 8. GitHub Import
 
@@ -103,16 +103,14 @@
 
 ## 9. Mobile/desktop
 
-状态：尚未实现（frontend/src/style.css 里没有任何 `@media` 查询）
+状态：已实现（frontend/src/style.css）
 
-优先桌面端，但信号页与详情页应适配手机宽度，方便点开 NAS 发来的通知链接。这仍然是一个明确的需求，只差实现。
+桌面仍然优先，但手机宽度可用：`frontend/src/style.css` 末尾的 `@media (max-width: 820px)` 是唯一的断点 —— 外壳从横排改为竖排，232px 的侧栏变成整宽横幅、导航变成可横向滑动的标签条，`/settings` 已经给过的引擎/特征/数据库读数在手机上隐藏，宽表格在页面内横向滚动而不是把整页撑开，主题按钮收进角落不再压住内容（ADR-111）。桌面布局不变。
 
 ## 10. 欠账（尚未实现的承诺，按本文件顺序）
 
 - 独立的策略详情页与其中的 Overview、Rules、Current Signals、AI Explanation 四段（第 3 节）
 - 信号页的第 1、4、6、7 段（第 6 节）
-- 专业指标 tooltip（第 7 节）
 - GitHub 导入七步向导（第 8 节）
-- 移动端适配（第 9 节）
 
 这一节是上面 `尚未实现` / `缺少` 的汇总视图；两份清单必须一致，守卫会核对。

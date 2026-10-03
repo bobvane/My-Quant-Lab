@@ -15,6 +15,7 @@ import {
   type StrategyVersion,
 } from '@/api'
 import EquityChart from '@/components/EquityChart.vue'
+import MetricHint from '@/components/MetricHint.vue'
 import MonteCarloChart from '@/components/MonteCarloChart.vue'
 import MultiLineChart from '@/components/MultiLineChart.vue'
 import SensitivityChart from '@/components/SensitivityChart.vue'
@@ -1037,7 +1038,7 @@ onMounted(async () => {
           </thead>
           <tbody>
             <tr v-for="k in ['total_return', 'max_drawdown', 'sharpe', 'win_rate', 'number_of_trades']" :key="k">
-              <td>{{ k }}</td>
+              <td>{{ k }}<MetricHint :label="k" /></td>
               <td :class="oosResult.in_sample[k] != null ? toneOf(oosResult.in_sample[k]) : ''">
                 {{ formatMetric(k, oosResult.in_sample[k]) }}
               </td>

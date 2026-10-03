@@ -17,6 +17,8 @@ These guards bind the promises to the code:
 * ``已实现（<path>）`` must name files that exist.
 * §4's assumptions block must exist on the backtest page.
 * §5's equity curve and latest-signal list must exist on the paper page.
+* §7's four questions must be answered for every metric label, from one source.
+* §9's phone layout must actually be a breakpoint in the stylesheet.
 * the outstanding list in the last section must name exactly the sections that
   are not implemented.
 
@@ -36,6 +38,14 @@ MAIN = REPO_ROOT / "frontend" / "src" / "main.ts"
 APP = REPO_ROOT / "frontend" / "src" / "App.vue"
 BACKTEST = REPO_ROOT / "frontend" / "src" / "views" / "BacktestView.vue"
 PAPER = REPO_ROOT / "frontend" / "src" / "views" / "PaperView.vue"
+METRICS = REPO_ROOT / "frontend" / "src" / "metrics.ts"
+METRIC_HINT = REPO_ROOT / "frontend" / "src" / "components" / "MetricHint.vue"
+STAT_CARD = REPO_ROOT / "frontend" / "src" / "components" / "StatCard.vue"
+STYLE = REPO_ROOT / "frontend" / "src" / "style.css"
+VIEWS = REPO_ROOT / "frontend" / "src" / "views"
+
+_NAMED_LABEL = re.compile(r'(?<!:)label="(?P<label>[^"]+)"')
+_MEDIA = re.compile(r"@media\s*\(max-width:\s*(?P<width>\d+)px\)\s*\{")
 
 _ROUTE = re.compile(
     r"\{\s*path:\s*'(?P<path>[^']*)'\s*,\s*name:\s*'(?P<name>[^']*)'\s*,"
@@ -158,6 +168,97 @@ def test_the_paper_page_shows_the_curve_and_the_signals_it_promises() -> None:
             f"docs/13 §5 promises a {rendered} the paper page does not use: the page drew "
             "the equity as four numbers and had no signal list (ADR-108)"
         )
+
+
+def test_the_professional_metrics_explain_themselves_in_place() -> None:
+    """§7 promises four questions, next to the metric itself (ADR-110)."""
+    section = next(body for number, _, body in _sections() if number == 7)
+    for question in ("是什么", "怎么算", "为什么看它", "注意什么"):
+        assert question in section, f"docs/13 §7 no longer promises the {question} question"
+
+    for path in (METRICS, METRIC_HINT, STAT_CARD):
+        assert path.exists(), (
+            f"{path.relative_to(REPO_ROOT)} does not exist: §7 promises that every metric "
+            "explains itself where it is read (ADR-110)"
+        )
+
+    metrics = _text(METRICS)
+    for field in ("what:", "how:", "why:", "watch:"):
+        assert field in metrics, (
+            f"frontend/src/metrics.ts has no {field} field: every metric note answers "
+            "the same four questions (ADR-110)"
+        )
+
+    hint = _text(METRIC_HINT)
+    for question in ("是什么", "怎么算", "为什么看它", "注意什么"):
+        assert question in hint, f"MetricHint.vue never renders the {question} question"
+    assert "metricNote(" in hint, "MetricHint.vue does not look its note up in metrics.ts"
+    assert "title=" in hint, "MetricHint.vue carries no hover tooltip, only the expanded list"
+
+    card = _text(STAT_CARD)
+    assert "<MetricHint" in card, (
+        "the metric cards do not carry the in-place explanation: §7 promises that a metric "
+        "can explain itself where it is read (ADR-110)"
+    )
+
+    declaration = re.search(r"NOT_A_METRIC[^=]*=\s*\[(?P<body>[^\]]*)\]", metrics)
+    assert declaration, "frontend/src/metrics.ts no longer declares NOT_A_METRIC"
+    declared = set(re.findall(r"'([^']+)'", declaration.group("body")))
+    unexplained = sorted(
+        {
+            match.group("label")
+            for path in sorted(VIEWS.glob("*.vue"))
+            for match in _NAMED_LABEL.finditer(_text(path))
+            if match.group("label") not in metrics and match.group("label") not in declared
+        }
+    )
+    assert not unexplained, (
+        f"these metric labels have neither a note in frontend/src/metrics.ts nor a place in "
+        f"NOT_A_METRIC: {unexplained} — a professional metric either answers the four "
+        "questions or is declared not to be one (ADR-110)"
+    )
+
+
+def _media_body(css: str, opening: int) -> str:
+    """Body of the block whose `{` sits at *opening*, found by counting braces."""
+    depth = 0
+    for index in range(opening, len(css)):
+        if css[index] == "{":
+            depth += 1
+        elif css[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return css[opening + 1 : index]
+    raise AssertionError("frontend/src/style.css has an unclosed block")
+
+
+def test_the_phone_layout_is_a_checked_promise() -> None:
+    """§9 was a preference with no breakpoint behind it (ADR-111)."""
+    section = next(body for number, _, body in _sections() if number == 9)
+    assert "style.css" in section, "docs/13 §9 no longer names the stylesheet that does it"
+    assert STYLE.exists(), f"{STYLE.relative_to(REPO_ROOT)} does not exist"
+
+    css = _text(STYLE)
+    blocks = [
+        _media_body(css, match.end() - 1)
+        for match in _MEDIA.finditer(css)
+        if int(match.group("width")) >= 480  # any phone is narrower than this
+    ]
+    assert blocks, (
+        "frontend/src/style.css has no @media (max-width: ...) that covers phone widths: "
+        "the sidebar stayed a fixed 232px column on a phone (ADR-111)"
+    )
+    phone = "\n".join(blocks)
+    for rule in (".app-shell", ".sidebar", ".nav", ".main", "table"):
+        assert rule in phone, f"the phone layout does not touch {rule} at all"
+    assert "flex-direction: column" in phone, "the shell still lays out sideways on a phone"
+    assert re.search(r"\.sidebar\s*\{[^}]*width:\s*100%", phone), (
+        "the sidebar keeps its fixed width on a phone: the page would still be pushed "
+        "sideways instead of stacked (ADR-111)"
+    )
+    assert "overflow-x: auto" in phone, (
+        "wide tables have nowhere to scroll on a phone, so they widen the whole page"
+    )
 
 
 def test_the_outstanding_list_covers_exactly_the_unfinished_sections() -> None:

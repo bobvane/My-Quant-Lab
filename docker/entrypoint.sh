@@ -111,7 +111,7 @@ wait_for_db() {
         if database_error_is_permanent "$reason"; then
             log "ERROR: the database answered with a problem that waiting cannot fix; giving up now instead of retrying ${attempts} times"
             log "reason: $reason"
-            log "check POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB and DB_HOST where this deployment reads them"
+            log "check POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB and POSTGRES_HOST where this deployment reads them"
             return 1
         fi
         if [ "$reason" != "$last_reason" ]; then

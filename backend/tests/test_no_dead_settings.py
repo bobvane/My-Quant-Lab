@@ -83,9 +83,24 @@ def _validator_reads() -> str:
 
 
 def test_every_setting_is_read_somewhere() -> None:
-    text = _consumer_text() + "\n" + _validator_reads()
+    """``settings.host`` is not the same claim as ``request.client.host``.
+
+    This guard used to look for a bare ``.name`` anywhere in the consumers, so
+    ``host`` and ``port`` passed it on the strength of ``request.client.host``,
+    ``parsed.port`` and other unrelated objects -- while no code read either
+    setting (ADR-102). A read now has to name the settings object, and a field a
+    validator consumes has to be named by that validator.
+    """
+
+    consumer = _consumer_text()
+    validator = _validator_reads()
     unread = sorted(
-        name for name in _settings_fields() if not re.search(rf"\.{re.escape(name)}\b", text)
+        name
+        for name in _settings_fields()
+        if not (
+            re.search(rf"settings\.{re.escape(name)}\b", consumer)
+            or re.search(rf"self\.{re.escape(name)}\b", validator)
+        )
     )
     assert unread == [], f"settings nobody reads: {unread} -- honour them or delete them (ADR-084)"
 
@@ -100,11 +115,18 @@ def test_every_documented_env_key_is_consumed() -> None:
 
 
 def test_the_knobs_that_did_nothing_are_gone() -> None:
-    """The four that were deleted: keeping one is what this ADR forbids."""
+    """The six that were deleted: keeping one is what this ADR forbids."""
 
     config = CONFIG.read_text(encoding="utf-8")
     for name in ("ai_provider_base_url", "ai_provider_api_key", "ai_default_model", "scan_cron"):
         assert name not in config, f"{name} is back; it had no reader (ADR-084)"
+
+    # The two the deployment owns: compose publishes the port and the entrypoint
+    # passes it to uvicorn, so a `Settings.port` only made `PORT=` look honoured.
+    for name in ("host", "port"):
+        assert not re.search(rf"^\s+{name}:\s", config, re.MULTILINE), (
+            f"Settings.{name} is back; the deployment owns it (ADR-102)"
+        )
 
     env = ENV_EXAMPLE.read_text(encoding="utf-8")
     for key in ("AI_PROVIDER_BASE_URL", "AI_PROVIDER_API_KEY", "AI_DEFAULT_MODEL"):

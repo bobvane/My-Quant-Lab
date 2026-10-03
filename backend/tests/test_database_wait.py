@@ -231,7 +231,11 @@ def test_a_permanent_answer_is_not_waited_for() -> None:
     assert 'if database_error_is_permanent "$reason"; then' in wait
     assert "giving up now instead of retrying" in wait
     assert wait.index("database_error_is_permanent") < wait.index('log "waiting for database')
-    assert "check POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB and DB_HOST" in wait
+    # The message an operator reads while staring at a dead stack must name the
+    # variable this deployment actually reads. It used to say `DB_HOST`, which no
+    # code in the repository consumes (ADR-102).
+    assert "check POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB and POSTGRES_HOST" in wait
+    assert "DB_HOST" not in wait, "the diagnostics name a variable nothing reads"
 
 
 def test_the_budget_is_a_decision_not_a_constant() -> None:

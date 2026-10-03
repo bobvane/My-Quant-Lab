@@ -2209,3 +2209,28 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：默认值写两份就会产生两个答案，而答案是哪一个取决于谁最后说话；探针写在镜像里、compose 又覆盖它，等于让「哪个探针在跑」变成需要人工核对的事实。这是 ADR-091「同一事实不能有两份答案」在部署配置上的实例：可以派生的就不要重复声明，必须声明的就让它只有一处。
 - 影响与兼容：`docker run` 不带 `--health-cmd` 的镜像不再自带探针（Dockerfile 注释里写明）；compose 的行为除探针归属外没有变化；`MARKET_DATA_PROVIDER` 的默认值从 `yahoo_finance` 改为 `synthetic`，与 `.env.example`/compose/测试夹具一致 —— 本地与 CI 都不会因此去请求外网。
 - 测试：`backend/tests/test_deploy_defaults.py` 的 `test_every_default_compose_writes_is_the_one_the_example_documents`、`test_every_required_variable_is_documented`、`test_the_code_defaults_are_the_ones_the_example_documents`、`test_every_service_declares_the_probe_that_runs`、`test_the_proxy_runs_as_the_user_both_files_name`。红证据见 `docs/15` 的 v1.6.8 行。
+## ADR-101：引用别人的代码要钉住那一次提交（可变标签不是版本）
+
+- 背景：`.github/workflows/` 里 24 处 `uses:` 全部指向可变主标签（`ci.yml:37` 的 `actions/checkout@v7`、`nightly.yml` 的 8 处、`release.yml` 的 10 处，共 9 个不同的 action），其中 `docker/login-action`、`docker/setup-buildx-action`、`docker/build-push-action`、`docker/metadata-action`、`softprops/action-gh-release` 都是第三方代码；而 `release.yml` 与 `nightly.yml` 的作业持有 `packages: write`（能推 ghcr 镜像），release 作业还用一个能创建 Release 的 token。标签是别人可以随时重新指向的指针：某个 action 仓库被接管、或维护者改一次 tag，下一次推到 `main` 就跑上了不同的代码，而这次提交里没有任何一行发生变化。
+- 决策：
+  1. 24 处 `uses:` 全部钉到 40 位 commit SHA，行尾保留解析来的版本注释：`actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7`（完整映射写在 `docs/15` 的 v1.6.9 行）。SHA 用 `gh api repos/<slug>/git/ref/tags/<tag>` 取得（annotated tag 再解引用一层）。
+  2. 新增守卫 `backend/tests/test_workflow_integrity.py`：`.github/workflows/*.yml` 里的每处 `uses:` 要么是本地 action（`./`）或容器（`docker://`），要么必须匹配 `@<40 位十六进制>`；被钉住的那一行还必须带 `#` 版本注释 —— SHA 自己不可读，人与 Dependabot 都需要知道它原来是哪个版本。
+- 理由：SHA 不可移动，标签可以。安全边界不在「信任哪个 action」，而在「这次运行的是不是我提交里写到的那份代码」；把版本号留在注释里既保住可读性，也让升级变成一次可见的 diff（改 SHA 与注释），而不是一次静默的替换。
+- 影响与兼容：升级 action 需要改 SHA（Dependabot 的 `github-actions` 生态会据此开 PR）；工作流的运行行为与之前完全一致，本机与 CI 都不需要改动。
+- 测试：`backend/tests/test_workflow_integrity.py::test_every_published_action_is_pinned_to_a_commit`（带扫描下限 `seen >= 20`，防止正则失效后空跑）与 `::test_the_pinned_actions_say_which_version_they_were`。红证据见 `docs/15` 的 v1.6.9 行。
+
+## ADR-102：守卫必须问对问题（一个判定看着在跑，其实问错了对象）
+
+- 背景：四条同源缺陷，共同点都是「检查存在、显示绿、但它问的不是那个问题」。
+  1. 死设置：`backend/tests/test_no_dead_settings.py` 当时只要求 `backend/app` 里出现任意 `.name`，于是 `Settings.host` 与 `Settings.port`（旧 `backend/app/core/config.py:82-83`）靠 `request.client.host`、`parsed.port`、`self.host = validate_smtp_host(host)` 这些**别的对象**通过了守卫；全仓库没有一处 `settings.host` / `settings.port` 读者 —— 容器绑 `0.0.0.0`，端口由入口点从壳层 `PORT` 传给 uvicorn（`docker/entrypoint.sh`），对外发布在哪个地址由 compose 的 `API_BIND` 决定。
+  2. 覆盖率工件：`ci.yml:75-81` 的 `Upload coverage` 是 `if: always()` 加 `if-no-files-found: ignore`，产出它的运行步没有 `--cov-fail-under`，全仓库也没有任何下限 —— 测试崩溃、报告根本没写出来时这一步仍然是绿的，而且那个百分数从来没有人和它比较过。
+  3. 发布说明：`release.yml` 的 `Generate release notes` 与 `Create GitHub Release` 都在 `if: always()` 下运行（这是有意的：镜像已经推上去了），但说明文本从不提 smoke 结果，于是任何「镜像起不来」的版本，其 Release 页面看上去都可以部署。
+  4. 诊断文案：`docker/entrypoint.sh:114` 在永久失败时让运维 check `DB_HOST`，而全仓库没有任何代码读 `DB_HOST`（真名是 `POSTGRES_HOST`）；同一个错字符串还被 `backend/tests/test_database_wait.py:234` 钉住，所以修文案必须同改守卫。
+- 决策：
+  1. 删掉 `Settings.host` 与 `Settings.port`（`backend/app/core/config.py:81-85` 留注释说明部署持有它们），守卫判据收窄为「`backend/app` 侧必须出现 `settings.<字段>`，或 `config.py` 自己的校验器出现 `self.<字段>`」；`test_the_knobs_that_did_nothing_are_gone` 按 `^\s+host:\s` / `^\s+port:\s` 钉住它们不许回来。
+  2. `ci.yml` 删掉 `if-no-files-found: ignore`（报告缺失就是这一步失败），并按实测钉下限：本机全量 `pytest -o addopts= --cov=app --cov-report=xml` = 8180 statements / 1148 missed = **86%**，因此运行步用 `--cov-fail-under=86`（提高覆盖率时上调；下调必须出现在 diff 里，不能悄悄发生）。
+  3. `release.yml` 的说明读 `steps.smoke.outcome`，在标题下第一行写 `> **Smoke test: passed.** …` 或 `> **Smoke test: <outcome>.** … the stack was not seen to boot …`。
+  4. `docker/entrypoint.sh` 的诊断文案改成 `POSTGRES_HOST`，并在同一次提交里改 `backend/tests/test_database_wait.py` 的断言、新增「`DB_HOST` 不许出现」。
+- 理由：ADR-084/090/091 都建立在「守卫会红」之上。守卫问错对象时它比没有守卫更糟 —— 它把「我已经检查过了」写进了绿色。因此收窄判据（`settings.` 前缀、必须有下限、必须写判定、必须点名真实变量）比增加例外名单更接近事实：例外名单会让真正死掉的字段躲在手写理由后面。
+- 影响与兼容：`HOST=` 与 `PORT=` 不再被应用读取（它们本来也没有被任何代码读；入口点读的是壳层 `PORT`，由 compose 提供）；CI 在覆盖率低于 86% 时会失败；Release 说明多一行判定；入口点的诊断文案变化要求同改测试（已同改）。
+- 测试：`backend/tests/test_no_dead_settings.py`（收紧判据，`test_the_knobs_that_did_nothing_are_gone` 增补）、`backend/tests/test_workflow_integrity.py::test_no_workflow_can_accept_a_missing_coverage_report` 与 `::test_the_coverage_number_is_enforced_not_merely_printed`、`backend/tests/test_release_pipeline.py::test_the_release_notes_carry_the_smoke_verdict`、`backend/tests/test_database_wait.py::test_a_permanent_answer_is_not_waited_for`。红证据见 `docs/15` 的 v1.6.9 行。

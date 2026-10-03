@@ -79,8 +79,10 @@ class Settings(BaseSettings):
     )
 
     api_prefix: str = "/api/v1"
-    host: str = "0.0.0.0"
-    port: int = 8080
+    # `host` and `port` used to live here. Nothing in this repository ever read
+    # them: the container binds `0.0.0.0` and the port the entrypoint passes to
+    # uvicorn, and which address the port is published on is compose's `API_BIND`
+    # (ADR-102). Declaring them made an operator's `HOST=`/`PORT=` look honoured.
 
     # The database URL is assembled from its parts, never concatenated (ADR-098).
     # A password pasted into a URL breaks it in two ways: `@`, `:` and `/` make

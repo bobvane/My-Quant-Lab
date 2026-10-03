@@ -146,6 +146,23 @@ def test_the_release_is_still_published_when_the_smoke_test_fails():
     assert text.index("Smoke test the released images") < text.index("Create GitHub Release")
 
 
+def test_the_release_notes_carry_the_smoke_verdict() -> None:
+    """Publishing on a failed smoke test is deliberate; publishing *silently* is not.
+
+    The notes step runs `if: always()`, so the release page is exactly where a reader
+    who never opens the run log learns whether the images were seen to boot. It used to
+    say nothing about it, and advertised `docker compose pull && docker compose up -d`
+    either way (ADR-102).
+    """
+
+    text = _text(RELEASE)
+    notes = _step(text, "Generate release notes")
+    assert "steps.smoke.outcome" in notes, "the notes never learn what the smoke test said"
+    assert "Smoke test:" in notes, "the verdict is read but not written into the notes"
+    # Both branches must exist: a note that only ever says "passed" is the old silence.
+    assert "passed" in notes and "not run" in notes, "the failure branch is missing"
+
+
 def test_the_release_smoke_test_pulls_the_version_it_is_releasing():
     """Smoke testing `latest` would certify whatever happened to be there."""
 

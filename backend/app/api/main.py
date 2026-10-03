@@ -68,6 +68,7 @@ from app.api.routers import (
 from app.api.routers import (
     strategy_versions as strategy_versions_router,
 )
+from app.api.routers.health import warm_dependency_probes
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.infrastructure.rate_limit import limiter
@@ -90,6 +91,11 @@ There is deliberately no broker order endpoint.
 async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("starting %s %s", settings.app_name, settings.app_version)
+    # Warm the dependency probes once, off the request path: the first probe in a
+    # process pays for a cold resolver and the broker transport, which is not a
+    # bound we control. Results are thrown away — `/health` still measures live
+    # (ADR-069).
+    warm_dependency_probes()
     yield
     logger.info("shutting down %s", settings.app_name)
 

@@ -8,6 +8,8 @@ API base: `/api/v1`
 
 返回：status、version、db、redis、workers。
 
+每个依赖探针都有 1 秒上限（`PROBE_TIMEOUT_SECONDS`，ADR-069）：连不上时 `redis` 报 `unavailable`、`workers` 报 `unknown`，而不是让整个响应等十几秒。词表只有 `"N online"` / `"0 online"` / `"unknown"` 三种；`/healthz` 不碰任何依赖。
+
 ## Assets
 
 `GET /assets`

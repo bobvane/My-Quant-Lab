@@ -5,6 +5,7 @@ import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, toneOf } from '@/format'
 
 const health = ref<HealthResponse | null>(null)
+const healthError = ref('')
 const info = ref<SystemInfo | null>(null)
 const signals = ref<SignalIntent[]>([])
 const accounts = ref<PaperAccount[]>([])
@@ -34,9 +35,21 @@ function qualityTone(status: string): string {
 
 async function load() {
   error.value = ''
+  healthError.value = ''
+  // /health asks PostgreSQL, Redis and the Celery workers, so on a bare install
+  // it can take seconds. It fills its own card when it arrives instead of
+  // holding the accounts table (and the whole page) hostage (ADR-069).
+  void api
+    .health()
+    .then((h) => {
+      health.value = h
+    })
+    .catch(() => {
+      health.value = null
+      healthError.value = '健康检查没有响应'
+    })
   try {
-    const [h, i, a, ai, assetsList, sList, appSettings] = await Promise.all([
-      api.health(),
+    const [i, a, ai, assetsList, sList, appSettings] = await Promise.all([
       api.systemInfo(),
       api.paperAccounts(),
       api.aiStatus().catch(() => null),
@@ -44,7 +57,6 @@ async function load() {
       api.series().catch(() => []),
       api.settings().catch(() => null),
     ])
-    health.value = h
     info.value = i
     accounts.value = a
     aiStatus.value = ai
@@ -131,7 +143,7 @@ onMounted(load)
       <StatCard
         label="系统状态"
         :value="health?.status ?? '—'"
-        :sub="health ? `数据库 ${health.database} / Redis ${health.redis}` : '连接中…'"
+        :sub="health ? `数据库 ${health.database} / Redis ${health.redis}` : healthError || '连接中…'"
       />
       <StatCard label="版本" :value="health?.version ?? '—'" :sub="`引擎 ${health?.engine_version ?? '—'}`" />
       <StatCard

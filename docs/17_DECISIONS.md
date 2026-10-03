@@ -1614,3 +1614,39 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
   `Content-Encoding: gzip` 且小于 1,000,000 字节、带 `immutable`；`/signals` 深链仍
   200。
 - 事实来源：NAS 上对 v1.5.4 web 容器的四条实测，见「背景」。
+
+## ADR-069：健康检查必须在自己承诺的时间内回答（`PROBE_TIMEOUT_SECONDS`、有界 broker 连接、仪表盘不再等它）
+
+- 背景：
+  - 一个没有任何依赖可达的安装（本机验证栈：没有 Redis、没有 broker，`DATABASE_URL`/`REDIS_URL`/`CELERY_BROKER_URL` 都指向 compose 里的容器名）上，`GET /api/v1/health` 要 **10.4 秒**才回，而 `frontend/src/views/DashboardView.vue` 的 `load()` 用 `Promise.all` 把 `api.health()` 和模拟账户表放在一起 await —— 于是打开仪表盘先空白十秒，四张卡片和账户表全都在等一次健康检查。
+  - 分段计时（`backend/scripts/probe_health_latency.py`，三个依赖都解析不了）：`database 1.26s`、`redis 2.08s`、`workers` **`11.76s`**，合计 **15.10s**。`/healthz` 不碰任何依赖，所以容器健康检查看不出这件事。
+  - 元凶是 `_check_workers()` 里的 `celery_app.control.ping(timeout=1.0)`：那个 `timeout` 只约束「等回复」，不约束「连得上 broker」。broker 连不上时走的是 kombu 默认连接策略（重试 + 退避），把 1 秒的意图变成 11 秒的等待。热解析缓存后仍然要 **8.99–11.13s**（两次实测），所以慢的不是 DNS 查询本身，而是 ping 内部的连接路径。
+  - 反证（`%TEMP%\mql_probe_health_warm_v157.py`，先热身 DNS 再计时）：同样抛 `OperationalError: Error 11001 connecting to quantlab-redis:6379. getaddrinfo failed.` 的 `celery_app.connection_for_read(transport_options={"socket_connect_timeout": 1, "socket_timeout": 1}).ensure_connection(max_retries=0, timeout=1)` 只用 **0.86s**、连续两次都是 0.86s。另两条路都不通：`connection_for_read(connect_timeout=1)` 抛 `TypeError: Connection._ensure_connection() got an unexpected keyword argument 'connect_timeout'`（celery 5.6.3 / kombu 5.6.2），`celery_app.conf.update(broker_connection_timeout=1, broker_connection_retry=False, broker_connection_max_retries=0)` 之后再 `control.ping` 仍是 **8.98s**。
+  - Redis 侧同形但轻得多：`redis.Redis.from_url(settings.redis_url, socket_timeout=2)` 只给了读超时、没有连接超时，实测 2.08s。
+  - 上限设好之后还剩一个**冷启动**代价：真栈里第一次 `GET /health` 仍要 **5.72s**（同一进程随后的重复调用 max 1.75s）。第一次探针在一个进程里要付冷解析器与 broker transport 的建立代价，那部分不在任何 socket 超时能约束的范围内。
+- 决策：
+  1. 本模块的每个依赖探针共用一个上限：`PROBE_TIMEOUT_SECONDS = 1.0`。
+  2. `_check_workers()` 拆成两步：先问「broker 通不通」（`connection_for_read(transport_options={"socket_connect_timeout": …, "socket_timeout": …})` + `ensure_connection(max_retries=0, timeout=…)`），通不了就直接 `"unknown"`，通了才 `control.ping(timeout=PROBE_TIMEOUT_SECONDS)`。「有没有 worker 在答」这个问题只有在「broker 连得上」时才有意义。
+  3. 词表不动：仍然是 `"N online"` / `"0 online"` / `"unknown"`，`/health` 的响应键一个不加一个不减，因此仪表盘、NAS 冒烟脚本与探针都不需要改解析。
+  4. `_check_redis()` 补 `socket_connect_timeout`，读超时从 2 收到 1（ping 是亚毫秒操作，1 秒已经是三个数量级的余量）。
+  5. 关闭连接失败用 `contextlib.suppress` 吞掉：清理出问题不是依赖状态，不能把已经拿到的 `"1 online"` 变成 `"unknown"`。
+  6. 仪表盘不再 await `/health`：账户表、系统信息、信号等照旧并行等待，健康卡片**自己到达自己填**，失败时副标题写「健康检查没有响应」而不是永远停在「连接中…」。健康检查是补充信息，不是首屏数据。
+  7. 时序断言写进离线探针 `backend/scripts/probe_health_latency.py`（先跑一轮热身、只给第二轮计分；单探针 ≤ 3.0s、合计 ≤ 5.0s，超了 `exit 1`），不写进单元测试；单元测试只断言「上限确实被传下去」与词表分支，避免慢 CI 上的抖动变成假红灯。
+  8. 启动时预热一次：`warm_dependency_probes()` 在 `backend/app/api/main.py` 的 `lifespan()` 里起一个 daemon 线程跑一遍 `_check_redis()` + `_check_workers()`，**结果丢弃**。它把冷启动代价移出请求路径，但**不是缓存**——`/health` 仍然实时测量，所以预热不会变成一个过期的「connected」。
+- 理由：
+  - 「等回复」不等于「连得上」：一个只约束路径一半的超时不是超时。要给它上限，就得在真正可能卡住的那一步（建立连接）上给。
+  - 热解析后仍然 9–11 秒，说明这不是 DNS 慢、也不是机器慢，而是代码在无界等待 —— 所以修在连接参数上，而不是把 ping 的超时调小或加缓存。
+  - 词表不变才能让这次修复停留在实现内部：调用方看到的仍然是「在线几个 / 没人答 / 不知道」，只是「不知道」现在一秒就回来。
+  - 清理失败不能污染结论：一句 `release()` 抛错不该把一次成功的探测改写成失败。
+  - 页面不该被一个状态卡片拖住。健康检查是「补充信息」，它慢或失败时账户表仍然该立刻在屏幕上。
+  - 只断言量级、并把计时放进探针：CI 机器负载不可控，「不许无界」要写成秒级预算，而不是把 0.86s 的成绩单钉死。
+  - 冷启动的代价该付，但不该由第一个请求付：解析器与 transport 的第一次建立没法用超时约束（不是我们在等待，而是初始化本身要花时间），所以把它挪到启动时；**同时把结果丢掉**，否则「预热」很容易滑成「缓存」，而缓存一个健康状态就等于在撒谎。
+- 影响与兼容：
+  - 无 broker 的部署：`/health` 从 ~15s 降到 ~3s（本机实测 `database 1.24s / redis 0.86s / workers 0.86s`，合计 **2.96s**），`workers` 仍然是 `"unknown"`。
+  - 有 broker 与 worker 的部署（含用户的 NAS）：先开一条连接再 ping，多一次本来就需要的连接建立（毫秒级）；词表与语义不变。
+  - **未覆盖**：数据库那一段仍然由驱动的连接策略决定（本机解析不了主机时实测 1.25s，属于 libpq 的 `connect_timeout`，那是引擎创建时的事，不属于本模块）。如果哪台机器上数据库探测变慢，要在 `app/core/db.py` 的引擎上处理，而不是在这里加一层。
+  - 仪表盘：`/health` 慢或失败不再挡住账户表；健康卡片在响应到达后自行填入。
+  - 冷启动：预热之后第一次 `GET /health` 从 **5.72s 降到 2.19s**（真栈实测，同一进程随后的调用 1.75s 以内）；预热线程里的异常由 `contextlib.suppress` 吞掉、并且是 daemon 线程，失败不影响进程启动。
+- 测试：
+  - `backend/tests/test_health_probe.py`（**13 条**）：上限被传进 `connection_for_read`/`ensure_connection`/`ping`（这条是本次缺陷的回归守卫——旧代码是直接 `control.ping(timeout=1.0)`）；broker 不通 → `"unknown"` 且从不 ping；连上了没人答 → `"0 online"`；ping 抛错 → `"unknown"`；关闭失败不改变结论；redis 探针的 `socket_connect_timeout`/`socket_timeout` 被传下去；Redis 拒连 → `"unavailable"`；`/health` 的键集合与 `workers` 词表三种取值不变；预热按 `redis → workers` 顺序各跑一次；预热抛错被吞且线程结束；`create_app()` 进入 lifespan 时确实调用预热（monkeypatch `app.api.main.warm_dependency_probes`）。
+  - `backend/scripts/probe_health_latency.py`：修复前打出 `workers -> unknown in 11.76s`、合计 `15.10s`、`RESULT: failures`；修复后 `RESULT: every dependency probe answers inside its budget`。

@@ -282,6 +282,8 @@ GHCR 镜像保持公开供 NAS 直接拉取。
 5. 这是对「把 API 暴露到局域网」场景的加固，不是访问控制体系的替代品：
    单用户 NAS 场景下，V1 仍以「只绑本机 + 网关」为主要边界。
 
+> 修订（ADR-097）：上面第 1 与第 5 条把「API 只绑 127.0.0.1、经 Web 容器代理」当成了边界，实际上 Web 容器发布 `${WEB_BIND:-0.0.0.0}:8081` 并把 `/api` 代理出去（且会注入同一个 token，见第 3 条），所以默认部署对局域网是开放的，token 拦住的是绕过容器的客户端。真正关上它要改 `WEB_BIND=127.0.0.1`，或在前置反向代理 / 防火墙上做。
+
 **理由**：docs/14 §4 要求 bearer auth 与 rate limiting，此前缺失；两次安全
 评审都指出无认证会放大 SSRF/端口探测面。以「默认关闭、按需开启、Web 代理
 自动注入」的方式补齐，既满足文档要求，又不破坏既有的开箱即用体验。
@@ -2147,3 +2149,24 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：一个永远是 `NULL` 或永远取默认值的列看起来像能力，读代码的人会以为有人在写它 —— `parameters_id` 尤其误导，因为真正的参数就躺在同一张表的 `parameters_json` 里。没人读的列不是「将来可能有用」，而是必须被维护、被迁移、被解释的负债。`backend/pg.sql` 是 ADR-090/091 那条主题在 DB 层的同型问题（同一事实不能有两份答案）：它没有消费者，所以只会在有人打开它的时候骗人。
 - 影响与兼容：`parameters_id` 的外键随列一起消失；三列都没有写入路径，因此不涉及数据迁移。`pg.sql` 可从 git 历史（`4f65fc755`）取回。`Base.metadata` 的表数从 34 降到 31（`feature_snapshots` 保留）。表结构删除全部由 `0009` 承担，其 `downgrade()` 负责恢复。
 - 测试：`backend/tests/test_dead_schema.py`（4 passed）。红证据：同一 worktree 里 4 条全红，消息分别为 `test_the_removed_tables_are_not_in_the_metadata`（`features`/`jobs`/`job_logs` 仍在 metadata）、`test_the_models_no_longer_declare_the_dead_names`、`test_the_static_schema_dump_is_gone`（`backend/pg.sql` 仍存在）、`test_no_second_copy_of_the_schema_lives_in_a_sql_file`。
+
+## ADR-096：文档里的门必须是门（API 规范与真实路由双向绑定）
+
+- 背景：v1.6.6 之后的一次只读审计把 `docs/12_API_SPEC.md` 的约 95 条端点声明与 `create_app().openapi()` 的真实路由表逐条对照，得到 11 条 high、1 条 medium、1 条 low 的漂移，另有 20 个真实存在的门文档一字未提。形态两种：① **整族凭空存在** —— `GET/POST /market-data-series`（真名 `/market-data/series`，且没有 POST）、`/market-data-snapshots/{series_id}`、`/market-data/{symbol}`（真名 `/market-data/latest/{symbol}`）、`/strategy-parameters*`（真名 `/strategy-versions/{version_id}/parameters`）、`/backtest-results*`（结果只有 `GET /backtests/{run_id}`）、四个 AI 家族（真身挂在 `/settings/ai/providers*`），以及 `GET /ai/models/provider/{id}`、`GET /ai/usage/provider/{id}`（provider 过滤是 `provider_id` 查询参数）、`GET /ai/prompts/{id}`、`POST /ai/prompts`、`POST /ai/tasks`；② **契约错位** —— `POST /market-data/sync` 的 `symbol/timeframe/start/end/provider` 是 `MarketDataSyncRequest` 请求体却被写成查询参数，`GET /feature-snapshots/{series_id}/bar/{timestamp}` 出现两次且两处互相矛盾，importer 家族有一处写成顶层路径。`backend/tests/test_api_contract.py`（8 passed）看不见这些：它绑的是**客户端**与 API，而客户端本身健康 —— 漂移全部住在 Markdown 里。
+- 决策：
+  1. `docs/12_API_SPEC.md` 的每条端点行带且只带一个状态标记：`[已实现]`（今天真的被服务）、`[计划]`（尚未实现）、`[取消]`（从未实现或已撤回），一行一个端点；撤回的门集中到文末的 `## 撤回的端点`，一条一行、不写长篇道歉。
+  2. 新增守卫 `backend/tests/test_api_spec_truth.py`（6 条）把三组声明与真实路由表双向绑定：扫描下限（≥90 条被服务的路由、≥90 条 `[已实现]` 声明）、每条端点行必须有唯一标记、`[已实现]` 必须在服务（否则列出 `docs/12:行号` 与路径）、**被服务的路由必须被声明**（否则列出 `METHOD /path`）、`[计划]`/`[取消]` 不许落在被服务的路由上（标记过期就是把真门藏起来）、每个已挂载的 router 前缀必须在规范里出现。
+  3. 审计点名的 20 个门按代码补写，改写过程中又发现并修正 9 处同类漂移（`POST /backtests/{id}/compare` 真名 `GET /backtests/compare`、`GET /strategies/{id}/versions/{version}`、`POST /strategies/{id}/backtest`、`POST /strategies/{id}/validate` 真名 `POST /strategies/validate`、`GET /research/runs/{id}`、`GET /github/snapshots*` 真名在 `/importer/github/*`、`POST /paper/orders`、`GET /paper/trades/{id}`、`GET /settings/audit`），并把 `?query` 从反引号里挪出去（`GET /backtests/compare?ids=1,2` 这种写法会让扫描器看不见那条声明）。
+- 理由：规范是部署者与集成方**唯一会读**的东西，却没有任何机制保证它正确 —— 客户端契约有 `test_api_contract.py` 双向看门，规范只靠人维护，于是它随代码漂移了很久。这是 ADR-090/091 与 ADR-095 那条主题（同一事实不能有两份答案）在文档层的实例：真实路由表与 Markdown 是同一事实的两份，就必须有守卫让它们互相校验。三分类标记让「未实现」不能躲在正文里：`[计划]` 成真时、`[取消]` 的门真被实现时，都必须翻牌，否则守卫红。
+- 影响与兼容：没有任何运行时代码变化。`GET /healthz` 由 `include_in_schema=False` 提供，因此守卫把它按名字加进「被服务」集合（`SERVED_OUTSIDE_THE_SCHEMA = {("GET", "/healthz")}`），规范也必须声明它（写成「只声明存活」）。文档从 566 行长到 575 行：134 条端点声明 = 112 条 `[已实现]` + 2 条 `[计划]` + 20 条 `[取消]`，与 112 个被服务的 `(method, path)` 一一对应（无多余、无遗漏）。
+- 测试：`backend/tests/test_api_spec_truth.py` **6 passed**、`backend/tests/test_api_contract.py` **8 passed**。红证据（`git worktree` 在 v1.6.6 `f7fcd93d8` 上跑同一份守卫）4 条红：扫描下限 `only 8 implemented claims found; the spec scan broke`；**129 个端点行没有任何标记**（`docs/12_API_SPEC.md:7: GET /health`、`:31: GET /market-data-series` …）；**104 个被服务的门文档从未声明**（`DELETE /backtests/{}`、`GET /assets`、`GET /resources/current` …）；以及 `docs/12_API_SPEC.md:545: [取消] GET /features is served`（旧标记正压在一个真门上）。
+
+## ADR-097：声明的边界必须有人交付（默认部署对局域网是开放的）
+
+- 背景：`.env.example` 的端口段曾写「API 只绑定本机，由 Web 容器代理 /api，避免无认证暴露」，鉴权段写「留空 = 无鉴权（默认；API 只绑本机、由 Web 容器代理，局域网无法直连）」，`README.md:143` 同一句话写在「安全与暴露面」节，`docs/17` 的 ADR-028 第 5 条把「只绑本机 + 网关」当成主要边界，`backend/app/core/config.py:111-114` 的注释也复述「safe only because it binds to 127.0.0.1」。真实组合是：`docker-compose.yml:216` 用 `${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8081}:80` 把 web 发布在所有网卡；`docker/web.nginx.conf:38-49` 把 `/api/` 反代到 `quantlab-api:8080`；`docker/web-entrypoint.sh:10-15` 在配置了 Token 时把 `Authorization: Bearer` 注入这个代理。于是**两种配置都不构成边界**：Token 为空时局域网任意主机都能读写 API（只有 `RATE_LIMIT_PER_MINUTE=60` 的写限流）；Token 非空时 Web 容器替所有客户端带上它，经 8081 的访问照样能用 —— Token 拦住的是绕过容器的客户端，而 8080 本来就只绑 `127.0.0.1`。
+- 决策：
+  1. 四处文案改成事实：`.env.example` 的端口段说明「这是默认部署唯一对局域网开放的端口，而它同时把 /api 代理出去」，鉴权段说明 Token 到底拦住谁、并把 `WEB_BIND=127.0.0.1` 写成真正关上的办法；`README.md` 的「安全与暴露面」按同义重写；`backend/app/core/config.py` 的 `api_auth_token` 注释改写并点名 `WEB_BIND`；`docs/17` 的 ADR-028 加 `> 修订（ADR-097）` 指针。
+  2. 守卫 `backend/tests/test_boundary_claims.py`（6 条）：三处旧句必须消失（`局域网无法直连`、`局域网无法无认证访问`、`避免无认证暴露`）；端口段必须说出「局域网开放」与关闭办法（`127.0.0.1`）；鉴权段必须说明 Token 拦的是「绕过 Web 容器」的客户端、且经 8081 的路仍然可用；README 同一节不得复述旧句并须点名 `WEB_BIND`；`config.py` 注释不得再出现 `safe only because`；最后一条守着「让旧句为假的那个组合」（nginx 的 `proxy_pass http://quantlab-api:8080/api/;` 与 `${AUTH_LINE}`、compose 的 `${WEB_BIND:-0.0.0.0}`）—— 组合一变，前面那些句子就要重读。
+- 理由：边界不是承诺，是配置的后果。默认部署对局域网开放是 NAS 的使用方式决定的（用户从自己的 PC 浏览器访问），不能靠改默认值来「修」；能修的是文档不再说反话，并把唯一真正能关上的开关指出来。这是 ADR-090/091 的主题在文档层的第二个实例。
+- 影响与兼容：没有任何行为变化；默认部署仍然局域网可达，Token 的语义也没有变化（只是被写清楚了）。`API_BIND=127.0.0.1` 依旧关住 8080 直连。
+- 测试：`backend/tests/test_boundary_claims.py` **6 passed**。红证据（`git worktree` 在 v1.6.6 `f7fcd93d8` 上跑同一份守卫）4 条红：`.env.example` 同时含 `局域网无法直连` 与 `避免无认证暴露`；端口段没有说「局域网开放」；鉴权段没有说「绕过 Web 容器」；`README.md` 仍写 `局域网无法直连`。

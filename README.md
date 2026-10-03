@@ -140,8 +140,21 @@ docker compose logs --tail 80 quantlab-api
 
 ## 安全与暴露面（可选）
 
-默认情况下 API 只绑定 `127.0.0.1`，由 Web 容器代理 `/api`，局域网无法直连。
-如果你要把 API 暴露出去，建议在 `.env` 里开启鉴权：
+默认部署对局域网是**开放**的：`quantlab-web` 发布 `${WEB_BIND:-0.0.0.0}:8081`，
+并把 `/api/` 反向代理给 API 进程（`docker/web.nginx.conf`），所以任何能访问
+`http://<NAS-IP>:8081` 的主机都能读写 API —— 界面没有登录，写请求只有
+`RATE_LIMIT_PER_MINUTE` 的限流。`API_BIND=127.0.0.1` 关住的是 8080 直连，
+不是这个部署本身。
+
+只想自己用（NAS 本机或 SSH 隧道）就把 Web 端口也收回本机：
+
+```ini
+WEB_BIND=127.0.0.1
+WEB_PORT=8081
+```
+
+要让部署真正挡在局域网之外，稳妥做法是在前面放一层你自己的反向代理 / 防火墙；
+写入侧限流与可选 Token 一并给出：
 
 ```ini
 # 至少 8 位，仅允许 A-Z a-z 0-9 . _ ~ + / = -；留空 = 不鉴权
@@ -151,12 +164,12 @@ API_AUTH_TOKEN=
 RATE_LIMIT_PER_MINUTE=60
 ```
 
-- 开启后，除 `/api/v1/healthz` 与 `/api/v1/health` 两个探针外，所有 API 请求
-  都需要 `Authorization: Bearer <token>`；**内置 Web 容器会自动带上它**，
-  浏览器端无需任何配置。
+- `API_AUTH_TOKEN` 设置后，除 `/api/v1/healthz` 与 `/api/v1/health` 两个探针外，
+  所有 API 请求都需要 `Authorization: Bearer <token>`；**内置 Web 容器会自动
+  带上它** —— 所以它拦住的是绕过 Web 容器、直连 API 的客户端，经 8081 代理的
+  局域网访问不受影响。
 - 通知渠道（Webhook / 飞书 / Telegram / PushPlus / Email）的密钥、AI API Key
   均**加密存储、只写入不回显**；审计日志也绝不包含密钥。
-- 更稳妥的做法仍是：不直接暴露 API 端口，在反向代理层再加一层认证。
 
 ---
 

@@ -109,9 +109,11 @@ class Settings(BaseSettings):
     # `app.infrastructure.secrets` and are never echoed back by the API.
     secret_key: str = Field(default="change-me-in-production")
     # Optional bearer token for the REST API. Empty (default) leaves the API
-    # open, which is safe only because it binds to 127.0.0.1 and is reached
-    # through the web proxy. Set it before exposing the API on the LAN; the
-    # bundled web container then injects the same token when proxying /api.
+    # process open; that process binds to 127.0.0.1 (API_BIND), but the bundled
+    # web container publishes ${WEB_BIND:-0.0.0.0}:8081 and proxies /api to it
+    # *with* the token injected, so the token stops clients that bypass the
+    # container — not the LAN clients that use it (ADR-097). Close the
+    # deployment where it is open: WEB_BIND=127.0.0.1, or a firewall in front.
     api_auth_token: str | None = None
     # Per-IP limit for mutating API requests (POST/PUT/DELETE). 0 disables it;
     # skipped entirely under APP_ENVIRONMENT=test. Read endpoints (GET) are not

@@ -301,6 +301,15 @@ table {
   font-size: 13px;
 }
 
+/* A table is the only element left that can push the page sideways: `white-space:
+   nowrap` on the cells gives it a min-content width, and `width: 100%` does not cap
+   it, so a wide table sticks out of its card and the whole page gets the scrollbar
+   (measured: 1168px at a 1440px viewport on /signals). The card holding a table is
+   therefore the scroll box, which keeps the sideways scrollbar inside that card. */
+.card:has(table) {
+  overflow-x: auto;
+}
+
 th,
 td {
   text-align: left;

@@ -2153,7 +2153,7 @@ onMounted(async () => {
               <td>{{ r.number_of_trades ?? 'N/A' }}</td>
               <td>
                 <button class="ghost" :disabled="busy" @click="open(r.id)">查看</button>
-                <button class="ghost" :disabled="busy" @click="removeRun(r.id)">删除</button>
+                <button class="ghost danger" :disabled="busy" @click="removeRun(r.id)">删除</button>
               </td>
             </tr>
           </tbody>

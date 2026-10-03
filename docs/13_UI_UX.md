@@ -142,6 +142,8 @@ AI 区块叫「AI 汇总（只解释已有数字，不重新计算）」，固�
 
 桌面仍然优先，但手机宽度可用：`frontend/src/style.css` 有两个断点。`@media (max-width: 820px)` 管平板：外壳从横排改为竖排，232px 的侧栏变成整宽横幅、导航变成可横向滑动的标签条，`/settings` 里「系统信息」「运行环境」那一组的引擎/特征/数据库读数在手机上隐藏，宽表格在页面内横向滚动而不是把整页撑开，主题按钮收进角落不再压住内容（ADR-111）。v1.9.5 补上 `@media (max-width: 480px)` 管窄手机（ADR-142，产品评审报告 P1-8）：`.main` 与 `.nav` 不再横向滚动、导航换行而不是滑动、卡片自己成为横向滚动容器、表格最小宽度从 560px 降到 460px、`.grid.cols-2` 变单列而三/四列变两列、结论卡读数降到 22px —— 820px 那套规则是给平板的，375px 下它自己就是横向滚动条。桌面布局不变。
 
+v1.9.6 补上桌面这一侧残留的一处（ADR-145，真实渲染发现）：宽表格在 1440px 视口下仍能把整页撑出横向滚动条（`/signals` 实测 3px，表格宽 1168px、右边界 1443px），因为 `table { width: 100% }` 与 `th, td { white-space: nowrap }` 同时成立时表格取的是 min-content 宽度、页面里又没有滚动容器。现在 `.card:has(table) { overflow-x: auto; }` 让**承载表格的卡片**成为滚动盒，横向滚动条落在卡片内部而不是整页；窄屏那套规则不变，表格仍然不压缩成换行文本（数字列保持 `nowrap` 才读得懂）。同一版起，每个改界面的版本交付前都在本机做一次与部署形态一致的抽查（ADR-149）：`scripts/Invoke-FrontendChecks.ps1 -SkipInstall -KeepMirror` 的生产构建 + 无依赖 Node 静态服务器 + 真实 Chrome 在 320 / 375 / 768 / 1440 / 1920 五个宽度逐页测量整页横向溢出、超出视口且没有滚动祖先的元素、空白下拉框、原始枚举与 `ADR-xxxx` 泄漏，并在空数据库上再跑一次看第一屏（读数写在 `docs/15_ROADMAP_ACCEPTANCE.md`）。
+
 ## 10. 界面模式（普通 / 高级）
 
 状态：已实现（frontend/src/mode.ts, frontend/src/App.vue, frontend/src/views/SettingsView.vue）
@@ -151,6 +153,8 @@ AI 区块叫「AI 汇总（只解释已有数字，不重新计算）」，固�
 普通模式隐藏的（它们仍然存在，只是不在第一屏）：JSON DSL 编辑器与 Dataset/Series ID、`result_hash` / `dataset_hash` / `engine_version` / `feature_version` 的可复现性区块、审计日志整节、运行环境逐键读数、**系统信息整节（系统状态 / 版本 / 引擎 / 数据库 / Redis / 特征版本 / DSL Schema）**、信号证据里的特征哈希与特征键名、触发规则 ID、`quality_status` 原始枚举、`BUY/SELL/WAIT/NO_SIGNAL` 原始状态词，v1.9.5 又把四组引擎词与一页诊断读数收了进来（ADR-137、ADR-141）：模拟账户状态（`active` / `inactive` / `closed`）、信号状态（`pending` / `acknowledged`）、模拟结果（`pending` / `profitable` / `unprofitable`）、版本校验状态（`pending` / `valid` / `invalid`），以及 `/settings` 里 AI 那一组的模型目录、提示词模板、用量与任务记录。高级模式把它们全部放回原位，方便自己和 AI 一起排查问题（ADR-126、ADR-134）。
 
 这些词在普通模式不是被删掉，而是被 `frontend/src/wording.ts` 的表翻成人话：`accountStatusLabel` 把 `active` 说成「运行中」、`signalStatusLabel` 把 `pending` 说成「未确认」、`outcomeLabel` 把 `profitable` 说成「这次赚钱了」、`validationLabel` 把 `valid` 说成「已通过校验」、`qualityLabel` 把 `unknown` 说成「还没有数据」。原始值仍然在 DOM 里，只是包在 `<code>` 与 `v-if="isAdvanced"` 之后 —— 翻译不等于隐藏事实（ADR-126、ADR-137）。
+
+v1.9.6 补的是同一张表漏掉的**调用点**（ADR-144，真实渲染发现）：`frontend/src/views/ResearchView.vue` 的「① 选择标的」原本直接输出 `{{ chosenOption.quality }}`，于是 `/research` 在任何模式下都写着「质量：valid」。现在它和别的页面一样走 `qualityLabel(chosenOption.quality)`（`qualityLabel` 与 `timeframeLabel`、`validationLabel` 一起从 `frontend/src/wording.ts` 导入），原始值放进 `<span v-if="isAdvanced" class="muted">（valid）</span>`。教训是**验收方式**：一个词表项被某个页面用上了，不等于每个渲染它的调用点都翻了 —— 守卫因此写成对调用点的断言（裸插值在普通模式可见文本里只允许出现一次，且必须在 `isAdvanced` 的 span 内），而不是只断言词表里有这个函数。
 
 同一版还定了一条交互规则：**点不动的按钮必须说明为什么**（ADR-138）。研究页的「开始研究」、回测页的「开始回测」、策略库的「分析仓库」、模拟验证的「执行信号」在缺输入时旁边都有一句 `v-if` 说明（缺版本、缺标的、缺仓库地址、缺信号 ID），而不再只是一个灰色的按钮让人猜。模拟验证里「手抄信号 ID」的输入框整块退到高级模式，普通模式的做法是到「信号」页的列表里点那一行的「→ 账户名」。
 
@@ -164,7 +168,7 @@ v1.9.5 还把 `/settings` 从一条长滚动条拆成四个标签页（ADR-141�
 
 `/research` 是评审 §4 那条主流程的入口，固定四步，一步一屏：
 
-1. **① 选择标的** —— 只列出真的已经同步下来的系列（`GET /market-data/series`），每条写 `代码 · 周期`；选中后立刻显示这份数据的覆盖范围（`series_start` → `series_end`）、`quality_status` 与 `bar_count`（`GET /market-data/series/{id}`）。质量是 `invalid` / `partial` / `unknown` 时在同一张卡里给出警告，说清结论因此受什么限制；什么都没有时给一个通往 `/data` 的链接，而不是一个空下拉框。
+1. **① 选择标的** —— 只列出真的已经同步下来的系列（`GET /market-data/series`），每条写 `代码 · 周期`；选中后立刻显示这份数据的覆盖范围（`series_start` → `series_end`）、`quality_status` 与 `bar_count`（`GET /market-data/series/{id}`）。质量是 `invalid` / `partial` / `unknown` 时在同一张卡里给出警告，说清结论因此受什么限制；什么都没有时给一个通往 `/data` 的链接，而不是一个空下拉框。普通模式把质量说成人话（`qualityLabel`：数据正常 / 有缺口 / 数据有问题 / 还没有数据），原始取值只在高级模式的括号里出现（ADR-144）。
 2. **② 选择策略** —— `GET /strategies` 与 `GET /strategies/{id}/versions` 两个下拉框；版本行写「版本 · 校验状态 · 是否当前」。库里记录的校验状态不是 `valid` 时给出警告。没有策略时链到 `/strategies`。
 3. **③ 设置少量参数** —— 只有两件事：研究哪一段时间（两个日期，留空＝全部已同步数据）与每次用多少钱（沿用策略里的仓位设置 / 固定比例 / 按每笔风险）。其余假设（成交模型、手续费、滑点、初始资金）不在这里改，回测页把它们原样列出来。日期顺序反了或比例越界时按钮不可用并写明原因。
 4. **④ 开始研究** —— 先给一句人话说明接下来会发生什么（`将用「X」的版本 v，在 SYMBOL 的日线上跑一次历史回测，区间 …`），再跳转到 `/backtest?strategy_version_id=…&symbol=…&timeframe=…&run=1[&start=&end=&size_mode=&size_fraction=&size_risk_pct=]`。
@@ -177,7 +181,7 @@ v1.9.5 还把 `/settings` 从一条长滚动条拆成四个标签页（ADR-141�
 
 `/data` 只做数据这一件事，三张卡：
 
-1. **同步行情** —— 输入代码（如 `AAPL`、`QQQ`、`BTC-USD`）选时间跨度后调 `POST /market-data/sync`，成功时报告新增 K 线根数与系列号，并把「已有 K 线、同步无新增」当成正常结果写出来，而不是报错。表格列出代码、周期、数据范围、质量、最后同步时间；高级模式再加系列 ID、来源与数据集版本三列。标的输入框的默认值在 v1.9.5 改成跟着行情源走（ADR-140）：`synthetic` 演示源预填 `DEMO-AAPL`（它只服务 `DEMO-AAPL` / `DEMO-BTC`），真实数据源预填 `AAPL`，页面上标明「当前行情源：…」——默认值是一个「按下按钮就能拿到东西」的承诺，写死演示代码在真行情源下必然同步出 0 根 K 线。
+1. **同步行情** —— 输入代码（如 `AAPL`、`QQQ`、`BTC-USD`）选时间跨度后调 `POST /market-data/sync`，成功时报告新增 K 线根数与系列号，并把「已有 K 线、同步无新增」当成正常结果写出来，而不是报错。表格列出代码、周期、数据范围、质量、最后同步时间；高级模式再加系列 ID、来源与数据集版本三列。标的输入框的默认值在 v1.9.5 改成跟着行情源走（ADR-140）：`synthetic` 演示源预填 `DEMO-AAPL`（它只服务 `DEMO-AAPL` / `DEMO-BTC`），真实数据源预填 `AAPL`，页面上标明「当前行情源：…」——默认值是一个「按下按钮就能拿到东西」的承诺，写死演示代码在真行情源下必然同步出 0 根 K 线。时间跨度也是同一类问题（ADR-146，真实渲染发现 375px 下第二个控件是**空白下拉框**）：选项原本是 `90 / 180 / 365 / 730 / 1825 / 3650`，而默认值写的是 `400`，浏览器找不到匹配项，`selectedIndex` 变成 -1，于是画出一个没有文字的框。v1.9.6 把六个跨度收成一处清单 `LOOKBACK_OPTIONS`（近 3 个月 / 近 6 个月 / 近 1 年 / 近 2 年 / 近 5 年 / 近 10 年），模板用 `v-for="opt in LOOKBACK_OPTIONS"` 渲染，默认值改成清单里真实存在的 `365`（「近 1 年」）—— 守卫解析清单与默认值，断言默认值属于清单，所以「值存在但不可选」这种状态不会再出现。
 2. **质量那一列是什么意思** —— 只有四种取值，逐条写出人话（与 `backend/app/data/market_data_repo.py` 的 `assess_bars_quality` 同一套判据）：`valid` 每一根 K 线的开高低收都是正数、相邻两根之间没有超过 5 天的空洞；`partial` 数据本身没问题但中间有超过 5 天的空洞；`invalid` 出现非正数或缺失的开高低收，或最高价低于最低价；`unknown` 还没有 K 线。同一张卡写明质量只描述数据、不描述策略，缺口会限制结论成立的范围。
 3. **删除会发生什么** —— 已经被回测引用过的数据不会被真正删除，后端把它改成归档（`is_archived`，ADR-081），因为回测结果的可复现性依赖这份数据；勾上「显示已归档」仍然看得到，可以「恢复」。没有任何回测引用的数据才会真正删除，删除前再确认一次。
 
@@ -195,6 +199,10 @@ v1.9.5 还把 `/settings` 从一条长滚动条拆成四个标签页（ADR-141�
 另外 `.page-sub` 限宽 72ch：一句人话不应该横跨整个宽屏。**没有换皮** —— 配色、字体、间距、组件与响应式断点全部沿用，只有主次关系变了。这条原则和 CSS 一起由守卫盯着（`backend/tests/test_frontend_contracts.py` 的 `test_the_typography_separates_a_conclusion_from_its_controls`）。
 
 v1.9.5 补了一条同一类的视觉规则：**危险操作要看得出来是危险的**（ADR-142，产品评审报告 P2-14）。之前界面上只有一种按钮语气，读者无法从外观区分「保存」与「关闭账户」，而「已归档」还借用了 `.badge.WAIT` 的黄色语义（那本来是「暂不确认」）。现在 `button.danger` 用 `var(--sell)` 的红色字与半透明红边框（hover 时淡红底），归档状态走新的 `.badge.archived`（灰色虚线）；模拟账户的「关闭」不再直接改状态，而是先 `window.confirm` 说明「关闭后不再接受新的虚拟成交，持仓与交易记录都会保留，随时可以重开」，确认后才调 `setStatus(account, 'close')`。确认框说的是影响范围，不是「你确定吗」。
+
+v1.9.6 把这条视觉规则补成**每个同类控件都成立**（ADR-148，真实渲染发现策略库与回测记录的「删除」还是普通灰按钮）：数据页的系列删除（`frontend/src/views/DataView.vue`）、策略库的策略删除（`frontend/src/views/StrategiesView.vue`）、回测记录的删除（`frontend/src/views/BacktestView.vue`）、模拟账户的「关闭」与「重置」（`frontend/src/views/PaperView.vue`）现在都用 `class="ghost danger"`，真实渲染里读到的计算色是 `rgb(217, 83, 79)`（`var(--sell)`）。一条视觉规则只有在每个同类控件上都成立时才是规则——只做其中两个，读者学到的就是「红色不代表什么」。
+
+同一版还修了「我的策略」页一处**说反了的状态**（ADR-147，真实渲染发现）：策略库里明明有一行策略，表格下面却写着「还没有策略。」——那句 `<p v-else>` 紧跟在「展开版本」卡片（`v-if="expandedId !== null"`）之后，条件是「没有展开任何策略」而不是「策略库为空」。现在两张表各自拥有空状态：策略库为空时显示「策略库还是空的：在上面用一句话建一个，或者从 GitHub 导入一个。」，生命周期表为空时保留「还没有策略。」；策略库表头同时补上了与表体对齐的「操作」列（表体 6 个 `td`、表头原本只有 5 个 `th`）。空状态是表格自己的属性，不是旁边卡片的属性——这也是为什么它在「空库 + 未展开」这种最常见状态下恰好通过评审，只有真实渲染能把「有数据时也说空」照出来。
 
 ## 14. 欠账（尚未实现的承诺，按本文件顺序）
 

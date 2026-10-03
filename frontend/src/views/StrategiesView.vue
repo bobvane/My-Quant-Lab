@@ -840,6 +840,7 @@ onMounted(load)
               <th>版本数</th>
               <th>来源</th>
               <th></th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -849,7 +850,11 @@ onMounted(load)
               <td>{{ s.version_count }}</td>
               <td>{{ s.source_type }}</td>
               <td>
-                <button class="ghost" :disabled="deletingStrategy === s.id" @click="deleteStrategy(s.id, s.name)">
+                <button
+                  class="ghost danger"
+                  :disabled="deletingStrategy === s.id"
+                  @click="deleteStrategy(s.id, s.name)"
+                >
                   {{ deletingStrategy === s.id ? '删除中…' : '删除' }}
                 </button>
               </td>
@@ -864,6 +869,7 @@ onMounted(load)
             </tr>
           </tbody>
         </table>
+        <p v-else class="muted">策略库还是空的：在上面用一句话建一个，或者从 GitHub 导入一个。</p>
         <div v-if="lineage" class="card" style="margin-top: 10px">
           <h3>策略血统 #{{ lineage.strategy_id }}</h3>
           <p class="muted">
@@ -942,7 +948,6 @@ onMounted(load)
           </table>
           <p v-else class="muted">该策略还没有版本。</p>
         </div>
-        <p v-else class="muted">还没有策略。</p>
       </div>
     </div>
 

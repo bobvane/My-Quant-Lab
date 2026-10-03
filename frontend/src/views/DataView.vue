@@ -21,7 +21,17 @@ const symbol = ref('')
 const symbolTouched = ref(false)
 const provider = ref('')
 const syncing = ref(false)
-const lookbackDays = ref(400)
+// The default has to be one of these options: a value the <select> does not offer
+// leaves the browser rendering an empty box (measured on /data at 375px).
+const LOOKBACK_OPTIONS: Array<{ days: number; label: string }> = [
+  { days: 90, label: '近 3 个月' },
+  { days: 180, label: '近 6 个月' },
+  { days: 365, label: '近 1 年' },
+  { days: 730, label: '近 2 年' },
+  { days: 1825, label: '近 5 年' },
+  { days: 3650, label: '近 10 年' },
+]
+const lookbackDays = ref(365)
 
 const providerText = computed(() => providerLabel(provider.value))
 const defaultSymbol = computed(() => defaultSymbolFor(provider.value))
@@ -186,12 +196,9 @@ onMounted(load)
           <option value="BTC-USD" />
         </datalist>
         <select v-model.number="lookbackDays" style="max-width: 140px">
-          <option :value="90">近 3 个月</option>
-          <option :value="180">近 6 个月</option>
-          <option :value="365">近 1 年</option>
-          <option :value="730">近 2 年</option>
-          <option :value="1825">近 5 年</option>
-          <option :value="3650">近 10 年</option>
+          <option v-for="opt in LOOKBACK_OPTIONS" :key="opt.days" :value="opt.days">
+            {{ opt.label }}
+          </option>
         </select>
         <button :disabled="syncing || !symbol.trim()" @click="syncData">
           {{ syncing ? '同步中…（可能需要几秒）' : '同步日线数据' }}
@@ -247,7 +254,7 @@ onMounted(load)
               <button v-if="s.is_archived" class="ghost" @click="restoreSeries(Number(s.id))">恢复</button>
               <button
                 v-else
-                class="ghost"
+                class="ghost danger"
                 @click="deleteSeries(Number(s.id), assetSymbol(Number(s.asset_id)))"
               >
                 删除

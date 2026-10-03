@@ -1061,9 +1061,10 @@ def test_the_first_visit_gets_a_way_in() -> None:
 def test_dangerous_actions_look_dangerous() -> None:
     """The product review's P2-14: closing or deleting is not a neutral grey button.
 
-    There is one ``.danger`` treatment now (used by the data page's delete, the paper
-    account's reset, and the new close action), and closing an account explains what
-    survives it before asking.
+    There is one ``.danger`` treatment (the data page's series delete, the strategy
+    delete, the backtest run delete, the paper account's reset and the new close action),
+    and closing an account explains what survives it before asking. Real render: the two
+    paper buttons compute to ``rgb(217, 83, 79)``.
     """
 
     assert "button.danger {" in STYLE
@@ -1076,3 +1077,67 @@ def test_dangerous_actions_look_dangerous() -> None:
     assert "window.confirm(" in body
     assert "if (!ok) return" in body
     assert "await setStatus(account, 'close')" in body
+    # Every control that destroys stored research results carries the same treatment.
+    assert 'class="ghost danger"' in DATA
+    assert 'class="ghost danger"' in STRATEGIES
+    assert 'class="ghost danger"' in BACKTEST
+
+
+def test_the_research_page_does_not_print_the_quality_enum() -> None:
+    """Real render (375/768/1440, /research): "质量：valid" was on the screen.
+
+    The label table already existed, but this call site handed the raw value to the
+    template, so basic mode printed the engine's own word. The raw value stays readable
+    in advanced mode, like every other reading.
+    """
+
+    assert "质量：{{ qualityLabel(chosenOption.quality) }}" in RESEARCH
+    # The raw value is still readable, but only inside the advanced-mode span.
+    assert RESEARCH.count("{{ chosenOption.quality }}") == 1
+    assert '<span v-if="isAdvanced" class="muted">（{{ chosenOption.quality }}）</span>' in RESEARCH
+    assert "qualityLabel" in RESEARCH.split("</script>", 1)[0]
+
+
+def test_a_wide_table_scrolls_inside_its_card() -> None:
+    """Real render (1440px, /signals): the card holding a table pushed the whole page.
+
+    ``table { width: 100% }`` next to ``white-space: nowrap`` cells gives a table a
+    min-content width and no cap — measured 1168px inside a 1440px viewport, with no
+    scroll container anywhere between that table and the page.
+    """
+
+    assert ".card:has(table) {" in STYLE
+    block = STYLE.split(".card:has(table) {", 1)[1].split("}", 1)[0]
+    assert "overflow-x: auto" in block
+
+
+def test_the_data_page_default_is_one_of_its_own_options() -> None:
+    """Real render (375px, /data): the lookback select drew as an empty box.
+
+    ``lookbackDays`` defaulted to 400 while the options were 90/180/365/730/1825/3650, so
+    the browser had no option to select and showed nothing. The options are one list now
+    and the default is one of them.
+    """
+
+    assert "const LOOKBACK_OPTIONS" in DATA
+    assert "const lookbackDays = ref(365)" in DATA
+    options = re.search(r"const LOOKBACK_OPTIONS[^=]*= \[(.*?)\n\]", DATA, re.S)
+    assert options is not None, "LOOKBACK_OPTIONS is not a literal list"
+    days = {int(value) for value in re.findall(r"days: (\d+)", options.group(1))}
+    assert days, "no option days found"
+    default = int(re.search(r"const lookbackDays = ref\((\d+)\)", DATA).group(1))
+    assert default in days, "the default value is not selectable"
+    assert 'v-for="opt in LOOKBACK_OPTIONS"' in DATA
+
+
+def test_the_strategy_library_does_not_claim_it_is_empty() -> None:
+    """Real render (375px, /strategies): "还没有策略。" sat under a populated table.
+
+    That paragraph was the ``v-else`` of the expanded-versions card, so it showed up
+    whenever no row had been expanded — even with strategies in the library. The header
+    row was also a column short of the body. Each table now owns its own empty state.
+    """
+
+    assert STRATEGIES.count("还没有策略。") == 1
+    assert 'v-else class="muted">策略库还是空的' in STRATEGIES
+    assert "<th>操作</th>" in STRATEGIES

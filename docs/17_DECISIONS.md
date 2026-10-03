@@ -2815,4 +2815,77 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 - 测试：`backend/tests/test_frontend_contracts.py::test_the_first_visit_gets_a_way_in` 断言 `GUIDE_KEY = 'mql-guide-dismissed'`、`guideDismissed`、`showGuide` computed、`dismissGuide()`、`class="card guide-card"`、标题与关闭按钮文案，以及首页含 `<RouterLink to="/data">到「数据」同步更长的一段</RouterLink>`。
 
+## ADR-144：词表要按**调用点**普查，研究页的行情质量也必须翻成人话
+
+- 背景：v1.9.5 把普通模式的词表扩到账户状态、信号状态、结果与校验状态（ADR-137），并在数据页把 `quality_status` 翻译成中文。用户随后指出「评审者是打开部署版本来看的」，于是本轮用真实 Chrome 打开构建产物逐页核对，在 `/research` 上读到仍然暴露的原始值：`数据覆盖：2025-08-29 → 2026-10-03 · 质量：valid`。词表本身没问题，问题是调用点：`frontend/src/views/ResearchView.vue:254` 直接把 `chosenOption.quality` 插进模板，而这个字段来自 `String(s.quality_status ?? 'unknown')`（`frontend/src/views/ResearchView.vue:39`）。
+
+- 决策：`frontend/src/views/ResearchView.vue` 改走同一张表——`import { qualityLabel, timeframeLabel, validationLabel } from '@/wording'`，模板写 `质量：{{ qualityLabel(chosenOption.quality) }}`，原始值包在 `<span v-if="isAdvanced" class="muted">（{{ chosenOption.quality }}）</span>` 里。验收方式随之定死：一个词表项被「用上了」不算完成，**每个渲染该值的调用点**都必须在普通模式输出人话。
+
+- 理由：这类缺陷的结构是「表存在、调用点漏了」，只按函数名或词表内容写守卫会漏掉第二个、第三个调用点。把守卫写成对具体调用点的断言（`质量：{{ qualityLabel(chosenOption.quality) }}` 必须在、裸插值只允许出现一次且在 `isAdvanced` 的 span 内），下一次有人新增调用点时至少会看见这条既有规则。
+
+- 影响与兼容：只改文案层，不改任何读数、请求或计算；高级模式下的原始值仍然可见（翻译不等于隐藏事实，ADR-126、ADR-137）。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_research_page_does_not_print_the_quality_enum`。
+
+## ADR-145：卡片自己成为表格的滚动容器（`.card:has(table)`）
+
+- 背景：真实渲染发现 `/signals` 在 1440px 视口下整页仍有 3px 横向滚动，`unhandled` 元素 7 个：`main.main > div > div.card > table` 宽 1168px、右边界 1443px。根因是 `frontend/src/style.css` 的 `table { width: 100% }` 与 `th, td { white-space: nowrap }` 同时成立时，表格取的是 min-content 宽度，`width: 100%` 并不封顶；表格与页面之间没有任何滚动容器。375px 那套修复（ADR-142）只让卡片在窄屏可滑，桌面上这个结构性问题依然在。
+
+- 决策：在 `frontend/src/style.css` 的 `table` 规则之后加 `.card:has(table) { overflow-x: auto; }`，让**承载表格的卡片**成为滚动盒：横向滚动条落在卡片内部，而不是整页。
+
+- 理由：表格是最后一个能把页面撑宽的元素，而「把表格包进一个 `div.table-scroll`」需要改十来个视图的模板并新增一层结构；`:has()` 在项目当前的构建目标（Vite 6 默认 baseline-widely-available）之内，一条规则覆盖所有页面。选择在 `.card` 上设 `overflow-x` 是安全的：`frontend/src/style.css` 里只有侧栏是 `position: fixed`（其父级链不经过 `.card`），卡片内部没有绝对定位子元素会被裁掉。
+
+- 影响与兼容：桌面上宽表格变成卡片内可横向滑动，页面本身不再滚动；窄屏行为不变（480px 断点里卡片本来就有 `overflow-x: auto`）。表格仍然没有把自己压缩成换行的多行文本——数字列保持 `nowrap` 才读得懂。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_a_wide_table_scrolls_inside_its_card`；真实渲染证据见 `docs/15_ROADMAP_ACCEPTANCE.md` 的 v1.9.6 读数（320/375/768/1440/1920 五个宽度全部 `pageOverflow = 0`）。
+
+## ADR-146：下拉框的默认值必须是它自己列出的选项
+
+- 背景：真实渲染在 `/data` 的 375px 截图上看到一个**空白下拉框**。原因是 `frontend/src/views/DataView.vue` 的 `const lookbackDays = ref(400)` 与模板里的选项（90 / 180 / 365 / 730 / 1825 / 3650）不一致：浏览器找不到匹配项，`selectedIndex` 变成 -1，于是画出一个没有文字的框。这与产品评审报告 P2-11（版本下拉框没有 placeholder）是同一类缺陷：控件有选项、但当前值不在其中。
+
+- 决策：把选项收成一处清单 `const LOOKBACK_OPTIONS: Array<{ days: number; label: string }>`，模板改 `v-for="opt in LOOKBACK_OPTIONS"`，默认值改成清单里真实存在的 `ref(365)`（「近 1 年」）。守卫同时解析清单与默认值，断言默认值属于清单。
+
+- 理由：默认值与选项列表分家，才会产生「值存在但不可选」的状态；把两者放进同一个字面量列表，是让这条不变量在代码层面看得见，而不是靠人记得同步。选 365 而不是 400，还顺手让界面上的六个跨度成为唯一的一组时间长度。
+
+- 影响与兼容：数据页的同步默认从 400 天变成 365 天；同步逻辑、API 参数、系列与回测都不受影响（`lookback_days` 本来就是请求参数）。已同步的数据与回测结果不会因此改变。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_data_page_default_is_one_of_its_own_options`。
+
+## ADR-147：空状态跟着它自己的表格，不跟着旁边的卡片
+
+- 背景：真实渲染在 `/strategies` 的 375px 全页截图上看到 `策略库` 表格里明明有一行策略，表格下面却写着「还没有策略。」。原因是一句错挂的 `v-else`：`frontend/src/views/StrategiesView.vue` 里 `<p v-else class="muted">还没有策略。</p>` 紧跟在「展开版本」卡片（`v-if="expandedId !== null"`）之后，于是它的条件是「没有展开任何策略」而不是「策略库为空」。同一张表的表头还比表体少一列（表体有 6 个 `td`，表头只有 5 个 `th`）。
+
+- 决策：删掉那句错挂的 `v-else`，让两张表各自拥有空状态：策略库为空时显示「策略库还是空的：在上面用一句话建一个，或者从 GitHub 导入一个。」，生命周期表为空时保留「还没有策略。」；策略库表头补上「操作」列（`<th>操作</th>`）。
+
+- 理由：空状态是表格的属性（这张表有没有内容），不是旁边卡片的属性。错挂的 `v-else` 之所以通过评审和守卫，是因为它在「空库 + 未展开」这种最常见状态下恰好是对的——只有真实渲染能把「有数据时也说空」照出来。
+
+- 影响与兼容：只改模板条件与列数，不改数据、请求与排序；策略库的表格在三档宽度下都仍然可横向滑动（ADR-145）。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_strategy_library_does_not_claim_it_is_empty`。
+
+## ADR-148：破坏性操作统一用 `.danger`，颜色按计算值核对
+
+- 背景：ADR-142 引入了 `button.danger`，但只有模拟账户的「关闭」「重置」用上了。产品评审报告 P2-14 点名的还有数据删除；真实渲染还确认策略库的「删除」与回测记录的「删除」也是普通灰按钮——读者无法从外观区分「查看」和「删掉这份研究证据」。当时那句 `test_dangerous_actions_look_dangerous` 的注释已经写着「数据页的删除也在用」，而代码里并没有。
+
+- 决策：所有会毁掉已存研究结果的控制件统一加 `danger`：数据页的系列删除（`frontend/src/views/DataView.vue`）、策略库的策略删除（`frontend/src/views/StrategiesView.vue`）、回测记录的删除（`frontend/src/views/BacktestView.vue`）、模拟账户的关闭与重置（`frontend/src/views/PaperView.vue`）。守卫把这四处一起钉住，并修掉那句不准确的注释。
+
+- 理由：一条视觉规则只有在**每个同类控件**上都成立时才是规则；只做其中两个，读者学到的就是「红色不代表什么」。核对方式也从「代码里有没有 `class="danger"`」推进到真实渲染里读计算色：探针在 `/strategies`、`/backtest`、`/data`、`/paper` 上读到的 `color` 都是 `rgb(217, 83, 79)`（`var(--sell)`）。
+
+- 影响与兼容：只改外观类名，`window.confirm` 的确认逻辑与后端行为不变（`test_every_destructive_button_asks_first` 仍然逐条核对五个删除/重置函数先确认再调 API）。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_dangerous_actions_look_dangerous`（含 `DATA` / `STRATEGIES` / `BACKTEST` 三处 `class="ghost danger"` 断言）。
+
+## ADR-149：补丁版也按「部署形态的真实渲染」验收
+
+- 背景：用户明确纠正过一个前提——「评审者是打开部署版本来看的」（m21381）。此前我的验收证据是源码级守卫（读 `.vue`/`.css` 文本）加人工推理，这能证明「代码里有这条规则」，不能证明「浏览器里长这样」：ADR-144 / ADR-145 / ADR-146 / ADR-147 / ADR-148 这五条问题全都是在真实渲染里才第一次出现的，其中两条（`/data` 空白下拉、`/strategies` 空状态错挂）连源码级守卫都在「看着没问题」。
+
+- 决策：此后每个涉及界面改动的版本，交付前都在本机跑一次与部署形态一致的检查：`scripts/Invoke-FrontendChecks.ps1 -SkipInstall -KeepMirror` 出的生产构建 + 无依赖 Node 静态服务器（`/api` 反代本地 uvicorn）+ 真实 Chrome（puppeteer-core）在 320 / 375 / 768 / 1440 / 1920 五个宽度逐页测量，读四类事实：整页横向溢出（`documentElement.scrollWidth - innerWidth`）、超出视口且没有滚动祖先的元素、空白下拉框（有选项但 `selectedIndex < 0`）、文本节点里的原始枚举与 `ADR-xxxx` 泄漏；同时在**空数据库**上再跑一次，验证第一次打开时的空状态与引导。脚本与截图留在临时目录，不进仓库。
+
+- 理由：产品层缺陷（信息层级、措辞、控件状态）的失败模式是「代码看起来对、屏幕上是错的」。把真实渲染读数写进版本读数（`docs/15_ROADMAP_ACCEPTANCE.md`），让「这一版真的有人打开过」变成可核对的证据，而不是一句自我评价。
+
+- 影响与兼容：不改动产品代码，不改 CI（探针依赖本机 Chrome，不进 CI）；版本读数里多一段真实渲染结果。这一条是方法，不替代任何既有守卫——源码级守卫仍然是回归防线，真实渲染是交付前的一次抽查。
+
+- 测试：本 ADR 由流程保证，`docs/15_ROADMAP_ACCEPTANCE.md` 的 v1.9.6 读数记录两次探针结果（有种子数据 10 路由 × 5 宽度 = 50 次加载；空库 7 路由 × 3 宽度 = 21 次加载）。
+
+
 

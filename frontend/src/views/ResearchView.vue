@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, type Asset, type Strategy, type StrategyVersion } from '@/api'
 import { isAdvanced } from '@/mode'
-import { timeframeLabel, validationLabel } from '@/wording'
+import { qualityLabel, timeframeLabel, validationLabel } from '@/wording'
 
 // 「研究策略」这一页就是把「从想法到结论」的第一步讲清楚（评审 §4、§7、§24；ADR-131、ADR-132）。
 //
@@ -251,7 +251,8 @@ onMounted(async () => {
       <div v-if="chosenOption" style="margin-top: 8px">
         <p class="muted">
           数据覆盖：{{ chosenOption.start }} → {{ chosenOption.end }} ·
-          质量：{{ chosenOption.quality }}
+          质量：{{ qualityLabel(chosenOption.quality) }}
+          <span v-if="isAdvanced" class="muted">（{{ chosenOption.quality }}）</span>
           <span v-if="checkingData"> · 读取中…</span>
           <span v-else-if="dataCheck"> · 共 {{ dataCheck.bar_count }} 根 K 线</span>
         </p>

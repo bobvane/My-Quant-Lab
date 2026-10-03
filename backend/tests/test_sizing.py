@@ -207,18 +207,32 @@ def test_risk_per_trade_changes_the_outcome(sample_bars) -> None:
 def test_tighter_stop_buys_more_and_risks_the_same(sample_bars) -> None:
     """The documented intent of risk-based sizing, end to end.
 
-    Halving the ATR multiple halves the stop distance, so the position roughly
-    doubles — and the loss taken at the stop stays near risk_pct either way. That
-    second assertion is the one that matters: it rules out "bought more because it
+    Halving the ATR multiple halves the stop distance, so the position buys more —
+    and the loss taken at the stop stays near risk_pct either way. That second
+    assertion is the one that matters: it rules out "bought more because it
     multiplied the loss".
+
+    The pair is 1.5/0.75 rather than the DSL's 2.0/1.0 because since ADR-116 the stop
+    tested on a bar is the line frozen at the entry decision, and that line trails the
+    close (``close[i-1] - n * atr[i-1]``). On this fixture a 2 ATR stop is almost never
+    reached before the strategy's own exit rule closes the trade, so the wide side
+    would have no stop-out to compare. The tighter side is also capped by available
+    cash (``affordable``) on this fixture, which is why the first assertion is "more",
+    not "double".
     """
 
-    wide = run_backtest(_spec({"mode": "risk_per_trade", "risk_pct": 0.02}), sample_bars)
+    def _risked(multiple: float):
+        dsl = copy.deepcopy(DSL)
+        dsl["risk"] = {"stop_loss_atr_multiple": multiple}
+        dsl["execution"] = {
+            **DSL["execution"],
+            "sizing": {"mode": "risk_per_trade", "risk_pct": 0.02},
+        }
+        return run_backtest(StrategySpec.model_validate(dsl), sample_bars)
+
+    wide = _risked(1.5)
     # Same strategy, but the stop is half as far away.
-    dsl = copy.deepcopy(DSL)
-    dsl["risk"] = {"stop_loss_atr_multiple": 1.0}
-    dsl["execution"] = {**DSL["execution"], "sizing": {"mode": "risk_per_trade", "risk_pct": 0.02}}
-    tight = run_backtest(StrategySpec.model_validate(dsl), sample_bars)
+    tight = _risked(0.75)
 
     assert wide.trades and tight.trades
     assert tight.trades[0]["quantity"] > wide.trades[0]["quantity"]

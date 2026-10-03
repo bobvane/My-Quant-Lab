@@ -91,6 +91,11 @@ API base: `/api/v1`
 `only 400 bars available, warm-up needs 900` 对应的就是一次 `number_of_trades = 0` 的
 「成功」回测。列表端点 `/backtests` 的摘要**不含** `warnings`。
 
+`engine_version` / `feature_version` 报告的是**真正跑过的那一次计算**（ADR-116：
+`ENGINE_VERSION` 与 `FEATURE_VERSION` 由代码提供，不再由路由写死字面量）。两者都是
+`result_hash` 的输入，所以换一个版本号就等于换一份计算：同一条策略在引擎语义变化后重跑会得到
+另一个哈希，而**已经落库的历史回测保存的是当时的快照**，不受影响。
+
 ## Backtest Metrics
 
 `GET /backtest-metrics/backtest/{backtest_id}` [已实现] —— 一次回测运行的指标。

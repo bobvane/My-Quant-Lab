@@ -158,20 +158,35 @@ def test_a_run_that_never_left_its_warm_up_is_flagged(sample_bars: pd.DataFrame)
 
 
 def test_fill_uses_next_bar_open_not_signal_bar(sample_bars: pd.DataFrame) -> None:
+    """The fill price comes from the bar *after* the one the rule was read on.
+
+    The old version compared ``trade["entry_time"]`` against itself (``signal_time`` was
+    built from the very same field) and then re-derived the same bar for the price, so
+    ``assert entry_idx >= signal_idx`` could not fail. The signal record carries both
+    bars, so the two can finally be told apart.
+    """
+
     spec = _spec()
     result = run_backtest(spec, sample_bars, strategy_version="t@1.0.0")
     frame = sample_bars
+
+    entries = [s for s in result.signals if s["direction"] in {"LONG", "SHORT"}]
+    assert entries, "the DSL never entered, so this test would prove nothing"
+
+    def bar_index(value: str) -> int:
+        return int(frame.index.get_indexer([pd.Timestamp(value)], method="nearest")[0])
+
+    slippage = 0.0005
+    for signal in entries:
+        assert bar_index(signal["fill_time"]) == bar_index(signal["bar_time"]) + 1
+        bar_open = float(frame["open"].iloc[bar_index(signal["fill_time"])])
+        expected = bar_open * (1 + slippage if signal["direction"] == "LONG" else 1 - slippage)
+        assert signal["fill_price"] == pytest.approx(expected, rel=1e-9)
+
+    fills = {s["fill_time"]: s["fill_price"] for s in entries}
     for trade in result.trades:
-        entry_time = pd.Timestamp(trade["entry_time"])
-        signal_time = pd.Timestamp(trade["entry_time"])
-        # the fill price must come from a bar strictly after the signal bar
-        signal_idx = frame.index.get_indexer([signal_time], method="nearest")[0]
-        entry_idx = frame.index.get_indexer([entry_time], method="nearest")[0]
-        assert entry_idx >= signal_idx
-        fill = trade["entry_price"]
-        bar_open = float(frame["open"].iloc[entry_idx])
-        slippage = 0.0005
-        assert fill == pytest.approx(bar_open * (1 + slippage), rel=1e-6)
+        assert trade["entry_time"] in fills
+        assert trade["entry_price"] == pytest.approx(fills[trade["entry_time"]], rel=1e-9)
 
 
 def test_costs_reduce_result(sample_bars: pd.DataFrame) -> None:
@@ -181,21 +196,35 @@ def test_costs_reduce_result(sample_bars: pd.DataFrame) -> None:
 
 
 def test_trades_never_look_ahead(sample_bars: pd.DataFrame) -> None:
-    """Exits never precede entries and no position exists before its fill bar."""
+    """Every entry sits on a *fill* bar whose decision was taken on an earlier bar.
+
+    The old version asserted ``exit_ >= entry`` twice and nothing else, so it passed on
+    an engine that filled rule exits at the deciding bar's close.
+    """
 
     result = run_backtest(_spec(), sample_bars)
     frame = sample_bars
+    decisions = {
+        signal["fill_time"]: signal["bar_time"]
+        for signal in result.signals
+        if signal["direction"] in {"LONG", "SHORT"}
+    }
+    assert decisions, "no entry signal to check"
+    assert result.trades, "no trade was produced, so this test would prove nothing"
     for trade in result.trades:
         entry = pd.Timestamp(trade["entry_time"])
         exit_ = pd.Timestamp(trade["exit_time"])
+        assert entry in frame.index
+        assert exit_ in frame.index
+        # a stop can trigger inside the very bar the position was opened at, so
+        # exit == entry is valid; an exit *before* entry never is.
         assert exit_ >= entry
         assert trade["quantity"] > 0
         assert trade["pnl"] is not None
-        # the fill must correspond to a real bar in the dataset
-        assert entry in frame.index
-        # a stop can trigger inside the very bar the position was opened at,
-        # so exit == entry is valid; an exit *before* entry never is.
-        assert exit_ >= entry
+        # the entry bar is a fill bar, and the decision that produced it was taken on a
+        # strictly earlier bar -- never on the fill bar itself.
+        assert trade["entry_time"] in decisions
+        assert pd.Timestamp(decisions[trade["entry_time"]]) < entry
 
 
 def test_equity_curve_length_matches_bars(sample_bars: pd.DataFrame) -> None:
@@ -213,20 +242,24 @@ def test_ambiguous_fill_is_flagged_and_pessimistic() -> None:
         rows.append((100.0, 101.0, 99.0, 100.0, 1000.0))
     frame = pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"], index=index)
 
-    # engineer a single bar that spans both levels
+    # engineer a bar that spans both levels: `close > low` fires on every flat bar and
+    # `close < low` never fires, so the position can only leave through the stop/target
+    # pair -- which sit 0.01 x ATR (0.02) either side of the close, inside every bar.
     dsl = copy.deepcopy(DSL)
     dsl.update(
         {
-            "entry": {"long": {"all": [{"op": "gt", "left": "close", "right": "close"}]}},
+            "entry": {"long": {"all": [{"op": "gt", "left": "close", "right": "low"}]}},
+            "exit": {"long": {"any": [{"op": "lt", "left": "close", "right": "low"}]}},
             "risk": {"stop_loss_atr_multiple": 0.01, "take_profit_atr_multiple": 0.01},
         }
     )
     spec = StrategySpec.model_validate(dsl)
     result = run_backtest(spec, frame)
+    assert result.metrics["number_of_trades"] > 0, "the rules never fired: nothing was tested"
     ambiguous = [t for t in result.trades if t["ambiguous_fill"]]
+    assert ambiguous, "a bar spanning both levels must be flagged"
     for trade in ambiguous:
         assert trade["exit_reason"] == "stop_loss"
-    assert result.metrics["number_of_trades"] >= 0
 
 
 def test_metrics_report_na_instead_of_faking_values() -> None:

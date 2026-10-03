@@ -27,7 +27,8 @@ from app.domain.models import (
     MarketDataSeries,
     StrategyVersion,
 )
-from app.research.engine import run_backtest
+from app.features.engine import FEATURE_VERSION
+from app.research.engine import ENGINE_VERSION, run_backtest
 from app.strategies.dsl import merge_spec_overrides
 
 logger = logging.getLogger(__name__)
@@ -89,8 +90,8 @@ def create_backtest(payload: BacktestCreate, db: Session = Depends(get_db)) -> B
     run = BacktestRun(
         strategy_version_id=strategy_version.id,
         dataset_version_id=series.id,
-        engine_version="1.0.0",
-        feature_version="pending",
+        engine_version=ENGINE_VERSION,
+        feature_version=FEATURE_VERSION,
         parameters_json=payload.parameters,
         execution_model_json=spec.execution.model_dump(),
         dataset_hash=dataset_hash,

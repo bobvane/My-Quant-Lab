@@ -35,6 +35,7 @@ from app.research.engine import (
     _cost_multipliers,
     _position_quantity,
     _resolve_exit,
+    _risk_level,
     _trade_record,
     direction_sign,
 )
@@ -543,60 +544,81 @@ def _simulate(
     # a position is open a new decision is ignored, so signal bars can exceed positions
     # and would overstate agreement relative to a member's own entry count.
     entries_taken = 0
+    # An exit decided on the previous bar, waiting for this bar's open (ADR-116).
+    pending_exit = False
+
+    def _settle(*, exit_index: int, exit_price: float, reason: str, ambiguous: bool) -> None:
+        """Book an exit and flatten the book (one copy of the arithmetic)."""
+
+        nonlocal cash, quantity, entry_price, entry_fee, entry_slippage, entry_stop, direction
+        slip = exit_price * slippage_rate
+        fill = exit_price - slip if direction == "LONG" else exit_price + slip
+        fee = abs(fill * quantity) * fee_rate
+        cash += direction_sign(direction) * (fill * quantity) - fee
+        pnl = (fill - entry_price) * quantity * direction_sign(direction) - fee - entry_fee
+        trades.append(
+            _trade_record(
+                direction=direction,
+                symbol=symbol,
+                entry_time=index[entry_index],
+                entry_price=entry_price,
+                exit_time=index[exit_index],
+                exit_price=fill,
+                quantity=quantity,
+                fees=fee + entry_fee,
+                slippage=abs(slip) + abs(entry_slippage),
+                pnl=pnl,
+                holding_bars=exit_index - entry_index,
+                exit_reason=reason,
+                ambiguous_fill=ambiguous,
+                strategy_version=strategy_version,
+                trade_high=trade_high,
+                trade_low=trade_low,
+                entry_stop=entry_stop,
+            )
+        )
+        quantity = 0.0
+        entry_price = 0.0
+        entry_fee = 0.0
+        entry_slippage = 0.0
+        entry_stop = None
+        direction = "LONG"
 
     for i in range(len(frame)):
         bar_time = index[i]
         close = float(closes[i])
 
+        # An exit decided on the previous bar fills at this bar's open, matching the
+        # single-strategy engine: a rule read on a closed bar cannot fill on it.
+        if pending_exit:
+            pending_exit = False
+            if quantity > 0:
+                _settle(
+                    exit_index=i,
+                    exit_price=float(opens[i]),
+                    reason="rule_exit",
+                    ambiguous=False,
+                )
+
         if quantity > 0:
             trade_high = max(trade_high, float(highs[i]))
             trade_low = min(trade_low, float(lows[i]))
             is_long = direction == "LONG"
-            stop = stop_long[i] if is_long else stop_short[i]
-            target = target_long[i] if is_long else target_short[i]
-            rule_exit = bool(exit_long[i] if is_long else exit_short[i])
+            stop = _risk_level(stop_long, i) if is_long else _risk_level(stop_short, i)
+            target = _risk_level(target_long, i) if is_long else _risk_level(target_short, i)
             exit_price, reason, ambiguous = _resolve_exit(
                 bar_high=float(highs[i]),
                 bar_low=float(lows[i]),
                 stop=stop,
                 target=target,
-                close=close,
-                rule_exit=rule_exit,
                 is_long=is_long,
             )
             if exit_price is not None:
-                slip = exit_price * slippage_rate
-                fill = exit_price - slip if is_long else exit_price + slip
-                fee = abs(fill * quantity) * fee_rate
-                cash += direction_sign(direction) * (fill * quantity) - fee
-                pnl = (fill - entry_price) * quantity * direction_sign(direction) - fee - entry_fee
-                trades.append(
-                    _trade_record(
-                        direction=direction,
-                        symbol=symbol,
-                        entry_time=index[entry_index],
-                        entry_price=entry_price,
-                        exit_time=bar_time,
-                        exit_price=fill,
-                        quantity=quantity,
-                        fees=fee + entry_fee,
-                        slippage=abs(slip) + abs(entry_slippage),
-                        pnl=pnl,
-                        holding_bars=i - entry_index,
-                        exit_reason=reason,
-                        ambiguous_fill=ambiguous,
-                        strategy_version=strategy_version,
-                        trade_high=trade_high,
-                        trade_low=trade_low,
-                        entry_stop=entry_stop,
-                    )
-                )
-                quantity = 0.0
-                entry_price = 0.0
-                entry_fee = 0.0
-                entry_slippage = 0.0
-                entry_stop = None
-                direction = "LONG"
+                _settle(exit_index=i, exit_price=exit_price, reason=reason, ambiguous=ambiguous)
+            elif bool(exit_long[i] if is_long else exit_short[i]) and i + 1 < len(frame):
+                # The exit rule turned true on this closed bar: fill it at the next
+                # bar's open rather than inventing this bar's close as a price.
+                pending_exit = True
 
         # Entry fills at the *next* bar open, matching the single-strategy engine.
         if quantity == 0 and i + 1 < len(frame):

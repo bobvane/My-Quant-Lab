@@ -7,9 +7,15 @@ Timing contract (docs/07_BACKTEST_ENGINE.md):
       -> the order becomes eligible
       -> fill at bar t+1 open (default)
 
-The engine therefore never reads a future bar to make a decision. When a stop
-loss and a take profit would both trigger inside the same bar, the *pessimistic*
-(conservative) fill is applied and the trade is flagged ``ambiguous_fill``.
+The engine therefore never reads a future bar to make a decision. This holds for
+exits too: an exit rule that turns true on bar t is filled at bar t+1's open, and
+the only prices that can close a position inside bar t are the stop and the target
+as they stood *before* bar t traded (``executor`` derives those lines from a bar's
+close, so bar t's own line is not knowable until bar t has closed).
+
+When a stop loss and a take profit would both trigger inside the same bar, the
+*pessimistic* (conservative) fill is applied and the trade is flagged
+``ambiguous_fill``.
 
 The same ``strategy version + dataset + parameters + engine version + feature
 version`` always produces the same numbers.
@@ -32,7 +38,7 @@ from app.strategies.executor import run_strategy
 
 __all__ = ["BacktestResult", "ENGINE_VERSION", "run_backtest"]
 
-ENGINE_VERSION = "1.0.0"
+ENGINE_VERSION = "1.1.0"
 BARS_PER_YEAR_DEFAULT = 252.0
 
 
@@ -254,14 +260,77 @@ def run_backtest(
     trade_low = 0.0
     entry_stop: float | None = None
     pending: dict[str, Any] | None = None
+    # An exit decided on the previous bar, waiting for this bar's open.
+    pending_exit: dict[str, Any] | None = None
     atr_col = "atr14" if "atr14" in frame.columns else None
     order_type = spec.execution.entry_order_type
+
+    def _settle(
+        *, exit_index: int, exit_price: float, reason: str, ambiguous: bool
+    ) -> dict[str, Any]:
+        """Book an exit and flatten the book.
+
+        Every exit goes through here -- a stop/target hit inside a bar, and a rule
+        exit filling at a later bar's open -- so the cash, fee and trade-record
+        arithmetic exists in one place.
+        """
+
+        nonlocal cash, quantity, entry_price, entry_fee, entry_slippage, entry_stop, direction
+        slip = exit_price * slippage_rate
+        fill = exit_price - slip if direction == "LONG" else exit_price + slip
+        fee = abs(fill * quantity) * fee_rate
+        cash += direction_sign(direction) * (fill * quantity) - fee
+        pnl = (fill - entry_price) * quantity * direction_sign(direction) - fee - entry_fee
+        record = _trade_record(
+            direction=direction,
+            symbol=symbol,
+            entry_time=index[entry_index],
+            entry_price=entry_price,
+            exit_time=index[exit_index],
+            exit_price=fill,
+            quantity=quantity,
+            fees=fee + entry_fee,
+            slippage=abs(slip) + abs(entry_slippage),
+            pnl=pnl,
+            holding_bars=exit_index - entry_index,
+            exit_reason=reason,
+            ambiguous_fill=ambiguous,
+            strategy_version=strategy_version,
+            trade_high=trade_high,
+            trade_low=trade_low,
+            entry_stop=entry_stop,
+        )
+        trades.append(record)
+        quantity = 0.0
+        entry_price = 0.0
+        entry_fee = 0.0
+        entry_slippage = 0.0
+        entry_stop = None
+        direction = "LONG"
+        return record
 
     for i in range(len(frame)):
         bar_time = index[i]
         close = float(closes[i])
 
-        # 1) Manage an open position with the *current* bar's extremes.
+        # 0) An exit decided on the previous bar fills at this bar's open -- exactly
+        #    like an entry, because the rule was read on a closed bar.
+        if pending_exit is not None:
+            if quantity <= 0:
+                pending_exit = None
+            else:
+                record = _settle(
+                    exit_index=i,
+                    exit_price=float(opens[i]),
+                    reason="rule_exit",
+                    ambiguous=False,
+                )
+                pending_exit["signal"]["fill_time"] = bar_time.isoformat()
+                pending_exit["signal"]["fill_price"] = record["exit_price"]
+                pending_exit = None
+
+        # 1) Manage an open position with this bar's extremes, against the levels that
+        #    stood before this bar opened.
         if quantity > 0:
             # Track the best/worst prices seen during this trade for MAE/MFE.
             trade_high = max(trade_high, float(highs[i]))
@@ -270,54 +339,26 @@ def run_backtest(
             is_long = direction == "LONG"
             # A short position mirrors the levels: its stop sits above entry and
             # its target below, so the raw close/ATR lines are inverted.
-            stop = stop_line[i] if is_long else stop_short_line[i]
-            target = target_line[i] if is_long else target_short_line[i]
-            rule_exit = bool(exit_flag[i] if is_long else exit_short_flag[i])
+            stop = _risk_level(stop_line, i) if is_long else _risk_level(stop_short_line, i)
+            target = _risk_level(target_line, i) if is_long else _risk_level(target_short_line, i)
             exit_price, reason, ambiguous = _resolve_exit(
                 bar_high=float(highs[i]),
                 bar_low=float(lows[i]),
                 stop=stop,
                 target=target,
-                close=close,
-                rule_exit=rule_exit,
                 is_long=is_long,
             )
             if exit_price is not None:
-                slip = exit_price * slippage_rate
-                fill = exit_price - slip if direction == "LONG" else exit_price + slip
-                fee = abs(fill * quantity) * fee_rate
-                cash += direction_sign(direction) * (fill * quantity) - fee
-                pnl = (fill - entry_price) * quantity * direction_sign(direction) - fee - entry_fee
-                trades.append(
-                    _trade_record(
-                        direction=direction,
-                        symbol=symbol,
-                        entry_time=index[entry_index],
-                        entry_price=entry_price,
-                        exit_time=bar_time,
-                        exit_price=fill,
-                        quantity=quantity,
-                        fees=fee + entry_fee,
-                        slippage=abs(slip) + abs(entry_slippage),
-                        pnl=pnl,
-                        holding_bars=i - entry_index,
-                        exit_reason=reason,
-                        ambiguous_fill=ambiguous,
-                        strategy_version=strategy_version,
-                        trade_high=trade_high,
-                        trade_low=trade_low,
-                        entry_stop=entry_stop,
-                    )
-                )
-                quantity = 0.0
-                entry_price = 0.0
-                entry_fee = 0.0
-                entry_slippage = 0.0
-                entry_stop = None
-                direction = "LONG"
+                _settle(exit_index=i, exit_price=exit_price, reason=reason, ambiguous=ambiguous)
                 signals.append(
                     {"bar_time": bar_time.isoformat(), "state": "SELL", "direction": "FLAT"}
                 )
+            elif bool(exit_flag[i] if is_long else exit_short_flag[i]) and i + 1 < len(frame):
+                # The exit rule turned true on this closed bar: it fills at the next
+                # bar's open, so the signal names both bars (ADR-116).
+                signal = {"bar_time": bar_time.isoformat(), "state": "SELL", "direction": "FLAT"}
+                signals.append(signal)
+                pending_exit = {"decision": i, "signal": signal}
 
         # 2) Generate an entry order: market fills at the *next* bar open; a
         #    limit/stop order is placed and filled by step 2.5.
@@ -563,21 +604,37 @@ def _pending_fill(
     return min(open_price, price) if low <= price else None
 
 
+def _risk_level(line: np.ndarray, i: int) -> float:
+    """The stop/target as it stood *before* bar ``i`` traded.
+
+    ``executor._stop_reference`` computes those lines from a bar's close, so bar
+    ``i``'s own level cannot be known until bar ``i`` has closed. Testing it against
+    that same bar's high/low would be reading a level out of the bar it is being
+    tested on; a position is therefore managed with bar ``i-1``'s level -- which is
+    also the level the entry decision froze (ADR-116).
+    """
+
+    if i <= 0:
+        return float("nan")
+    return float(line[i - 1])
+
+
 def _resolve_exit(
     *,
     bar_high: float,
     bar_low: float,
     stop: float,
     target: float,
-    close: float,
-    rule_exit: bool,
     is_long: bool = True,
 ) -> tuple[float | None, str, bool]:
-    """Resolve an exit price for the current bar.
+    """Resolve a stop/target exit price for the current bar.
 
     When a stop and a target are both inside the same bar the *pessimistic*
     (conservative) level is used and the trade is flagged ``ambiguous_fill``: the
     engine must never pick the order that flatters the result.
+
+    A rule exit is not resolved here: it is a decision taken on this bar's close, so
+    it belongs to the next bar's open like any other order (ADR-116).
     """
 
     has_stop = not np.isnan(stop)
@@ -595,8 +652,6 @@ def _resolve_exit(
         return float(stop), "stop_loss", False
     if target_hit:
         return float(target), "take_profit", False
-    if rule_exit:
-        return close, "rule_exit", False
     return None, "", False
 
 

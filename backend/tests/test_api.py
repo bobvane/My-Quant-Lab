@@ -71,6 +71,42 @@ def test_execution_overrides_apply_nested_sizing(client) -> None:
     assert base.json()["result_hash"] != body["result_hash"]
 
 
+def test_a_run_reports_the_engine_that_actually_ran(client) -> None:
+    """``engine_version`` is provenance: it must name the engine, not a literal.
+
+    The run was created with the hardcoded string ``"1.0.0"`` while the engine exports
+    its own ``ENGINE_VERSION``, so the two could drift apart and nothing would fail --
+    a stored run would quietly claim an engine that had not produced it.
+    """
+
+    from app.features.engine import FEATURE_VERSION
+    from app.research.engine import ENGINE_VERSION
+
+    client.post(
+        "/api/v1/market-data/sync", json=MarketDataSyncRequest(symbol="DEMO-AAPL").model_dump()
+    )
+    strategy = client.post("/api/v1/strategies", json={"name": "Provenance"}).json()
+    version = client.post(
+        f"/api/v1/strategies/{strategy['id']}/versions",
+        json=StrategyVersionCreate(version="1.0.0", dsl=DSL).model_dump(),
+    ).json()
+
+    response = client.post(
+        "/api/v1/backtests",
+        json=BacktestCreate(
+            strategy_version_id=version["id"], symbol="DEMO-AAPL", timeframe="1d"
+        ).model_dump(mode="json"),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["engine_version"] == ENGINE_VERSION
+    assert body["feature_version"] == FEATURE_VERSION
+
+    stored = client.get(f"/api/v1/backtests/{body['id']}")
+    assert stored.status_code == 200
+    assert stored.json()["engine_version"] == ENGINE_VERSION
+
+
 def test_backtest_survives_a_monitoring_failure(client, monkeypatch) -> None:
     """Optional monitoring must never turn a good backtest into a 500.
 

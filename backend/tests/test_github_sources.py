@@ -11,9 +11,12 @@ _DSL = {
     "execution": {"fill_model": "next_bar_open", "fee_bps": 10, "slippage_bps": 5},
 }
 
+# An import names the commit a human reviewed, never the branch they typed (ADR-060).
+_COMMIT = "9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f60718293"
+
 
 def test_import_persists_github_source_and_snapshot(client, db_session) -> None:
-    from app.domain.models import GitHubSource
+    from app.domain.models import GitHubSource, StrategyVersion
 
     response = client.post(
         "/api/v1/importer/github/import",
@@ -22,14 +25,22 @@ def test_import_persists_github_source_and_snapshot(client, db_session) -> None:
             "name": "GIT Test",
             "version": "1.0.0",
             "dsl": _DSL,
-            "ref": "abc123",
+            "ref": "main",
+            "commit": _COMMIT,
         },
     )
     assert response.status_code == 201, response.text
+    assert response.json()["source_commit"] == _COMMIT
 
     source = db_session.query(GitHubSource).one()
     assert source.repository_url == "https://github.com/bobvane/demo"
-    assert source.current_commit == "abc123"
+    # The source row tracks the imported commit, so the watcher compares SHA to SHA.
+    assert source.current_commit == _COMMIT
+
+    version = db_session.query(StrategyVersion).one()
+    assert version.source_commit == _COMMIT
+    assert version.evidence_json["commit"] == _COMMIT
+    assert version.evidence_json["ref"] == "main"
 
     listed = client.get("/api/v1/importer/github/sources").json()
     assert listed[0]["repository_url"] == "https://github.com/bobvane/demo"
@@ -39,10 +50,38 @@ def test_import_persists_github_source_and_snapshot(client, db_session) -> None:
 
     snapshots = client.get(f"/api/v1/importer/github/sources/{source.id}/snapshots").json()
     assert len(snapshots) == 1
-    assert snapshots[0]["commit"] == "abc123"
+    assert snapshots[0]["commit"] == _COMMIT
     # A snapshot has to explain itself: the reason lives in the extraction, and
     # dropping it left "why did this check end this way?" unanswerable (ADR-058).
     assert snapshots[0]["extraction"]["imported"] is True
+    assert snapshots[0]["extraction"]["reason"] == "manual_import"
+
+
+def test_an_import_without_a_ref_still_records_its_commit(client, db_session) -> None:
+    """The old code skipped the snapshot whenever the ref was missing or HEAD (ADR-060).
+
+    Nothing about the import was recorded then, so the source looked as if the
+    strategy had appeared from nowhere.
+    """
+
+    from app.domain.models import GitHubSource
+
+    response = client.post(
+        "/api/v1/importer/github/import",
+        json={
+            "repo_url": "https://github.com/bobvane/demo2",
+            "name": "GIT No Ref",
+            "version": "1.0.0",
+            "dsl": _DSL,
+            "commit": _COMMIT,
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    source = db_session.query(GitHubSource).one()
+    snapshots = client.get(f"/api/v1/importer/github/sources/{source.id}/snapshots").json()
+    assert len(snapshots) == 1
+    assert snapshots[0]["commit"] == _COMMIT
     assert snapshots[0]["extraction"]["reason"] == "manual_import"
 
 

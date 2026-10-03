@@ -424,6 +424,24 @@ const unparsedPythonWarning = computed(() => {
   return n > 0 ? `其中 ${n} 个 Python 文件下载到了、但没能解析——它们里面的规则不会出现在下面的发现里。` : ''
 })
 
+const COMMIT_SHA_RE = /^[0-9a-fA-F]{7,40}$/
+
+/**
+ * A commit is the only revision that can be re-read later. Anything else in a
+ * `source_commit` column is a branch name recorded before ADR-060, and it has to
+ * look different from a commit instead of passing as one.
+ */
+function commitLabel(value?: string | null): string {
+  const text = (value ?? '').trim()
+  if (!text) return '—'
+  return COMMIT_SHA_RE.test(text) ? `${text.slice(0, 12)}…` : `${text}（ADR-060 之前记的是分支名）`
+}
+
+function shortCommit(value?: string | null): string {
+  const text = (value ?? '').trim()
+  return COMMIT_SHA_RE.test(text) ? text.slice(0, 12) : text || '未知'
+}
+
 async function analyzeRepo() {
   error.value = ''
   info.value = ''
@@ -466,9 +484,10 @@ async function importReviewed() {
       importName.value.trim() || analysis.value.repo,
       '1.0.0',
       dsl,
+      analysis.value.commit,
       analysis.value.ref,
     )
-    info.value = `已导入策略 #${result.strategy_id}（版本 ${result.version}，${result.validation_status}）`
+    info.value = `已导入策略 #${result.strategy_id}（版本 ${result.version}，${result.validation_status}，来源 commit ${shortCommit(result.source_commit)}）`
     analysis.value = null
     await load()
   } catch (e) {
@@ -602,7 +621,7 @@ onMounted(load)
               <template v-for="v in lineage.versions" :key="v.id">
                 <tr>
                   <td>{{ v.version }}</td>
-                  <td class="muted">{{ v.source_commit || '—' }}</td>
+                  <td class="muted">{{ commitLabel(v.source_commit) }}</td>
                   <td class="muted">{{ v.prompt_version || '—' }}</td>
                   <td class="muted">{{ String(v.immutable_hash).slice(0, 12) }}…</td>
                   <td>{{ v.is_current ? '是' : '' }}</td>
@@ -778,7 +797,8 @@ onMounted(load)
       </div>
       <div v-if="analysis">
         <p class="muted">
-          {{ analysis.owner }}/{{ analysis.repo }} @ {{ analysis.ref }} ·
+          {{ analysis.owner }}/{{ analysis.repo }} @ {{ analysis.ref }} · commit
+          {{ shortCommit(analysis.commit) }} ·
           读取 {{ analysis.coverage.downloaded_files }} / {{ analysis.coverage.candidate_files }} 个候选文件
           （解析 {{ analysis.coverage.parsed_files }} 个 Python<span
             v-if="analysis.coverage.unparsed_python_files"

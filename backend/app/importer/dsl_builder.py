@@ -143,7 +143,11 @@ def build_draft_dsl(meta: RepoMeta, findings: AnalysisResult) -> tuple[dict[str,
             "source": {
                 "type": "github",
                 "repository": f"{meta.owner}/{meta.repo}",
-                "commit": meta.ref,
+                # The draft carries the revision it was built from, and only the
+                # commit can be re-read later; `ref` is the name that was asked
+                # for (ADR-060, docs/05 §4.4).
+                "ref": meta.ref,
+                "commit": meta.commit,
             },
         },
         "market": {"asset_classes": ["stock"], "timeframes": ["1d"]},

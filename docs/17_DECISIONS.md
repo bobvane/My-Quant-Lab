@@ -1038,3 +1038,33 @@ ADR-056/057 让「读了多少、为什么停下」有了算术表达，但用�
 **测试**
 
 `backend/tests/test_importer.py` 的 `test_unparseable_file_becomes_unknown` 改名为 `test_unparseable_file_is_reported_as_unparsed_not_understood`（断言 `parse_error` 含 `does not parse as Python`、`unknowns == []`）；新增 `test_a_file_that_does_not_parse_is_not_counted_as_parsed`（`files_parsed == ['strat.py']`、`files_unparsed` 只有 `legacy.py`、`coverage["unparsed_python_files"] == 1`、警告含 `did not parse`、且 `build_draft_dsl` 的"无法映射"计数仍是 `1 construct(s)`——那条来自 `strat.py` 自己的未解析引用，不是这个文件）；`test_analyze_endpoint_reports_its_coverage` 断言 `analysis_version == "1.3.0"`、`coverage["unparsed_python_files"] == 0`、`files_unparsed == []`、警告不含 `did not parse`。`backend/tests/test_github_watch.py` 的 `_install_fake_client` 增加 `findings` 参数；新增 `test_a_python_file_that_did_not_parse_blocks_an_unattended_import`（`AnalysisResult(files_unparsed=[SkippedFile("legacy.py", …)])` → 返回并存储 `incomplete`、不新建版本、`current_commit` 推进到 `newsha`（结构性）、快照 `reason == "unparseable_python"` / `transient is False` / `files_unparsed[0]["path"] == "legacy.py"`）。`backend/scripts/probe_parse_honesty.py` 用三个内存树（干净 / 两个解析失败 / 解析失败 + 上限缺口）打印 `files_parsed`、`files_unparsed`、coverage 计数器与全部警告，并断言解析失败者**不在** `files_parsed` 里且没有泄漏进 `unknowns`。
+
+## ADR-060：一个修订必须用 commit 命名（`RepoMeta.commit`、`ref` 与 `commit`，docs/05 §4.4）
+
+**背景**
+
+1. `fetch_repository` 把调用方给的 `ref`（或默认分支名）直接当成修订标识：`get_tree(owner, name, resolved_ref)` 与 `get_raw_file(owner, name, path, resolved_ref)` 都用分支名请求，`RepoMeta` 只有 `ref` 一个字段。于是报告只能说"我读了 main"。分支名会移动：同一份报告在两个时间点无法指向同一份代码；抓取进行到一半时仓库被推了新提交，tree 与文件就可能来自两个不同修订，而报告里没有任何东西能暴露这一点。
+2. 导入路径把分支名当成修订记了下来：`import_strategy` 写 `StrategyVersion.source_commit = payload.ref`、`_persist_github_source` 写 `source.current_commit = ref`，快照也记在 `commit="main"` 上，而 watcher 拿 `get_head_commit()` 的 SHA 与这个值比较——两类不同的字符串被存在同一列里。前端 `frontend/src/views/StrategiesView.vue` 的表头写着「来源 commit」，单元格却是 `{{ v.source_commit || '—' }}`，于是 `main` 看起来像一个 commit。
+3. `_persist_github_source` 的 `if ref and ref != "HEAD"` 守卫让"没传 ref（或传 HEAD）"的导入**一条快照都不记**：策略建出来了，来源历史里却什么都没有。
+4. `GithubImportRequest` 只有 `repo_url` / `ref` / `name` / `version` / `dsl`：请求根本不必说出审阅的是哪个 commit，服务端也就无从记录它。
+
+**决策**
+
+1. `GitHubClient` 新增 `resolve_commit(owner, repo, ref) -> str`：已经是 7–40 位十六进制 SHA 就原样返回；否则 `GET /repos/{owner}/{repo}/commits/{ref}` 取 `sha`，拿不到就 `raise GitHubError("could not resolve ref {ref!r} to a commit in {owner}/{repo}")`——绝不把一个名字当成修订。
+2. `fetch_repository` 先 `commit = self.resolve_commit(...)`，tree 与每个文件的读取都用这个 SHA；`RepoMeta` 新增必填字段 `commit`（`ref` 保留为"当初要的是哪个名字"）。
+3. `ANALYSIS_VERSION` 升为 `1.4.0`；`GithubAnalyzeOut` 新增 `commit`。
+4. `GithubImportRequest` 新增必填 `commit`（`min_length=7, max_length=64, pattern=r"^[0-9a-fA-F]{7,64}$"`）；`import_strategy` 用它写 `source_commit`、`evidence_json`（`{importer, repository, ref, commit}`）与审计记录，响应回显 `source_commit`。
+5. `_persist_github_source(db, owner, repo, commit, content_hash)` 改成接收 SHA，**无条件**记快照（删掉 `HEAD` 守卫），`current_commit` 与快照 commit 都写这个 SHA。
+6. 前端：新增 `commitLabel`（不像 SHA 的值渲染成 `main（ADR-060 之前记的是分支名）`）与 `shortCommit`（取前 12 位）；分析卡片头部显示 `owner/repo @ ref · commit <短 SHA>`；来源版本列与导入成功提示都显示 commit。
+
+**理由**
+
+这条与"回测必须可复现"是同一条红线：**只有不可变的标识才允许事后复查**。ADR-056/057/058/059 修的都是"报告有没有夸大它做过的事"，这一条修的是"报告指向的是不是同一份东西"——一份说自己读了 `main` 的报告，在 `main` 移动之后就再也无法核对，策略的 `source_commit` 也因此没有证据价值。
+
+watcher 路径不需要额外请求：它比较的本来就是 `get_head_commit()` 返回的 SHA，传进 `fetch_repository` 时已经是 commit，`resolve_commit` 只是原样放行。把"解析 ref"放进抓取器内部而不是要求每个调用方自己解析，是为了让两条路径（端点与 watcher）不可能各自记住不同的规则——同 ADR-056 把 coverage 算术共享给两处、ADR-058 把 upsert 放进共享服务。
+
+对旧数据不做迁移：`source_commit = "main"` 是历史事实（当时确实只记了这个），改写成某个 SHA 等于编造证据；前端标注它"不是 commit"比假装它是更诚实——与 ADR-058 保留 `checked` 同理。
+
+**测试**
+
+`backend/tests/test_importer.py` 新增 `test_fetch_reads_the_commit_the_ref_pointed_at`（记录 tree 与文件请求的 ref：`meta.ref == "main"`、`meta.commit == _FAKE_COMMIT`、两次文件请求都带该 SHA、`/commits/` 只查一次、没有 `/git/trees/main`）与 `test_a_commit_sha_is_taken_as_is_and_an_unresolvable_ref_fails`（传 SHA → 不发 `/commits/`；仓库返回 `{"message": "Not Found"}` → `GitHubError("could not resolve ref …")`）；`test_analyze_endpoint_reports_its_coverage` 断言 `analysis_version == "1.4.0"` 与响应 `commit`；新增 `test_import_endpoint_requires_the_commit_it_was_reviewed_at`（缺 `commit` / `commit="main"` / `commit="abc12"` 都是 422）。`backend/tests/test_github_sources.py` 的导入测试改发 `ref` + `commit`，断言 `source_commit`、`evidence_json["commit"]`、快照 commit 都是该 SHA，新增 `test_an_import_without_a_ref_still_records_its_commit`（不传 ref 也照样记快照）。`backend/scripts/probe_commit_provenance.py` 用内存客户端打印每次请求用的修订并断言全部带 SHA，另测 watcher 路径零查询与不可解析 ref 的拒绝。

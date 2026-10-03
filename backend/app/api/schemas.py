@@ -543,6 +543,9 @@ class GithubAnalyzeOut(BaseModel):
     owner: str
     repo: str
     ref: str
+    # The commit ``ref`` pointed at when the fetch started. The report describes
+    # this revision, and the import records it (ADR-060).
+    commit: str
     description: str | None = None
     license: str | None = None
     # ``coverage`` is the review surface: it says how many candidate files the
@@ -570,6 +573,15 @@ class GithubImportRequest(BaseModel):
 
     repo_url: str = Field(min_length=10, max_length=512)
     ref: str | None = Field(default=None, max_length=128)
+    # The commit the reviewed analysis read, taken from ``GithubAnalyzeOut.commit``.
+    # It is required: a strategy version has to name the revision it came from, and
+    # a branch name is not a revision (ADR-060).
+    commit: str = Field(
+        min_length=7,
+        max_length=64,
+        pattern=r"^[0-9a-fA-F]{7,64}$",
+        description="Commit SHA the reviewed analysis read; stored as source_commit",
+    )
     name: str = Field(min_length=1, max_length=128)
     version: str = Field(default="1.0.0", min_length=1, max_length=32)
     dsl: dict[str, Any]

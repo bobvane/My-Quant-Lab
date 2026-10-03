@@ -7,7 +7,9 @@ Two-step flow, human in the loop:
    Nothing is written to the database.
 2. ``POST /importer/github/import`` — takes the (possibly human-edited) DSL,
    validates it through the same pipeline as hand-written strategies, and only
-   then creates a Strategy + immutable StrategyVersion.
+   then creates a Strategy + immutable StrategyVersion. The request has to name
+   the commit the analysis read: the version and the watched source are recorded
+   against that SHA, not against the branch that was asked for (ADR-060).
 
 Repository code is never executed, never cloned, never run in any worker.
 """
@@ -43,29 +45,33 @@ router = APIRouter(prefix="/importer/github", tags=["importer"])
 
 
 def _persist_github_source(
-    db: Session, owner: str, repo: str, ref: str | None, content_hash: str
+    db: Session, owner: str, repo: str, commit: str, content_hash: str
 ) -> GitHubSource:
-    """Upsert the watched GitHub source + a snapshot for the imported ref."""
+    """Upsert the watched GitHub source + a snapshot for the imported commit (ADR-060).
+
+    ``commit`` is a SHA, not a ref: the source row and the snapshot both have to
+    name the revision a human actually reviewed, otherwise the watcher compares a
+    branch name with a SHA and the "source commit" column shows a moving target.
+    """
 
     url = f"https://github.com/{owner}/{repo}"
     source = db.scalar(select(GitHubSource).where(GitHubSource.repository_url == url))
     if source is None:
-        source = GitHubSource(repository_url=url, default_branch="main", current_commit=ref)
+        source = GitHubSource(repository_url=url, default_branch="main", current_commit=commit)
         db.add(source)
         db.flush()
     else:
-        source.current_commit = ref or source.current_commit
+        source.current_commit = commit
         source.last_checked_at = dt.datetime.now(tz=dt.UTC)
-    if ref and ref != "HEAD":
-        # One row per (source, commit): re-importing or re-checking a commit has to
-        # refresh its explanation, not insert a duplicate (ADR-058).
-        record_snapshot(
-            db,
-            source.id,
-            ref,
-            content_hash,
-            {"imported": True, "reason": "manual_import"},
-        )
+    # One row per (source, commit): re-importing or re-checking a commit has to
+    # refresh its explanation, not insert a duplicate (ADR-058).
+    record_snapshot(
+        db,
+        source.id,
+        commit,
+        content_hash,
+        {"imported": True, "reason": "manual_import"},
+    )
     return source
 
 
@@ -107,6 +113,7 @@ def analyze_repository(payload: GithubAnalyzeRequest) -> GithubAnalyzeOut:
         owner=meta.owner,
         repo=meta.repo,
         ref=meta.ref,
+        commit=meta.commit,
         description=meta.description,
         license=meta.license,
         analysis_version=coverage["analysis_version"],
@@ -171,12 +178,13 @@ def import_strategy(payload: GithubImportRequest, db: Session = Depends(get_db))
             strategy,
             version=payload.version,
             dsl=payload.dsl,
-            source_commit=payload.ref,
+            source_commit=payload.commit,
             source_url=f"https://github.com/{owner}/{repo}",
             evidence={
                 "importer": "github",
                 "repository": f"{owner}/{repo}",
                 "ref": payload.ref,
+                "commit": payload.commit,
             },
         )
     except ValueError as exc:
@@ -191,17 +199,19 @@ def import_strategy(payload: GithubImportRequest, db: Session = Depends(get_db))
         payload={
             "repository": f"{owner}/{repo}",
             "ref": payload.ref,
+            "commit": payload.commit,
             "version": version_row.version,
             "immutable_hash": version_row.immutable_hash,
         },
     )
-    _persist_github_source(db, owner, repo, payload.ref, version_row.immutable_hash)
+    _persist_github_source(db, owner, repo, payload.commit, version_row.immutable_hash)
     db.commit()
 
     return {
         "strategy_id": strategy.id,
         "strategy_version_id": version_row.id,
         "version": version_row.version,
+        "source_commit": version_row.source_commit,
         "validation_status": version_row.validation_status,
         "immutable_hash": version_row.immutable_hash,
         "warnings": [i.as_dict() for i in report.warnings],

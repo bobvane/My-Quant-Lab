@@ -28,6 +28,10 @@ from app.importer.github_client import (
 from app.strategies.dsl import StrategySpec
 from app.strategies.validator import validate_strategy
 
+# The commit the fake GitHub resolves every ref to: a real-shaped 40-hex SHA, so
+# tests exercise the same path production uses (ADR-060).
+_FAKE_COMMIT = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+
 EMA_CROSS_SOURCE = '''\
 """Dual moving average crossover system."""
 
@@ -193,6 +197,7 @@ def _meta() -> RepoMeta:
         owner="acme",
         repo="strat",
         ref="abc123",
+        commit=_FAKE_COMMIT,
         default_branch="main",
         description="demo",
         license="MIT",
@@ -235,6 +240,17 @@ def test_draft_never_invents_exit_rules() -> None:
     dsl, warnings = build_draft_dsl(_meta(), findings)
     assert dsl["exit"] == {}
     assert any("exit" in w for w in warnings)
+
+
+def test_the_draft_names_the_commit_it_was_built_from() -> None:
+    """A branch name is not a revision, not even inside the draft (ADR-060)."""
+
+    findings = analyze_python_source("strat.py", EMA_CROSS_SOURCE)
+    dsl, _warnings = build_draft_dsl(_meta(), findings)
+    source = dsl["strategy"]["source"]
+    assert source["commit"] == _FAKE_COMMIT
+    assert source["ref"] == _meta().ref
+    assert source["commit"] != source["ref"]
 
 
 def test_analyze_repository_files_skips_non_python() -> None:
@@ -308,6 +324,8 @@ class _FakeGitHub(GitHubClient):
                 ],
                 "truncated": False,
             }
+        if "/commits/" in url:
+            return {"sha": _FAKE_COMMIT}
         return {
             "name": "strat",
             "default_branch": "main",
@@ -322,6 +340,51 @@ class _FakeGitHub(GitHubClient):
         if url.endswith("strat.py"):
             return EMA_CROSS_SOURCE
         return "# demo"
+
+
+def test_fetch_reads_the_commit_the_ref_pointed_at() -> None:
+    """A branch is a moving target: the report names the revision it read (ADR-060)."""
+
+    class PinRecording(_FakeGitHub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tree_refs: list[str] = []
+            self.file_refs: list[str] = []
+
+        def get_tree(self, owner: str, repo: str, ref: str):  # type: ignore[override]
+            self.tree_refs.append(ref)
+            return super().get_tree(owner, repo, ref)
+
+        def get_raw_file(self, owner: str, repo: str, path: str, ref: str) -> str:  # type: ignore[override]
+            self.file_refs.append(ref)
+            return super().get_raw_file(owner, repo, path, ref)
+
+    client = PinRecording()
+    meta, _files, _coverage = client.fetch_repository("https://github.com/acme/strat")
+
+    assert meta.ref == "main"  # what the caller asked for
+    assert meta.commit == _FAKE_COMMIT  # what was actually read
+    assert client.tree_refs == [_FAKE_COMMIT]
+    assert client.file_refs == [_FAKE_COMMIT, _FAKE_COMMIT]
+    # The branch name was resolved once and then never used for content.
+    assert sum(1 for call in client.calls if "/commits/" in call) == 1
+    assert not any("/git/trees/main" in call for call in client.calls)
+
+
+def test_a_commit_sha_is_taken_as_is_and_an_unresolvable_ref_fails() -> None:
+    client = _FakeGitHub()
+    assert client.resolve_commit("acme", "strat", _FAKE_COMMIT) == _FAKE_COMMIT
+    # The watcher already has a SHA, so pinning costs it no extra request.
+    assert not any("/commits/" in call for call in client.calls)
+
+    class NoSha(_FakeGitHub):
+        def get_json(self, url: str):  # type: ignore[override]
+            if "/commits/" in url:
+                return {"message": "Not Found"}
+            return super().get_json(url)
+
+    with pytest.raises(GitHubError, match="could not resolve ref"):
+        NoSha().resolve_commit("acme", "strat", "main")
 
 
 def test_fetch_respects_cap_and_prefers_python() -> None:
@@ -511,7 +574,10 @@ def test_analyze_endpoint_reports_its_coverage(client, monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
 
-    assert body["analysis_version"] == "1.3.0"
+    assert body["analysis_version"] == "1.4.0"
+    # The report names the revision it describes, not just the branch it was asked for.
+    assert body["ref"] == "main"
+    assert body["commit"] == _FAKE_COMMIT
     coverage = body["coverage"]
     assert coverage["candidate_files"] == 14
     assert coverage["candidate_python_files"] == 4
@@ -592,12 +658,34 @@ def test_import_endpoint_rejects_invalid_dsl(client) -> None:
         "/api/v1/importer/github/import",
         json={
             "repo_url": "https://github.com/acme/strat",
+            "commit": _FAKE_COMMIT,
             "name": "Broken",
             "version": "1.0.0",
             "dsl": {"schema_version": "1.0", "strategy": {"id": "x"}},
         },
     )
     assert response.status_code == 422
+
+
+def test_import_endpoint_requires_the_commit_it_was_reviewed_at(client) -> None:
+    """A branch name is not a revision: the version has to name a commit (ADR-060)."""
+
+    for body in (
+        {"ref": "main"},  # the old shape: a ref, no commit
+        {"ref": "main", "commit": "main"},
+        {"ref": "main", "commit": "abc12"},
+    ):
+        response = client.post(
+            "/api/v1/importer/github/import",
+            json={
+                "repo_url": "https://github.com/acme/strat",
+                "name": "No Commit",
+                "version": "1.0.0",
+                "dsl": {"schema_version": "1.0", "strategy": {"id": "x"}},
+                **body,
+            },
+        )
+        assert response.status_code == 422, body
 
 
 def test_import_endpoint_creates_strategy_from_reviewed_dsl(client) -> None:
@@ -614,7 +702,8 @@ def test_import_endpoint_creates_strategy_from_reviewed_dsl(client) -> None:
         "/api/v1/importer/github/import",
         json={
             "repo_url": "https://github.com/acme/strat",
-            "ref": "abc123",
+            "ref": "main",
+            "commit": _FAKE_COMMIT,
             "name": "Imported EMA Cross",
             "version": "1.0.0",
             "dsl": draft,
@@ -624,6 +713,8 @@ def test_import_endpoint_creates_strategy_from_reviewed_dsl(client) -> None:
     body = response.json()
     assert body["validation_status"] == "valid"
     assert body["immutable_hash"]
+    # The version records the commit that was read, not the branch that was typed.
+    assert body["source_commit"] == _FAKE_COMMIT
 
     check = client.get(f"/api/v1/strategies/versions/{body['strategy_version_id']}/verify")
     assert check.json()["intact"] is True

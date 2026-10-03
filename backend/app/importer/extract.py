@@ -36,8 +36,9 @@ __all__ = [
 # Bumped when the analysis report changes shape: 1.1.0 separates parsed from
 # inventoried files, keeps each skip reason, and adds the coverage block; 1.2.0
 # teaches the coverage block to blame the budget instead of the cap; 1.3.0 stops
-# counting a Python file that did not parse as parsed (ADR-059).
-ANALYSIS_VERSION = "1.3.0"
+# counting a Python file that did not parse as parsed (ADR-059); 1.4.0 names the
+# commit the report describes instead of the branch that was asked for (ADR-060).
+ANALYSIS_VERSION = "1.4.0"
 
 MAX_SNIPPET_CHARS = 400
 

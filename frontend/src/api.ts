@@ -163,6 +163,8 @@ export interface GithubAnalysis {
   owner: string
   repo: string
   ref: string
+  /** The revision `ref` pointed at when the fetch started (ADR-060). */
+  commit: string
   description: string | null
   license: string | null
   analysis_version: string
@@ -185,6 +187,8 @@ export interface GithubImportResult {
   strategy_id: number
   strategy_version_id: number
   version: string
+  /** The commit recorded on the new version: the one the analysis read (ADR-060). */
+  source_commit: string
   validation_status: string
   immutable_hash: string
   warnings: Array<Record<string, unknown>>
@@ -817,10 +821,28 @@ export const api = {
     request<{ has_update: boolean; head: string | null; current_commit: string | null }>(
       `/importer/github/sources/${id}/check`,
     ),
-  importGithubStrategy: (repoUrl: string, name: string, version: string, dsl: Record<string, unknown>, ref?: string) =>
+  /**
+   * Import a reviewed draft. `commit` is required: the version has to name the
+   * revision the analysis read, and a branch name is not a revision (ADR-060).
+   */
+  importGithubStrategy: (
+    repoUrl: string,
+    name: string,
+    version: string,
+    dsl: Record<string, unknown>,
+    commit: string,
+    ref?: string,
+  ) =>
     request<GithubImportResult>('/importer/github/import', {
       method: 'POST',
-      body: JSON.stringify({ repo_url: repoUrl, name, version, dsl, ref: ref || undefined }),
+      body: JSON.stringify({
+        repo_url: repoUrl,
+        name,
+        version,
+        dsl,
+        commit,
+        ref: ref || undefined,
+      }),
     }),
   aiStatus: () => request<AIStatus>('/ai/status'),
   explainSignalPreview: (strategyVersionId: number, symbol?: string, timeframe = '1d') =>

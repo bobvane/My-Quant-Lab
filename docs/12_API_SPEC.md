@@ -55,7 +55,6 @@ API base: `/api/v1`
 `GET /strategies/{id}/versions/{version}`
 `POST /strategies/{id}/validate`
 `POST /strategies/{id}/backtest`
-`POST /strategies/import/github`
 
 ## Strategy Versions
 
@@ -373,17 +372,35 @@ re-imported automatically when a new commit lands):
 `GET /importer/github/sources/{id}`
 `GET /importer/github/sources/{id}/check`     (live commit check -> has_update)
 `GET /importer/github/sources/{id}/snapshots`
+`POST /importer/github/import`                (persist a reviewed DSL as a strategy)
 
 `POST /importer/github/analyze` is read-only and returns the review surface: the
 findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
 
-- `analysis_version` (currently `1.3.0`) rises whenever the report's field semantics
+- `ref` is the name that was asked for; `commit` is the revision the report actually
+  describes. The client sends `ref` (e.g. `main`), the server resolves it against
+  `GET /repos/{owner}/{repo}/commits/{ref}` and then reads the tree and every file by
+  that SHA, so a push landing mid-fetch can no longer mix two revisions into one report
+  (ADR-060, docs/05 §4.4). A ref that does not resolve is an error, never a stand-in for
+  a commit. A SHA passed in as `ref` is used as-is (no extra request — the watcher always
+  passes the head SHA it just read).
+- `POST /importer/github/import` **requires** `commit` (7–64 hex characters, e.g.
+  `9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f60718293`); a missing or non-SHA value is a 422,
+  because the human reviewed one revision and not "whatever the branch was at the time".
+  The SHA is stored as the new `StrategyVersion.source_commit`, in `evidence_json`
+  (`{importer, repository, ref, commit}`), in the audit record, and on the source's
+  `current_commit`; the import also writes a snapshot for that commit even when no `ref`
+  was sent, and the response echoes `source_commit`.
+
+- `analysis_version` (currently `1.4.0`) rises whenever the report's field semantics
   change. It moved to `1.1.0` when `files_scanned` was split into `files_parsed` and
   `files_inventoried` (non-Python files are inventoried, not parsed) and
   `files_skipped` became `[{path, reason}]` instead of bare paths; to `1.2.0` when
   `coverage` learned to separate "the cap stopped it" from "the time budget stopped it";
   to `1.3.0` when a Python file that was downloaded but did not parse stopped being
-  counted as parsed (`files_parsed`, `coverage.unparsed_python_files`, ADR-059).
+  counted as parsed (`files_parsed`, `coverage.unparsed_python_files`, ADR-059); to
+  `1.4.0` when the report started naming the `commit` it read instead of only the `ref`
+  it was asked for (ADR-060).
 - `files_unparsed` = `[{path, reason}]` for files that were fetched but whose parse
   failed. They contributed nothing to the findings, so the draft cannot contain the rules
   they declare; the `reason` is the parser's own error, sanitised.

@@ -8,6 +8,8 @@ Security contract (non-negotiable):
   as plain text through the REST API.
 * Hard caps on file count and file size; oversized content is skipped with a
   warning, never truncated silently into analysis.
+* A ref is pinned to its commit before anything is read: the report has to name
+  the revision it describes, and a branch name is a moving target (ADR-060).
 * Repository content is untrusted data. It is sanitized before it is stored
   as evidence and before it could ever reach an LLM prompt.
 """
@@ -15,6 +17,7 @@ Security contract (non-negotiable):
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -57,11 +60,24 @@ class GitHubError(RuntimeError):
     """Raised for any repository access problem (network, auth, limits)."""
 
 
+_COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+
+
+def _is_commit_sha(value: str) -> bool:
+    """True when ``value`` already looks like a commit SHA (nothing to resolve)."""
+
+    return bool(_COMMIT_SHA_RE.fullmatch(value or ""))
+
+
 @dataclass(frozen=True)
 class RepoMeta:
     owner: str
     repo: str
     ref: str
+    # The revision ``ref`` pointed at when the fetch started. Every read uses it,
+    # so the report describes one revision instead of whatever the branch happened
+    # to hold while the fetch was running (ADR-060).
+    commit: str
     default_branch: str
     description: str | None
     license: str | None
@@ -239,6 +255,26 @@ class GitHubClient:
             return str(payload[0].get("sha") or "")
         return ""
 
+    def resolve_commit(self, owner: str, repo: str, ref: str) -> str:
+        """Pin a ref to the commit it points at right now (ADR-060).
+
+        A branch name is a moving target: the tree and every file used to be read
+        by ref, so a push in the middle of a fetch could mix two revisions and the
+        report could not say which one it described. Everything the fetch reads
+        goes through the SHA returned here, so an analysis - and the import that
+        follows it - names one immutable revision. A ref that is already a SHA is
+        returned unchanged, which is why the watcher pays nothing for this.
+        """
+
+        if _is_commit_sha(ref):
+            return ref
+        url = f"https://api.github.com/repos/{owner}/{repo}/commits/{ref}"
+        payload = self.get_json(url)
+        sha = str(payload.get("sha") or "") if isinstance(payload, dict) else ""
+        if not _is_commit_sha(sha):
+            raise GitHubError(f"could not resolve ref {ref!r} to a commit in {owner}/{repo}")
+        return sha
+
     def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
         data = self.get_json(f"https://api.github.com/repos/{owner}/{repo}")
         if not isinstance(data, dict):
@@ -281,6 +317,10 @@ class GitHubClient:
         left unattempted and reported as such, so a slow network produces a
         smaller *and honest* report instead of a long silence.
 
+        ``ref`` is resolved to a commit first and every read below uses that SHA,
+        so the report names the revision it describes instead of a branch that may
+        move while the fetch runs (ADR-060).
+
         Returns the metadata, the files, and a :class:`FetchCoverage` that says
         how much of the candidate list the returned files actually cover: the
         skipped entries and the candidates beyond the cap are both counted, so a
@@ -293,11 +333,13 @@ class GitHubClient:
         meta_raw = self.get_repo(owner, name)
         default_branch = str(meta_raw.get("default_branch") or "main")
         resolved_ref = ref or default_branch
+        commit = self.resolve_commit(owner, name, resolved_ref)
         license_info = meta_raw.get("license") or {}
         meta = RepoMeta(
             owner=owner,
             repo=str(meta_raw.get("name") or name),
             ref=resolved_ref,
+            commit=commit,
             default_branch=default_branch,
             description=meta_raw.get("description"),
             license=license_info.get("spdx_id") or license_info.get("name"),
@@ -305,7 +347,7 @@ class GitHubClient:
             html_url=str(meta_raw.get("html_url") or repo_url),
         )
 
-        entries = self.get_tree(owner, name, resolved_ref)
+        entries = self.get_tree(owner, name, commit)
         candidates = [
             e
             for e in entries
@@ -338,7 +380,7 @@ class GitHubClient:
             failure: str | None = None
             for _ in range(FETCH_RETRIES + 1):
                 try:
-                    content = self.get_raw_file(owner, name, path, resolved_ref)
+                    content = self.get_raw_file(owner, name, path, commit)
                     failure = None
                     break
                 except GitHubError as exc:

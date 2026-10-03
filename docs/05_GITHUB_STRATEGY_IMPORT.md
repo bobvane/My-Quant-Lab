@@ -53,7 +53,7 @@ V1 可以完全不执行原始代码，只做 AST/文本/AI 提取和 DSL 重建
 "不可信输入"意味着报告本身也不能夸大它做过的事。分析报告必须回答：**候选文件共几个、实际下载几个、真的解析几个、只登记几个、跳过几个及原因、有几个候选从未尝试**。
 
 - `POST /importer/github/analyze` 返回 `coverage` 块、`files_parsed` / `files_inventoried` / `files_skipped[{path, reason}]` / `files_unparsed[{path, reason}]`，并把覆盖率结论写进 `warnings`（"25 candidate file(s) were never fetched…"）。
-- `analysis_version`（当前 `1.3.0`）随字段语义变化提升：`files_scanned` 曾把"只登记未解析"的非 Python 文件也算成已扫描，`files_skipped` 曾只有路径、丢掉 `skipped_reason`；`1.2.0` 起 `coverage` 区分"没读是因为上限"与"没读是因为时间预算用完了"；`1.3.0` 起"下载到了但解析失败"的 Python 文件不再被算作已解析（见 §4.3）。
+- `analysis_version`（当前 `1.4.0`）随字段语义变化提升：`files_scanned` 曾把"只登记未解析"的非 Python 文件也算成已扫描，`files_skipped` 曾只有路径、丢掉 `skipped_reason`；`1.2.0` 起 `coverage` 区分"没读是因为上限"与"没读是因为时间预算用完了"；`1.3.0` 起"下载到了但解析失败"的 Python 文件不再被算作已解析（见 §4.3）；`1.4.0` 起报告用 commit（而不是分支名）命名它读的那个修订（见 §4.4）。
 - **无人值守的 watcher 不得从不完整的读取中自动导入**：若还有 Python 文件没被读到（超出抓取上限或下载失败），或有 Python 文件下载到了却解析失败，`check_source` 记 `last_import_status = "incomplete"`、写 `GitHubSnapshot.extraction_json = {"imported": false, "reason": ..., "transient": ..., "coverage": ..., "files_unparsed": [...], "warnings": ...}`，并且**不新建策略版本**——变化的规则可能就在没读到的（或没看懂的）文件里，导入部分草案等于静默降级策略。
 - 只登记不解析的 `.md`/`.json` **不**阻断导入（这是常见情况），但会出现在报告里。
 
@@ -78,6 +78,17 @@ watcher 里这条区别决定了是否"记为已见"：上限造成的缺口是�
 - 解析期异常**捕获 `Exception`**（不只 `SyntaxError`），因为仓库代码是不可信输入：任何解析期失败都必须变成"这个文件没被看懂"，而不是让整份报告 500。
 - watcher 的拒绝条件因此是 `unread_python_files > 0 or unparsed_python_files > 0`；快照 `reason` 为 `incomplete_analysis`（有没读到的）或 `unparseable_python`（读到了但没看懂）。解析失败与上限缺口一样是**结构性**的（`transient = false`，重读不会让它变得可解析），所以照常推进 `current_commit`，不会每轮重试。
 - 前端：头部行列出"解析 P 个 Python、N 个解析失败"，`files_unparsed` 有独立 `<details>` 表格给出文件名与解析错误；来源详情面板对 `unparseable_python` 给出对应解释。
+
+### 4.4 一个修订必须用 commit 命名（ADR-060）
+
+`ref` 是**请求**，`commit` 是**事实**。同一个分支名 `main` 今天指向的代码和明天指向的不是同一份，所以"我读了 `main`"这句话事后无法复读：报告不能复现、策略来源不能核对，watcher 也只能拿一个 SHA 去和它比较。分析路径以前把分支名既当作抓取的 ref、又当作记录的修订：`get_tree` / `get_raw_file` 都用 `ref` 请求、`RepoMeta` 只有 `ref`、导入时 `StrategyVersion.source_commit` 与 `GitHubSource.current_commit` 直接写分支名、快照也记在 `commit="main"` 上——抓取进行到一半时仓库被推了新提交，这份报告就会把两个修订混在一起，而事后无法分辨。
+
+- `fetch_repository` 先把 `ref` 解析成 commit（`resolve_commit`：`GET /repos/{owner}/{repo}/commits/{ref}`），然后**每一次**读取（tree 与每个文件）都用那个 SHA；`RepoMeta.commit` 是必填字段，`ref` 只表示"当初要的是哪个名字"。
+- `POST /importer/github/analyze` 的响应同时给出 `ref` 与 `commit`；页面头部显示 `owner/repo @ ref · commit <12 位>`。解析不出 SHA 时**报错**（`could not resolve ref ...`），不会把一个名字冒充成修订。
+- watcher 本来就是拿 `get_head_commit()` 的 SHA 与 `current_commit` 比较，所以传给抓取器的已经是 commit，`resolve_commit` 原样返回——**不额外发一次请求**。
+- 导入请求**必须**带 `commit`（`GithubImportRequest.commit`，7–64 位十六进制；不传或不合法 → 422）：人工审阅过的是某一个修订，不是"main 当时的样子"。`StrategyVersion.source_commit`、`evidence_json`、审计记录与来源快照都记这个 SHA；`_persist_github_source` **无条件**记快照（旧代码的 `if ref and ref != "HEAD"` 守卫会让不带 ref 的导入一条记录都没有）。
+- 旧数据里 `source_commit` 可能是分支名（如 `main`）。前端把不像 SHA 的值渲染成 `main（ADR-060 之前记的是分支名）`，而不是让它看起来像一个 commit。
+- `analysis_version` 提升到 `1.4.0`：响应多了 `commit`，且"读的是哪个修订"的语义变了。
 
 ## 5. AI Extraction 输出
 
@@ -168,7 +179,8 @@ old commit
 导入成功
 策略：Adaptive Breakout
 来源：github.com/example/repo
-Commit：abc123
+Ref：main
+Commit：9f1c2d3e4a5b6c7d8e9f0a1b2c3d4e5f60718293
 类型：Breakout
 已识别：EMA20 / ATR14 / breakout confirmation
 覆盖：读取 12 / 30 个候选文件（解析 9 个 Python、登记 3 个非 Python）
@@ -178,4 +190,4 @@ Commit：abc123
 状态：Experimental
 ```
 
-人审的前提是报告说清了"到底看了多少、看懂了没有"。未读到的文件正是没被审阅的代码，而**读到了却没能解析**的文件贡献同样是零，两者都必须出现在用户最终看到的这一段里，而不是只躺在日志中。
+人审的前提是报告说清了"到底看了多少、看懂了没有"。未读到的文件正是没被审阅的代码，而**读到了却没能解析**的文件贡献同样是零，两者都必须出现在用户最终看到的这一段里，而不是只躺在日志中。`Ref` 只说"当初要的是哪个名字"，`Commit` 才是这份报告（以及导入出来的策略版本）真正对应的修订：事后要复查"这个策略是从哪份代码来的"，只有 `Commit` 能被重新读取（§4.4）。

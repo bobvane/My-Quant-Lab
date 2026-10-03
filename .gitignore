@@ -31,6 +31,11 @@ build/
 # Database / volumes
 *.db
 *.sqlite3
+# SQLite write-ahead / journal sidecars of the throwaway local verification
+# database (`backend/.local-verify.sqlite3`); `*.sqlite3` does not match them.
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
 postgres_data/
 redis_data/
 

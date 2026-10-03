@@ -599,6 +599,24 @@ export interface AppSettings {
   environment: AppSettingsEnvironment
 }
 
+export interface TemporaryAccessState {
+  /** disabled | starting | active | stopping | error (ADR-125). */
+  status: string
+  /** The public address, once cloudflared has reported one. */
+  url: string | null
+  started_at: string | null
+  expires_at: string | null
+  /** Seconds left before the automatic shutdown; null when no tunnel is running. */
+  remaining_seconds: number | null
+  max_duration_seconds: number
+  /** False when the deployment switched the feature off. */
+  enabled: boolean
+  /** The only service the tunnel may reach — the bundled web container. */
+  target_url: string
+  /** Why the last attempt failed, or why a tunnel closed itself. */
+  detail: string | null
+}
+
 export interface PaperAccount {
   id: number
   name: string
@@ -948,6 +966,17 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ key, value }),
     }),
+  /**
+   * Temporary remote access: a Cloudflare Quick Tunnel the operator opens by hand
+   * and closes by hand (or by its deadline). The state lives in the API process,
+   * so a restart answers `disabled` and nothing is exposed until it is asked for
+   * again (ADR-125).
+   */
+  temporaryAccess: () => request<TemporaryAccessState>('/settings/temporary-access'),
+  startTemporaryAccess: () =>
+    request<TemporaryAccessState>('/settings/temporary-access/start', { method: 'POST' }),
+  stopTemporaryAccess: () =>
+    request<TemporaryAccessState>('/settings/temporary-access/stop', { method: 'POST' }),
   audit: () => request<{ total: number; events: Array<Record<string, unknown>> }>('/audit/logs'),
   analyzeGithubRepo: (
     repoUrl: string,

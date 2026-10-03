@@ -66,6 +66,15 @@ x-backend-env: &backend-env
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
   NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,quantlab-postgres,quantlab-redis,quantlab-docker-proxy,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.local,.internal}
+  # Temporary remote access (ADR-125): a Cloudflare Quick Tunnel started on demand
+  # from the settings page. The target is the bundled web container on the
+  # frontend network — never the API, the database or another NAS service — and
+  # the tunnel is closed by hand, by its deadline, or when the API stops.
+  TEMPORARY_ACCESS_ENABLED: ${TEMPORARY_ACCESS_ENABLED:-true}
+  TEMPORARY_ACCESS_TARGET_URL: ${TEMPORARY_ACCESS_TARGET_URL:-http://quantlab-web:80}
+  TEMPORARY_ACCESS_CLOUDFLARED_BIN: ${TEMPORARY_ACCESS_CLOUDFLARED_BIN:-cloudflared}
+  TEMPORARY_ACCESS_MAX_DURATION_SECONDS: ${TEMPORARY_ACCESS_MAX_DURATION_SECONDS:-3600}
+  TEMPORARY_ACCESS_START_TIMEOUT_SECONDS: ${TEMPORARY_ACCESS_START_TIMEOUT_SECONDS:-30}
 
 x-backend-networks: &backend-networks
   - backend

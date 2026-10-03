@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   api,
   type AIProviderRecord,
@@ -7,6 +7,7 @@ import {
   type NotificationConfig,
   type NotificationTestResult,
   type ProviderTestResult,
+  type TemporaryAccessState,
 } from '@/api'
 import { formatDateTime, formatNumber } from '@/format'
 
@@ -175,6 +176,111 @@ const testResult = ref<ProviderTestResult | null>(null)
 const testingId = ref<number | null>(null)
 const busyId = ref<number | null>(null)
 
+// --- Temporary remote access (ADR-125) ---------------------------------------
+// A Cloudflare Quick Tunnel the operator opens on purpose. The API owns the
+// process and its deadline; this panel only mirrors that state, counts the
+// remaining minutes down, and never assumes a tunnel survived a page reload or an
+// API restart — a public address is not something to restore behind someone's back.
+const temporaryAccess = ref<TemporaryAccessState>({
+  status: 'disabled',
+  url: null,
+  started_at: null,
+  expires_at: null,
+  remaining_seconds: null,
+  max_duration_seconds: 3600,
+  enabled: true,
+  target_url: '',
+  detail: null,
+})
+const tunnelBusy = ref(false)
+const tunnelCopied = ref(false)
+const tunnelDeadline = ref<number | null>(null)
+const tunnelNow = ref(Date.now())
+let tunnelTimer: number | undefined
+let tunnelTicks = 0
+
+const tunnelRemaining = computed(() => {
+  if (tunnelDeadline.value === null) return null
+  return Math.max(0, Math.round((tunnelDeadline.value - tunnelNow.value) / 1000))
+})
+
+const tunnelClock = computed(() => {
+  const seconds = tunnelRemaining.value
+  if (seconds === null) return ''
+  return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+})
+
+function applyTemporaryAccess(state: TemporaryAccessState) {
+  temporaryAccess.value = state
+  tunnelDeadline.value =
+    state.remaining_seconds === null ? null : Date.now() + state.remaining_seconds * 1000
+  tunnelNow.value = Date.now()
+}
+
+async function refreshTunnel() {
+  try {
+    // The card is informational: a failed poll must not take over the page's
+    // error bar, which belongs to real failures.
+    applyTemporaryAccess(await api.temporaryAccess())
+  } catch {
+    /* keep showing the last known state */
+  }
+}
+
+function tickTunnel() {
+  tunnelNow.value = Date.now()
+  tunnelTicks += 1
+  const status = temporaryAccess.value.status
+  // `starting` becomes `active` as soon as cloudflared prints its address; `active`
+  // can also end without this page asking (deadline, unexpected exit).
+  if (status === 'starting' && tunnelTicks % 2 === 0) void refreshTunnel()
+  else if (status === 'active' && (tunnelTicks % 10 === 0 || tunnelRemaining.value === 0)) {
+    void refreshTunnel()
+  }
+}
+
+async function startTunnel() {
+  error.value = ''
+  info.value = ''
+  tunnelBusy.value = true
+  tunnelCopied.value = false
+  try {
+    applyTemporaryAccess(await api.startTemporaryAccess())
+  } catch (e) {
+    error.value = (e as Error).message
+    await refreshTunnel()
+  } finally {
+    tunnelBusy.value = false
+  }
+}
+
+async function stopTunnel() {
+  error.value = ''
+  info.value = ''
+  tunnelBusy.value = true
+  try {
+    applyTemporaryAccess(await api.stopTemporaryAccess())
+    tunnelCopied.value = false
+    info.value = '临时访问已关闭，公网地址已失效'
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    tunnelBusy.value = false
+  }
+}
+
+async function copyTunnelUrl() {
+  const url = temporaryAccess.value.url
+  if (!url) return
+  try {
+    await navigator.clipboard.writeText(url)
+    tunnelCopied.value = true
+  } catch {
+    // The clipboard needs a secure context; the address is on screen regardless.
+    error.value = '复制失败，请手动选择地址'
+  }
+}
+
 async function load() {
   error.value = ''
   try {
@@ -185,7 +291,7 @@ async function load() {
       failures.push(label)
       return null
     }
-    const [audit, settings, ai, notification, models, usage, notifyLog, prompts, tasks] =
+    const [audit, settings, ai, notification, models, usage, notifyLog, prompts, tasks, tunnel] =
       await Promise.all([
         api.audit().catch(() => {
           note('审计日志')
@@ -199,7 +305,9 @@ async function load() {
         api.notificationEvents().catch(() => ({ events: [] })),
         api.aiPrompts().catch(() => ({ prompts: [] })),
         api.aiTasksList().catch(() => []),
+        api.temporaryAccess().catch(() => note('临时远程访问')),
       ])
+    if (tunnel) applyTemporaryAccess(tunnel)
     notifyEvents.value = notifyLog.events
     aiPrompts.value = prompts.prompts
     aiTasks.value = tasks
@@ -426,7 +534,16 @@ function prettyJson(value: unknown): string {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  // One timer drives the whole card: it counts the remaining minutes down and
+  // re-asks the API while a tunnel is starting or active (ADR-125).
+  tunnelTimer = window.setInterval(tickTunnel, 1000)
+})
+
+onUnmounted(() => {
+  if (tunnelTimer !== undefined) window.clearInterval(tunnelTimer)
+})
 </script>
 
 <template>
@@ -858,6 +975,76 @@ onMounted(load)
         </tbody>
       </table>
       <p v-else class="muted">暂无审计记录。</p>
+    </div>
+
+    <!-- 临时远程访问（ADR-125）：按需开启的 Cloudflare Quick Tunnel，只代理内置
+         Web 容器，默认 60 分钟自动过期，服务重启后不会自动恢复。 -->
+    <div class="card" style="margin-top: 14px">
+      <h3>临时远程访问</h3>
+      <p class="muted" style="margin-top: 0">
+        用于临时 UX 测试、远程演示和故障排查。开启后把本项目的 Web 界面发布成临时公网地址，
+        最多运行 {{ Math.round(temporaryAccess.max_duration_seconds / 60) }} 分钟；隧道只指向内置
+        Web 服务，不开放任何新端口。
+      </p>
+
+      <p v-if="!temporaryAccess.enabled" class="muted">
+        状态：未开启　
+        <span class="muted">（此部署已通过 TEMPORARY_ACCESS_ENABLED=false 关闭该功能）</span>
+      </p>
+
+      <template v-else>
+        <p>
+          状态：
+          <span v-if="temporaryAccess.status === 'disabled'" class="muted">未开启</span>
+          <span v-else-if="temporaryAccess.status === 'starting'" class="wait">正在启动……</span>
+          <span v-else-if="temporaryAccess.status === 'active'" class="pos">● 已开启</span>
+          <span v-else-if="temporaryAccess.status === 'stopping'" class="wait">正在关闭……</span>
+          <span v-else class="error">启动失败</span>
+        </p>
+
+        <p v-if="temporaryAccess.status === 'starting'" class="muted">
+          正在等待 Cloudflare Tunnel 地址……
+        </p>
+
+        <template v-if="temporaryAccess.status === 'active' && temporaryAccess.url">
+          <p style="margin-bottom: 4px">访问地址：</p>
+          <p><code>{{ temporaryAccess.url }}</code></p>
+          <p class="muted">
+            剩余时间：{{ tunnelClock }}（到期自动关闭）
+          </p>
+          <div class="row">
+            <button class="ghost" @click="copyTunnelUrl()">
+              {{ tunnelCopied ? '已复制' : '复制地址' }}
+            </button>
+            <button class="danger" :disabled="tunnelBusy" @click="stopTunnel()">关闭临时访问</button>
+          </div>
+          <p class="notice warn" style="margin-top: 12px">
+            ⚠️ 此地址将在关闭或自动过期后失效，请勿长期公开分享。
+          </p>
+        </template>
+
+        <template v-else-if="temporaryAccess.status === 'disabled'">
+          <div class="row">
+            <button :disabled="tunnelBusy" @click="startTunnel()">开启临时访问</button>
+          </div>
+          <p v-if="temporaryAccess.detail" class="muted" style="margin-top: 10px">
+            {{ temporaryAccess.detail }}
+          </p>
+        </template>
+
+        <template v-else-if="temporaryAccess.status === 'error'">
+          <p class="error">错误信息：{{ temporaryAccess.detail ?? '未知错误' }}</p>
+          <div class="row">
+            <button :disabled="tunnelBusy" @click="startTunnel()">重试</button>
+            <button class="ghost" :disabled="tunnelBusy" @click="stopTunnel()">清除状态</button>
+          </div>
+        </template>
+      </template>
+
+      <p class="muted" style="margin-bottom: 0">
+        隧道由后端进程按需启动，关闭、超时或服务重启都会终止它；不会自动恢复，也不会代理 NAS
+        上的其它服务。
+      </p>
     </div>
 
     <div class="card" style="margin-top: 14px">

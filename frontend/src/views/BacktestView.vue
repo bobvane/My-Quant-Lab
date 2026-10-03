@@ -63,6 +63,27 @@ const SENS_METRICS = [
 ]
 
 /**
+ * Metrics the API returns as fractions (0.0512 is 5.12%), so they must be
+ * rendered with `formatPercent`. Everything else is already in its own unit —
+ * Sharpe/Sortino are ratios of returns, profit factor is a multiple, expectancy
+ * and MAE/MFE are prices, trade counts are counts (ADR-087).
+ */
+const RATIO_METRICS = new Set([
+  'total_return',
+  'cagr',
+  'max_drawdown',
+  'win_rate',
+  'annualized_volatility',
+  'exposure',
+])
+
+function formatMetric(key: string, value: number | null | undefined, digits = 4): string {
+  if (value == null) return '—'
+  // A percentage needs two decimals, not four: the extra digits are noise.
+  return RATIO_METRICS.has(key) ? formatPercent(value, 2) : formatNumber(value, digits)
+}
+
+/**
  * Parameters a strategy actually declares, with the values its indicators read via
  * `period_ref`. A parameter no `period_ref` points at is decorative: sweeping it
  * produces identical points, so it is deliberately excluded.
@@ -746,6 +767,8 @@ async function loadVersions() {
 }
 
 async function removeRun(id: number) {
+  const ok = window.confirm(`确定删除回测 #${id}？结果、指标与成交明细会一并删除，且不可恢复。`)
+  if (!ok) return
   error.value = ''
   busy.value = true
   try {
@@ -789,10 +812,35 @@ function sizingOverrides(): Record<string, unknown> {
   return { sizing: { mode: sizeMode.value, risk_pct: sizeRiskPct.value } }
 }
 
+/**
+ * Inclusive bar window for the next run. The API has always accepted ISO
+ * `start`/`end` and filters bars with them; an empty box means "use every bar in
+ * the series" (ADR-089). Days are read as UTC, like the bars themselves.
+ */
+const startDate = ref('')
+const endDate = ref('')
+
+function clearDates() {
+  startDate.value = ''
+  endDate.value = ''
+}
+
+function dayStart(value: string): string {
+  return new Date(`${value}T00:00:00Z`).toISOString()
+}
+
+function dayEnd(value: string): string {
+  return new Date(`${value}T23:59:59Z`).toISOString()
+}
+
 async function runNew() {
   error.value = ''
   if (versionId.value === null || !symbol.value.trim()) {
     error.value = '请先选择策略版本并填写标的代码'
+    return
+  }
+  if (startDate.value && endDate.value && startDate.value > endDate.value) {
+    error.value = '起始日期不能晚于结束日期'
     return
   }
   if (sizeMode.value !== 'strategy') {
@@ -812,6 +860,8 @@ async function runNew() {
       symbol.value.trim(),
       timeframe.value,
       sizingOverrides(),
+      startDate.value ? dayStart(startDate.value) : undefined,
+      endDate.value ? dayEnd(endDate.value) : undefined,
     )
     runs.value = [result, ...runs.value]
     detail.value = result
@@ -932,6 +982,25 @@ onMounted(async () => {
           </template>
         </span>
       </div>
+      <div class="row" style="margin-top: 8px">
+        <label class="muted" style="display: flex; align-items: center; gap: 6px">
+          起始日期
+          <input v-model="startDate" type="date" style="max-width: 165px" />
+        </label>
+        <label class="muted" style="display: flex; align-items: center; gap: 6px">
+          结束日期
+          <input v-model="endDate" type="date" style="max-width: 165px" />
+        </label>
+        <button class="ghost" :disabled="!startDate && !endDate" @click="clearDates">
+          清除区间
+        </button>
+        <span class="muted">
+          <template v-if="startDate || endDate">
+            只回测该区间内的 K 线（含首尾两天，按 UTC 计算）。
+          </template>
+          <template v-else>留空则使用该序列已同步的全部 K 线。</template>
+        </span>
+      </div>
       <p class="muted" style="margin-bottom: 0">
         先到「行情与策略」同步该标的的数据；同一版本重复运行会得到相同结果（结果哈希可验证）。
         仓位管理会写入本次回测的执行模型，因此改变它会让结果哈希随之变化。
@@ -970,10 +1039,10 @@ onMounted(async () => {
             <tr v-for="k in ['total_return', 'max_drawdown', 'sharpe', 'win_rate', 'number_of_trades']" :key="k">
               <td>{{ k }}</td>
               <td :class="oosResult.in_sample[k] != null ? toneOf(oosResult.in_sample[k]) : ''">
-                {{ oosResult.in_sample[k] != null ? formatNumber(oosResult.in_sample[k], 4) : '—' }}
+                {{ formatMetric(k, oosResult.in_sample[k]) }}
               </td>
               <td :class="oosResult.out_of_sample[k] != null ? toneOf(oosResult.out_of_sample[k]) : ''">
-                {{ oosResult.out_of_sample[k] != null ? formatNumber(oosResult.out_of_sample[k], 4) : '—' }}
+                {{ formatMetric(k, oosResult.out_of_sample[k]) }}
               </td>
             </tr>
             <tr>
@@ -1120,13 +1189,13 @@ onMounted(async () => {
           />
           <StatCard
             label="目标指标均值"
-            :value="formatNumber(sensResult.summary.mean)"
-            :sub="`中位数 ${formatNumber(sensResult.summary.median)}`"
+            :value="formatMetric(sensMetric, sensResult.summary.mean)"
+            :sub="`中位数 ${formatMetric(sensMetric, sensResult.summary.median)}`"
           />
           <StatCard
             label="极差 (max − min)"
-            :value="formatNumber(sensResult.summary.range)"
-            :sub="`标准差 ${formatNumber(sensResult.summary.stdev)}`"
+            :value="formatMetric(sensMetric, sensResult.summary.range)"
+            :sub="`标准差 ${formatMetric(sensMetric, sensResult.summary.stdev)}`"
           />
           <StatCard
             label="邻域稳健"
@@ -1173,7 +1242,7 @@ onMounted(async () => {
                     ? '未测得'
                     : p.objective === null
                       ? 'N/A'
-                      : formatNumber(p.objective)
+                      : formatMetric(sensMetric, p.objective)
                 }}
               </td>
               <td :class="p.warmup_unmet ? 'muted' : toneOf(p.metrics.total_return)">
@@ -1664,7 +1733,7 @@ onMounted(async () => {
           <tr v-for="r in compareResult.runs" :key="r.run_id">
             <td>{{ r.run_id }}</td>
             <td v-for="m in compareResult.metrics" :key="m" :class="toneOf(r[m])">
-              {{ r[m] != null ? formatNumber(r[m], 4) : '—' }}
+              {{ formatMetric(m, r[m]) }}
             </td>
           </tr>
         </tbody>
@@ -1770,7 +1839,7 @@ onMounted(async () => {
         <tbody>
           <tr v-for="m in metricRows" :key="m.key">
             <td>{{ m.key }}</td>
-            <td :class="toneOf(m.value)">{{ m.value != null ? formatNumber(m.value, 4) : 'N/A' }}</td>
+            <td :class="toneOf(m.value)">{{ m.value != null ? formatMetric(m.key, m.value) : 'N/A' }}</td>
           </tr>
         </tbody>
       </table>

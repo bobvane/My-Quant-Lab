@@ -104,6 +104,25 @@ async function setStatus(account: PaperAccount, action: 'close' | 'reopen') {
   }
 }
 
+async function resetAccount(account: PaperAccount) {
+  const ok = window.confirm(
+    `重置「${account.name}」会删除全部虚拟持仓与交易记录，并把资金基准改回 ${formatNumber(account.net_deposits)}。此操作不可撤销，确定继续？`,
+  )
+  if (!ok) return
+  error.value = ''
+  info.value = ''
+  busy.value = account.id
+  try {
+    const r = await api.resetPaperAccount(account.id)
+    info.value = `${account.name} 已重置：现金 ${formatNumber(r.cash)}，第 ${r.reset_count} 次重置`
+    await load()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    busy.value = null
+  }
+}
+
 async function fund(account: PaperAccount) {
   error.value = ''
   info.value = ''
@@ -207,6 +226,9 @@ onMounted(load)
                 @click="setStatus(a, 'reopen')"
               >
                 重开
+              </button>
+              <button class="danger" :disabled="busy === a.id" @click="resetAccount(a)">
+                重置
               </button>
             </td>
           </tr>

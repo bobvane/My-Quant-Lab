@@ -49,9 +49,16 @@ async function load() {
       healthError.value = '健康检查没有响应'
     })
   try {
+    // Every panel here answers for itself: one module that fails must not blank
+    // the other five (ADR-088). The failed labels are named in the banner.
+    const failures: string[] = []
+    const note = (label: string) => {
+      failures.push(label)
+      return null
+    }
     const [i, a, ai, assetsList, sList, appSettings] = await Promise.all([
-      api.systemInfo(),
-      api.paperAccounts(),
+      api.systemInfo().catch(() => note('系统信息')),
+      api.paperAccounts().catch(() => note('模拟账户') ?? []),
       api.aiStatus().catch(() => null),
       api.assets().catch(() => []),
       api.series().catch(() => []),
@@ -62,6 +69,9 @@ async function load() {
     aiStatus.value = ai
     assets.value = assetsList
     seriesList.value = sList
+    if (failures.length) {
+      error.value = `${failures.join('、')} 加载失败，页面其余内容仍然可用`
+    }
     // Only ask for holdings when Ghostfolio is configured. Asking anyway makes
     // an unconfigured optional integration answer 502 on every page load, which
     // the browser reports as a failed request (ADR-067).

@@ -48,9 +48,12 @@ async function scan() {
   info.value = ''
   scanning.value = true
   try {
-    await api.scanSignals()
-    info.value = '扫描完成，已重新加载信号列表'
+    const result = await api.scanSignals(true)
     await resetAndLoad()
+    info.value =
+      result.created > 0
+        ? `扫描完成：评估 ${result.evaluated} 条，写入 ${result.created} 条新信号`
+        : `扫描完成：评估 ${result.evaluated} 条，没有新的可执行信号`
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -260,7 +263,7 @@ onMounted(load)
       </p>
       <div v-if="outcomeSummary?.groups?.ALL" class="row" style="margin-bottom: 8px">
         <span class="stat small">整体胜率 {{ formatPercent(outcomeSummary.groups.ALL.win_rate) }}</span>
-        <span class="muted">样本 {{ outcomeSummary.groups.ALL.count }}（已评估的信号）· 平均 {{ formatNumber(outcomeSummary.groups.ALL.avg_pnl_pct, 3) }}% · 累计 {{ formatNumber(outcomeSummary.groups.ALL.total_pnl_pct, 3) }}%</span>
+        <span class="muted">样本 {{ outcomeSummary.groups.ALL.count }}（已评估的信号）· 平均 {{ formatPercent(outcomeSummary.groups.ALL.avg_pnl_pct, 3) }} · 累计 {{ formatPercent(outcomeSummary.groups.ALL.total_pnl_pct, 3) }}</span>
       </div>
       <table v-if="outcomeSummary && Object.keys(outcomeSummary.groups).length > 1" style="margin-bottom: 10px">
         <thead>
@@ -277,8 +280,8 @@ onMounted(load)
             <td>{{ k }}</td>
             <td>{{ g.count }}</td>
             <td>{{ g.win_rate != null ? formatPercent(g.win_rate) : '—' }}</td>
-            <td :class="toneOf(g.avg_pnl_pct)">{{ g.avg_pnl_pct != null ? formatNumber(g.avg_pnl_pct, 3) + '%' : '—' }}</td>
-            <td :class="toneOf(g.total_pnl_pct)">{{ g.total_pnl_pct != null ? formatNumber(g.total_pnl_pct, 3) + '%' : '—' }}</td>
+            <td :class="toneOf(g.avg_pnl_pct)">{{ g.avg_pnl_pct != null ? formatPercent(g.avg_pnl_pct, 3) : '—' }}</td>
+            <td :class="toneOf(g.total_pnl_pct)">{{ g.total_pnl_pct != null ? formatPercent(g.total_pnl_pct, 3) : '—' }}</td>
           </tr>
         </tbody>
       </table>
@@ -308,9 +311,9 @@ onMounted(load)
             <td class="muted">{{ o.entry_time ? formatDateTime(String(o.entry_time)) : '—' }}</td>
             <td class="muted">{{ o.exit_time ? formatDateTime(String(o.exit_time)) : '—' }}</td>
             <td>{{ o.outcome_state }}</td>
-            <td :class="toneOf(o.pnl_pct)">{{ o.pnl_pct != null ? formatNumber(o.pnl_pct, 3) + '%' : '—' }}</td>
-            <td class="muted">{{ o.mae_pct != null ? formatNumber(o.mae_pct, 3) + '%' : '—' }}</td>
-            <td class="muted">{{ o.mfe_pct != null ? formatNumber(o.mfe_pct, 3) + '%' : '—' }}</td>
+            <td :class="toneOf(o.pnl_pct)">{{ o.pnl_pct != null ? formatPercent(o.pnl_pct, 3) : '—' }}</td>
+            <td class="muted">{{ o.mae_pct != null ? formatPercent(o.mae_pct, 3) : '—' }}</td>
+            <td class="muted">{{ o.mfe_pct != null ? formatPercent(o.mfe_pct, 3) : '—' }}</td>
             <td class="muted">{{ o.evaluated_at ? formatDateTime(String(o.evaluated_at)) : '—' }}</td>
           </tr>
         </tbody>

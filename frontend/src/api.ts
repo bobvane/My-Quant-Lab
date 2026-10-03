@@ -694,6 +694,9 @@ export const api = {
      * `{ sizing: { mode: 'risk_per_trade', risk_pct: 0.01 } }`.
      */
     executionOverrides: Record<string, unknown> = {},
+    /** Inclusive bar window as ISO timestamps; omitted means "everything loaded". */
+    start?: string,
+    end?: string,
   ) =>
     request<BacktestDetail>('/backtests', {
       method: 'POST',
@@ -702,6 +705,8 @@ export const api = {
         symbol,
         timeframe,
         execution_overrides: executionOverrides,
+        ...(start ? { start } : {}),
+        ...(end ? { end } : {}),
       }),
     }),
   runOos: (strategyVersionId: number, symbol: string, oosPct = 0.2, timeframe = '1d') =>
@@ -817,9 +822,9 @@ export const api = {
       bars_after: number
       groups: Record<string, Record<string, any>>
     }>(`/signals/outcome-summary${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`),
-  scanSignals: () =>
+  scanSignals: (persist = false) =>
     request<{ evaluated: number; created: number; signals: SignalIntent[]; disclaimer: string }>(
-      '/signals/scan',
+      `/signals/scan?persist=${persist}`,
       { method: 'POST' },
     ),
   paperAccounts: () => request<PaperAccount[]>('/paper/accounts'),
@@ -840,6 +845,19 @@ export const api = {
     request<{ account_id: number; status: string }>(`/paper/accounts/${accountId}/reopen`, {
       method: 'POST',
     }),
+  resetPaperAccount: (accountId: number, initialCash?: number) =>
+    request<{
+      account_id: number
+      cash: number
+      net_deposits: number
+      reset_count: number
+      warning: string
+    }>(
+      `/paper/accounts/${accountId}/reset${
+        initialCash != null ? `?initial_cash=${initialCash}` : ''
+      }`,
+      { method: 'POST' },
+    ),
   fundPaperAccount: (accountId: number, amount: number) =>
     request<{ account_id: number; cash: number }>(`/paper/accounts/${accountId}/fund`, {
       method: 'POST',

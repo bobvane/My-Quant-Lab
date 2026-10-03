@@ -222,7 +222,11 @@ async function activateVersion(v: Record<string, any>) {
   }
 }
 
-async function deleteStrategy(id: number) {
+async function deleteStrategy(id: number, name: string) {
+  const ok = window.confirm(
+    `确定删除策略「${name}」？它没有被回测、信号或模拟盘引用时会连同全部版本一并删除，且不可恢复。`,
+  )
+  if (!ok) return
   error.value = ''
   info.value = ''
   deletingStrategy.value = id
@@ -237,7 +241,11 @@ async function deleteStrategy(id: number) {
   }
 }
 
-async function deleteSeries(id: number) {
+async function deleteSeries(id: number, symbol: string) {
+  const ok = window.confirm(
+    `确定删除 ${symbol} 的行情数据？没有回测引用时数据会被真正删除且不可恢复；被回测引用时会改为归档（数据保留、可从「显示已归档」恢复）。`,
+  )
+  if (!ok) return
   error.value = ''
   info.value = ''
   try {
@@ -674,7 +682,7 @@ onMounted(load)
               <td>{{ formatDateTime(String(s.last_sync_at ?? '')) }}</td>
               <td>
                 <button v-if="s.is_archived" class="ghost" @click="restoreSeries(Number(s.id))">恢复</button>
-                <button v-else class="ghost" @click="deleteSeries(Number(s.id))">删除</button>
+                <button v-else class="ghost" @click="deleteSeries(Number(s.id), assetSymbol(Number(s.asset_id)))">删除</button>
               </td>
             </tr>
           </tbody>
@@ -701,7 +709,7 @@ onMounted(load)
               <td>{{ s.version_count }}</td>
               <td>{{ s.source_type }}</td>
               <td>
-                <button class="ghost" :disabled="deletingStrategy === s.id" @click="deleteStrategy(s.id)">
+                <button class="ghost" :disabled="deletingStrategy === s.id" @click="deleteStrategy(s.id, s.name)">
                   {{ deletingStrategy === s.id ? '删除中…' : '删除' }}
                 </button>
               </td>

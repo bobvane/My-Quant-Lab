@@ -178,12 +178,22 @@ const busyId = ref<number | null>(null)
 async function load() {
   error.value = ''
   try {
+    // Nine independent panels share this page, so each request answers for
+    // itself: one failing endpoint must not blank the other eight (ADR-088).
+    const failures: string[] = []
+    const note = (label: string) => {
+      failures.push(label)
+      return null
+    }
     const [audit, settings, ai, notification, models, usage, notifyLog, prompts, tasks] =
       await Promise.all([
-        api.audit(),
-        api.settings(),
-        api.aiProviders(),
-        api.notificationConfig(),
+        api.audit().catch(() => {
+          note('审计日志')
+          return { total: 0, events: [] }
+        }),
+        api.settings().catch(() => note('系统设置')),
+        api.aiProviders().catch(() => note('AI 服务商')),
+        api.notificationConfig().catch(() => note('通知配置')),
         api.aiModels().catch(() => ({ models: [] })),
         api.aiUsage().catch(() => ({ usage: [] })),
         api.notificationEvents().catch(() => ({ events: [] })),
@@ -195,12 +205,15 @@ async function load() {
     aiTasks.value = tasks
     events.value = audit.events
     auditTotal.value = audit.total
-    environment.value = settings.environment ?? {}
-    systemSettings.value = settings.settings ?? []
-    providers.value = ai.providers
+    environment.value = settings?.environment ?? {}
+    systemSettings.value = settings?.settings ?? []
+    providers.value = ai?.providers ?? []
     aiModels.value = models.models
     aiUsage.value = usage.usage
-    applyNotification(notification)
+    if (notification) applyNotification(notification)
+    if (failures.length) {
+      error.value = `${failures.join('、')} 加载失败，页面其余内容仍然可用`
+    }
   } catch (e) {
     error.value = (e as Error).message
   }
@@ -368,6 +381,10 @@ async function toggleActive(row: AIProviderRecord) {
 }
 
 async function remove(row: AIProviderRecord) {
+  const ok = window.confirm(
+    `确定删除 provider「${row.name}」？它的模型配置会一并删除，且不可恢复；有 AI 调用记录时后端会拒绝，请改为停用。`,
+  )
+  if (!ok) return
   error.value = ''
   info.value = ''
   busyId.value = row.id

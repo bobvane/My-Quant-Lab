@@ -23,6 +23,7 @@ __all__ = [
     "get_or_create_series",
     "load_bars",
     "latest_closed_bar_time",
+    "refresh_series_content_hash",
     "series_content_hash",
     "upsert_bars",
 ]
@@ -239,11 +240,30 @@ def upsert_bars(db: Session, series: MarketDataSeries, bars: list[dict[str, obje
         series.series_start = min(v for v in (current_start, min(stamps)) if v is not None)
         series.series_end = max(v for v in (current_end, max(stamps)) if v is not None)
         series.last_sync_at = dt.datetime.now(tz=dt.UTC)
+    # Whoever writes bars also stamps their hash, so a series can never claim a
+    # content hash that its stored bars do not produce (ADR-092).
+    refresh_series_content_hash(db, series)
     return inserted
 
 
 def latest_closed_bar_time(series: MarketDataSeries) -> dt.datetime | None:
     return series.series_end
+
+
+def refresh_series_content_hash(db: Session, series: MarketDataSeries) -> str | None:
+    """Recompute ``market_data.content_hash`` from the bars actually stored.
+
+    The hash covers this series' closed bars in timestamp order — exactly the
+    frame a backtest loads when it names no date window — so it equals the
+    ``dataset_hash`` recorded by ``POST /backtests`` for the same series. A
+    series with no closed bars has no hash at all (``None``), which is not the
+    same statement as the hash of an empty frame.
+    """
+
+    db.flush()
+    frame = load_bars(db, series, only_closed=True)
+    series.content_hash = None if frame.empty else series_content_hash(frame)
+    return series.content_hash
 
 
 def series_content_hash(frame: pd.DataFrame) -> str:

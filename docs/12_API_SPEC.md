@@ -42,10 +42,10 @@ API base: `/api/v1`
 ## Features
 
 `GET /features`
-`GET /features/{id}`
-`POST /features`
 
-参数：name、type、inputs、outputs。
+返回本引擎实际计算的特征目录（`name` / `feature_type` / `feature_version` / `description` / `inputs` / `params` / `is_deterministic` / `lookahead_safe`，按 `name` 排序，**无 `id`**）。目录来自代码（`backend/app/features/catalogue.py`），不是数据库表：`GET /features` 曾经读一张从未被写入过的 `features` 表，因此它一直返回空列表（ADR-093）。目录与 `build_features()` 的真实产出由 `backend/tests/test_feature_catalogue.py` 双向校验。
+
+`GET /features/{id}`、`POST /features` 从未实现，随那张死表一起取消：特征由代码定义，没有可寻址的行。
 
 ## Feature Snapshots
 
@@ -541,8 +541,8 @@ findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
 
 ### Feature Versions API
 
-`[已实现]` `GET /features/versions`
-`[计划]` `GET /features/{feature_id}/versions`（特征定义为单版本、按 name 唯一，v1.0 不做）
+`[已实现]` `GET /features/versions` —— 返回 `engine_feature_version`、`indicator_version`、`price_action_version` 与 `snapshot_versions`（已落库的特征版本，来自 `feature_snapshots`，是唯一有真实写入的证据）。旧的 `definition_versions` 字段随死表 `features` 一起删除（ADR-093）。
+`[取消]` `GET /features/{feature_id}/versions`（特征由代码定义、没有可寻址的行；目录端点见上文 `GET /features`）
 
 ### Strategy Lineage API
 

@@ -2098,3 +2098,52 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：把版本方案交给「推 main 时顺手跑一下」的守卫，等于在没有推 main 的时刻没有守卫；**唯一事实的来源（`version.txt`）必须在发布那一刻被读一次**，ADR-017/ADR-079 定的方案才算真的生效。第二条是「同一事实两处」的老账（ADR-070、ADR-085 是同一主题的不同侧面）：两边各写一次时，正确性取决于两次都记得改，而这次没有 —— 守卫改成「两处必须一致」比「断言等于 8081」更接近事实本身。
 - 影响与兼容：打 tag 时若 `version.txt` 不一致，release 会在构建镜像**之前**失败（这是好事：错误版本的镜像不会被发布出去）。历史 tag 不受影响，无需重打。`scripts/version.sh notes` 输出的部署说明现在指向能真正打开的地址。无 API 变更、无数据变更。
 - 测试：上述两条守卫；红证据里对应 `the release never reads the file it publishes` 与 `the release notes do not point at a port that serves nobody`（v1.6.4 上 8 failed 中的两条）；实现后 8 passed。发布事件自身的行为证据是下一次 `git tag -a v1.6.5` 推送后的 release run（它会执行该步骤）。
+
+## ADR-092：写 bars 的人必须同时写它的哈希
+
+- 背景：v1.6.3 期间 DB/ORM 只读审计的第一条是「有读无写」：`market_data.content_hash`（`backend/app/domain/models.py:131`）被序列详情端点 `backend/app/api/routers/market_data.py:133` 读取并原样返回，而全仓库没有任何一行代码写它 —— 唯一计算同型哈希的 `series_content_hash()`（`backend/app/data/market_data_repo.py:249-252`，sha256 覆盖 `frame.to_csv(float_format="%.10g")`）只有一个调用点，`backend/app/api/routers/backtests.py:87` 把结果存进 `backtest_runs.dataset_hash`，从不回写序列。于是这个唯一暴露该字段的接口从项目开始就恒返回 `null`（列表端点 `backend/app/api/routers/market_data.py:91-105` 甚至不返回该列），`docs/11_DATA_MODEL.md` 也从未描述过它。写入 bars 的路径有两条：`backend/app/api/routers/market_data.py:226-230`（手动/接口同步）与 `backend/app/workers/tasks.py:97-98`（夜间与计划同步），两条都走同一个 `upsert_bars()`（`backend/app/data/market_data_repo.py:196-242`）。
+- 决策：
+  1. 刷新放进两条路径共用的入口：`backend/app/data/market_data_repo.py` 新增 `refresh_series_content_hash(db: Session, series: MarketDataSeries) -> str | None`（`load_bars(db, series, only_closed=True)` → 空则 `None`，否则 `series_content_hash(frame)`），并在 `upsert_bars()` 收尾（`return inserted` 之前）无条件调用它；函数加入 `__all__`。
+  2. 语义定死：哈希覆盖该序列**全部 closed bars**（时间升序、`float_format="%.10g"`），没有 closed bars 时是 `NULL`（不等于「空 frame 的哈希」）。
+  3. 因此该值等于同名序列上「不带区间的回测」记录进 `backtest_runs.dataset_hash` 的值（`backend/app/api/routers/backtests.py:87` 用的是同一个函数，且 `:74` 的 `load_bars` 不传 `start`/`end`/`limit`），调用方可以据此确认「我看到的 bars 就是那份结果算的 bars」。
+  4. 守卫 `backend/tests/test_series_content_hash.py`（6 条）把这条链路钉死：写入即得哈希、重同步不变、多一根 bar 就变、空序列为 `None`、端点返回它、一次真实回测的 `dataset_hash` 与之相等。
+- 理由：把回写放在「两条调用方各自记得」的位置，第三个写入者出现时就会漏（`workers/tasks.py` 就是第二个写入者）；放在唯一的写入口里，忘记这件事在结构上不可能发生。哈希的用途也要求它描述**库里现在存着什么**，而不是「某次调用传进来了什么」——因此实现方式是 upsert 之后重新读一遍已落库的 closed bars，而不是对入参 frame 求哈希。
+- 影响与兼容：列早已存在且可空，无需迁移；代价是每次 upsert 后多一次 `load_bars` + 一次 `to_csv`（同步路径为 400 根 bar 量级，可接受）。历史库里的既有行仍为 `NULL`，直到该序列下一次同步。
+- 测试：`backend/tests/test_series_content_hash.py`（6 passed）。红证据：把该文件拷进 v1.6.5 的 worktree（`git worktree add --detach %TEMP%\mql-red-166 90a358e81`）运行 = 5 failed，`test_a_sync_stores_the_hash_of_the_bars_it_inserted` 的断言消息正是 `assert None is not None + where None = <MarketDataSeries>.content_hash`（第 6 条 `test_a_series_without_bars_has_no_hash_at_all` 在旧代码上「通过」——因为旧代码什么都不写）。
+
+## ADR-093：目录必须来自代码，因为它就是代码
+
+- 背景：审计第二条：`features` 表（`FeatureDefinition`，`backend/app/domain/models.py:261-272`）在全仓库**零写入**，却有两个读端点 —— `GET /features`（`backend/app/api/routers/features.py:37`）与 `GET /features/versions` 的 `definition_versions`（同文件 `:22-27`）。也就是说这两个端点承诺的能力一生都不存在：引擎实际产出三十个特征列（`build_features()`），而接口回答「没有特征」。同型的还有 `jobs` / `job_logs`（`backend/app/domain/models.py:705-738`）：既无写入也无读取，没有任何路由暴露它们。`docs/12_API_SPEC.md:44-46` 还宣称 `GET /features/{id}` 与 `POST /features` 存在。
+- 决策：
+  1. 目录搬到代码里：新增 `backend/app/features/catalogue.py` —— `FEATURE_CATALOGUE`（32 项：indicator 12 + price_action 20）与 `catalogue_payload()`（按 `name` 排序、**无 `id`**，字段 `name`/`feature_type`/`feature_version`/`description`/`inputs`/`params`/`is_deterministic`/`lookahead_safe`）；`GET /features` 返回它，且不再依赖数据库会话。
+  2. `GET /features/versions` 返回真实存在的东西：`engine_feature_version`、`indicator_version`、`price_action_version` 与 `snapshot_versions`（来自 `feature_snapshots`，它**有**写入 —— `backend/app/simulation/signal_engine.py:278`），删掉 `definition_versions`。
+  3. 删除 `FeatureDefinition` / `Job` / `JobLog` 三张表（迁移 `0009_drop_dead_schema`），`docs/12_API_SPEC.md` 把 `/features/{id}`、`POST /features`、`/features/{feature_id}/versions` 标记为随死表取消。
+  4. 守卫 `backend/tests/test_feature_catalogue.py` 把目录与引擎的**真实产出**双向比对（`set(build_features(sample_bars).columns) - set(OHLCV_COLUMNS)` 与目录名字集合互相相等）：算出来却没登记、登记了却没算出来，都会红。
+- 理由：一张永远为空的表不是「还没填」，而是「没有任何代码路径会填它」——它让一个端点看起来在提供能力（v1.6.4 ADR-089 的同型问题）。特征目录的事实来源就是计算特征的代码，所以它必须与代码放在一起、并被代码验证；只把名字抄进另一处注释或数据表，就会像这张表一样在某一天变成谎言。
+- 影响与兼容：`GET /features` 的返回形状变化（不再有 `id`、不再为空），`GET /features/versions` 少一个字段、多两个版本字段；前端从未调用过这两个端点（`frontend/src/api.ts` 与 `frontend/src/views/*.vue` grep 命中 0），因此对外兼容性影响只体现在文档与 OpenAPI。表删除有迁移 `0009`，其 `downgrade()` 会真实重建三张表与两个被删列（PG 回归套件的 teardown 会跑到 `downgrade("base")`，半恢复的 schema 会污染下一次 `upgrade`）。
+- 测试：`backend/tests/test_feature_catalogue.py`（6 passed）、`backend/tests/test_dead_schema.py`（4 passed）、改造后的 `backend/tests/test_feature_metrics_api.py`（目录非空且含 `ema20`/`rsi14`/`breakout`、`ai/models` 仍为空、`"definition_versions" not in body`）。红证据：同一 worktree 里 `test_feature_catalogue.py` 收集期即失败 —— `ModuleNotFoundError: No module named 'app.features.catalogue'`。
+
+## ADR-094：不变式必须在建库时就存在，而不是只在某个迁移里
+
+- 背景：审计第三条：策略版本与已完成回测的不可变触发器只存在于迁移 `backend/alembic/versions/0002_immutability.py`（且 `:29-30` 判断「非 PostgreSQL 直接 return」）与 `0003_fix_triggers_json.py`。而实际会建库的路径里，单元测试（`backend/tests/conftest.py:64` 的 `Base.metadata.create_all(engine)`）、四个探针脚本（`probe_watch_refusal.py:122`、`probe_version_ledger.py:72`、`probe_paper_contributions.py:115`、`probe_lifecycle_direction.py:144`）与开发者临时库都不跑迁移 —— 它们建出来的库**一个守卫都没有**，而 `backend/app/domain/models.py:14-17` 却声称该不变式由触发器保证。这正是 `operator does not exist: json = json` 那次事故能进生产的原因：本地唯一会建的库跑不了这个守卫，0002 里 `NEW.dsl_json = OLD.dsl_json` 的写法只有在 PG 上才暴露（0003 改成 `::text` 比较）。
+- 决策：
+  1. 守卫的唯一定义放进 `backend/app/domain/immutability.py`：`statements_for(dialect_name)` / `drop_statements_for(dialect_name)` / `install_immutability_triggers(connection)` / `drop_immutability_triggers(connection)`，触发器名与拒绝消息都是模块常量（`trg_strategy_versions_immutable`、`trg_backtest_results_immutable`、`"... are immutable: create a new version instead"`、`"completed backtest results are immutable"`）。
+  2. 通过 `@event.listens_for(Base.metadata, "after_create")` 安装：任何用 `create_all()` 建出来的库都带上同一份守卫；`backend/app/domain/models.py` 导入该模块以注册事件。
+  3. 迁移链调用同一个函数：新增 `backend/alembic/versions/0010_immutability.py`，`upgrade()` = `install_immutability_triggers(op.get_bind())`，`downgrade()` 刻意空实现并注明「不变式不能被回滚削弱」（0002/0003 作为历史记录保留）。
+  4. 两种方言给出一致的判定：PostgreSQL 用 `NEW.dsl_json::text IS DISTINCT FROM OLD.dsl_json::text`（沿用 0003 的修正），SQLite 用 `BEFORE UPDATE ... FOR EACH ROW WHEN OLD.x IS NOT NEW.x ... RAISE(ABORT, '...')`。
+  5. 守卫 `backend/tests/test_immutability_guard.py`（10 条）在**单元测试自己的 SQLite 库**上真跑这些触发器：直接改 `dsl_json`/`version`/`immutable_hash` 必须失败、`is_current` 翻转必须仍然成功（v0.9.9 那次 500 的回归）、已完成结果的 `summary_json` 不可改、`backtest_runs` 仍可归档；另有文本断言「`backend/app` 下含 `CREATE TRIGGER` 的文件恰好只有 `app/domain/immutability.py`」「`0010` 引用共享函数」「`models.py` 导入该模块」。
+- 理由：只写在某条迁移里的守卫等价于「只有走过那条迁移的库才有」——而测试库、探针库、开发库都不过那条路，于是**没有任何测试证明它有效**（PG 套件默认 skip，本地永远跳过 4 条）。把定义绑在 metadata 上，「从模型建库」与「从迁移建库」就得到同一个结果，缺一即无法建出库。
+- 影响与兼容：`create_all()` 会多执行两条 DDL；`test_immutability_guard.py` 让这套守卫在本地 SQLite 上也被真跑（此前只有 PG 上 4 条、默认 skip）。两种方言的异常类型不同（SQLite 是 `IntegrityError`、PG 是 `ProgrammingError`），测试按消息中的 `immutable` 匹配，两种都断言消息文本而不是类型。0002/0003 保留为历史记录，新库的最终状态由 0010 安装同一份定义。
+- 测试：`backend/tests/test_immutability_guard.py`（10 passed）。红证据：同一 worktree 里 8 failed，其中 `test_the_test_database_really_carries_the_guards` 的断言消息为 `assert {'trg_backtest_results_immutable', 'trg_strategy_versions_immutable'} <= set()`（旧代码建出来的测试库 `sqlite_master` 里没有任何触发器），`test_the_migration_chain_uses_the_shared_definition` 报 `FileNotFoundError: ...\backend\alembic\versions\0010_immutability.py`；另两条在旧代码上通过（`is_current` 翻转、`backtest_runs` 归档），因为「没有守卫」不会拦住任何写入。
+
+## ADR-095：没人读的列不是能力，是负债（以及第二份 schema 快照）
+
+- 背景：审计第四条的三个字段声明后从未被读写：`backtest_runs.parameters_id`（`backend/app/domain/models.py:311`，`ForeignKey("strategy_parameters.id")` —— 真正的参数记录在同表 `parameters_json` `:314`，审计原文把它误标成 `strategy_versions` 的字段）、`ai_models.context_length`（`:632`）、`ai_models.supports_structured_output`（`:633`）：在 `backend/`、`frontend/`、`docs/` 里 grep 不到任何消费者。同一次审计还留下了仓库里唯一一份 `.sql`：`backend/pg.sql`（589 行 / 21,754 字节，`alembic upgrade --sql` 导出的静态 DDL 快照，`git log` 只有 `4f65fc755` 一次触碰），它零引用（`git grep -n -I -- 'pg\.sql'` 无命中），并且已经漂移：里面同时躺着 `content_hash`、`parameters_id`、`context_length`、`supports_structured_output` —— 也就是说读者若把它当真相，会看到一份并不存在的 schema。`docs/11_DATA_MODEL.md` 开头还复述了「模型包含 17 个核心表」这个数字。
+- 决策：
+  1. 删三个死列（迁移 `0009_drop_dead_schema` 用 `op.batch_alter_table(..., recreate="auto")` 分别在 `backtest_runs` 与 `ai_models` 上 `drop_column`）。
+  2. 删 `backend/pg.sql`（`git rm`）：schema 的唯一事实来源是 `backend/app/domain/models.py` 与 `backend/alembic/versions/`，需要静态 DDL 时现场生成。
+  3. `docs/11_DATA_MODEL.md` 不再复述表的数量，改为指向 `Base.metadata`（表的清单以代码为准）。
+  4. 守卫 `backend/tests/test_dead_schema.py`（4 条）：三张死表不在 `Base.metadata.tables`；`models.py` 不再出现 `FeatureDefinition`/`JobLog`/`class Job(`/`parameters_id`/`context_length`/`supports_structured_output`；`backend/pg.sql` 不存在；`backend/` 下没有含 `CREATE TABLE` 的 `*.sql`（防止第二份 schema 快照回来）。
+- 理由：一个永远是 `NULL` 或永远取默认值的列看起来像能力，读代码的人会以为有人在写它 —— `parameters_id` 尤其误导，因为真正的参数就躺在同一张表的 `parameters_json` 里。没人读的列不是「将来可能有用」，而是必须被维护、被迁移、被解释的负债。`backend/pg.sql` 是 ADR-090/091 那条主题在 DB 层的同型问题（同一事实不能有两份答案）：它没有消费者，所以只会在有人打开它的时候骗人。
+- 影响与兼容：`parameters_id` 的外键随列一起消失；三列都没有写入路径，因此不涉及数据迁移。`pg.sql` 可从 git 历史（`4f65fc755`）取回。`Base.metadata` 的表数从 34 降到 31（`feature_snapshots` 保留）。表结构删除全部由 `0009` 承担，其 `downgrade()` 负责恢复。
+- 测试：`backend/tests/test_dead_schema.py`（4 passed）。红证据：同一 worktree 里 4 条全红，消息分别为 `test_the_removed_tables_are_not_in_the_metadata`（`features`/`jobs`/`job_logs` 仍在 metadata）、`test_the_models_no_longer_declare_the_dead_names`、`test_the_static_schema_dump_is_gone`（`backend/pg.sql` 仍存在）、`test_no_second_copy_of_the_schema_lives_in_a_sql_file`。

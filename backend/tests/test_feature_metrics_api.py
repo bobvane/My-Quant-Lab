@@ -5,8 +5,15 @@ from __future__ import annotations
 from app.domain.models import BacktestResult, BacktestRun, Strategy, StrategyVersion
 
 
-def test_empty_feature_and_ai_registries(client) -> None:
-    assert client.get("/api/v1/features").json() == []
+def test_feature_catalogue_and_ai_registries(client) -> None:
+    # The catalogue comes from code (ADR-093): it is what the engine computes, not a
+    # table nobody ever wrote to.
+    features = client.get("/api/v1/features").json()
+    assert features, "the engine computes features, so the catalogue cannot be empty"
+    names = {f["name"] for f in features}
+    assert {"ema20", "rsi14", "breakout"} <= names
+    assert all(f["feature_version"] for f in features)
+
     assert client.get("/api/v1/ai/models").json()["models"] == []
     # Built-in prompt definitions are registered on first read (docs/06).
     prompts = client.get("/api/v1/ai/prompts").json()["prompts"]
@@ -21,7 +28,10 @@ def test_backtest_metrics_endpoint_404(client) -> None:
 def test_feature_versions_endpoint(client) -> None:
     body = client.get("/api/v1/features/versions").json()
     assert body["engine_feature_version"]
-    assert "definition_versions" in body and "snapshot_versions" in body
+    assert body["indicator_version"] and body["price_action_version"]
+    assert isinstance(body["snapshot_versions"], list)
+    # The dead table the endpoint used to read is gone, and so is the key it fed.
+    assert "definition_versions" not in body
 
 
 def test_data_sources_and_lineage(client) -> None:

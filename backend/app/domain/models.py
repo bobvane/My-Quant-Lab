@@ -4,17 +4,18 @@ Mapping of the V1 data model (``docs/11_DATA_MODEL.md``):
 
 * assets, market_data_sources, market_data (series), market_data_bars
 * strategies, strategy_versions, strategy_parameters
-* features, feature_snapshots
+* feature_snapshots
 * backtest_runs, backtest_results, backtest_metrics, backtest_trades
 * paper_accounts, paper_positions, paper_orders, paper_trades
 * ai_providers, ai_models, ai_prompts, ai_tasks, ai_usage
-* jobs, job_logs, audit_logs, system_settings
+* audit_logs, system_settings
 * signals, signal_outcomes, github_sources, github_snapshots
 
 Invariants enforced here:
 
-* ``strategy_versions`` rows are immutable (guarded by the service layer and by a
-  database trigger installed in the Alembic migration).
+* ``strategy_versions`` rows are immutable (guarded by the service layer and by the
+  database triggers in ``app/domain/immutability.py``, which every database created
+  from these models gets — see ADR-094).
 * every backtest run records strategy version + dataset + parameters + engine
   version + feature version so results stay reproducible.
 * timestamps are stored as timezone aware UTC.
@@ -45,6 +46,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
+
+# Importing the module registers the ``after_create`` listener that installs the
+# immutability triggers on every database built from these models (ADR-094).
+from app.domain import immutability as _immutability  # noqa: F401
 
 UTC = dt.UTC
 
@@ -258,20 +263,6 @@ class StrategyParameter(Base):
 # --------------------------------------------------------------------------- #
 # 3. Features
 # --------------------------------------------------------------------------- #
-class FeatureDefinition(Base, TimestampMixin):
-    __tablename__ = "features"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    feature_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    feature_version: Mapped[str] = mapped_column(String(16), default="1.0.0", nullable=False)
-    description: Mapped[str | None] = mapped_column(Text)
-    inputs_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    params_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    is_deterministic: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    lookahead_safe: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-
-
 class FeatureSnapshot(Base):
     """Persisted feature values for one bar, used as signal/backtest evidence."""
 
@@ -308,7 +299,6 @@ class BacktestRun(Base):
         ForeignKey("strategy_versions.id"), nullable=False
     )
     dataset_version_id: Mapped[int] = mapped_column(ForeignKey("market_data.id"), nullable=False)
-    parameters_id: Mapped[int | None] = mapped_column(ForeignKey("strategy_parameters.id"))
     engine_version: Mapped[str] = mapped_column(String(16), default="1.0.0", nullable=False)
     feature_version: Mapped[str] = mapped_column(String(16), default="1.0.0", nullable=False)
     parameters_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -629,8 +619,6 @@ class AIModel(Base, TimestampMixin):
     )
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
     capability_tier: Mapped[str] = mapped_column(String(16), default="standard")
-    context_length: Mapped[int | None] = mapped_column(Integer)
-    supports_structured_output: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     input_cost_per_mtok: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"))
     output_cost_per_mtok: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -700,44 +688,8 @@ class AIUsage(Base):
 
 
 # --------------------------------------------------------------------------- #
-# 8. Jobs, audit, settings
+# 8. Audit and settings
 # --------------------------------------------------------------------------- #
-class Job(Base):
-    __tablename__ = "jobs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    job_type: Mapped[str] = mapped_column(String(48), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
-    idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True)
-    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    error_message: Mapped[str | None] = mapped_column(Text)
-    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, server_default=func.now(), nullable=False
-    )
-    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
-    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-    logs: Mapped[list[JobLog]] = relationship(back_populates="job", cascade="all, delete-orphan")
-
-
-class JobLog(Base):
-    __tablename__ = "job_logs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
-    level: Mapped[str] = mapped_column(String(16), default="INFO", nullable=False)
-    message: Mapped[str] = mapped_column(Text, nullable=False)
-    context_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, server_default=func.now(), nullable=False
-    )
-
-    job: Mapped[Job] = relationship(back_populates="logs")
-
-
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

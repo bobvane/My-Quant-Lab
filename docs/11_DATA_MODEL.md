@@ -1,6 +1,6 @@
 # 11 数据模型
 
-本数据模型实现了新的架构决策，遵循 PostgreSQL 关系数据库设计，并确保策略版本不可变性。模型包含 17 个核心表，覆盖资产管理、市场数据、策略版本、回测结果、模拟交易、AI 提供商等所有业务领域。
+本数据模型实现了新的架构决策，遵循 PostgreSQL 关系数据库设计，并确保策略版本不可变性。模型覆盖资产管理、市场数据、策略版本、回测结果、模拟交易、AI 提供商与资源监控等领域；**表的完整清单以 `backend/app/domain/models.py` 的 `Base.metadata` 为准**（此处不再复述表的数量，避免与代码漂移，见 ADR-095）。
 
 ## 核心实体
 
@@ -19,11 +19,26 @@ asset_class VARCHAR(20) NOT NULL, -- stock, crypto, etf
 - id
 - asset_id
 - timeframe
-- provider
+- source_id
 - timezone
 - adjusted
-- last_timestamp
+- dataset_version
+- series_start
+- series_end
+- last_sync_at
 - quality_status
+- content_hash nullable
+- is_archived
+
+`content_hash` is the SHA-256 of every *closed* bar of the series, in timestamp order,
+rendered exactly as `series_content_hash()` renders a frame (`frame.to_csv(float_format="%.10g")`).
+It is refreshed by `upsert_bars()` — the one function both bar-writing paths go through —
+so it always describes the rows that are actually stored (ADR-092). A series with no
+closed bars has `NULL`, which is not the same thing as the hash of an empty frame.
+Because a backtest without an explicit window loads every closed bar of its series, this
+value equals the `backtest_runs.dataset_hash` a completed run records: a caller can
+therefore confirm that the bars it is looking at are the bars a stored result was
+computed from.
 
 ## OHLCVBar
 
@@ -196,8 +211,8 @@ unique(strategy_id, version)
 
 ## Data integrity rules
 
-1. StrategyVersion immutable。
-2. BacktestRun immutable after completed（允许追加 metadata，不允许改结果）。
+1. StrategyVersion immutable（`dsl_json` / `version` / `immutable_hash` 由数据库触发器拒绝改写）。触发器定义在 `backend/app/domain/immutability.py`，由 `Base.metadata` 的 `after_create` 事件安装 —— 任何用 `create_all()` 建出来的库（单元测试、探针脚本、开发者临库）与迁移出来的库都带同一份守卫（ADR-094）。
+2. BacktestRun immutable after completed（允许追加 metadata，不允许改结果；`backtest_results` 一旦有 `result_hash`，summary/metrics/equity_curve 由同一份触发器锁住）。
 3. Signal immutable core evidence。
 4. Ghostfolio data is read-only mirror。
 5. Paper data cannot alter real portfolio data。

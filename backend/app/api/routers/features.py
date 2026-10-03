@@ -1,4 +1,11 @@
-"""Feature definition endpoints (docs/12)."""
+"""Feature endpoints (docs/12).
+
+The catalogue is served from code — ``app.features.catalogue`` — because the features
+are computed in code. The ``features`` table this module used to read was never written
+by anything, so ``GET /features`` answered an empty list for the whole life of the
+project (ADR-093). What is still read from the database is the set of feature versions
+that were actually persisted into ``feature_snapshots``, which is real evidence.
+"""
 
 from __future__ import annotations
 
@@ -9,43 +16,28 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
-from app.domain.models import FeatureDefinition
+from app.domain.models import FeatureSnapshot
+from app.features.catalogue import catalogue_payload
+from app.features.engine import FEATURE_VERSION
+from app.features.indicators import INDICATOR_VERSION
+from app.features.price_action import PA_FEATURE_VERSION
 
 router = APIRouter(prefix="/features", tags=["features"])
 
 
-@router.get("/versions", summary="Distinct feature versions across definitions/snapshots")
+@router.get("/versions", summary="Feature versions: what the engine builds and what is stored")
 def feature_versions(db: Session = Depends(get_db)) -> dict[str, Any]:
-    from app.domain.models import FeatureSnapshot
-    from app.features.engine import FEATURE_VERSION
-
-    definition_versions = sorted(
-        {row.feature_version for row in db.scalars(select(FeatureDefinition)).all()}
-    )
     snapshot_versions = sorted(
         {row.feature_version for row in db.scalars(select(FeatureSnapshot)).all()}
     )
     return {
         "engine_feature_version": FEATURE_VERSION,
-        "definition_versions": definition_versions,
+        "indicator_version": INDICATOR_VERSION,
+        "price_action_version": PA_FEATURE_VERSION,
         "snapshot_versions": snapshot_versions,
     }
 
 
-@router.get("", summary="List feature definitions")
-def list_features(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    rows = db.scalars(select(FeatureDefinition).order_by(FeatureDefinition.name)).all()
-    return [
-        {
-            "id": row.id,
-            "name": row.name,
-            "feature_type": row.feature_type,
-            "feature_version": row.feature_version,
-            "description": row.description,
-            "inputs": row.inputs_json,
-            "params": row.params_json,
-            "is_deterministic": row.is_deterministic,
-            "lookahead_safe": row.lookahead_safe,
-        }
-        for row in rows
-    ]
+@router.get("", summary="List the features this engine computes")
+def list_features() -> list[dict[str, Any]]:
+    return catalogue_payload()

@@ -2695,3 +2695,27 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 - 测试：`backend/tests/test_frontend_contracts.py::test_the_navigation_splits_research_from_the_strategy_library` 断言「高级」分组标题与「系统资源」写在 `<template v-if="isAdvanced">` 里、`/settings` 在它之外；文档偏差说明由 `docs/13_UI_UX.md` §1 的正文承担（`test_the_navigation_tree_is_the_shipped_navigation` 只比对 `label + path` 行，分组标题绝不能出现在那个文本块里）。
 
+## ADR-134：软件工程读数从首页搬进「系统管理 → 系统信息」
+
+- 背景：评审 §6 指出，系统状态、版本、引擎、数据库、Redis、特征版本与 DSL Schema 这些读数描述的是**软件本身**，而首页第一屏应该回答「我现在在研究什么、结论是什么、下一步做什么、有什么要注意的」。v1.9.4 之前它们在首页以两张高级 StatCard（`系统状态`、`版本`）加一张「系统构成（高级模式）」卡的形式出现：普通模式下虽然被 `v-if="isAdvanced"` 藏掉，但那一屏的结构仍然是「状态板 + 四问」，顺序由工程读数决定。
+
+- 决策：把这一整组（`GET /health`、`GET /system`）从 `frontend/src/views/DashboardView.vue` **移出**，放到 `frontend/src/views/SettingsView.vue` 的「系统信息」组里，与「运行环境」「审计日志」一样只在高级模式出现：两张 StatCard（`系统状态`、`版本`）、模块 badge 行、`行情源 · 特征版本 · DSL Schema` 一句，另加一句指向 `/resources`（CPU/内存/磁盘/容器明细）。首页只在高级模式留一句指路文字，链接到 `/settings`。端点、返回字段与渲染值**一个都没改**。
+
+- 理由：搬家的成本几乎为零（同一组 `api.health()` / `api.systemInfo()`，只是由另一个页面的 `Promise.all` 请求），收益是首页的结构不再被工程读数支配 —— 四问永远是第一屏，普通用户不会因为「数据库 ok / Redis ok」而以为这页是运维面板。这与 ADR-126（隐藏而不是删除）、§6（放到系统与审计）一致，也顺带把「一个页面一个职责」推进到首页。
+
+- 影响与兼容：`/health` 与 `/system` 的请求从首页的 `Promise.all` 移到设置页的 `Promise.all`（现在十一项，仍各自 `.catch`、失败名写进横幅，ADR-088）；首页请求数由 8 降到 7，首页不再引用 `HealthResponse` / `SystemInfo` 两个类型。设置页因此新增 `health` / `healthError` / `serverInfo` 三个 ref 与 `StatCard` 导入（这一页的 `info` 早已是操作结果横幅，读数另起名字才不撞车）。`系统状态` / `版本` 两个 label 早已在 `frontend/src/metrics.ts` 的 `NOT_A_METRIC` 里，所以 `label="…"` 守卫（docs/13 §7）不受影响。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_engineering_readings_live_in_the_settings_page` 断言首页不含 `api.health(` / `api.systemInfo(` / `系统构成` 且含 `<RouterLink to="/settings">系统管理 → 系统信息</RouterLink>`，设置页的 `Promise.all` 里两个调用各带 `.catch`、`note('系统信息')` 与 `系统信息` 分组标题存在，`系统状态`/`版本` 两张卡在设置页而不在首页；`::test_every_settings_request_answers_for_itself` 把这两个调用加进门禁；`::test_the_interface_has_a_basic_mode_that_hides_engineering_readings` 改为按「哪一页出现哪些读数」判断，不再按首页的 `v-if` 计数。
+
+## ADR-135：排版层级用「结论卡 + 退后的配置卡」实现，不换皮
+
+- 背景：评审 §18 的判断是「保留现有视觉风格，只重新建立信息层级」：卡片过多、结果与配置混在一起、表格过多、关键结论视觉层级不足、要读很多文字才知道下一步。项目此前所有卡片都是同一种实心白底、同一种 13px 弱化标题，读者没有视觉入口。
+
+- 决策：在 `frontend/src/style.css` 里加一层**语义类**，不动配色、字体、组件与断点。① 结果卡带强调色左边框：`.card.answer-card, .card.conclusion-card, .card.comparison-card { border-left: 3px solid var(--accent) }`，并把 `.conclusion-card h3, .comparison-card h3` 从「弱化 + 大写」改成正文色 13.5px，`.conclusion-card .stat, .comparison-card .stat` 放大到 26px。② 只用来填东西的卡加 `.card-quiet { background: transparent; border-style: dashed }`（标题保持弱化）：回测的「运行新回测」、模拟验证的「新建模拟账户」「执行信号（虚拟成交）」、策略库的「用一句人话创建策略」与「从 GitHub 导入」、数据页的三张卡、研究页的 ① ② ③（④ 开始研究 是动作，保持实心）。③ `.page-sub { max-width: 72ch }`，一句人话不再横跨宽屏。
+
+- 理由：主次是**排版问题而不是功能问题** —— 需要用到的控件一个都不能少、一个都不能挪走（这些页面已经被守卫钉住顺序与内容），所以唯一能动的维度是「哪张卡先被眼睛看到」。用透明 + 虚线表示「这里要你输入」，用强调色左边框表示「这里是结论」，是这套现有视觉语言里已有的两种语气，不需要新配色，也不会让老用户觉得换了产品。`border-left: 3px solid var(--accent)` 同时覆盖了原来只给 `.conclusion-card` / `.comparison-card` 的 `var(--border)` 灰边框，避免两处规则打架。
+
+- 影响与兼容：纯 CSS 与 class 改动，没有新增/删除组件、没有新增数据请求、没有改任何量化逻辑或后端；`.card-quiet` 与既有 `.card` 叠加，字体、间距、响应式（`@media (max-width: 820px)`）全部沿用。深色与浅色主题都在 `var(--accent)` 下工作（`#4c8dff` / `#0969da`）。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_typography_separates_a_conclusion_from_its_controls` 断言 `frontend/src/style.css` 含 `.card-quiet` + `border-style: dashed`、三张结果卡的 accent 左边框、26px 读数与 72ch 限宽，并且五个页面各有至少一张 `class="card card-quiet"` 卡、结果卡仍是 `comparison-card`/`conclusion-card`、研究页 ④ 不被静音；`docs/13_UI_UX.md` §13 记录同一条原则。
+

@@ -774,7 +774,7 @@ onMounted(load)
     <p v-if="info" class="notice">{{ info }}</p>
 
     <div class="grid cols-2">
-      <div class="card">
+      <div class="card card-quiet">
         <h3>用一句人话创建策略</h3>
         <p class="muted" style="margin-bottom: 8px">
           回答几个问题就能建一个策略：系统把你的回答写成规则，规则就是这份策略的版本内容。
@@ -1028,7 +1028,7 @@ onMounted(load)
       </div>
     </template>
 
-    <div class="card" style="margin-top: 14px">
+    <div class="card card-quiet" style="margin-top: 14px">
       <h3>从 GitHub 导入（只读分析，不执行仓库代码）</h3>
       <p class="muted">
         七步只有拿到自己的证据才放行：没有分析结果就到不了第 2 步，不安全构造没有人工确认就出不了第 4 步，

@@ -50,6 +50,7 @@ UI_SPEC = (REPO_ROOT / "docs" / "13_UI_UX.md").read_text(encoding="utf-8")
 MAIN_TS = (SRC / "main.ts").read_text(encoding="utf-8")
 RESEARCH = (VIEWS / "ResearchView.vue").read_text(encoding="utf-8")
 DATA = (VIEWS / "DataView.vue").read_text(encoding="utf-8")
+STYLE = (SRC / "style.css").read_text(encoding="utf-8")
 
 # Fields the outcome API sends as fractions. `_pct` in the name does not mean the
 # value was multiplied by 100 — that is the whole bug (ADR-087).
@@ -149,17 +150,49 @@ def test_every_dashboard_request_answers_for_itself() -> None:
 
     block = _promise_all_block(DASHBOARD)
     assert _bare_requests(block) == [], _bare_requests(block)
-    assert "api.systemInfo().catch(" in block
     assert "api.paperAccounts().catch(" in block
+    assert "api.signals(undefined, 50).catch(" in block
     # A failed module is named in the banner instead of taking the page down.
-    assert "note('系统信息')" in block
+    assert "note('策略列表')" in block
     assert "加载失败，页面其余内容仍然可用" in DASHBOARD
+    # The engineering readings are not asked for on this page at all (ADR-134).
+    assert "api.health(" not in DASHBOARD
+    assert "api.systemInfo(" not in DASHBOARD
+
+
+def test_the_engineering_readings_live_in_the_settings_page() -> None:
+    """The first screen answers "what should I do", not "what version is this" (ADR-134).
+
+    The audit (§6) put it plainly: 系统状态 / 版本 / 引擎 / 数据库 / Redis / 特征版本 /
+    DSL Schema are software-engineering readings. They stay in the product, they just
+    belong to 系统管理 → 系统信息 rather than the first thing a user opens.
+    """
+
+    assert "系统构成" not in DASHBOARD
+    assert "health" not in DASHBOARD
+    assert '<RouterLink to="/settings">系统管理 → 系统信息</RouterLink>' in DASHBOARD
+
+    block = _promise_all_block(SETTINGS)
+    assert "api.health().catch(" in block
+    assert "api.systemInfo().catch(" in block
+    assert "note('系统信息')" in block
+    assert "health.value = systemHealth" in SETTINGS
+    assert "if (!systemHealth) healthError.value = '健康检查没有响应'" in SETTINGS
+    assert "serverInfo.value = systemInfo" in SETTINGS
+    assert '<h2 class="group-head">系统信息</h2>' in SETTINGS
 
 
 def test_every_settings_request_answers_for_itself() -> None:
     block = _promise_all_block(SETTINGS)
     assert _bare_requests(block) == [], _bare_requests(block)
-    for call in ("api.audit()", "api.settings()", "api.aiProviders()", "api.notificationConfig()"):
+    for call in (
+        "api.audit()",
+        "api.settings()",
+        "api.aiProviders()",
+        "api.notificationConfig()",
+        "api.health()",
+        "api.systemInfo()",
+    ):
         assert f"{call}.catch(" in block, call
     # The values a failed request leaves behind are read defensively.
     assert "settings?.environment ?? {}" in SETTINGS
@@ -315,24 +348,24 @@ def test_the_interface_has_a_basic_mode_that_hides_engineering_readings() -> Non
     assert '<template v-if="isAdvanced">' in APP
     assert '<RouterLink to="/resources">' in APP
 
-    # Dashboard: 系统状态 / 版本 / 系统构成 are advanced-mode readings now. Counting the
-    # attribute would be satisfied by gating *anything* three times (and stayed green with
-    # four gates while the 系统状态 card was plain), so this asks which readings disappear.
-    def _gated_stat_cards(source: str) -> tuple[set[str], set[str]]:
-        gated: set[str] = set()
-        always: set[str] = set()
-        for card in re.findall(r"<StatCard\b.*?/>", source, re.S):
-            label = card.split('label="', 1)[1].split('"', 1)[0]
-            (gated if 'v-if="isAdvanced"' in card else always).add(label)
-        return gated, always
+    # Dashboard: the engineering readings are gone from the first screen entirely
+    # (ADR-134), so the question is no longer "which ones are gated" but "which page
+    # carries them". Counting `v-if="isAdvanced"` would still be satisfied by gating
+    # *anything* three times, so this asks which readings appear where.
+    def _stat_card_labels(source: str) -> set[str]:
+        return {
+            card.split('label="', 1)[1].split('"', 1)[0]
+            for card in re.findall(r"<StatCard\b.*?/>", source, re.S)
+        }
 
-    gated, always = _gated_stat_cards(DASHBOARD)
-    assert {"系统状态", "版本"} <= gated
-    assert {"可执行信号", "观察中"} <= always
-    assert '<div v-if="isAdvanced" class="card"' in DASHBOARD
+    assert {"可执行信号", "观察中"} <= _stat_card_labels(DASHBOARD)
+    assert "系统状态" not in _stat_card_labels(DASHBOARD)
+    assert "版本" not in _stat_card_labels(DASHBOARD)
+    assert '<h2 class="group-head">系统信息</h2>' in SETTINGS
+    assert {"系统状态", "版本"} <= _stat_card_labels(SETTINGS)
 
-    # Settings: 运行环境 and 审计日志 are whole groups that only advanced mode shows.
-    assert SETTINGS.count('<template v-if="isAdvanced">') >= 2
+    # Settings: 系统信息, 运行环境 and 审计日志 are whole groups only advanced mode shows.
+    assert SETTINGS.count('<template v-if="isAdvanced">') >= 3
 
     # Signals: the raw rule ids and the feature catalogue are advanced-mode material.
     assert SIGNALS.count('v-if="isAdvanced') >= 2
@@ -750,3 +783,46 @@ def test_the_backtest_page_accepts_a_handoff_without_trusting_it() -> None:
         "run",
     ):
         assert key in body, key
+
+
+def test_the_typography_separates_a_conclusion_from_its_controls() -> None:
+    """The audit (§18) asked to keep the look and rebuild the rank order (ADR-135).
+
+    Before this, a form and a one-sentence conclusion were the same white box at the same
+    weight, so the eye had no way in. Two moves carry it, and neither hides anything: the
+    result card gets an accent rule and a larger reading, and the cards that only exist to
+    be filled in step back to a dashed, dimmed frame (``card-quiet``).
+    """
+
+    # The result card leads: accent rule, heading in body colour, bigger number.
+    assert ".card.answer-card," in STYLE
+    assert ".card.conclusion-card," in STYLE
+    assert ".card.comparison-card {" in STYLE
+    assert "border-left: 3px solid var(--accent)" in STYLE
+    assert ".conclusion-card .stat," in STYLE
+    assert "font-size: 26px" in STYLE
+    # The plain-language lead paragraph does not run the width of a desktop monitor.
+    assert ".page-sub {" in STYLE
+    assert "max-width: 72ch" in STYLE
+
+    # The input cards step back on every page that has one.
+    quiet = {
+        "BacktestView.vue": BACKTEST,
+        "PaperView.vue": PAPER,
+        "StrategiesView.vue": STRATEGIES,
+        "DataView.vue": DATA,
+        "ResearchView.vue": RESEARCH,
+    }
+    for name, source in quiet.items():
+        assert ".card-quiet {" in STYLE, name
+        assert 'class="card card-quiet"' in source, name
+    assert "border-style: dashed" in STYLE
+
+    # The result cards keep their solid frame, and ④ 开始研究 is an action, not a form.
+    assert 'class="card comparison-card"' in PAPER
+    assert 'class="card conclusion-card"' in BACKTEST
+    assert "<h3>④ 开始研究</h3>" in RESEARCH
+    assert 'class="card card-quiet" style="margin-top: 14px">\n      <h3>④' not in RESEARCH
+
+    assert "## 13. 排版层级" in UI_SPEC
+    assert "frontend/src/style.css" in UI_SPEC

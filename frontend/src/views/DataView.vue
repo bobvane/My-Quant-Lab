@@ -144,7 +144,7 @@ onMounted(load)
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="info" class="notice">{{ info }}</p>
 
-    <div class="card">
+    <div class="card card-quiet">
       <h3>同步行情</h3>
       <p class="muted" style="margin-bottom: 8px">
         输入 Yahoo Finance 代码（美股如 AAPL、MSFT，ETF 如 SPY、QQQ，加密货币如 BTC-USD），
@@ -264,7 +264,7 @@ onMounted(load)
       </div>
     </div>
 
-    <div class="card" style="margin-top: 14px">
+    <div class="card card-quiet" style="margin-top: 14px">
       <h3>质量那一列是什么意思</h3>
       <p class="muted">
         质量由后端在每次同步后检查（`backend/app/data/market_data_repo.py` 的 `assess_bars_quality`），
@@ -281,7 +281,7 @@ onMounted(load)
       </p>
     </div>
 
-    <div class="card" style="margin-top: 14px">
+    <div class="card card-quiet" style="margin-top: 14px">
       <h3>删除会发生什么</h3>
       <p class="muted">
         已经被回测用过的数据不会被真正删除：后端把它改成「归档」，因为回测结果的可复现性依赖这份数据

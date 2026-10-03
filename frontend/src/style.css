@@ -589,6 +589,43 @@ code {
   margin-left: 6px;
 }
 
+/* Information hierarchy (audit section 18, ADR-135). The audit did not ask for a new look:
+   it asked for a rank order. One answer leads each page and is drawn as a result - accent
+   rule, heading in body colour, larger reading. Cards that only exist to be filled in (a
+   form, a sync box, an account creator) go quiet, so a page reads as "here is the answer,
+   here is what produced it" instead of "here is a wall of settings and tables". */
+.page-sub {
+  max-width: 72ch;
+}
+
+.card.answer-card,
+.card.conclusion-card,
+.card.comparison-card {
+  border-left: 3px solid var(--accent);
+}
+
+.conclusion-card h3,
+.comparison-card h3 {
+  color: var(--text);
+  font-size: 13.5px;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.conclusion-card .stat,
+.comparison-card .stat {
+  font-size: 26px;
+}
+
+.card-quiet {
+  background: transparent;
+  border-style: dashed;
+}
+
+.card-quiet h3 {
+  color: var(--muted);
+}
+
 /* Phone widths (ADR-111, docs/13_UI_UX.md section 9). A signal notification opened on a
    phone must show the page, not a 232px menu column: the shell stacks, the menu becomes a
    horizontally scrollable strip, and wide tables scroll inside the page instead of pushing

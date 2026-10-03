@@ -1,20 +1,31 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 import {
   api,
   type AIProviderRecord,
   type AppSettingsEnvironment,
+  type HealthResponse,
   type NotificationConfig,
   type NotificationTestResult,
   type ProviderTestResult,
+  type SystemInfo,
   type TemporaryAccessState,
 } from '@/api'
+import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber } from '@/format'
 // 界面模式在这一页有两处作用：模式切换开关本身，以及决定工程读数是否出现（ADR-126）。
 import { isAdvanced, mode, setMode } from '@/mode'
 
 const events = ref<Array<Record<string, unknown>>>([])
 const auditTotal = ref(0)
+// 软件工程读数（系统状态、版本、引擎、数据库、Redis、特征版本、DSL Schema）原本挤在
+// 首页第一屏，现在归到这一页的「系统信息」组里：它回答「软件本身怎么样」，不是
+// 「我现在该做什么」（评审 §6；ADR-134）。这一页的 `info` 是操作结果横幅，所以读数
+// 另起一个名字。
+const health = ref<HealthResponse | null>(null)
+const healthError = ref('')
+const serverInfo = ref<SystemInfo | null>(null)
 const environment = ref<Partial<AppSettingsEnvironment>>({})
 const systemSettings = ref<Array<Record<string, any>>>([])
 const newSettingKey = ref('')
@@ -286,29 +297,49 @@ async function copyTunnelUrl() {
 async function load() {
   error.value = ''
   try {
-    // Nine independent panels share this page, so each request answers for
-    // itself: one failing endpoint must not blank the other eight (ADR-088).
+    // Eleven independent panels share this page, so each request answers for
+    // itself: one failing endpoint must not blank the other ten (ADR-088).
     const failures: string[] = []
     const note = (label: string) => {
       failures.push(label)
       return null
     }
-    const [audit, settings, ai, notification, models, usage, notifyLog, prompts, tasks, tunnel] =
-      await Promise.all([
-        api.audit().catch(() => {
-          note('审计日志')
-          return { total: 0, events: [] }
-        }),
-        api.settings().catch(() => note('系统设置')),
-        api.aiProviders().catch(() => note('AI 服务商')),
-        api.notificationConfig().catch(() => note('通知配置')),
-        api.aiModels().catch(() => ({ models: [] })),
-        api.aiUsage().catch(() => ({ usage: [] })),
-        api.notificationEvents().catch(() => ({ events: [] })),
-        api.aiPrompts().catch(() => ({ prompts: [] })),
-        api.aiTasksList().catch(() => []),
-        api.temporaryAccess().catch(() => note('临时远程访问')),
-      ])
+    const [
+      audit,
+      settings,
+      ai,
+      notification,
+      models,
+      usage,
+      notifyLog,
+      prompts,
+      tasks,
+      tunnel,
+      systemHealth,
+      systemInfo,
+    ] = await Promise.all([
+      api.audit().catch(() => {
+        note('审计日志')
+        return { total: 0, events: [] }
+      }),
+      api.settings().catch(() => note('系统设置')),
+      api.aiProviders().catch(() => note('AI 服务商')),
+      api.notificationConfig().catch(() => note('通知配置')),
+      api.aiModels().catch(() => ({ models: [] })),
+      api.aiUsage().catch(() => ({ usage: [] })),
+      api.notificationEvents().catch(() => ({ events: [] })),
+      api.aiPrompts().catch(() => ({ prompts: [] })),
+      api.aiTasksList().catch(() => []),
+      api.temporaryAccess().catch(() => note('临时远程访问')),
+      // /health asks PostgreSQL, Redis and the Celery workers, so on a bare
+      // install it can take seconds; it fills its own card when it arrives
+      // instead of holding the rest of the page hostage (ADR-069).
+      api.health().catch(() => note('系统信息') ?? null),
+      api.systemInfo().catch(() => note('系统信息') ?? null),
+    ])
+    health.value = systemHealth
+    if (!systemHealth) healthError.value = '健康检查没有响应'
+    serverInfo.value = systemInfo
     if (tunnel) applyTemporaryAccess(tunnel)
     notifyEvents.value = notifyLog.events
     aiPrompts.value = prompts.prompts
@@ -964,6 +995,43 @@ onUnmounted(() => {
         <button class="ghost" :disabled="!newSettingKey.trim()" @click="addSetting">新增/更新</button>
       </div>
     </div>
+
+    <template v-if="isAdvanced">
+      <h2 class="group-head">系统信息</h2>
+
+      <div class="card" style="margin-top: 14px">
+        <h3>系统信息</h3>
+        <p class="muted">
+          这一组读数回答的是「软件本身怎么样」：服务是否健康、跑的是哪个版本、引擎与特征版本、
+          行情源和 DSL Schema。它原来挤在首页第一屏，但那块地方应该回答「我现在该做什么」，
+          所以搬到这里（评审 §6；ADR-134）。
+        </p>
+        <div class="grid cols-4" style="margin-top: 14px">
+          <StatCard
+            label="系统状态"
+            :value="health?.status ?? '—'"
+            :sub="
+              health ? `数据库 ${health.database} / Redis ${health.redis}` : healthError || '连接中…'
+            "
+          />
+          <StatCard
+            label="版本"
+            :value="health?.version ?? '—'"
+            :sub="`引擎 ${health?.engine_version ?? '—'}`"
+          />
+        </div>
+        <div class="row" style="margin-top: 12px">
+          <span v-for="m in serverInfo?.modules ?? []" :key="m" class="badge">{{ m }}</span>
+        </div>
+        <p class="muted" style="margin-top: 10px">
+          行情源：{{ serverInfo?.market_data_provider ?? '—' }} · 特征版本：{{ serverInfo?.feature_version ?? '—' }} ·
+          DSL Schema：{{ serverInfo?.strategy_schema_version ?? '—' }}
+        </p>
+        <p class="muted" style="margin-top: 8px">
+          CPU、内存、磁盘与容器明细在<RouterLink to="/resources">系统资源</RouterLink>页。
+        </p>
+      </div>
+    </template>
 
     <template v-if="isAdvanced">
       <h2 class="group-head">运行环境</h2>

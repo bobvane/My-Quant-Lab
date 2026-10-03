@@ -1141,7 +1141,7 @@ onMounted(async () => {
 
     <p v-if="error" class="error">{{ error }}</p>
 
-    <div class="card">
+    <div class="card card-quiet">
       <h3>运行新回测</h3>
       <div class="row">
         <select v-model="strategyId" style="max-width: 220px">

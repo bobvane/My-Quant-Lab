@@ -308,7 +308,7 @@ onMounted(() => {
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="info" class="notice">{{ info }}</p>
 
-    <div class="card">
+    <div class="card card-quiet">
       <h3>新建模拟账户</h3>
       <div class="row">
         <input v-model="name" style="max-width: 220px" placeholder="账户名称" />
@@ -455,7 +455,7 @@ onMounted(() => {
       <p v-else class="muted">{{ comparison.note }}</p>
     </div>
 
-    <div v-if="accounts.length" class="card" style="margin-top: 14px">
+    <div v-if="accounts.length" class="card card-quiet" style="margin-top: 14px">
       <h3>执行信号（虚拟成交）</h3>
       <p class="muted">
         填写一个已持久化的信号 ID，对指定账户按该信号成交。BUY 开仓、SELL 平仓；账户关闭时拒绝成交。

@@ -6,14 +6,12 @@ import {
   type AIStatus,
   type BacktestSummary,
   type ExplainResult,
-  type HealthResponse,
   type PaperAccount,
   type SignalIntent,
   type SignalRecord,
   type Strategy,
   type StrategyLifecycle,
   type StrategyVersion,
-  type SystemInfo,
 } from '@/api'
 import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, signalDirection, toneOf } from '@/format'
@@ -29,9 +27,6 @@ import {
   timeframeLabel,
 } from '@/wording'
 
-const health = ref<HealthResponse | null>(null)
-const healthError = ref('')
-const info = ref<SystemInfo | null>(null)
 const signals = ref<SignalIntent[]>([])
 const accounts = ref<PaperAccount[]>([])
 const scanning = ref(false)
@@ -70,19 +65,6 @@ function qualityTone(status: string): string {
 
 async function load() {
   error.value = ''
-  healthError.value = ''
-  // /health asks PostgreSQL, Redis and the Celery workers, so on a bare install
-  // it can take seconds. It fills its own card when it arrives instead of
-  // holding the accounts table (and the whole page) hostage (ADR-069).
-  void api
-    .health()
-    .then((h) => {
-      health.value = h
-    })
-    .catch(() => {
-      health.value = null
-      healthError.value = '健康检查没有响应'
-    })
   try {
     // Every panel here answers for itself: one module that fails must not blank
     // the other five (ADR-088). The failed labels are named in the banner.
@@ -91,8 +73,7 @@ async function load() {
       failures.push(label)
       return null
     }
-    const [i, a, ai, assetsList, sList, appSettings, strategyRows, recent] = await Promise.all([
-      api.systemInfo().catch(() => note('系统信息')),
+    const [a, ai, assetsList, sList, appSettings, strategyRows, recent] = await Promise.all([
       api.paperAccounts().catch(() => note('模拟账户') ?? []),
       api.aiStatus().catch(() => null),
       api.assets().catch(() => []),
@@ -101,7 +82,6 @@ async function load() {
       api.strategies().catch(() => note('策略列表') ?? []),
       api.signals(undefined, 50).catch(() => []),
     ])
-    info.value = i
     accounts.value = a
     aiStatus.value = ai
     assets.value = assetsList
@@ -413,7 +393,7 @@ onMounted(load)
       </div>
     </div>
 
-    <div class="grid" :class="isAdvanced ? 'cols-4' : 'cols-2'" style="margin-top: 14px">
+    <div class="grid cols-2" style="margin-top: 14px">
       <StatCard
         label="可执行信号"
         :value="signals.length ? actionable() : '—'"
@@ -423,18 +403,6 @@ onMounted(load)
         label="观察中"
         :value="signals.length ? waiting() : '—'"
         sub="暂不确认：入场条件还没满足，不追单"
-      />
-      <StatCard
-        v-if="isAdvanced"
-        label="系统状态"
-        :value="health?.status ?? '—'"
-        :sub="health ? `数据库 ${health.database} / Redis ${health.redis}` : healthError || '连接中…'"
-      />
-      <StatCard
-        v-if="isAdvanced"
-        label="版本"
-        :value="health?.version ?? '—'"
-        :sub="`引擎 ${health?.engine_version ?? '—'}`"
       />
     </div>
 
@@ -651,15 +619,10 @@ onMounted(load)
       </div>
     </div>
 
-    <div v-if="isAdvanced" class="card" style="margin-top: 14px">
-      <h3>系统构成（高级模式）</h3>
-      <div class="row">
-        <span v-for="m in info?.modules ?? []" :key="m" class="badge">{{ m }}</span>
-      </div>
-      <p class="muted" style="margin-top: 10px">
-        行情源：{{ info?.market_data_provider ?? '—' }} · 特征版本：{{ info?.feature_version ?? '—' }} ·
-        DSL Schema：{{ info?.strategy_schema_version ?? '—' }}
-      </p>
-    </div>
+    <p v-if="isAdvanced" class="muted" style="margin-top: 14px">
+      系统状态、版本、引擎、数据库、Redis、特征版本与 DSL Schema 已经搬到
+      <RouterLink to="/settings">系统管理 → 系统信息</RouterLink>：它们回答的是「软件本身怎么样」，
+      不是「我现在该做什么」（评审 §6；ADR-134）。
+    </p>
   </div>
 </template>

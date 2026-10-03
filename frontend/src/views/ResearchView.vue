@@ -220,7 +220,7 @@ onMounted(async () => {
 
     <p v-if="error" class="error">{{ error }}</p>
 
-    <div class="card">
+    <div class="card card-quiet">
       <h3>① 选择标的</h3>
       <p class="muted">
         下面列出来的都是已经同步好的数据。没有你要的代码，就先去「数据」页同步一份。
@@ -256,7 +256,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <div class="card" style="margin-top: 14px">
+    <div class="card card-quiet" style="margin-top: 14px">
       <h3>② 选择策略</h3>
       <div v-if="strategies.length" class="row" style="margin-bottom: 10px">
         <select v-model.number="strategyId" style="max-width: 260px">
@@ -280,7 +280,7 @@ onMounted(async () => {
       </p>
     </div>
 
-    <div class="card" style="margin-top: 14px">
+    <div class="card card-quiet" style="margin-top: 14px">
       <h3>③ 设置少量参数</h3>
       <p class="muted" style="margin-bottom: 8px">
         只在这里改两件事：研究哪一段时间，以及每次用多少钱。其余假设（手续费、滑点、成交模型）

@@ -646,11 +646,28 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbol, timeframe, lookback_days: lookbackDays }),
     }),
-  deleteSeries: (seriesId: number) =>
-    request<{ deleted: number; symbol: string }>(`/market-data/series/${seriesId}`, {
+  // Deleting a series a backtest used archives it instead (ADR-081): the run's
+  // dataset pointer is the reproducibility evidence, so the data stays. `purge`
+  // says "really delete", and the API answers 409 while runs depend on it.
+  deleteSeries: (seriesId: number, purge = false) =>
+    request<{
+      deleted: number | null
+      symbol: string
+      archived: boolean
+      blocking_runs: number
+      message: string
+    }>(`/market-data/series/${seriesId}${purge ? '?purge=true' : ''}`, {
       method: 'DELETE',
     }),
-  series: () => request<Array<Record<string, unknown>>>('/market-data/series'),
+  restoreSeries: (seriesId: number) =>
+    request<{ id: number; is_archived: boolean; blocking_runs: number }>(
+      `/market-data/series/${seriesId}/restore`,
+      { method: 'POST' },
+    ),
+  series: (includeArchived = false) =>
+    request<Array<Record<string, unknown>>>(
+      `/market-data/series${includeArchived ? '?include_archived=true' : ''}`,
+    ),
   latestBars: (symbol: string, timeframe = '1d', limit = 120) =>
     request<{ bars: Array<{ timestamp: string; close: number; high: number; low: number; open: number }> }>(
       `/market-data/latest/${encodeURIComponent(symbol)}?timeframe=${timeframe}&limit=${limit}`,

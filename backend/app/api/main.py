@@ -75,6 +75,17 @@ from app.infrastructure.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
+
+def new_incident_id() -> str:
+    """A short id that ties a 500 response to the log line that explains it.
+
+    Eight hex characters: long enough not to collide in one operator's log window,
+    short enough to read over the phone.
+    """
+
+    return secrets.token_hex(4)
+
+
 DESCRIPTION = """
 My Quant Lab — Personal Quantitative Research Laboratory.
 
@@ -187,9 +198,14 @@ def create_app() -> FastAPI:
     )
 
     @app.exception_handler(Exception)
-    async def unhandled_exception_handler(request: Request, exc: Exception):  # pragma: no cover
-        logger.exception("unhandled error on %s", request.url.path)
-        details: dict[str, object] = {"path": str(request.url.path)}
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        # An unhandled error used to return "internal server error" and nothing else,
+        # which is useless to the person who has to find it (ADR-082). A short
+        # incident id goes into the log line *and* into the response, so the message
+        # the user reads can be grepped straight out of the container logs.
+        incident = new_incident_id()
+        logger.exception("unhandled error on %s (incident %s)", request.url.path, incident)
+        details: dict[str, object] = {"path": str(request.url.path), "incident": incident}
         if not settings.is_production:
             # Outside production the cause is returned to the caller so CI and
             # local debugging do not have to dig through container logs.
@@ -199,10 +215,11 @@ def create_app() -> FastAPI:
             content={
                 "error": {
                     "code": "internal_error",
-                    "message": "internal server error",
+                    "message": f"internal server error (incident {incident})",
                     "details": details,
                 }
             },
+            headers={"X-Incident-Id": incident},
         )
 
     for router in (

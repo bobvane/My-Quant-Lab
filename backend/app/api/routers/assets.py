@@ -68,6 +68,8 @@ def list_series(asset_id: int, db: Session = Depends(get_db)) -> list[dict]:
             "series_start": row.series_start,
             "series_end": row.series_end,
             "last_sync_at": row.last_sync_at,
+            # Kept because backtests point at it (ADR-081), not because it is in use.
+            "is_archived": bool(row.is_archived),
         }
         for row in series
     ]

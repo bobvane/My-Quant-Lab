@@ -26,7 +26,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine, event  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
@@ -49,6 +49,18 @@ def db_session(tmp_path):
         poolclass=StaticPool,
         future=True,
     )
+
+    # SQLite ignores foreign keys unless they are switched on per connection, and
+    # the production database is PostgreSQL: a suite that never enforces them
+    # cannot see the difference between "this row is still referenced" and "this
+    # row was orphaned". Turn the rules on so the tests fail the way production
+    # does instead of silently accepting broken references.
+    @event.listens_for(engine, "connect")
+    def _sqlite_enforce_foreign_keys(dbapi_connection, _record):  # pragma: no cover
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     session = TestingSession()

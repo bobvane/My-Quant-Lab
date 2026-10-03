@@ -67,6 +67,9 @@ const error = ref('')
 const info = ref('')
 const syncing = ref(false)
 const lookbackDays = ref(400)
+// Archived series are hidden by default: they are kept because backtests still
+// point at them (ADR-081), not because they are still in use.
+const showArchived = ref(false)
 
 const SAMPLE_DSL = {
   schema_version: '1.0',
@@ -107,7 +110,7 @@ async function load() {
     const [a, s, sr, lc] = await Promise.all([
       api.assets(),
       api.strategies(),
-      api.series(),
+      api.series(showArchived.value),
       api.lifecycles(),
     ])
     assets.value = a
@@ -119,6 +122,12 @@ async function load() {
     error.value = (e as Error).message
   }
 }
+
+// Archived rows only exist in the response when they are asked for, so the toggle
+// is a re-fetch rather than a client-side filter.
+watch(showArchived, () => {
+  void load()
+})
 
 function evidenceSummary(row: StrategyLifecycle): string {
   const e = row.evidence
@@ -230,9 +239,24 @@ async function deleteStrategy(id: number) {
 
 async function deleteSeries(id: number) {
   error.value = ''
+  info.value = ''
   try {
     const result = await api.deleteSeries(id)
-    info.value = `已删除 ${result.symbol} 的行情数据（系列 #${id}）`
+    info.value = result.archived
+      ? `ℹ ${result.message}`
+      : `已删除 ${result.symbol} 的行情数据（系列 #${id}）`
+    await load()
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
+async function restoreSeries(id: number) {
+  error.value = ''
+  info.value = ''
+  try {
+    await api.restoreSeries(id)
+    info.value = `已恢复系列 #${id} 的行情数据`
     await load()
   } catch (e) {
     error.value = (e as Error).message
@@ -624,6 +648,9 @@ onMounted(load)
             {{ syncing ? '同步中…（可能需要几秒）' : '同步日线数据' }}
           </button>
         </div>
+        <label class="muted">
+          <input v-model="showArchived" type="checkbox" /> 显示已归档（有回测使用，数据为可复现而保留）
+        </label>
         <table v-if="series.length">
           <thead>
             <tr>
@@ -637,12 +664,18 @@ onMounted(load)
           </thead>
           <tbody>
             <tr v-for="s in series" :key="String(s.id)">
-              <td>{{ assetSymbol(Number(s.asset_id)) }}</td>
+              <td>
+                {{ assetSymbol(Number(s.asset_id)) }}
+                <span v-if="s.is_archived" class="badge WAIT">已归档</span>
+              </td>
               <td>{{ s.timeframe }}</td>
               <td class="muted">{{ String(s.series_start ?? '').slice(0, 10) }} → {{ String(s.series_end ?? '').slice(0, 10) }}</td>
               <td>{{ s.quality_status }}</td>
               <td>{{ formatDateTime(String(s.last_sync_at ?? '')) }}</td>
-              <td><button class="ghost" @click="deleteSeries(Number(s.id))">删除</button></td>
+              <td>
+                <button v-if="s.is_archived" class="ghost" @click="restoreSeries(Number(s.id))">恢复</button>
+                <button v-else class="ghost" @click="deleteSeries(Number(s.id))">删除</button>
+              </td>
             </tr>
           </tbody>
         </table>

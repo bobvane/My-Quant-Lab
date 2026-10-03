@@ -7,7 +7,7 @@ import logging
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import BarOut, MarketDataSyncRequest
@@ -27,7 +27,14 @@ from app.data.providers import (
     get_market_data_provider,
     mark_closed_bars,
 )
-from app.domain.models import Asset, MarketDataBar, MarketDataSeries, MarketDataSource
+from app.domain.models import (
+    Asset,
+    BacktestRun,
+    FeatureSnapshot,
+    MarketDataBar,
+    MarketDataSeries,
+    MarketDataSource,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/market-data", tags=["market-data"])
@@ -67,11 +74,19 @@ def list_data_sources(db: Session = Depends(get_db)) -> list[dict]:
 def list_series(
     db: Session = Depends(get_db),
     asset_id: int | None = None,
+    include_archived: bool = Query(
+        default=False,
+        description="Also list archived series (kept only because backtests still point at them)",
+    ),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict]:
     stmt = select(MarketDataSeries)
     if asset_id:
         stmt = stmt.where(MarketDataSeries.asset_id == asset_id)
+    if not include_archived:
+        # An archived series is deliberately out of the sync list: the data is kept
+        # for reproducibility (ADR-081), not because it is still in use.
+        stmt = stmt.where(MarketDataSeries.is_archived.is_(False))
     rows = db.scalars(stmt.order_by(MarketDataSeries.id).limit(limit)).all()
     return [
         {
@@ -84,6 +99,7 @@ def list_series(
             "series_start": row.series_start,
             "series_end": row.series_end,
             "last_sync_at": row.last_sync_at,
+            "is_archived": bool(row.is_archived),
         }
         for row in rows
     ]
@@ -116,6 +132,7 @@ def get_series(series_id: int, db: Session = Depends(get_db)) -> dict:
         "last_sync_at": row.last_sync_at,
         "content_hash": row.content_hash,
         "bar_count": int(bars),
+        "is_archived": bool(row.is_archived),
     }
 
 
@@ -265,13 +282,140 @@ def latest_bars(
     }
 
 
-@router.delete("/series/{series_id}", summary="Delete a series and all its bars")
-def delete_series(series_id: int, db: Session = Depends(get_db)) -> dict:
+def _blocking_runs(db: Session, series_id: int) -> int:
+    """How many completed backtests point at this series as their dataset."""
+
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(BacktestRun)
+            .where(BacktestRun.dataset_version_id == series_id)
+        )
+        or 0
+    )
+
+
+def _symbol_of(db: Session, series: MarketDataSeries) -> str:
+    asset = db.get(Asset, series.asset_id)
+    return asset.symbol if asset else str(series.asset_id)
+
+
+def _hard_delete(db: Session, series: MarketDataSeries) -> None:
+    """Delete the series and its children explicitly.
+
+    Do not rely on the database cascade: PostgreSQL would cascade on its own, the
+    SQLite test database only does so with foreign keys switched on, and the rows we
+    delete here are exactly the ones that make "hard delete" irreversible.
+    """
+
+    db.execute(delete(MarketDataBar).where(MarketDataBar.series_id == series.id))
+    db.execute(delete(FeatureSnapshot).where(FeatureSnapshot.series_id == series.id))
+    db.delete(series)
+    db.flush()
+
+
+@router.delete("/series/{series_id}", summary="Delete a series, or archive one a backtest used")
+def delete_series(
+    series_id: int,
+    db: Session = Depends(get_db),
+    purge: bool = Query(
+        default=False,
+        description="Really delete the data even though backtests point at it (refused instead)",
+    ),
+) -> dict:
+    """Remove a series — but never make a reproducible backtest unreproducible.
+
+    ``backtest_runs.dataset_version_id`` is the evidence of what a result was computed
+    from. Deleting the series under it would leave a result nobody can re-derive, so a
+    series a backtest used is archived (hidden from the sync list, data kept) instead.
+    ``?purge=true`` says "I really mean delete": it is refused with 409 while runs
+    depend on the series, the same convention ``delete_strategy`` already uses.
+    """
+
+    from app.data.strategy_service import record_audit
+
     series = db.get(MarketDataSeries, series_id)
     if series is None:
         raise HTTPException(status_code=404, detail="series not found")
-    asset = db.get(Asset, series.asset_id)
-    symbol = asset.symbol if asset else str(series.asset_id)
-    db.delete(series)
+    symbol = _symbol_of(db, series)
+    blocking = _blocking_runs(db, series_id)
+
+    if blocking and purge:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{symbol} 的行情数据被 {blocking} 次回测使用，不能直接删除。"
+                "请先删除相关回测记录，或改为归档（不带 purge 参数）。"
+            ),
+        )
+
+    if blocking:
+        series.is_archived = True
+        record_audit(
+            db,
+            event_type="market_data_series_archived",
+            entity_type="market_data_series",
+            entity_id=str(series_id),
+            action="archive",
+            payload={"symbol": symbol, "blocking_runs": blocking},
+        )
+        db.commit()
+        logger.info(
+            "archived market data series %s (%s): %d backtest run(s) depend on it",
+            series_id,
+            symbol,
+            blocking,
+        )
+        return {
+            "deleted": None,
+            "symbol": symbol,
+            "archived": True,
+            "blocking_runs": blocking,
+            "message": (
+                f"{symbol} 的行情数据被 {blocking} 次回测使用，已归档并在行情同步中隐藏；"
+                "数据保留，回测结果仍可复现。"
+            ),
+        }
+
+    _hard_delete(db, series)
+    record_audit(
+        db,
+        event_type="market_data_series_deleted",
+        entity_type="market_data_series",
+        entity_id=str(series_id),
+        action="delete",
+        payload={"symbol": symbol, "purged": purge},
+    )
     db.commit()
-    return {"deleted": series_id, "symbol": symbol}
+    logger.info("deleted market data series %s (%s)", series_id, symbol)
+    return {
+        "deleted": series_id,
+        "symbol": symbol,
+        "archived": False,
+        "blocking_runs": 0,
+        "message": f"已删除 {symbol} 的行情数据（系列 #{series_id}）。",
+    }
+
+
+@router.post("/series/{series_id}/restore", summary="Bring an archived series back")
+def restore_series(series_id: int, db: Session = Depends(get_db)) -> dict:
+    from app.data.strategy_service import record_audit
+
+    series = db.get(MarketDataSeries, series_id)
+    if series is None:
+        raise HTTPException(status_code=404, detail="series not found")
+    series.is_archived = False
+    record_audit(
+        db,
+        event_type="market_data_series_restored",
+        entity_type="market_data_series",
+        entity_id=str(series_id),
+        action="restore",
+        payload={"symbol": _symbol_of(db, series)},
+    )
+    db.commit()
+    return {
+        "id": series_id,
+        "is_archived": bool(series.is_archived),
+        "blocking_runs": _blocking_runs(db, series_id),
+    }

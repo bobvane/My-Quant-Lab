@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.data.github_source_service import record_snapshot
 from app.domain.models import GitHubSnapshot, GitHubSource, Strategy, StrategyVersion
-from app.importer.extract import AnalysisResult
+from app.importer.extract import AnalysisResult, SkippedFile
 from app.importer.github_client import FetchCoverage
 from app.workers.tasks import _bump_version, check_source
 
@@ -44,7 +44,12 @@ def test_bump_version_scheme() -> None:
     assert _bump_version("1.9.9") == "2.0.0"
 
 
-def _install_fake_client(monkeypatch, head: str, coverage: FetchCoverage | None = None):
+def _install_fake_client(
+    monkeypatch,
+    head: str,
+    coverage: FetchCoverage | None = None,
+    findings: AnalysisResult | None = None,
+):
     import app.importer as importer
 
     report = coverage or _complete_coverage()
@@ -60,7 +65,9 @@ def _install_fake_client(monkeypatch, head: str, coverage: FetchCoverage | None 
             return (object(), [], report)
 
     monkeypatch.setattr(importer, "GitHubClient", _FakeClient)
-    monkeypatch.setattr(importer, "analyze_repository_files", lambda files: AnalysisResult())
+    monkeypatch.setattr(
+        importer, "analyze_repository_files", lambda files: findings or AnalysisResult()
+    )
     monkeypatch.setattr(importer, "build_draft_dsl", lambda meta, findings: (_DRAFT, []))
 
 
@@ -223,6 +230,45 @@ def test_unread_non_python_files_do_not_block_an_import(db_session, monkeypatch)
     snapshot = db_session.query(GitHubSnapshot).one()
     assert snapshot.extraction_json["coverage"]["not_attempted_files"] == 10
     assert snapshot.extraction_json["coverage"]["complete"] is False
+
+
+def test_a_python_file_that_did_not_parse_blocks_an_unattended_import(
+    db_session, monkeypatch
+) -> None:
+    """Read is not the same claim as understood (ADR-059).
+
+    A file can download successfully and still fail to parse. It used to be
+    counted in ``files_parsed``, so ``coverage["complete"]`` stayed true, no
+    warning said anything, and the watcher imported a draft with every rule that
+    file declares silently missing.
+    """
+
+    findings = AnalysisResult(
+        files_unparsed=[
+            SkippedFile(
+                path="legacy.py",
+                reason=(
+                    "file does not parse as Python (SyntaxError): "
+                    "Missing parentheses in call to 'print'"
+                ),
+            )
+        ]
+    )
+    _install_fake_client(monkeypatch, "newsha", findings=findings)
+    source = _seed_importable_source(db_session)
+
+    assert check_source(db_session, source) == "incomplete"
+    assert source.last_import_status == "incomplete"
+    assert db_session.query(StrategyVersion).count() == 1  # nothing imported
+    # Not parsing is structural, not transient: re-reading changes nothing, so
+    # the commit is marked as seen instead of being retried forever (ADR-057).
+    assert source.current_commit == "newsha"
+    db_session.commit()
+    snapshot = db_session.query(GitHubSnapshot).one()
+    assert snapshot.extraction_json["reason"] == "unparseable_python"
+    assert snapshot.extraction_json["transient"] is False
+    assert snapshot.extraction_json["files_unparsed"][0]["path"] == "legacy.py"
+    assert any("did not parse" in w for w in snapshot.extraction_json["warnings"])
 
 
 def test_re_checking_a_commit_refreshes_its_snapshot(db_session, monkeypatch) -> None:

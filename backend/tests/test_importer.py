@@ -21,6 +21,7 @@ from app.importer import (
 from app.importer.extract import AnalysisResult, build_coverage, coverage_warnings
 from app.importer.github_client import (
     DEFAULT_FETCH_BUDGET_SECONDS,
+    FetchCoverage,
     RepoFile,
     RepoMeta,
 )
@@ -156,9 +157,18 @@ def test_unknown_code_stays_unknown() -> None:
     assert all("my_secret_sauce" not in (r.left, r.right) for r in result.rules)
 
 
-def test_unparseable_file_becomes_unknown() -> None:
+def test_unparseable_file_is_reported_as_unparsed_not_understood() -> None:
+    """Reading a file is not the same claim as understanding it (ADR-059).
+
+    The failure used to be filed as an "unknown construct", which is a mapping
+    report - and the file was still counted as parsed, so nothing downstream
+    could tell that every rule it declares was missing.
+    """
+
     result = analyze_python_source("broken.py", "def broken(:\n  ???")
-    assert any(u.category == "unparseable" for u in result.unknowns)
+    assert result.parse_error is not None
+    assert "does not parse as Python" in result.parse_error
+    assert result.unknowns == []
 
 
 def test_sanitize_strips_instruction_override() -> None:
@@ -239,6 +249,46 @@ def test_analyze_repository_files_skips_non_python() -> None:
     assert result.files_skipped[0].reason == "binary"
     assert result.files_inventoried == ["notes.md"]  # inventoried, not parsed
     assert result.indicators
+
+
+def test_a_file_that_does_not_parse_is_not_counted_as_parsed() -> None:
+    """A downloaded file that yields nothing must not read as analysed (ADR-059)."""
+
+    files = [
+        RepoFile(path="strat.py", size=100, sha="a", content=EMA_CROSS_SOURCE),
+        RepoFile(path="legacy.py", size=100, sha="b", content="print 'py2'\n"),
+    ]
+    result = analyze_repository_files(files)
+    assert result.files_parsed == ["strat.py"]
+    assert [f.path for f in result.files_unparsed] == ["legacy.py"]
+    assert "does not parse as Python" in result.files_unparsed[0].reason
+
+    coverage = build_coverage(
+        FetchCoverage(
+            candidate_files=2,
+            candidate_python_files=2,
+            attempted_files=2,
+            downloaded_files=2,
+            skipped_files=0,
+            skipped_python_files=0,
+            not_attempted_files=0,
+            not_attempted_python_files=0,
+            cap=30,
+        ),
+        result,
+    )
+    assert coverage["unparsed_python_files"] == 1
+    assert coverage["parsed_files"] == 1
+    warnings = coverage_warnings(coverage)
+    assert any("did not parse" in w for w in warnings)
+    # The unparsed file is not one of the "construct(s) that could not be mapped":
+    # that count is a mapping report, and this file was never mapped at all. It
+    # used to be the only trace such a file left (ADR-059).
+    _dsl, draft_warnings = build_draft_dsl(_meta(), result)
+    assert len(result.unknowns) == 1  # strat.py's own unresolved rule, nothing more
+    mapped = [w for w in draft_warnings if "could not be mapped" in w]
+    assert len(mapped) == 1
+    assert mapped[0].startswith("1 construct(s)")
 
 
 class _FakeGitHub(GitHubClient):
@@ -461,7 +511,7 @@ def test_analyze_endpoint_reports_its_coverage(client, monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
 
-    assert body["analysis_version"] == "1.2.0"
+    assert body["analysis_version"] == "1.3.0"
     coverage = body["coverage"]
     assert coverage["candidate_files"] == 14
     assert coverage["candidate_python_files"] == 4
@@ -469,14 +519,72 @@ def test_analyze_endpoint_reports_its_coverage(client, monkeypatch) -> None:
     assert coverage["not_attempted_files"] == 9
     assert coverage["complete"] is False
     assert coverage["unread_python_files"] == 0
+    assert coverage["unparsed_python_files"] == 0
     assert coverage["budget_exhausted"] is False
     assert coverage["max_seconds"] == 120
 
     assert all(path.endswith(".py") for path in body["files_parsed"])
     assert all(path.endswith(".md") for path in body["files_inventoried"])
     assert len(body["files_parsed"]) == 4  # inventoried is not parsed
+    assert body["files_unparsed"] == []
     assert any("never fetched" in warning for warning in body["warnings"])
     assert not any("stopped after" in warning for warning in body["warnings"])
+    assert not any("did not parse" in warning for warning in body["warnings"])
+
+
+def test_analyze_endpoint_reports_a_file_it_could_not_parse(client, monkeypatch) -> None:
+    """A fully read repository can still hold a file nobody understood (ADR-059).
+
+    Every candidate is fetched here, so ``complete`` is true and nothing looks unread.
+    The Python file that does not parse is the whole story, and the response has to
+    carry it: otherwise the reader sees an empty finding list for a strategy whose
+    rules live in that file.
+    """
+
+    class BrokenRepo(_FakeGitHub):
+        def __init__(self, token: str | None = None) -> None:
+            super().__init__()
+
+        def get_json(self, url: str):  # type: ignore[override]
+            if "/git/trees/" in url:
+                return {
+                    "tree": [
+                        {"path": "good.py", "type": "blob", "size": 100, "sha": "a"},
+                        {"path": "legacy.py", "type": "blob", "size": 100, "sha": "b"},
+                        {"path": "README.md", "type": "blob", "size": 50, "sha": "c"},
+                    ],
+                    "truncated": False,
+                }
+            return super().get_json(url)
+
+        def get_text(self, url: str, *, max_bytes: int = 1) -> str:  # type: ignore[override]
+            if url.endswith("legacy.py"):
+                return "print 'python 2 style'\n"
+            if url.endswith("good.py"):
+                return EMA_CROSS_SOURCE
+            return "# demo"
+
+    import app.api.routers.importer as importer_router
+
+    monkeypatch.setattr(importer_router, "GitHubClient", BrokenRepo)
+    response = client.post(
+        "/api/v1/importer/github/analyze",
+        json={"repo_url": "https://github.com/acme/strat"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["files_parsed"] == ["good.py"]
+    assert body["files_inventoried"] == ["README.md"]
+    assert [item["path"] for item in body["files_unparsed"]] == ["legacy.py"]
+    assert "does not parse as Python" in body["files_unparsed"][0]["reason"]
+
+    coverage = body["coverage"]
+    assert coverage["complete"] is True
+    assert coverage["unread_python_files"] == 0
+    assert coverage["unparsed_python_files"] == 1
+    assert coverage["parsed_files"] == 1
+    assert any("did not parse" in warning for warning in body["warnings"])
 
 
 def test_import_endpoint_rejects_invalid_dsl(client) -> None:

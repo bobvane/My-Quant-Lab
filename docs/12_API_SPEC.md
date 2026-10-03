@@ -377,29 +377,37 @@ re-imported automatically when a new commit lands):
 `POST /importer/github/analyze` is read-only and returns the review surface: the
 findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
 
-- `analysis_version` (currently `1.2.0`) rises whenever the report's field semantics
+- `analysis_version` (currently `1.3.0`) rises whenever the report's field semantics
   change. It moved to `1.1.0` when `files_scanned` was split into `files_parsed` and
   `files_inventoried` (non-Python files are inventoried, not parsed) and
   `files_skipped` became `[{path, reason}]` instead of bare paths; to `1.2.0` when
-  `coverage` learned to separate "the cap stopped it" from "the time budget stopped it".
+  `coverage` learned to separate "the cap stopped it" from "the time budget stopped it";
+  to `1.3.0` when a Python file that was downloaded but did not parse stopped being
+  counted as parsed (`files_parsed`, `coverage.unparsed_python_files`, ADR-059).
+- `files_unparsed` = `[{path, reason}]` for files that were fetched but whose parse
+  failed. They contributed nothing to the findings, so the draft cannot contain the rules
+  they declare; the `reason` is the parser's own error, sanitised.
 - `max_files` (1–30, default 12) caps how many candidates are fetched; `max_seconds`
   (10–600, default 120) is the wall-clock budget for the whole fetch (ADR-057). The
   per-request timeout cannot bound a loop of 30 files with retries, so the loop has a
   budget of its own and stops when it is spent.
 - `coverage` = `candidate_files`, `candidate_python_files`, `cap`, `attempted_files`,
   `downloaded_files`, `parsed_files`, `inventoried_files`, `skipped_files`,
-  `not_attempted_files`, `unread_python_files`, `complete`, `max_seconds`,
-  `budget_exhausted`. The numbers describe the fetch, not the repo's docs: `1` candidate
-  file and `cap = 1` are different facts. `budget_exhausted` decides which advice
-  applies — raise the budget, or raise `max_files` (the cap was never reached).
+  `unparsed_python_files`, `not_attempted_files`, `unread_python_files`, `complete`,
+  `max_seconds`, `budget_exhausted`. The numbers describe the fetch, not the repo's docs:
+  `1` candidate file and `cap = 1` are different facts. `budget_exhausted` decides which
+  advice applies — raise the budget, or raise `max_files` (the cap was never reached).
 - `warnings` carries the coverage sentences (never fetched / stopped after the budget /
-  unread Python / unread after fetch) plus the DSL-builder warnings. They are not
-  advisory decoration: a non-empty list means the findings may be missing rules that
-  live in files the analysis never read.
+  unread Python / unread after fetch / downloaded but did not parse) plus the DSL-builder
+  warnings. They are not advisory decoration: a non-empty list means the findings may be
+  missing rules that live in files the analysis never read — or never understood.
 - The last_import_status of a watched source can be `incomplete`: the watcher refuses
-  to import from a partial read and records the coverage gap in the snapshot instead.
-  A gap caused by the budget or the network is recorded as `transient` and does **not**
-  advance the source's `current_commit`, so the next scheduled check retries it.
+  to import from a partial read, or from a read in which a Python file did not parse, and
+  records the gap in the snapshot instead (`reason` is `incomplete_analysis` for the
+  former, `unparseable_python` for the latter). A gap caused by the budget or the network
+  is recorded as `transient` and does **not** advance the source's `current_commit`, so
+  the next scheduled check retries it; a cap-limited read or a file that did not parse is
+  structural and is marked as seen.
 - `last_import_status` uses the watcher's outcome vocabulary (ADR-058): `unchanged`
   (the commit was already seen, nothing was fetched), `no_change` (a new commit was
   fetched and analysed, the DSL did not change), `imported`, `incomplete`, `error`.
@@ -407,8 +415,8 @@ findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
   clients should render it as a historical value rather than reinterpreting it.
 - `GET /importer/github/sources/{id}/snapshots` returns `id`, `source_id`, `commit`,
   `content_hash`, `fetched_at` and `extraction`. `extraction` is the stored reason
-  (`imported`, `reason`, `transient`, `coverage`, `warnings`); snapshots written before
-  v1.4.8 from the manual import path may be `{}`.
+  (`imported`, `reason`, `transient`, `coverage`, `files_unparsed`, `warnings`);
+  snapshots written before v1.4.8 from the manual import path may be `{}`.
 
 ## GitHub Snapshots
 

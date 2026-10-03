@@ -553,6 +553,9 @@ class GithubAnalyzeOut(BaseModel):
     files_parsed: list[str]
     files_inventoried: list[str]
     files_skipped: list[dict[str, Any]]
+    # Downloaded but not understood: a Python file whose parse failed contributed
+    # nothing, so it must not be listed as parsed (ADR-059).
+    files_unparsed: list[dict[str, Any]]
     indicators: list[dict[str, Any]]
     rules: list[dict[str, Any]]
     params: list[dict[str, Any]]

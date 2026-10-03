@@ -52,9 +52,9 @@ V1 可以完全不执行原始代码，只做 AST/文本/AI 提取和 DSL 重建
 
 "不可信输入"意味着报告本身也不能夸大它做过的事。分析报告必须回答：**候选文件共几个、实际下载几个、真的解析几个、只登记几个、跳过几个及原因、有几个候选从未尝试**。
 
-- `POST /importer/github/analyze` 返回 `coverage` 块、`files_parsed` / `files_inventoried` / `files_skipped[{path, reason}]`，并把覆盖率结论写进 `warnings`（"25 candidate file(s) were never fetched…"）。
-- `analysis_version`（当前 `1.2.0`）随字段语义变化提升：`files_scanned` 曾把"只登记未解析"的非 Python 文件也算成已扫描，`files_skipped` 曾只有路径、丢掉 `skipped_reason`；`1.2.0` 起 `coverage` 区分"没读是因为上限"与"没读是因为时间预算用完了"。
-- **无人值守的 watcher 不得从不完整的读取中自动导入**：若还有 Python 文件没被读到（超出抓取上限或下载失败），`check_source` 记 `last_import_status = "incomplete"`、写 `GitHubSnapshot.extraction_json = {"imported": false, "reason": "incomplete_analysis", "transient": ..., "coverage": ..., "warnings": ...}`，并且**不新建策略版本**——变化的规则可能就在没读到的文件里，导入部分草案等于静默降级策略。
+- `POST /importer/github/analyze` 返回 `coverage` 块、`files_parsed` / `files_inventoried` / `files_skipped[{path, reason}]` / `files_unparsed[{path, reason}]`，并把覆盖率结论写进 `warnings`（"25 candidate file(s) were never fetched…"）。
+- `analysis_version`（当前 `1.3.0`）随字段语义变化提升：`files_scanned` 曾把"只登记未解析"的非 Python 文件也算成已扫描，`files_skipped` 曾只有路径、丢掉 `skipped_reason`；`1.2.0` 起 `coverage` 区分"没读是因为上限"与"没读是因为时间预算用完了"；`1.3.0` 起"下载到了但解析失败"的 Python 文件不再被算作已解析（见 §4.3）。
+- **无人值守的 watcher 不得从不完整的读取中自动导入**：若还有 Python 文件没被读到（超出抓取上限或下载失败），或有 Python 文件下载到了却解析失败，`check_source` 记 `last_import_status = "incomplete"`、写 `GitHubSnapshot.extraction_json = {"imported": false, "reason": ..., "transient": ..., "coverage": ..., "files_unparsed": [...], "warnings": ...}`，并且**不新建策略版本**——变化的规则可能就在没读到的（或没看懂的）文件里，导入部分草案等于静默降级策略。
 - 只登记不解析的 `.md`/`.json` **不**阻断导入（这是常见情况），但会出现在报告里。
 
 ### 4.2 抓取时间预算（ADR-057）
@@ -68,6 +68,16 @@ V1 可以完全不执行原始代码，只做 AST/文本/AI 提取和 DSL 重建
 抓取**必须**把配置的超时传给每一个 HTTP 调用：`GitHubClient(timeout=15.0)` 曾经只作用于文件下载，`get_json`（repo / tree / commit）静默使用 httpx 的默认值。
 
 watcher 里这条区别决定了是否"记为已见"：上限造成的缺口是结构性的（同一个 commit 再读一次结果相同），标记已见以免每次调度都重复几十次请求；预算/网络造成的缺口是**瞬时**的（`extraction_json["transient"] = true`），此时**不推进 `current_commit`**，下一轮调度会重试——否则一次网络抖动就等于永久放弃这次更新。
+
+### 4.3 读到了 ≠ 看懂了（ADR-059）
+
+覆盖率回答的是"读到了多少"，不回答"看懂了没有"。一个 `.py` 可以**下载成功却完全无法解析**：Python 2 的 `print 'x'`、内容里的 NUL 字节、解析器拒绝的构造。这样的文件贡献是**零**（没有规则、没有指标、连一条 unknown 都没有），它以前却被无条件写进 `files_parsed`：`coverage.complete` 照样是 `true`、`unread_python_files` 是 0、`warnings` 一句不说，于是 watcher 照常无人值守导入——规则藏在这个文件里的策略被静默降级。这是 ADR-056/057/058 的同族缺陷，只是深了一层。
+
+- `AnalysisResult.files_unparsed: list[SkippedFile]`（`{path, reason}`）记录**下载成功但未解析**的文件；`build_coverage()` 给出 `coverage.unparsed_python_files`；`coverage_warnings()` 追加"2 Python file(s) were downloaded but did not parse, so nothing in them was understood and the rules they declare are missing (see files_unparsed)."
+- 解析失败**不再**记成 `unknowns` 里的 `category="unparseable"`：那是"无法映射的构造"的映射报告，而这是"整份文件没被看懂"，两者混在一起时，后者唯一的痕迹就是那句"N construct(s) could not be mapped"。
+- 解析期异常**捕获 `Exception`**（不只 `SyntaxError`），因为仓库代码是不可信输入：任何解析期失败都必须变成"这个文件没被看懂"，而不是让整份报告 500。
+- watcher 的拒绝条件因此是 `unread_python_files > 0 or unparsed_python_files > 0`；快照 `reason` 为 `incomplete_analysis`（有没读到的）或 `unparseable_python`（读到了但没看懂）。解析失败与上限缺口一样是**结构性**的（`transient = false`，重读不会让它变得可解析），所以照常推进 `current_commit`，不会每轮重试。
+- 前端：头部行列出"解析 P 个 Python、N 个解析失败"，`files_unparsed` 有独立 `<details>` 表格给出文件名与解析错误；来源详情面板对 `unparseable_python` 给出对应解释。
 
 ## 5. AI Extraction 输出
 
@@ -164,7 +174,8 @@ Commit：abc123
 覆盖：读取 12 / 30 个候选文件（解析 9 个 Python、登记 3 个非 Python）
 警告：原项目使用当前未确认 K 线，已按系统规则改为 closed bar
 警告：18 个候选文件从未获取（上限 12）；9 个 Python 文件没被读到
+警告：1 个 Python 文件下载到了但没能解析（legacy.py），它里面的规则不在本次发现里
 状态：Experimental
 ```
 
-人审的前提是报告说清了"到底看了多少"。未读到的文件正是没被审阅的代码，所以它们必须出现在用户最终看到的这一段里，而不是只躺在日志中。
+人审的前提是报告说清了"到底看了多少、看懂了没有"。未读到的文件正是没被审阅的代码，而**读到了却没能解析**的文件贡献同样是零，两者都必须出现在用户最终看到的这一段里，而不是只躺在日志中。

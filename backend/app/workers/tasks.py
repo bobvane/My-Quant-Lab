@@ -224,7 +224,8 @@ def check_source(db: Any, source: Any) -> str:
     Returns and stores the same outcome vocabulary: ``"unchanged"`` (the commit
     is the one already seen, nothing was fetched), ``"no_change"`` (a new commit
     was fetched and analysed, but the DSL did not change), ``"imported"``,
-    ``"incomplete"`` (a read gap left rules unread) or ``"error"``.
+    ``"incomplete"`` (a read gap, or a Python file that did not parse, left rules
+    unknown) or ``"error"``.
 
     ``source.last_import_status`` used to collapse all three non-events into
     ``"checked"``, which left a user staring at a row unable to tell "nothing to
@@ -277,20 +278,25 @@ def check_source(db: Any, source: Any) -> str:
         source.current_commit = head
         source.last_import_status = "no_change"
         return "no_change"
-    if not coverage["complete"] and coverage["unread_python_files"]:
-        # Unattended import: a Python file that was never read may hold the rules
-        # that changed. Importing the partial draft would silently downgrade the
-        # strategy, so record the gap and leave the version alone (ADR-056).
+    unread_python = int(coverage["unread_python_files"])
+    unparsed_python = int(coverage.get("unparsed_python_files") or 0)
+    if unread_python or unparsed_python:
+        # Unattended import: a Python file we never read, or read but could not
+        # parse, may hold the rules that changed. Importing the partial draft
+        # would silently downgrade the strategy, so record the gap and leave the
+        # version alone (ADR-056, ADR-059).
         #
         # Only a structural gap is marked as seen. A cap-limited read of a given
         # commit will read exactly as much next time, so retrying it would just
         # repeat the request and stall the schedule; a fetch that ran out of time
         # (or lost files to the network) is transient, and marking it seen would
-        # abandon the update forever (ADR-057).
+        # abandon the update forever (ADR-057). A file that did not parse is
+        # structural too: parsing it again the same way cannot help.
         exhausted = bool(coverage.get("budget_exhausted"))
         if not exhausted:
             source.current_commit = head
         source.last_import_status = "incomplete"
+        reason = "incomplete_analysis" if unread_python else "unparseable_python"
         record_snapshot(
             db,
             source.id,
@@ -298,9 +304,12 @@ def check_source(db: Any, source: Any) -> str:
             immutable_hash(draft, "incomplete"),
             {
                 "imported": False,
-                "reason": "incomplete_analysis",
+                "reason": reason,
                 "transient": exhausted,
                 "coverage": coverage,
+                "files_unparsed": [
+                    {"path": item.path, "reason": item.reason} for item in findings.files_unparsed
+                ],
                 "warnings": warnings,
             },
         )

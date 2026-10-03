@@ -3,7 +3,9 @@
 Only :func:`ast.parse` is ever used — repository code is *parsed*, never
 imported, compiled to bytecode for execution, or run.  Anything the analyser
 cannot confidently map to the Strategy DSL becomes an ``UnknownFinding`` with
-file/line evidence instead of an invented rule.
+file/line evidence instead of an invented rule.  A file that does not parse at
+all is reported as unparsed rather than as parsed: read and understood are two
+different claims (ADR-059).
 """
 
 from __future__ import annotations
@@ -32,8 +34,10 @@ __all__ = [
 ]
 
 # Bumped when the analysis report changes shape: 1.1.0 separates parsed from
-# inventoried files, keeps each skip reason, and adds the coverage block.
-ANALYSIS_VERSION = "1.2.0"
+# inventoried files, keeps each skip reason, and adds the coverage block; 1.2.0
+# teaches the coverage block to blame the budget instead of the cap; 1.3.0 stops
+# counting a Python file that did not parse as parsed (ADR-059).
+ANALYSIS_VERSION = "1.3.0"
 
 MAX_SNIPPET_CHARS = 400
 
@@ -145,6 +149,13 @@ class AnalysisResult:
     files_parsed: list[str] = field(default_factory=list)
     files_inventoried: list[str] = field(default_factory=list)
     files_skipped: list[SkippedFile] = field(default_factory=list)
+    # A file that was downloaded but did not parse contributed **nothing**, so it
+    # cannot be counted as parsed: "read" and "understood" are different claims,
+    # and only the second one is what the report is about (ADR-059).
+    files_unparsed: list[SkippedFile] = field(default_factory=list)
+    # Set by :func:`analyze_python_source` for the file it just looked at; the
+    # repository-wide pass moves it into ``files_unparsed``.
+    parse_error: str | None = None
     indicators: list[IndicatorFinding] = field(default_factory=list)
     rules: list[RuleFinding] = field(default_factory=list)
     params: list[ParamFinding] = field(default_factory=list)
@@ -498,17 +509,23 @@ def _is_shifted(current: ast.AST, previous: ast.AST) -> bool:
 
 
 def analyze_python_source(path: str, source: str) -> AnalysisResult:
-    """Parse one Python file and extract strategy findings."""
+    """Parse one Python file and extract strategy findings.
+
+    A file that does not parse returns an empty result with ``parse_error`` set,
+    and is deliberately *not* recorded as an ``UnknownFinding``: a file we could
+    not parse is not a construct we could not map, and counting it as one made
+    "N construct(s) could not be mapped" the only trace of a file that yielded
+    nothing at all (ADR-059).
+    """
     visitor = _StrategyVisitor(path, source)
     try:
         tree = ast.parse(source)
-    except SyntaxError as exc:
-        visitor.result.unknowns.append(
-            UnknownFinding(
-                category="unparseable",
-                detail=f"file does not parse as Python: {exc}",
-                evidence=Evidence(path=path, start_line=None, end_line=None, snippet=""),
-            )
+    except Exception as exc:  # noqa: BLE001 - repository code is untrusted input
+        # Any parse-time failure means "we did not understand this file", which is
+        # exactly what ``files_unparsed`` is for. One hostile file must never be
+        # able to abort the whole report, so this catches more than SyntaxError.
+        visitor.result.parse_error = sanitize_untrusted_text(
+            f"file does not parse as Python ({type(exc).__name__}): {exc}"
         )
         return visitor.result
     visitor.visit(tree)
@@ -529,6 +546,12 @@ def analyze_repository_files(files: list[RepoFile]) -> AnalysisResult:
             merged.files_inventoried.append(repo_file.path)
             continue
         partial = analyze_python_source(repo_file.path, repo_file.content)
+        if partial.parse_error:
+            # Downloaded, but nothing was understood: not a parsed file.
+            merged.files_unparsed.append(
+                SkippedFile(path=repo_file.path, reason=partial.parse_error)
+            )
+            continue
         merged.files_parsed.append(repo_file.path)
         merged.indicators.extend(partial.indicators)
         merged.rules.extend(partial.rules)
@@ -557,6 +580,7 @@ def build_coverage(fetch: FetchCoverage, findings: AnalysisResult) -> dict[str, 
         "parsed_files": len(findings.files_parsed),
         "inventoried_files": len(findings.files_inventoried),
         "skipped_files": len(findings.files_skipped),
+        "unparsed_python_files": len(findings.files_unparsed),
         "not_attempted_files": fetch.not_attempted_files,
         "unread_python_files": fetch.unread_python_files,
         "complete": fetch.complete,
@@ -588,6 +612,12 @@ def coverage_warnings(coverage: dict[str, Any]) -> list[str]:
         messages.append(
             f"{coverage['unread_python_files']} Python file(s) were not read, so rules that "
             "live in them are missing from these findings."
+        )
+    unparsed = int(coverage.get("unparsed_python_files") or 0)
+    if unparsed:
+        messages.append(
+            f"{unparsed} Python file(s) were downloaded but did not parse, so nothing in them "
+            "was understood and the rules they declare are missing (see files_unparsed)."
         )
     skipped = int(coverage["skipped_files"])
     if skipped:

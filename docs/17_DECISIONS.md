@@ -1005,3 +1005,36 @@ ADR-056/057 让「读了多少、为什么停下」有了算术表达，但用�
 **测试**
 
 `backend/tests/test_github_watch.py` 新增 `test_a_new_commit_with_an_unchanged_dsl_is_stored_as_no_change`（新 commit + DSL 未变 → 返回并存储 `no_change`、`current_commit` 推进、不新建版本、快照 `imported is False`）、`test_the_task_summary_names_the_statuses_the_run_produced`（monkeypatch `session_scope`，两个 `unchanged` 来源 → 汇总含 `{"checked": 2, "unchanged": 2}`）与 `test_re_checking_a_commit_refreshes_its_snapshot`（先写入同一 commit 的人工导入快照，再让 watcher 得到瞬时缺口 → 不抛异常、快照仍只有一行且 `reason` 更新为 `incomplete_analysis`）；`test_check_source_imports_new_commit` / `test_check_source_unchanged_when_commit_same` / `test_unread_non_python_files_do_not_block_an_import` 增补「存储值等于返回值」的断言。`backend/tests/test_github_sources.py` 的 `test_import_persists_github_source_and_snapshot` 断言快照含 `extraction.imported is True` / `extraction.reason == "manual_import"`，新增 `test_a_second_record_for_the_same_commit_updates_the_first`（两次 `record_snapshot` → 同一行 id、`content_hash` 与 `extraction_json` 取最新）。本地真栈验证：`backend/scripts/probe_watch_status.py` 对真实仓库跑 `check_source`，同一 commit 返回并存储 `unchanged`；把 `current_commit` 改成旧值后真实抓取在 120s 预算处停下 → 返回并存储 `incomplete`、`current_commit` 不推进、对该 commit 的既有快照被刷新为 `incomplete_analysis` + `transient=True` + `coverage=1/179` + `unread_python=138` + `budget_exhausted=True`；真实浏览器（12 条断言 + 详情面板）全通过。
+
+
+## ADR-059：读到了不等于看懂了（`files_unparsed`，docs/05 §4.3）
+
+**背景**
+
+覆盖率（ADR-056）回答的是"读到了多少"，它不回答"看懂了没有"。ADR-056/057/058 之后报告已经会说自己没读哪些文件、为什么没读、缺口是结构性的还是瞬时的——但仍然会**把读不懂的文件算成读懂了**：
+
+1. `analyze_repository_files` 无条件把每个有内容的 `.py` 写进 `files_parsed`，而 `analyze_python_source` 在解析失败时只是往 `unknowns` 塞一条 `category="unparseable"` 就返回空结果。于是下载成功但根本无法解析的文件贡献为零（没有规则、没有指标、连 unknown 都只算"一条无法映射的构造"），却被计入 `parsed_files`：`coverage["complete"]` 仍为 `true`、`unread_python_files` 为 0、`coverage_warnings()` 返回空列表，`check_source` 照常无人值守导入——规则写在这个文件里的策略被静默降级。
+2. 实测（本机真实代码，非推断）：`[RepoFile("good.py", …, "FAST = 5\n"), RepoFile("legacy.py", …, "print 'py2'\n")]` → `analyze_repository_files(...).files_parsed == ['good.py', 'legacy.py']`，`files_unparsed` 这个字段根本不存在，`build_coverage(...)` 报 `parsed_files 2 / complete True`，`coverage_warnings(...)` 返回 `[]`——一句都不说。
+3. 解析失败被归成"无法映射的构造"（`unknowns`）是错误归类：那句 `N construct(s) could not be mapped to the DSL and need human review` 是**映射报告**，而这里根本没有可映射的对象。它也曾经是这种文件唯一的痕迹。
+4. 解析期异常并不只有 `SyntaxError`。实测 `ast.parse`：NUL 字节 → `SyntaxError: source code string cannot contain null bytes`；Python 2 的 `print 'x'` → `SyntaxError: Missing parentheses in call to 'print'`；20000 层括号 → `SyntaxError: too many nested parentheses`；深缩进 → `IndentationError`（`SyntaxError` 子类）。仓库代码是不可信输入，任何解析期异常都必须变成"这个文件没被看懂"，而不是让整份报告 500。
+
+**决策**
+
+1. `AnalysisResult` 新增 `files_unparsed: list[SkippedFile]`（`{path, reason}`）与 `parse_error: str | None`；`build_coverage()` 新增 `coverage.unparsed_python_files`，`coverage_warnings()` 追加 `N Python file(s) were downloaded but did not parse, so nothing in them was understood and the rules they declare are missing (see files_unparsed).`
+2. `analyze_python_source` 捕获 `Exception`（`# noqa: BLE001 - repository code is untrusted input`，不只捕 `SyntaxError`），把 `sanitize_untrusted_text(f"file does not parse as Python ({type(exc).__name__}): {exc}")` 写进 `parse_error` 后返回空结果，**不再**往 `unknowns` 塞 `category="unparseable"`。
+3. `analyze_repository_files` 对 `parse_error` 非空的文件 `continue`：不进 `files_parsed`、不 extend 任何 finding 列表，只进 `files_unparsed`。
+4. watcher 的拒绝条件改为 `unread_python_files > 0 or unparsed_python_files > 0`（原来的 `not coverage["complete"] and …` 合取是冗余的：有未读 Python 必然不 complete）；快照 `reason` 二选一：`incomplete_analysis`（有没读到的）或 `unparseable_python`（读到了但没看懂），并把 `files_unparsed` 写进 `extraction_json`。
+5. 解析失败与上限缺口同属**结构性**缺口：`transient = false`，照常推进 `current_commit`（重读不会让一个解析不了的文件变得可解析，每轮重试只会重复几十次请求）；只有预算/网络型缺口才是瞬时的（ADR-057）。
+6. `ANALYSIS_VERSION` 升为 `1.3.0`；`GithubAnalyzeOut` 新增 `files_unparsed`；前端头部行列出"解析 P 个 Python、N 个解析失败"、新增独立的解析失败 `<details>` 表格与警告行，来源详情面板对 `unparseable_python` 给出解释。
+
+**理由**
+
+报告的可信度只能靠它对自己不知道的东西说实话来支撑。`coverage.complete` 断言的是**抓取完整性**，不是理解完整性；把两者混在一起，"已完整读取"就变成了一句假话——而且是在 ADR-056/057/058 刚刚把这句话修准之后，问题往下深了一层：上一版修的是"没读到的文件不算读过"，这一版是"没看懂的文件不算看懂"。
+
+对策略的影响上，"读到了但没看懂"与"根本没读到"是同一件事：规则缺失。但对**重试**的意义完全不同，这才是必须区分 `transient` 的原因：网络/预算造成的缺口重读可能补上，解析失败重读一定补不上。
+
+选择捕获 `Exception` 而不是 `SyntaxError`，是因为触发点属于不可信输入：报告生成器不能因为仓库里有一个畸形文件就整份失败，那等于把"拒绝导入"变成了"看不到报告"。
+
+**测试**
+
+`backend/tests/test_importer.py` 的 `test_unparseable_file_becomes_unknown` 改名为 `test_unparseable_file_is_reported_as_unparsed_not_understood`（断言 `parse_error` 含 `does not parse as Python`、`unknowns == []`）；新增 `test_a_file_that_does_not_parse_is_not_counted_as_parsed`（`files_parsed == ['strat.py']`、`files_unparsed` 只有 `legacy.py`、`coverage["unparsed_python_files"] == 1`、警告含 `did not parse`、且 `build_draft_dsl` 的"无法映射"计数仍是 `1 construct(s)`——那条来自 `strat.py` 自己的未解析引用，不是这个文件）；`test_analyze_endpoint_reports_its_coverage` 断言 `analysis_version == "1.3.0"`、`coverage["unparsed_python_files"] == 0`、`files_unparsed == []`、警告不含 `did not parse`。`backend/tests/test_github_watch.py` 的 `_install_fake_client` 增加 `findings` 参数；新增 `test_a_python_file_that_did_not_parse_blocks_an_unattended_import`（`AnalysisResult(files_unparsed=[SkippedFile("legacy.py", …)])` → 返回并存储 `incomplete`、不新建版本、`current_commit` 推进到 `newsha`（结构性）、快照 `reason == "unparseable_python"` / `transient is False` / `files_unparsed[0]["path"] == "legacy.py"`）。`backend/scripts/probe_parse_honesty.py` 用三个内存树（干净 / 两个解析失败 / 解析失败 + 上限缺口）打印 `files_parsed`、`files_unparsed`、coverage 计数器与全部警告，并断言解析失败者**不在** `files_parsed` 里且没有泄漏进 `unknowns`。

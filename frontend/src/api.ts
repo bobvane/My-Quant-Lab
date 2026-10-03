@@ -143,6 +143,8 @@ export interface GithubCoverage {
   parsed_files: number
   inventoried_files: number
   skipped_files: number
+  /** Downloaded but not understood: nothing in these files was read as rules. */
+  unparsed_python_files: number
   not_attempted_files: number
   unread_python_files: number
   complete: boolean
@@ -168,6 +170,8 @@ export interface GithubAnalysis {
   files_parsed: string[]
   files_inventoried: string[]
   files_skipped: GithubSkippedFile[]
+  /** Files whose parse failed: read, but nothing was understood (ADR-059). */
+  files_unparsed: GithubSkippedFile[]
   indicators: Array<Record<string, unknown>>
   rules: Array<Record<string, unknown>>
   params: Array<Record<string, unknown>>

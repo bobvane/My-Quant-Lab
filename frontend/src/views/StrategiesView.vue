@@ -346,6 +346,14 @@ function snapshotExplanation(snapshot: GithubSnapshot | null): string {
       ? `读取因超出时间预算或网络中断而停止，只读了 ${read}；这个 commit 没有标记为已处理，下一轮检查会重试。`
       : `读取受抓取上限限制，只读了 ${read}；同样的设置重读会得到同样的结果，所以这个 commit 已标记为处理过，不会自动导入。`
   }
+  if (reason === 'unparseable_python') {
+    const coverage = extraction.coverage ?? {}
+    const files = Number(coverage.unparsed_python_files ?? 0)
+    const names = Array.isArray(extraction.files_unparsed)
+      ? extraction.files_unparsed.map((f: Record<string, unknown>) => String(f.path)).join('、')
+      : ''
+    return `${files} 个 Python 文件下载到了但解析失败${names ? `（${names}）` : ''}，它们里面的规则无法进入草案；重读不会让它们变得可解析，所以这个 commit 已标记为处理过，不会自动导入。`
+  }
   if (reason === 'manual_import') return '这个 commit 是人工审核后导入的。'
   if (extraction.imported === true) return '已从这个 commit 生成新的策略版本。'
   if (extraction.imported === false) return '已读取这个 commit，但抽取出的策略没有变化。'
@@ -357,6 +365,10 @@ function snapshotCoverage(snapshot: GithubSnapshot | null): string {
   if (!coverage) return ''
   return `读取 ${coverage.downloaded_files} / ${coverage.candidate_files} 个候选文件（解析 ${coverage.parsed_files} 个 Python、登记 ${coverage.inventoried_files} 个非 Python）${
     coverage.unread_python_files > 0 ? `，其中 ${coverage.unread_python_files} 个 Python 没被读到` : ''
+  }${
+    coverage.unparsed_python_files > 0
+      ? `，其中 ${coverage.unparsed_python_files} 个 Python 解析失败`
+      : ''
   }。`
 }
 
@@ -381,7 +393,11 @@ const analysis = ref<GithubAnalysis | null>(null)
 const coverageHeadline = computed(() => {
   const coverage = analysis.value?.coverage
   if (!coverage) return ''
-  if (coverage.complete) return '已完整读取仓库中的全部候选文件。'
+  if (coverage.complete) {
+    return coverage.unparsed_python_files > 0
+      ? '已完整读取仓库中的全部候选文件——但其中有 Python 文件没有解析成功，见下方。'
+      : '已完整读取仓库中的全部候选文件。'
+  }
   if (coverage.budget_exhausted) {
     const budget = coverage.max_seconds === null ? '时间预算' : `${coverage.max_seconds} 秒的时间预算`
     const rest = coverage.skipped_files > 0 ? `，另有 ${coverage.skipped_files} 个获取后无法读取` : ''
@@ -397,6 +413,15 @@ const coverageHeadline = computed(() => {
 const unreadPythonWarning = computed(() => {
   const n = analysis.value?.coverage.unread_python_files ?? 0
   return n > 0 ? `其中 ${n} 个 Python 文件没被读到——它们里面的规则不会出现在下面的发现里。` : ''
+})
+
+// Read and understood are different claims: a file we downloaded but could not
+// parse contributed nothing, and it must not look like a file we analysed
+// (ADR-059). Saying "read everything" without this line is how a report
+// overstates itself one layer deeper than ADR-056 did.
+const unparsedPythonWarning = computed(() => {
+  const n = analysis.value?.coverage.unparsed_python_files ?? 0
+  return n > 0 ? `其中 ${n} 个 Python 文件下载到了、但没能解析——它们里面的规则不会出现在下面的发现里。` : ''
 })
 
 async function analyzeRepo() {
@@ -755,15 +780,35 @@ onMounted(load)
         <p class="muted">
           {{ analysis.owner }}/{{ analysis.repo }} @ {{ analysis.ref }} ·
           读取 {{ analysis.coverage.downloaded_files }} / {{ analysis.coverage.candidate_files }} 个候选文件
-          （解析 {{ analysis.coverage.parsed_files }} 个 Python、登记
+          （解析 {{ analysis.coverage.parsed_files }} 个 Python<span
+            v-if="analysis.coverage.unparsed_python_files"
+          >、{{ analysis.coverage.unparsed_python_files }} 个解析失败</span>、登记
           {{ analysis.coverage.inventoried_files }} 个非 Python）·
           许可证 {{ analysis.license ?? '未知' }}
         </p>
         <p :class="analysis.coverage.complete ? 'muted' : 'error'">{{ coverageHeadline }}</p>
         <p v-if="unreadPythonWarning" class="error">{{ unreadPythonWarning }}</p>
+        <p v-if="unparsedPythonWarning" class="error">{{ unparsedPythonWarning }}</p>
         <ul v-if="analysis.warnings.length" class="error">
           <li v-for="(w, idx) in analysis.warnings" :key="idx">{{ w }}</li>
         </ul>
+        <details v-if="analysis.files_unparsed.length" class="muted">
+          <summary>解析失败的文件（{{ analysis.files_unparsed.length }}）</summary>
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(f, idx) in analysis.files_unparsed" :key="idx">
+                <td>{{ f.path }}</td>
+                <td class="muted">{{ f.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </details>
         <details v-if="analysis.files_skipped.length" class="muted">
           <summary>被跳过的文件（{{ analysis.files_skipped.length }}）</summary>
           <table>
@@ -861,7 +906,15 @@ onMounted(load)
               <td colspan="5">
                 <p v-if="ghSnapshotLoading === Number(s.id)" class="muted">读取检查记录…</p>
                 <template v-else>
-                  <p :class="latestSnapshot(s)?.extraction?.reason === 'incomplete_analysis' ? 'error' : 'muted'">
+                  <p
+                    :class="
+                      ['incomplete_analysis', 'unparseable_python'].includes(
+                        String(latestSnapshot(s)?.extraction?.reason ?? ''),
+                      )
+                        ? 'error'
+                        : 'muted'
+                    "
+                  >
                     {{ snapshotExplanation(latestSnapshot(s)) }}
                   </p>
                   <p v-if="snapshotCoverage(latestSnapshot(s))" class="muted">

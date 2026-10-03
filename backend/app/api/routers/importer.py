@@ -116,6 +116,10 @@ def analyze_repository(payload: GithubAnalyzeRequest) -> GithubAnalyzeOut:
         files_skipped=[
             {"path": skipped.path, "reason": skipped.reason} for skipped in findings.files_skipped
         ],
+        files_unparsed=[
+            {"path": unparsed.path, "reason": unparsed.reason}
+            for unparsed in findings.files_unparsed
+        ],
         indicators=[_finding_to_dict(f) for f in findings.indicators],
         rules=[_finding_to_dict(f) for f in findings.rules],
         params=[_finding_to_dict(f) for f in findings.params],

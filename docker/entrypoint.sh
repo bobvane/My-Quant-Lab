@@ -44,13 +44,12 @@ dump_context() {
     log "----------------------"
 }
 
-# Wait for PostgreSQL with a real query (not just a TCP connect, which can
-# succeed while the server is still initialising).
-# 30 x 2s = 60s ceiling keeps startup inside the container healthcheck budget.
-wait_for_db() {
-    i=0
-    while [ "$i" -lt 30 ]; do
-        if python -c '
+# Ask the database a real question (not just a TCP connect, which can succeed
+# while the server is still initialising). The answer — including the failure —
+# goes to stderr, and the caller keeps it: a reason nobody prints is a reason
+# nobody can act on (ADR-080).
+database_probe() {
+    python -c '
 import sys
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
@@ -64,15 +63,56 @@ try:
 except Exception as exc:
     print("not ready: %s" % exc, file=sys.stderr)
     sys.exit(1)
-' >/dev/null 2>&1; then
+'
+}
+
+# Some answers cannot change while the clock runs: a password the server will
+# never accept, a database or role that was never created, a driver that is not
+# installed, a host name that does not resolve. Waiting 60 s for those turns a
+# one-line configuration mistake into a minute of silence followed by a
+# migration error that names the wrong cause (ADR-080).
+database_error_is_permanent() {
+    case "$1" in
+        *"password authentication failed"*) return 0 ;;
+        *"no password supplied"*) return 0 ;;
+        *"does not exist"*) return 0 ;;
+        *"NoSuchModuleError"*) return 0 ;;
+        *"could not translate host name"*) return 0 ;;
+        *"Name or service not known"*) return 0 ;;
+        *"nodename nor servname provided"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Wait for PostgreSQL, then give up and let alembic report the real error.
+# The budget is an environment variable so the ceiling stays a decision:
+# defaults 30 x 2 s = 60 s, inside the container healthcheck budget (ADR-080).
+wait_for_db() {
+    attempts="${DB_WAIT_ATTEMPTS:-30}"
+    interval="${DB_WAIT_INTERVAL:-2}"
+    i=0
+    last_reason=''
+    while [ "$i" -lt "$attempts" ]; do
+        if reason=$(database_probe 2>&1); then
             log "database is ready"
             return 0
         fi
+        reason=$(printf '%s' "$reason" | tr '\n' ' ' | sed 's/  */ /g')
+        if database_error_is_permanent "$reason"; then
+            log "ERROR: the database answered with a problem that waiting cannot fix; giving up now instead of retrying ${attempts} times"
+            log "reason: $reason"
+            log "check POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB and DB_HOST where this deployment reads them"
+            return 1
+        fi
+        if [ "$reason" != "$last_reason" ]; then
+            log "database not ready yet: $reason"
+            last_reason="$reason"
+        fi
         i=$((i + 1))
-        log "waiting for database ($i/30)"
-        sleep 2
+        log "waiting for database ($i/$attempts)"
+        sleep "$interval"
     done
-    log "WARNING: database not ready after 60s; continuing so alembic reports the real error"
+    log "WARNING: database not ready after $((attempts * interval))s ($attempts attempts); continuing so alembic reports the real error"
     return 0
 }
 
@@ -99,7 +139,7 @@ run_migrations() {
 case "$ROLE" in
     api)
         check_settings || exit 1
-        wait_for_db
+        wait_for_db || exit 1
         run_migrations
         log "starting API on port ${PORT}"
         exec uvicorn app.api.main:app \
@@ -109,20 +149,20 @@ case "$ROLE" in
         ;;
     worker)
         check_settings || exit 1
-        wait_for_db
+        wait_for_db || exit 1
         log "starting celery worker"
         exec celery -A app.workers.celery_app.celery_app worker \
             --loglevel=INFO --concurrency="${CELERY_CONCURRENCY:-2}"
         ;;
     scheduler)
         check_settings || exit 1
-        wait_for_db
+        wait_for_db || exit 1
         log "starting celery beat"
         exec celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
         ;;
     migrate)
         check_settings || exit 1
-        wait_for_db
+        wait_for_db || exit 1
         run_migrations
         log "migrations complete"
         ;;

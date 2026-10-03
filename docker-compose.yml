@@ -52,6 +52,9 @@ x-backend-env: &backend-env
   DEFAULT_CURRENCY: ${DEFAULT_CURRENCY:-USD}
   DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-UTC}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  # Database-wait budget for docker/entrypoint.sh (defaults 30 x 2 s = 60 s).
+  DB_WAIT_ATTEMPTS: ${DB_WAIT_ATTEMPTS:-30}
+  DB_WAIT_INTERVAL: ${DB_WAIT_INTERVAL:-2}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8081,http://localhost:5173}
   # Outbound proxy for external API calls (Yahoo Finance, AI providers, etc.)
   # Leave empty for direct access. NO_PROXY excludes internal services.

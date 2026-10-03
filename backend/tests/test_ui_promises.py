@@ -20,6 +20,8 @@ These guards bind the promises to the code:
 * §6's four owed segments must exist on the signal page, and a "current" reading
   must name the moment it belongs to.
 * §7's four questions must be answered for every metric label, from one source.
+* §8's seven import steps must be declared in order and gated by evidence, and a
+  passing validation must die with the text it was about.
 * §9's phone layout must actually be a breakpoint in the stylesheet.
 * the outstanding list in the last section must name exactly the sections that
   are not implemented.
@@ -41,6 +43,7 @@ APP = REPO_ROOT / "frontend" / "src" / "App.vue"
 BACKTEST = REPO_ROOT / "frontend" / "src" / "views" / "BacktestView.vue"
 PAPER = REPO_ROOT / "frontend" / "src" / "views" / "PaperView.vue"
 SIGNALS = REPO_ROOT / "frontend" / "src" / "views" / "SignalsView.vue"
+STRATEGIES = REPO_ROOT / "frontend" / "src" / "views" / "StrategiesView.vue"
 API = REPO_ROOT / "frontend" / "src" / "api.ts"
 METRICS = REPO_ROOT / "frontend" / "src" / "metrics.ts"
 METRIC_HINT = REPO_ROOT / "frontend" / "src" / "components" / "MetricHint.vue"
@@ -256,6 +259,74 @@ def test_the_professional_metrics_explain_themselves_in_place() -> None:
         f"these metric labels have neither a note in frontend/src/metrics.ts nor a place in "
         f"NOT_A_METRIC: {unexplained} — a professional metric either answers the four "
         "questions or is declared not to be one (ADR-110)"
+    )
+
+
+def test_the_import_wizard_gates_its_seven_steps() -> None:
+    """§8 promised seven named steps; the page showed one long form (ADR-113)."""
+    section = next(body for number, _, body in _sections() if number == 8)
+    steps = (
+        "Repository",
+        "Analysis",
+        "Detected Strategies",
+        "Warnings",
+        "DSL Preview",
+        "Validation",
+        "Import",
+    )
+    for step in steps:
+        assert step in section, f"docs/13 §8 no longer promises the {step} step"
+
+    page = _text(STRATEGIES)
+    declaration = re.search(r"const WIZARD_STEPS = \[(?P<body>.*?)\] as const", page, re.DOTALL)
+    assert declaration, (
+        "the import page declares no seven-step list: §8 promises a wizard, and a form that "
+        "looks like one without a step model cannot gate anything (ADR-113)"
+    )
+    order = [declaration.group("body").index(step) for step in steps]
+    assert order == sorted(order), (
+        f"the wizard declares its steps out of the promised order: {order} — the Import step "
+        "cannot come before Validation (ADR-113)"
+    )
+    assert page.count("wizardStep ===") >= 7, (
+        "fewer than seven step branches are rendered: a step in the chip list that has no body "
+        "is a navigation entry pretending to be a page (ADR-113)"
+    )
+    assert "WIZARD_STEPS[wizardStep]" in page and "gotoStep(" in page, (
+        "the wizard cannot move between steps, or never names the step it would open (ADR-113)"
+    )
+
+    # Every step is opened by evidence the reader can see, not by a click.
+    for gate in ("stepUnlocked", "validatedDraft", "draftIsJson", "unsafeReviewed"):
+        assert gate in page, (
+            f"nothing gates a wizard step on {gate}: an ungated step is the old one long form "
+            "with numbers in front of it (ADR-113)"
+        )
+    assert "importing || namedVersionTaken || !validatedDraft" in page, (
+        "the import button is not gated on the validation result: §8's last step could be "
+        "taken with an unvalidated draft (ADR-113)"
+    )
+
+    # Validation is a statement about one exact document, so editing the text has
+    # to withdraw it, and the check itself must be reachable from the wizard.
+    assert page.count("api.validateDsl(") >= 2, (
+        "the wizard never validates the draft: only the manual DSL card calls the validator "
+        "(ADR-113)"
+    )
+    assert "watch(dslText" in page and "validation.value = null" in page, (
+        "a passing validation survives a change to the DSL text: the page would keep showing a "
+        "verdict about a document nobody validated any more (ADR-113)"
+    )
+    assert "available_columns" in page, (
+        "the validation step does not show the columns the validator knows, so a rejected name "
+        "has no explanation next to it (ADR-113)"
+    )
+
+    # "Detected Strategies" must not be dressed up as strategy discovery.
+    assert "扁平发现" in page, (
+        "the Detected Strategies step implies the importer recognised whole strategies: it "
+        "reports flat findings, and claiming more is a promise about someone else's code "
+        "(ADR-113)"
     )
 
 

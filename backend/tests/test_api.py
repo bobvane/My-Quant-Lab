@@ -186,11 +186,22 @@ def test_dsl_validation_endpoint(client) -> None:
     ok = client.post("/api/v1/strategies/validate", json=DSL)
     assert ok.status_code == 200
     assert ok.json()["is_valid"] is True
+    # The wizard's Validation step renders both of these, so they are contract,
+    # not decoration: it shows the columns the validator knows, and every issue by
+    # severity / code / message / path (ADR-113).
+    columns = ok.json()["available_columns"]
+    assert isinstance(columns, list) and columns == sorted(columns)
+    assert "close" in columns
 
     bad = {**DSL, "entry": {"long": {"all": [{"op": "gt", "left": "close", "right": "nope"}]}}}
     response = client.post("/api/v1/strategies/validate", json=bad)
     assert response.status_code == 200
     assert response.json()["is_valid"] is False
+    issues = response.json()["issues"]
+    assert issues, "an unknown identifier must produce at least one issue"
+    assert any(issue["severity"] == "error" for issue in issues)
+    for issue in issues + ok.json()["issues"]:
+        assert set(issue) == {"severity", "code", "message", "path"}
 
 
 def test_market_data_sync_and_series(client) -> None:

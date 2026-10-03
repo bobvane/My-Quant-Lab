@@ -59,7 +59,7 @@ API base: `/api/v1`
 `DELETE /strategies/{strategy_id}` [已实现] —— 删除策略及其全部版本。
 `POST /strategies/{strategy_id}/versions` [已实现] —— 创建一个新的不可变策略版本。
 `GET /strategies/{strategy_id}/versions` [已实现] —— 列出某个策略的版本。
-`POST /strategies/validate` [已实现] —— 校验一份 DSL 文档（不落库）。
+`POST /strategies/validate` [已实现] —— 校验一份 DSL 文档（不落库）。请求体就是**裸 DSL 对象**本身（不是 `{dsl: …}` 包裹，也没有别的字段）；响应是 `StrategyValidationOut`：`is_valid`（没有任何 `error` 级问题时为真）、`issues`（每条形如 `{severity, code, message, path}`，`path` 可为 null）、`available_columns`（校验器认识的列名，排序后给出）。DSL 连结构都解析不了时返回 200 且 `is_valid=false`，只给一条 `code="schema_error"`、`path=null` 的 error，`available_columns` 为空 —— 400/422 只留给请求体本身不是 JSON 的情况。前端「从 GitHub 导入」的第 6 步渲染的就是这两个字段（ADR-113）。
 
 ## Strategy Versions
 

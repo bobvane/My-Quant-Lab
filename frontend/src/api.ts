@@ -225,6 +225,13 @@ export interface GithubSnapshot {
   extraction: Record<string, any>
 }
 
+/** `POST /strategies/validate` — a statement about one exact DSL document (ADR-113). */
+export interface StrategyValidation {
+  is_valid: boolean
+  issues: Array<Record<string, unknown>>
+  available_columns: string[]
+}
+
 /** Percentile block of a Monte Carlo distribution (docs/22). */
 export interface MonteCarloPercentiles {
   p5: number | null
@@ -637,7 +644,7 @@ export const api = {
       body: JSON.stringify({ version, dsl }),
     }),
   validateDsl: (dsl: Record<string, unknown>) =>
-    request<{ is_valid: boolean; issues: Array<Record<string, unknown>> }>('/strategies/validate', {
+    request<StrategyValidation>('/strategies/validate', {
       method: 'POST',
       body: JSON.stringify(dsl),
     }),

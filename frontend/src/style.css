@@ -401,6 +401,40 @@ code {
   word-break: break-word;
 }
 
+/* The seven-step GitHub import wizard (ADR-113, docs/13_UI_UX.md section 8). A step that
+   cannot be reached yet is drawn as locked instead of silently failing on click. */
+.wizard-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  font-size: 12px;
+}
+
+.wizard-steps li {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 3px 9px;
+}
+
+.wizard-steps li.current {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.wizard-steps li.done {
+  opacity: 0.7;
+}
+
+.wizard-steps li.locked {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 /* Phone widths (ADR-111, docs/13_UI_UX.md section 9). A signal notification opened on a
    phone must show the page, not a 232px menu column: the shell stacks, the menu becomes a
    horizontally scrollable strip, and wide tables scroll inside the page instead of pushing

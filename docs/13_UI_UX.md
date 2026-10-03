@@ -102,9 +102,19 @@
 
 ## 8. GitHub Import
 
-状态：部分实现（缺少 七步向导：Repository → Analysis → Detected Strategies → Warnings → DSL Preview → Validation → Import）
+状态：已实现（frontend/src/views/StrategiesView.vue, frontend/src/api.ts）
 
-`/market` 的「从 GitHub 导入（只读分析，不执行仓库代码）」区块把分析结果、检测到的策略、警告与导入放在一个页面里一次呈现，「已导入来源（自动监视更新）」列出后续同步。导入仍然是只读分析：仓库代码永不执行。
+`/market` 的「从 GitHub 导入（只读分析，不执行仓库代码）」区块是一份七步向导，步骤名与顺序固定：Repository → Analysis → Detected Strategies → Warnings → DSL Preview → Validation → Import（`const WIZARD_STEPS`）。每一步由它自己的证据解锁，而不是由一个按钮解锁（ADR-113）：
+
+1. **Repository**：仓库地址、分支/tag、最多读取文件数与最长等待秒数、可选 token；地址为空时分析按钮是灰的。
+2. **Analysis**：候选/读取/解析/登记的文件数、coverage 结论、解析失败与被跳过的文件明细。这一步只报告事实，判断对错留给用户。
+3. **Detected Strategies**：导入器真的找到的东西 —— 指标、规则、参数三张表，加上无法映射的计数。它们是**扁平发现**（每个指标、规则、参数各自一条），不是「它认出了这是哪个策略」；把它说成策略识别就是替别人的代码下结论。
+4. **Warnings**：分析留下的警告与不安全构造。没有不安全构造时这一步自动通过；有一个就必须由用户勾选「我已人工审查这 N 个不安全构造」，系统不替用户点这个勾。
+5. **DSL Preview**：草案就是「策略 DSL」编辑器里的那份文本（同一个 draft，改它请回到那张卡）。这一步只检查它还是不是一个合法的 JSON 对象，并给出指标声明与入场条件的条数。
+6. **Validation**：`POST /strategies/validate` 判定这份草案，逐条列出 `severity / code / message / path`，并列出校验器认识的列（`available_columns`），被否决的名字因此总能对照。校验说的是「这份文本此刻」：文本一改，结论立刻被丢掉，向导退回第 5 步、第 7 步重新上锁。
+7. **Import**：名称与版本（留空 = 服务器分配，版本账本实时核对是否重名），只有校验通过且文本没有再改过时按钮才可用。导入把这个 commit 的结果写成一份不可变版本，来源、commit、哈希与校验状态一起存档。
+
+导入全程只读，仓库代码永不执行；「已导入来源（自动监视更新）」列出后续同步。
 
 ## 9. Mobile/desktop
 
@@ -115,6 +125,5 @@
 ## 10. 欠账（尚未实现的承诺，按本文件顺序）
 
 - 独立的策略详情页与其中的 Overview、Rules、Current Signals、AI Explanation 四段（第 3 节）
-- GitHub 导入七步向导（第 8 节）
 
 这一节是上面 `尚未实现` / `缺少` 的汇总视图；两份清单必须一致，守卫会核对。

@@ -9,6 +9,7 @@ import {
   type SignalIntent,
   type Strategy,
   type StrategyLifecycle,
+  type StrategyValidation,
 } from '@/api'
 import { formatDateTime, formatNumber } from '@/format'
 
@@ -102,7 +103,7 @@ const SAMPLE_DSL = {
 
 const dslText = ref(JSON.stringify(SAMPLE_DSL, null, 2))
 const strategyName = ref('EMA 交叉趋势')
-const validation = ref<{ is_valid: boolean; issues: Array<Record<string, unknown>> } | null>(null)
+const validation = ref<StrategyValidation | null>(null)
 
 async function load() {
   error.value = ''
@@ -569,6 +570,9 @@ async function analyzeRepo() {
     importName.value = analysis.value.repo
     dslText.value = JSON.stringify(analysis.value.draft_dsl, null, 2)
     strategyName.value = analysis.value.repo
+    unsafeReviewed.value = false
+    validation.value = null
+    gotoStep(2)
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -581,6 +585,12 @@ async function importReviewed() {
   info.value = ''
   if (!analysis.value) {
     error.value = '请先分析仓库'
+    gotoStep(1)
+    return
+  }
+  if (!validatedDraft.value) {
+    error.value = '第 6 步的校验还没通过（或者校验之后 DSL 又被改过）：先校验草案，再导入'
+    gotoStep(6)
     return
   }
   importing.value = true
@@ -599,6 +609,9 @@ async function importReviewed() {
     analysis.value = null
     importVersion.value = ''
     versionPlan.value = null
+    validation.value = null
+    unsafeReviewed.value = false
+    gotoStep(1)
     await load()
     await loadGhSources()
   } catch (e) {
@@ -610,6 +623,113 @@ async function importReviewed() {
     importing.value = false
   }
 }
+
+// docs/13_UI_UX.md §8 promises seven steps: Repository → Analysis → Detected
+// Strategies → Warnings → DSL Preview → Validation → Import. Each step is unlocked
+// by its own evidence, and a passing validation belongs to one exact document —
+// edit the text and it stops being true (ADR-113).
+const WIZARD_STEPS = [
+  '仓库（Repository）',
+  '分析（Analysis）',
+  '检测到的策略（Detected Strategies）',
+  '警告（Warnings）',
+  'DSL 预览（DSL Preview）',
+  '校验（Validation）',
+  '导入（Import）',
+] as const
+
+const wizardStep = ref(1)
+const unsafeReviewed = ref(false)
+const validating = ref(false)
+
+function gotoStep(step: number) {
+  wizardStep.value = Math.min(Math.max(step, 1), WIZARD_STEPS.length)
+}
+
+/** The draft has to be an object before the validator can say anything about it. */
+const draftDsl = computed<Record<string, unknown> | null>(() => {
+  try {
+    const parsed = JSON.parse(dslText.value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+})
+
+const draftIsJson = computed(() => draftDsl.value !== null)
+const validatedDraft = computed(() => validation.value?.is_valid === true)
+const unsafeCount = computed(() => analysis.value?.unsafe_flags.length ?? 0)
+const warningsAcknowledged = computed(() => unsafeCount.value === 0 || unsafeReviewed.value)
+
+const draftIndicatorCount = computed(() => {
+  const indicators = draftDsl.value?.indicators
+  return Array.isArray(indicators) ? indicators.length : 0
+})
+
+const draftEntryCount = computed(() => {
+  const entry = draftDsl.value?.entry as { long?: { all?: unknown[] } } | undefined
+  return Array.isArray(entry?.long?.all) ? entry.long.all.length : 0
+})
+
+/** What unlocks each step, in one place so a button cannot drift from it. */
+const stepUnlocked = computed<boolean[]>(() => {
+  const hasAnalysis = analysis.value !== null
+  return [
+    repoUrl.value.trim().length > 0,
+    hasAnalysis,
+    hasAnalysis,
+    hasAnalysis && warningsAcknowledged.value,
+    hasAnalysis && draftIsJson.value,
+    hasAnalysis && draftIsJson.value && validatedDraft.value,
+    hasAnalysis && validatedDraft.value && !!importName.value.trim() && !namedVersionTaken.value,
+  ]
+})
+
+const stepBlockedReason = computed(() => {
+  switch (wizardStep.value) {
+    case 1:
+      return '先填仓库地址'
+    case 2:
+    case 3:
+      return '还没有分析结果'
+    case 4:
+      return unsafeCount.value > 0
+        ? `请先勾选「已审查这 ${unsafeCount.value} 个不安全构造」`
+        : '还没有分析结果'
+    case 5:
+      return 'DSL 不是合法的 JSON 对象'
+    case 6:
+      return '校验还没通过'
+    default:
+      return ''
+  }
+})
+
+async function validateDraft() {
+  error.value = ''
+  info.value = ''
+  const dsl = draftDsl.value
+  if (!dsl) {
+    error.value = 'DSL 不是合法的 JSON 对象，先修好文本再校验'
+    return
+  }
+  validating.value = true
+  try {
+    validation.value = await api.validateDsl(dsl)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    validating.value = false
+  }
+}
+
+// A passing check is a statement about one exact document. The moment the text
+// changes, that statement is about a document nobody has validated any more, so it
+// is dropped and the wizard steps back behind the gate (ADR-113).
+watch(dslText, () => {
+  if (validation.value !== null) validation.value = null
+  if (wizardStep.value > 5) wizardStep.value = 5
+})
 
 onMounted(load)
 </script>
@@ -882,43 +1002,72 @@ onMounted(load)
 
     <div class="card" style="margin-top: 14px">
       <h3>从 GitHub 导入（只读分析，不执行仓库代码）</h3>
-      <div class="row" style="margin-bottom: 10px">
-        <input v-model="repoUrl" style="max-width: 340px" placeholder="https://github.com/owner/repo" />
-        <input v-model="repoRef" style="max-width: 140px" placeholder="分支/tag（可选）" />
-        <button :disabled="analyzing" @click="analyzeRepo">
-          {{ analyzing ? '分析中…（视网络情况可能需要一两分钟）' : '分析仓库' }}
-        </button>
+      <p class="muted">
+        七步只有拿到自己的证据才放行：没有分析结果就到不了第 2 步，不安全构造没有人工确认就出不了第 4 步，
+        DSL 不是合法 JSON 就到不了第 6 步，校验通过之后又改过文本就回到第 5 步（ADR-113）。
+      </p>
+      <ol class="wizard-steps">
+        <li
+          v-for="(step, index) in WIZARD_STEPS"
+          :key="step"
+          :class="{
+            current: wizardStep === index + 1,
+            done: wizardStep > index + 1,
+            locked: !stepUnlocked[index],
+          }"
+          @click="stepUnlocked[index] && gotoStep(index + 1)"
+        >
+          {{ index + 1 }}. {{ step }}
+        </li>
+      </ol>
+
+      <div v-if="wizardStep === 1">
+        <div class="row" style="margin-bottom: 10px">
+          <input
+            v-model="repoUrl"
+            style="max-width: 340px"
+            placeholder="https://github.com/owner/repo"
+          />
+          <input v-model="repoRef" style="max-width: 140px" placeholder="分支/tag（可选）" />
+        </div>
+        <div class="row" style="margin-bottom: 10px">
+          <label class="muted" for="repo-max-files">最多读取文件数</label>
+          <input
+            id="repo-max-files"
+            v-model.number="repoMaxFiles"
+            type="number"
+            min="1"
+            max="30"
+            style="max-width: 90px"
+          />
+          <label class="muted" for="repo-max-seconds">最长等待秒数</label>
+          <input
+            id="repo-max-seconds"
+            v-model.number="repoMaxSeconds"
+            type="number"
+            min="10"
+            max="600"
+            style="max-width: 90px"
+          />
+          <span class="muted">超时就停下并说明读了哪些，不会一直转圈</span>
+        </div>
+        <div class="row" style="margin-bottom: 10px">
+          <input
+            v-model="repoToken"
+            type="password"
+            style="max-width: 340px"
+            placeholder="GitHub token（可选，仅提限额用，不存储）"
+          />
+        </div>
+        <div class="row">
+          <button :disabled="analyzing || !repoUrl.trim()" @click="analyzeRepo">
+            {{ analyzing ? '分析中…（视网络情况可能需要一两分钟）' : '分析仓库' }}
+          </button>
+          <span class="muted">输入公开仓库地址后，系统只下载文本做静态分析，绝不执行仓库里的任何代码</span>
+        </div>
       </div>
-      <div class="row" style="margin-bottom: 10px">
-        <label class="muted" for="repo-max-files">最多读取文件数</label>
-        <input
-          id="repo-max-files"
-          v-model.number="repoMaxFiles"
-          type="number"
-          min="1"
-          max="30"
-          style="max-width: 90px"
-        />
-        <label class="muted" for="repo-max-seconds">最长等待秒数</label>
-        <input
-          id="repo-max-seconds"
-          v-model.number="repoMaxSeconds"
-          type="number"
-          min="10"
-          max="600"
-          style="max-width: 90px"
-        />
-        <span class="muted">超时就停下并说明读了哪些，不会一直转圈</span>
-      </div>
-      <div class="row" style="margin-bottom: 10px">
-        <input
-          v-model="repoToken"
-          type="password"
-          style="max-width: 340px"
-          placeholder="GitHub token（可选，仅提限额用，不存储）"
-        />
-      </div>
-      <div v-if="analysis">
+
+      <div v-else-if="wizardStep === 2 && analysis">
         <p class="muted">
           {{ analysis.owner }}/{{ analysis.repo }} @ {{ analysis.ref }} · commit
           {{ shortCommit(analysis.commit) }} ·
@@ -932,9 +1081,6 @@ onMounted(load)
         <p :class="analysis.coverage.complete ? 'muted' : 'error'">{{ coverageHeadline }}</p>
         <p v-if="unreadPythonWarning" class="error">{{ unreadPythonWarning }}</p>
         <p v-if="unparsedPythonWarning" class="error">{{ unparsedPythonWarning }}</p>
-        <ul v-if="analysis.warnings.length" class="error">
-          <li v-for="(w, idx) in analysis.warnings" :key="idx">{{ w }}</li>
-        </ul>
         <details v-if="analysis.files_unparsed.length" class="muted">
           <summary>解析失败的文件（{{ analysis.files_unparsed.length }}）</summary>
           <table>
@@ -969,6 +1115,35 @@ onMounted(load)
             </tbody>
           </table>
         </details>
+        <p class="muted">
+          这一步只报告读取与解析的事实，判断对错留给你自己：分析结果的每个数字都能在仓库里找到对应的文件。
+        </p>
+      </div>
+
+      <div v-else-if="wizardStep === 3 && analysis">
+        <p class="muted">
+          这里列的是导入器真的找到的东西（扁平发现：每个指标、规则、参数各自一条），
+          它不会替你决定「这是一个策略」——组合成草案的是第 5 步，判定草案对错的是第 6 步。
+        </p>
+        <table v-if="analysis.indicators.length">
+          <thead>
+            <tr>
+              <th>指标</th>
+              <th>类型</th>
+              <th>周期</th>
+              <th>证据</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(i, idx) in analysis.indicators" :key="idx">
+              <td>{{ i.source_name }}</td>
+              <td>{{ i.kind }}</td>
+              <td>{{ i.period ?? '—' }}</td>
+              <td class="muted">{{ i.evidence_path }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="muted">没有识别出指标声明。</p>
         <table v-if="analysis.rules.length">
           <thead>
             <tr>
@@ -990,14 +1165,104 @@ onMounted(load)
           </tbody>
         </table>
         <p v-else class="muted">没有识别出可映射的规则，请检查 unknowns。</p>
-        <p v-if="analysis.unsafe_flags.length" class="error">
-          发现 {{ analysis.unsafe_flags.length }} 个不安全构造（导入器不会执行它们，但请先审查）。
-        </p>
+        <table v-if="analysis.params.length">
+          <thead>
+            <tr>
+              <th>识别出的参数</th>
+              <th>取值</th>
+              <th>证据</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(p, idx) in analysis.params" :key="idx">
+              <td>{{ p.name }}</td>
+              <td>{{ p.value }}</td>
+              <td class="muted">{{ p.evidence_path }}</td>
+            </tr>
+          </tbody>
+        </table>
         <p v-if="analysis.unknowns.length" class="muted">
           另有 {{ analysis.unknowns.length }} 处无法映射的内容（已保留证据，未编造规则）。
         </p>
-        <p class="notice">
-          草案已填入下方 DSL 编辑器（缺失的离场规则需手动补齐），确认无误后导入。
+      </div>
+
+      <div v-else-if="wizardStep === 4 && analysis">
+        <ul v-if="analysis.warnings.length" class="error">
+          <li v-for="(w, idx) in analysis.warnings" :key="idx">{{ w }}</li>
+        </ul>
+        <p v-else class="muted">分析过程没有留下警告。</p>
+        <p v-if="unsafeCount" class="error">
+          发现 {{ unsafeCount }} 个不安全构造（导入器不会执行它们，但请先审查）。
+        </p>
+        <label v-if="unsafeCount" class="muted">
+          <input v-model="unsafeReviewed" type="checkbox" />
+          我已人工审查这 {{ unsafeCount }} 个不安全构造
+        </label>
+        <p v-if="analysis.unknowns.length" class="muted">
+          另有 {{ analysis.unknowns.length }} 处无法映射的内容（已保留证据，未编造规则）。
+        </p>
+        <p class="muted">
+          没有不安全构造时这一步自动通过；有的话必须由你勾选确认，系统不会替你点这个勾。
+        </p>
+      </div>
+
+      <div v-else-if="wizardStep === 5">
+        <p class="muted">
+          草案就是上面「策略 DSL」编辑器里的那份文本（同一个 draft，改它请回到那张卡）。
+          这一步只检查它还是不是一个合法的 JSON 对象，判定它是否可用是第 6 步的事。
+        </p>
+        <p :class="draftIsJson ? 'muted' : 'error'">
+          <template v-if="draftIsJson">
+            当前文本是合法 JSON 对象：{{ draftIndicatorCount }} 个指标声明、{{ draftEntryCount }} 条入场条件。
+          </template>
+          <template v-else>当前文本不是合法的 JSON 对象，第 6 步无法校验。</template>
+        </p>
+        <pre class="code-block">{{ dslText }}</pre>
+        <p class="muted">缺失的离场规则需要你手动补齐：导入器只写它看得懂的部分，不会编造。</p>
+      </div>
+
+      <div v-else-if="wizardStep === 6">
+        <div class="row">
+          <button :disabled="!draftIsJson || validating" @click="validateDraft">
+            {{ validating ? '校验中…' : '校验这份草案' }}
+          </button>
+          <span class="muted">校验说的是「这份文本此刻」：改一个字它就过期，第 5 步会重新挡住你</span>
+        </div>
+        <p v-if="validation" :class="validation.is_valid ? 'muted' : 'error'">
+          {{
+            validation.is_valid
+              ? '校验通过：没有 error 级问题，可以进入第 7 步。'
+              : '校验未通过：下面是它列出的问题，先修文本再回来。'
+          }}
+        </p>
+        <table v-if="validation && validation.issues.length">
+          <thead>
+            <tr>
+              <th>级别</th>
+              <th>代码</th>
+              <th>说明</th>
+              <th>路径</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(issue, idx) in validation.issues" :key="idx">
+              <td>{{ issue.severity }}</td>
+              <td>{{ issue.code }}</td>
+              <td>{{ issue.message }}</td>
+              <td class="muted">{{ issue.path ?? '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else-if="validation" class="muted">没有列出任何问题。</p>
+        <p v-if="validation" class="muted">
+          校验器认识这些列：{{ validation.available_columns.join('、') }}；不在其中的名字一律被它否决。
+        </p>
+        <p v-else class="muted">还没有校验过这份草案。</p>
+      </div>
+
+      <div v-else-if="wizardStep === 7">
+        <p class="muted">
+          导入会把这个 commit 的分析结果写成一份不可变版本：来源、commit、哈希与校验状态一起存档，之后不可改写。
         </p>
         <div class="row" style="margin-top: 10px">
           <input v-model="importName" style="max-width: 260px" placeholder="策略名称" />
@@ -1007,7 +1272,7 @@ onMounted(load)
             placeholder="版本（留空 = 服务器分配）"
           />
           <button
-            :disabled="importing || namedVersionTaken"
+            :disabled="importing || namedVersionTaken || !validatedDraft"
             @click="importReviewed"
           >
             {{ importing ? '导入中…' : '确认导入' }}
@@ -1017,10 +1282,25 @@ onMounted(load)
           {{ plannedVersionNote }}
         </p>
       </div>
-      <p v-else class="muted">
-        输入公开仓库地址后，系统只下载文本做静态分析：识别指标、规则与参数，
-        无法确认的一律标记未知，绝不执行仓库里的任何代码。
-      </p>
+
+      <p v-else class="muted">这一步需要先有分析结果：请回到第 1 步。</p>
+
+      <div class="row" style="margin-top: 12px">
+        <button class="ghost" :disabled="wizardStep === 1" @click="gotoStep(wizardStep - 1)">
+          上一步
+        </button>
+        <button
+          v-if="wizardStep < 7"
+          class="ghost"
+          :disabled="!stepUnlocked[wizardStep]"
+          @click="gotoStep(wizardStep + 1)"
+        >
+          下一步：{{ WIZARD_STEPS[wizardStep] }}
+        </button>
+        <span v-if="wizardStep < 7 && !stepUnlocked[wizardStep]" class="muted">
+          {{ stepBlockedReason }}
+        </span>
+      </div>
     </div>
 
     <div v-if="ghSources.length" class="card" style="margin-top: 14px">

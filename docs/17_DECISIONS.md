@@ -1765,3 +1765,29 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 测试：
   - `backend/tests/test_self_check_verdicts.py`：六条守卫，读 `scripts/` 下 `Test-*.ps1` 的原文并把 PowerShell 反引号续行折成一行：这些脚本存在；每个 `Test-*.ps1` 必须同时含 `exit 1` 与 `exit 0`；`Test-EnsembleAttribution.ps1` 的退出块里必须出现 `$failures` 且文件最后一个非空行必须是 `exit 0`；它必须真的检查数据（`market-data/sync`、`series_id`、`result_hash`、字面量 `'^[0-9a-f]{64}$'`、`dataset_version_id`、`bars_evaluated`）；折行后不得有把 `/market-data/sync` 或成员回测响应 `| Out-Null` 掉的语句；sweep 契约的 `max_thresholds`/`possible_votes`/`effective_vote`/`engine_version` 仍在（防止重写时把检查丢掉）。
   - 行为证据（本机真栈：SQLite + `MARKET_DATA_PROVIDER=synthetic` 的 API 跑在 8080；替身是 `%TEMP%` 下一个 stdlib 反代，可在反代时把 `/research/ensemble*` 的 `engine_version` 改写成 `ensemble-9.9.9`，或从同步报告里删掉 `series_id`）：① 直连 API → **exit 0**，identity 表四行真实数据、`market data … inserted=0 series_id=1`（第二次运行，幂等插入 0 行）、`INVARIANTS: OK`；② 纯反代替身（对照组，证明失败不是替身造成的）→ **exit 0**；③ 改写 `engine_version` → **exit 1**，恰好两条 FAIL（ensemble 与 sweep 的 `engine_version` 推导不一致），`INVARIANTS: FAILED (2)`；④ 同步报告缺 `series_id` → **exit 1**，一条 FAIL（`the sync established no series (no message) -- there are no bars to verify against`），`INVARIANTS: FAILED (1)`。
+
+## ADR-074：客户端的每一次调用都是一句关于服务端的断言（`frontend/src/api.ts` ↔ OpenAPI 契约守卫）
+
+- 背景：v0.9.9 的根因是 `frontend/src/views/SettingsView.vue` 调用了 `api.aiTask(id)`，而 `frontend/src/api.ts` 从来没有定义过这个方法；唯一抓住它的是 `vue-tsc` 的 TS2551，也就是说那一版的 Actions 失败是**类型检查**救回来的。
+  - 这次体检要问的是它的反面：类型系统证明客户端能编译，不证明它调用的那扇门存在。`frontend/src/api.ts:8 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api/v1'`，`:20 async function request<T>(path: string, init?: RequestInit): Promise<T>` —— `request<T>` 里的 `T` 是未校验的断言，`path` 只是一段字符串。客户端写 `/strategies` 而服务端只有 `/strategy-versions` 时，`vue-tsc`、`ruff`、`pytest` 全部绿灯，第一次发现是浏览器控制台里一条红色 failed request。
+  - 门是唯一被写两遍的东西：`backend/app/api/main.py:208-229` 用 `app.include_router(router, prefix=settings.api_prefix)` 挂上 19 个 router（前缀 `/api/v1`）。真实门表只有 `app.openapi()["paths"]` 能给出——本机 FastAPI 版本下 `app.routes` 里是 19 个 `_IncludedRouter` 包装对象，**没有 `.path` 属性**。客户端一侧约 80 个 `request<...>(...)` 调用点，路径是字符串字面量或模板字面量（`/backtests/${id}`、`/backtests${flag ? '?status=…' : ''}`）。
+  - 先审计、再决定。三个探针分别查门（路径 + 方法）、查旋钮（查询键双向）、查载荷（客户端接口字段 vs 响应 schema），结论是**今天没有任何漂移**：80 个调用点全部落在真实门上（另 2 个是条件查询串归一化造成的假象）；客户端发送的每个查询键都已声明；API 标为 required 的查询参数客户端都发送；27 份可比对的响应里客户端声明的顶层字段全部存在。
+  - 同一次审计也证明了这类守卫**最容易死于假阳性**：第一版字段探针用扁平正则 `^\s*(\w+)\??\s*:` 读接口字段，把嵌套对象里的字段也当成顶层字段，于是 `SensitivityResult` 的 `summary: { mean, median, stdev, min, max, range, positive_ratio }`、`MonteCarloResult`、`EnsembleResult` 三处被报成「客户端字段不在 schema 里」——三条全是假的。人一旦学会忽略这种告警，守卫就等于不存在。
+- 决策：
+  1. 新增 `backend/tests/test_api_contract.py`，把「客户端调用 ↔ 服务端门」变成 CI 里会失败的断言，共四类检查：每个 `(path, method)` 必须由 API 服务；客户端发送的查询键必须已声明（条件查询串里的键按「可能发送」只做这一向检查）；API 声明为 required 的查询参数必须被无条件发送；客户端响应接口在**深度 0** 声明的字段必须出现在该响应的 schema 里。
+  2. 扫描器本身要可信：用 `request` 标识符定位调用，泛型、括号、字符串、注释、模板字面量都做平衡扫描；模板表达式按「是否含 `?`」分成条件查询串（`${flag ? '?key=1' : ''}`，其中的键记为条件键）与路径段（归一成 `{}`）；数字路径段与 `${id}` 一样归一成 `{}`，因为 `'/backtests/12'` 与 `` `/backtests/${id}` `` 是同一个请求。
+  3. 字段比较必须深度感知：`_declared_fields` 只在接口体深度 0 收集「标识符紧跟 `:` 或 `?`」的名字，嵌套 `{ … }` 里的名字不算字段——这条正是上面三条假阳性的解药。
+  4. 守卫要有下限，否则解析器失灵时它会以「全绿」的方式失效：操作数 ≥ 90、调用点 ≥ 60、不同路径 ≥ 50、可比对的响应 ≥ 20。解析器读不懂客户端了，这些下限先失败。
+  5. 守卫必须被证明会咬人：同一个文件里喂进一个故意坏掉的客户端（不存在的门、门不提供的方法、未声明的查询键、漏掉的必填参数），四个检查各咬一条；再喂一个守规矩的客户端，必须一条都不报——后者里特意留了 `summary: { mean: number | null; nonsense: number | null }`，把「嵌套字段不是字段」钉死。
+- 理由：
+  - 缺的是没有编译器的那个方向。v0.9.9 的方向（页面调 `api.ts` 里不存在的方法）由 `vue-tsc` 兜住；反方向（客户端调服务端没有的门、发服务端不认的键、声明服务端不发到顶层的字段）没有任何一层兜住，而它同样只在运行时暴露。
+  - 为什么不以此版做真栈或浏览器取证：这一版没有改任何运行时行为，改的是「谁在什么时候检查」。真正的证据是负向注入——把真实 `api.ts` 的原文分别改一处（门改名、方法换成 `DELETE`、删掉必填的 `ids=`、在 `SensitivityResult` 里加一个不存在的字段），四个检查各自报出一条，而未改动的原文报 0 条。这比跑一次真栈更能证明守卫会咬。
+  - 宁可少查，也不要假报。字段检查只覆盖 schema 是普通对象（或数组、联合）的 27 份响应，动态构造的 schema（`/health`、`/system/info`、`POST /strategies` 等）直接跳过。范围写进 ADR，而不是让守卫在将来某次重命名里突然变红。
+  - 不把检查降级成「警告」：ADR-072 与 ADR-073 的教训是同一条——不能失败的检查等于没有检查。
+- 影响与兼容：
+  - 新增一个纯静态测试文件（读 `frontend/src/api.ts` 与 `create_app().openapi()`），不改 API、不改数据库、不改前端运行时，`api.ts` 一行未动。
+  - 从此这一类改动会在 CI 里失败：调用不存在的门、调用门不提供的方法、发送未声明的查询键、漏掉必填查询参数、在响应接口深度 0 声明 API 不发送的字段。
+  - 边界与代价：字段检查只对 27 份可比对响应生效（其余跳过）；条件查询串里的键只检查「是否已声明」，不算作满足必填参数（一个可能不发送的键不能满足一个总是要求的参数）；泛型参数里若出现箭头类型（`=>`）会让 `<`/`>` 配对失准，靠第 4 条下限兜住。今天的行为变化为零：守卫在现行代码上 8 条全绿，新增的失败面全部属于**将来**。
+- 测试：
+  - `backend/tests/test_api_contract.py`：八条。`test_the_client_source_is_where_this_guard_expects_it`（文件与默认基址 `/api/v1` 都还在，防止守卫指向错文件而「通过」）、`test_the_scan_finds_the_calls_and_the_doors`（四条下限）、`test_every_client_call_names_a_door_the_api_serves`、`test_the_client_sends_only_declared_query_keys`、`test_the_client_sends_every_required_query_key`、`test_the_client_declares_no_field_the_api_never_sends`（并要求 `compared >= 20`）、`test_the_contract_checker_bites_on_a_broken_client`、`test_the_contract_checker_accepts_a_client_that_keeps_the_contract`。
+  - 审计与注入证据（`%TEMP%` 下的一次性脚本，不入库）：门/旋钮探针在真实 `api.ts` 上找到 80 个调用点、78 个落到真实门（另 2 个是条件查询串归一化假象，随后修正）；深度感知的字段探针比对 27 份响应、0 个问题；负向注入四处改动各产生恰好一条：`GET /backtests/compare_all`（门不存在）、`DELETE /strategies`（方法不对）、`GET /backtests/compare: omits required query key 'ids'`、`SensitivityResult for POST /research/sensitivity: declares field 'nonsense_field' the response schema does not describe`；未改动的原文 0 条。

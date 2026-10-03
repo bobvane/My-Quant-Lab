@@ -2596,3 +2596,56 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 影响与兼容：改动集中在四个视图（`DashboardView.vue` 整页重写、`SignalsView.vue` 措辞、`SettingsView.vue` 分组与模式卡、`StrategiesView.vue`/`BacktestView.vue`/`StrategyDetailView.vue`/`PaperView.vue` 的名称与条件显示）、两个新模块（`mode.ts`、`wording.ts`）与 `metrics.ts`/`StatCard.vue`/`MetricHint.vue`/`style.css`；**没有**新增后端端点、没有改任何计算、没有改数据模型、没有改认证。`/market` 仍是策略库、`/backtest` 仍是回测实验室，只是名字与第一屏顺序变了。**未处理**：评审里的「回测结果第一屏结论层」（UX-2）与「AI 总结整个研究结果」（UX-5）留到 v1.9.2，「行情与策略」拆页（UX-4）与排版重排（§18）留到 v1.9.3。
 
 - 测试：`backend/tests/test_frontend_contracts.py` 新增三条读源码文本的契约测试 —— `test_the_home_page_answers_four_questions_in_plain_words`（`DashboardView.vue` 有 ① 我在研究什么 / ② 最近一次研究结论 / ③ 下一步 / ④ 需要你注意的事情 四个标题、`class="card answer-conclusion"`、`暂时没有需要特别注意的事情`、`suggested_next`/`blocked_reason`/`stagePage(`，且 `api.strategies()`/`api.signals(undefined, 50)` 在 `Promise.all` 里各带 `.catch`）、`test_every_professional_word_carries_a_plain_translation`（`frontend/src/wording.ts` 有 `METRIC_WORDING`/`termAlias`/`metricKeyLabel` 与 19 个引擎键的人话名，`StatCard.vue` 调 `metricPlain(label)` 与 `termAlias(label)`，`MetricHint.vue` 里出现「详细解释」且四问仍在同一个组件里，`metrics.ts` 有 `metricPlain`，`BacktestView.vue` 用 `metricKeyLabel(m.key)`）、`test_signals_say_what_they_are_not`（`SIGNAL_LABELS` 的四个中文词、两句免责、`SignalsView.vue` 调 `signalLabel(`/`groupLabel(`，且它的**模板**部分不再出现 `docs/` —— 脚本注释可以引用规格文档，用户看得到的地方不行）。`docs/13_UI_UX.md` 第 2 节与第 7 节的正文同步改成上面这套说法，第 10 节新增界面模式一节（守卫 `test_every_section_says_whether_it_exists` 与导航树测试同时复跑）。红证据（提交前实测）：把 `wording.ts` 里的 `SIGNAL_LABELS` 值改回 `BUY` → `test_signals_say_what_they_are_not` **1 failed, 14 deselected**，逐字节还原后复绿。改名与文档同批：`StrategyDetailView.vue` 的第 7 段标题改成 `<h3>模拟验证（Paper Trading）</h3>`，`backend/tests/test_ui_promises.py` 的 `DETAIL_SECTIONS` 与 `docs/13_UI_UX.md` 第 3 节第 7 项同时改名 —— 这条守卫比较的正是「文档承诺的名字」与「页面真实渲染的 `<h3>`」，只改一边必然红（本轮实测：只改页面时 `test_the_strategy_detail_page_shows_its_nine_sections` 报 `the detail page renders no 模拟盘（Paper Trading） section`）。
+
+## ADR-128：回测结果先给结论，再给读数；三级指标按「要不要看」分层
+
+- 背景：评审 §9 指出回测实验室应该成为产品核心页面，而当时结果是「先四张指标卡，再一堆研究工具」——用户看完数字仍然不知道这套策略到底行不行、最坏会怎样、下一步做什么。评审 §10 给出三级分层：一级（累计收益、最大回撤、胜率、交易次数、盈亏比、年化收益）必须直接看到；二级（Sharpe、Sortino、CAGR、Expectancy、Exposure 等）点「查看详细分析」才展开；三级（OOS、Walk-Forward、参数敏感性、Monte Carlo、R-Multiple、Threshold Sweep、Ensemble）属于高级分析。§21 同时禁止删除任何一项能力。
+
+- 决策：
+  1. **第一屏是结论**（`frontend/src/views/BacktestView.vue`）：新增 `class="card conclusion-card"` 的「历史回测结论」卡，放在「这次回测的提醒」之前、权益曲线之前，内容依次是 `conclusionHeadline`（一句话）、`<span class="verdict">` 结论标签、两行 `.grid.cols-4` 一级指标、`.risk-line`「最大风险：」、`.next-line`「下一步：」带 `RouterLink`。原本那四张卡（总收益率 / 最大回撤 / 夏普比率 / 胜率）删掉，因为一级读数已经在新卡里、夏普降为二级。
+  2. **结论标签先看样本量**：`MIN_MEANINGFUL_TRADES = 10`，与后端生命周期门槛同一个数（`backend/app/strategies/lifecycle.py` 的 `LifecycleThresholds.min_backtest_trades`，代码注释里写明这个来源）。少于 10 笔 → `warn`「样本太少（N 笔），先别下结论」；没有收益读数 → `warn`；`total_return <= 0` → `bad`「历史回测没有赚钱，不建议继续」；否则 `ok`「值得继续验证」。前端自己**不算**任何新指标，只按已有读数分类（ADR-046 的同一原则）。
+  3. **可信程度独立成卡**：`loadLifecycle()` 取 `GET /lifecycle/strategies/{id}`，`evidenceRows` 输出历史回测（`gates.backtested`）/ 样本外验证（OOS，`gates.oos_tested`）/ 滚动验证（`wfResult !== null`）/ 模拟验证（`gates.paper_trading`）四行的完成状态与「已经存下来的东西」（`evidence.backtest_runs`、`oos_windows`、`paper_trades` 等），`evidenceSentence` 再把它压成「已经做完的是…；还没有做的是…」。回测属于哪个策略由 `evidenceStrategyId` 推出（`detail.strategy_version_id` 在 `strategyId` 的版本列表里就用它，否则查 `ensAllVersions` 的 `strategy_id`）。
+  4. **二级指标收进按钮**：「指标明细」改成「查看详细分析（二级指标）」+ `class="ghost"` 按钮切换 `showDetailAnalytics`，表格加 `v-if="showDetailAnalytics"`；说明句里给 `<a href="#trades">跳到交易明细</a>`，交易明细卡加 `id="trades"`。
+  5. **三级分析整段包进高级模式**：从「滚动 Walk-Forward」那张卡起，到策略集成（加权投票）卡结束，整段包在 `<template v-if="isAdvanced">` 里（普通模式只留一句「高级分析（普通模式下不占第一屏）」加切换到 `● 高级模式` 的提示）。它们的端点、计算与结果一行未动，只是默认不在第一屏。
+  6. **新指标就地解释**：`frontend/src/metrics.ts` 补齐 `交易次数` / `盈亏效率` / `年化复合收益率` / `平均持仓（根）` 四条 note（是什么 / 怎么算 / 为什么看它 / 注意什么），`frontend/src/style.css` 补 `.conclusion-card`、`.verdict(.ok/.warn/.bad)`、`.conclusion-sentence`、`.risk-line`、`.next-line`。
+
+- 理由：评审的判据是「每个核心页面都要回答：我在哪里、现在能做什么、结果是什么意思、下一步是什么」。四张指标卡回答的是第三个问题里最小的一部分，而且把「这套策略值不值得继续」这个真正的判断留给了用户自己拼。把结论、风险、可信程度、下一步四句话放在最前面，再把研究工具按「要不要现在看」分层，就同时满足了两类读法：普通用户读完第一屏就能做决定，专业用户点两下仍然拿到全部原始读数。样本量门禁放在标签里而不是隐藏结论，是因为「86 笔」和「4 笔」看起来一样漂亮，但只有前者能支撑结论。
+
+- 影响与兼容：只改一个视图、一个样式表与 `metrics.ts` 的四条文案；**没有**改后端、没有改 API、没有改数据模型、没有新增依赖、没有改任何量化计算或结果哈希（同一个策略与数据集跑出的 `result_hash` 与 v1.9.1 一致）。三级分析在普通模式下不渲染，但端点仍然存在、高级模式一点就回到原样。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_backtest_result_answers_before_it_lists` 读源码文本断言结论卡的存在与**顺序**（`conclusion-card` 在 `权益曲线` 之前，也在 `<template v-if="isAdvanced">` 之前），把该 `<template>` 到其后第一个 `"\n    </template>"` 之间的文本切出来，断言 OOS / 滚动 Walk-Forward / 参数敏感性分析 / Monte Carlo 重采样 / 策略集成（加权投票）五个标题都在里面、而「这次回测的提醒」不在；再断言一级卡片名（总收益率 / 最大回撤 / 胜率 / 交易次数 / 盈亏效率 / 年化复合收益率）、`查看详细分析` + `showDetailAnalytics` + `<table v-if="showDetailAnalytics">`、`MIN_MEANINGFUL_TRADES` 与注释里点名的 `min_backtest_trades`、以及 `metrics.ts` 里四个新名字。`docs/13_UI_UX.md` 第 4 节按上面顺序重写。同时实测到一条前端坑：`metrics.ts` 的对象键 `平均持仓（根）` 用的是**全角括号**，不加引号时 `vue-tsc` 报 `TS1127 Invalid character` 并级联出一片 `TS1005`/`TS1128`；键必须写成 `'平均持仓（根）':`（纯 CJK 的键如 `年化复合收益率` 可以不加引号）。修好后 `pwsh -NoProfile -File scripts/Invoke-FrontendChecks.ps1 -SkipInstall` exit 0：typecheck 无输出、build 616 modules、`dist/assets/index-PGDSL-Sh.js` 1,371.45 kB（gzip 458.05 kB）、`dist/assets/index-CSKDz4N5.css` 7.35 kB、`✓ built in 14.89s`。
+
+## ADR-129：AI 汇总固定回答五段，其中「可信程度」由本地事实给出
+
+- 背景：评审 §13 指出 AI 当时只是一个「解释」按钮，最终形态应该是「量化引擎 → 计算事实 → AI → 普通语言总结」，输出固定覆盖 ① 结论 ② 原因 ③ 风险 ④ 可信程度 ⑤ 下一步；同一条同时强调 README 的既有原则——**AI 不替引擎算数字**。
+
+- 决策：
+  1. `frontend/src/views/BacktestView.vue` 的 AI 区块改名为「AI 汇总（只解释已有数字，不重新计算）」，按五段渲染：① `summary` + `plain_language`；② `aiDrivers`（`key_drivers` 优先，旧结果回退 `why`）；③ `aiRisks`（`risks` 拼 `risk_notes`）；④ `evidenceSentence` + `what_could_invalidate`；⑤ `what_to_watch_next`。
+  2. **第四段不来自 AI**：它复用上面「可信程度怎么样？」那张卡的同一批生命周期事实（`evidenceRows.value`），因为「这份结论验证到哪一步了」是系统里已经存在、且与 AI 是否配置无关的事实。
+  3. 空态写明未配置 AI Provider 时的行为：**未配置 AI 不影响结论**，一至三段与五段缺席，第四段照常。
+  4. 没有新增后端字段：五段全部来自已有的 `AIExplanation`（`summary`/`why`/`key_drivers`/`risks`/`risk_notes`/`what_could_invalidate`/`what_to_watch_next`/`plain_language`）与 `GET /lifecycle/strategies/{id}`。
+
+- 理由：把「AI 的看法」和「系统的账」分开摆，用户才能分辨哪句话是模型写的、哪句话是引擎算的。四段来自模型、一段来自引擎，正好也把「AI 不产生量化事实」这条原则落成界面结构：模型可以解释为什么亏、建议下一步看什么，但「样本外验证还没做」这种判断必须由代码给出，不能由模型代笔。
+
+- 影响与兼容：只改前端渲染分组与文案，`ExplainResult`/`AIExplanation` 的类型与后端端点不变，AI 缓存与任务队列（`task_id`）不变。老的回测解读记录（只有 `summary`/`why`）仍然能渲染，②会回退到 `why`。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_ai_summary_answers_five_questions_and_owes_none_of_them` 断言标题、五段标记（`① 结论`…`⑤ 下一步`）、`key_drivers`/`why`/`risk_notes`/`what_to_watch_next`/`what_could_invalidate` 都在场，第四段走 `evidenceSentence` + `evidenceRows.value`，以及「未配置 AI」这句提示存在；`docs/13_UI_UX.md` 第 4 节记下同一套规则。
+
+## ADR-130：模拟验证页把「回测 vs 模拟」摆出来，并说明两边为什么还不能比
+
+- 背景：评审 §15 认为模拟盘应该是**验证工具**而不是账户管理，最有价值的模块是「回测 vs 模拟」；同时要求把「模拟盘运行时间还短、暂时不能与 5 年历史回测直接比较」这句话写出来。难点是两边的来源不同：回测的读数是**另一份记录**，模拟的读数是这个账户自己的绩效。
+
+- 决策：
+  1. `frontend/src/views/PaperView.vue` 的账户明细操作列新增「回测 vs 模拟」按钮，载入 `loadComparison(account)`。
+  2. 回测列走账户绑定的策略：`account.strategy_id` → `api.strategyVersions(strategy_id)` 取 `is_current` 的版本 → `api.backtests(version.id)` 取最近一条 `status === 'completed'` → `api.backtest(run.id)` 的 `equity_curve` 首尾算它覆盖的窗口。`PaperAccount` **没有** `strategy_version_id` 字段，所以只能从策略间接推，这一条决定了实现路径。
+  3. 模拟列走 `api.paperPerformance(account.id)`（`metrics.total_return` / `metrics.max_drawdown` / `closed_trades`）与 `api.paperEquity(account.id)`（窗口）。
+  4. 三行读数：累计收益、最大回撤、交易次数；每列下面写明来源（「策略版本 vX 的第 #N 次回测」/「模拟账户 #N 的 M 笔成交记录」）。
+  5. **两列不相比大小**：卡上明写「两边的收益不能直接比大小」，并用 `spanLabel()` 从两条曲线的时间戳算出各自的跨度（约 N 天 / N 个月 / X.X 年），配一句「模拟盘目前运行的时间比历史回测短得多，暂时不能与多年历史回测直接比较」。账户没有绑定策略时写 `comparison.note`：「这个账户没有绑定策略…」。
+  6. 页面定位改写：page-sub 开头改成「这一页不是记账工具，而是策略的验证工具…」，页首原有的事实（虚拟资金、与 Ghostfolio 隔离、滑点与手续费、无券商接口）全部保留。
+
+- 理由：模拟盘的意义在于「同一个策略在真实走过的节奏里表现如何」，所以参照物必须是回测；但两份记录的**长度不同**，直接并排两个百分比会被读成「模拟盘比回测差」。把跨度与来源一起印出来，读者就得到正确的结论：「还没到能比的时候」。跨度只用于说明，不参与任何指标计算（§23 禁止 AI 或前端产生量化事实）。
+
+- 影响与兼容：只改一个视图与一条样式（`.comparison-card`）；`PaperAccount` 不变、`/paper/*` 端点不变、模拟成交与账本一行未动，前端没有新增任何收益率计算（累计收益与最大回撤都是端点原样返回的值，`closed_trades` 也是）。没有可对照回测时页面不会空白，而是说明为什么没有。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_paper_page_compares_itself_with_a_stored_backtest` 断言 `回测 vs 模拟`、`不是记账工具，而是策略的验证工具`、`comparison`/`loadComparison`、五个 api 调用名（`api.strategyVersions(`/`api.backtests(`/`api.backtest(`/`api.paperPerformance(`/`api.paperEquity(`）、`spanLabel`、两句「不能比」的说明，以及三行读数的取数路径（`run.total_return` + `perf.metrics?.total_return`、`run.max_drawdown` + `perf.metrics?.max_drawdown`、`run.number_of_trades` + `perf.closed_trades`）；`docs/13_UI_UX.md` 第 5 节记录同一套口径。
+

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api, type PaperAccount, type PaperPosition, type SignalRecord } from '@/api'
 import EquityChart from '@/components/EquityChart.vue'
 import StatCard from '@/components/StatCard.vue'
@@ -189,6 +189,107 @@ async function loadPositions(accountId: number) {
   }
 }
 
+/**
+ * 回测 vs 模拟（评审 §15、ADR-130）：模拟盘是验证工具，所以它最有用的一屏是「和回测比」。
+ *
+ * 两个事实必须同时说：① 两列读数都来自已经存下来的东西（回测用一次已完成回测的读数，
+ * 模拟用绩效端点的读数），这一页不重新计算任何指标；② 两边的时间跨度不一样长，所以这两个
+ * 收益不能直接比大小 —— 时间跨度只由曲线首尾时间戳算出差多少天，用来解释这件事，而不是
+ * 拿它去折算或修正收益。
+ */
+type ComparisonSide = {
+  total_return: number | null
+  max_drawdown: number | null
+  trades: number | null
+  window: string
+  detail: string
+}
+
+type Comparison = {
+  accountId: number
+  accountName: string
+  backtest: ComparisonSide | null
+  paper: ComparisonSide | null
+  note: string
+}
+
+const comparison = ref<Comparison | null>(null)
+const comparing = ref<number | null>(null)
+
+/** 曲线首尾差多少天：只用来描述两边跑了多久，不是量化指标。 */
+function spanLabel(timestamps: Array<string | undefined>): string {
+  const usable = timestamps.filter((t): t is string => typeof t === 'string' && t.length > 0)
+  if (usable.length < 2) return ''
+  const first = new Date(usable[0]).getTime()
+  const last = new Date(usable[usable.length - 1]).getTime()
+  if (!Number.isFinite(first) || !Number.isFinite(last) || last <= first) return ''
+  const days = Math.round((last - first) / 86400000)
+  if (days < 60) return `约 ${days} 天`
+  if (days < 730) return `约 ${Math.round(days / 30)} 个月`
+  return `约 ${(days / 365).toFixed(1)} 年`
+}
+
+/** 找出这个账户该跟哪一次回测比：绑定策略的当前版本、最近一次跑完的回测。 */
+async function loadComparison(account: PaperAccount) {
+  error.value = ''
+  comparing.value = account.id
+  comparison.value = null
+  try {
+    const result: Comparison = {
+      accountId: account.id,
+      accountName: account.name,
+      backtest: null,
+      paper: null,
+      note: '',
+    }
+
+    if (account.strategy_id === null) {
+      result.note =
+        '这个账户没有绑定策略，所以没有可以对照的历史回测。绑定一个策略之后，这里会把两边并排放在一起。'
+      comparison.value = result
+      return
+    }
+
+    const versions = await api.strategyVersions(account.strategy_id)
+    const version = versions.find((v) => v.is_current) ?? versions[0]
+    if (!version) {
+      result.note = '这个策略还没有版本记录：先到「我的策略」创建版本并跑一次回测。'
+      comparison.value = result
+      return
+    }
+
+    const runs = await api.backtests(version.id)
+    const run = runs.find((r) => r.status === 'completed')
+    if (run) {
+      const detail = await api.backtest(run.id)
+      result.backtest = {
+        total_return: run.total_return,
+        max_drawdown: run.max_drawdown,
+        trades: run.number_of_trades,
+        window: spanLabel(detail.equity_curve.map((p) => p.timestamp)),
+        detail: `策略版本 ${version.version} 的第 #${run.id} 次回测`,
+      }
+    } else {
+      result.note = '这个策略版本还没有跑完的回测，先在「回测」页跑一次，这里才有对照。'
+    }
+
+    const perf = await api.paperPerformance(account.id)
+    const equity = await api.paperEquity(account.id)
+    result.paper = {
+      total_return: perf.metrics?.total_return ?? null,
+      max_drawdown: perf.metrics?.max_drawdown ?? null,
+      trades: perf.closed_trades ?? null,
+      window: spanLabel(equity.equity_curve.map((p) => p.timestamp)),
+      detail: `模拟账户 #${account.id} 的 ${equity.trades_count} 笔成交记录`,
+    }
+    comparison.value = result
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    comparing.value = null
+  }
+}
+
 onMounted(() => {
   void load()
   void loadRecentSignals()
@@ -199,8 +300,9 @@ onMounted(() => {
   <div>
     <h1 class="page-title">模拟验证</h1>
     <p class="page-sub">
-      模拟账户使用虚拟资金，与 Ghostfolio 真实持仓完全隔离。成交按「信号参考价 + 滑点」计算并计入手续费；
-      V1 为多头单持仓，且不包含任何券商下单接口。
+      这一页不是记账工具，而是策略的验证工具：让同一个策略在一段真实走过的时间里用虚拟资金成交，
+      看它和回测差多少。模拟账户使用虚拟资金，与 Ghostfolio 真实持仓完全隔离。成交按「信号参考价 +
+      滑点」计算并计入手续费；V1 为多头单持仓，且不包含任何券商下单接口。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -260,6 +362,9 @@ onMounted(() => {
               <button class="ghost" :disabled="loadingEquity === a.id" @click="loadEquity(a.id)">
                 {{ loadingEquity === a.id ? '读取中…' : '权益曲线' }}
               </button>
+              <button class="ghost" :disabled="comparing === a.id" @click="loadComparison(a)">
+                {{ comparing === a.id ? '对比中…' : '回测 vs 模拟' }}
+              </button>
               <button
                 v-if="a.status === 'active'"
                 class="ghost"
@@ -286,6 +391,68 @@ onMounted(() => {
       <p class="notice warn" style="margin-top: 12px">
         重置模拟账户会清空全部虚拟持仓与交易记录，并写入审计日志。真实账户不受任何影响。
       </p>
+    </div>
+
+    <!-- 回测 vs 模拟（评审 §15、ADR-130）：这一屏回答「模拟盘有没有严重偏离回测」，
+         并且明说两列的时间跨度不同、暂时不能直接比大小。 -->
+    <div v-if="comparison" class="card comparison-card" style="margin-top: 14px">
+      <h3>回测 vs 模拟（{{ comparison.accountName }}）</h3>
+      <template v-if="comparison.backtest && comparison.paper">
+        <p class="muted">
+          同一套策略信号，左边是它在整段历史数据上的回测，右边是它在模拟账户里真实走过的这一段。
+          <b>两边的收益不能直接比大小</b>：时间跨度不一样长，回测跑了很多年，模拟盘才刚开始。
+          这一屏看的是「模拟盘有没有严重偏离回测」，不是给模拟盘打分。
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>读数</th>
+              <th>
+                历史回测<span v-if="comparison.backtest.window">
+                  （{{ comparison.backtest.window }}）</span
+                >
+              </th>
+              <th>
+                模拟验证<span v-if="comparison.paper.window">（{{ comparison.paper.window }}）</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>累计收益</td>
+              <td :class="toneOf(comparison.backtest.total_return)">
+                {{ formatPercent(comparison.backtest.total_return) }}
+              </td>
+              <td :class="toneOf(comparison.paper.total_return)">
+                {{ formatPercent(comparison.paper.total_return) }}
+              </td>
+            </tr>
+            <tr>
+              <td>最大回撤</td>
+              <td :class="toneOf(comparison.backtest.max_drawdown)">
+                {{ formatPercent(comparison.backtest.max_drawdown) }}
+              </td>
+              <td :class="toneOf(comparison.paper.max_drawdown)">
+                {{ formatPercent(comparison.paper.max_drawdown) }}
+              </td>
+            </tr>
+            <tr>
+              <td>交易次数</td>
+              <td>{{ comparison.backtest.trades ?? '—' }}</td>
+              <td>{{ comparison.paper.trades ?? '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted">
+          回测那一列来自 {{ comparison.backtest.detail }}；模拟那一列来自
+          {{ comparison.paper.detail }}。两边的收益率都只统计已平仓的部分。
+        </p>
+        <p class="notice">
+          模拟盘目前运行的时间比历史回测短得多，暂时不能与多年历史回测直接比较：样本还没攒够，
+          收益和回撤都还只是开头。等模拟盘跑够时间再回来看这一屏。
+        </p>
+      </template>
+      <p v-else class="muted">{{ comparison.note }}</p>
     </div>
 
     <div v-if="accounts.length" class="card" style="margin-top: 14px">

@@ -523,6 +523,63 @@ code {
   margin-top: 12px;
 }
 
+/* The backtest page leads with a verdict, not with a metrics table (audit section 9,
+   ADR-128): one sentence, a coloured verdict chip, then the readings that sentence is
+   built from. Everything below it is detail. */
+.conclusion-card {
+  border-left: 3px solid var(--border);
+}
+
+/* The paper page's most useful screen is the comparison with the stored backtest, so it is
+   marked as a result card rather than another management table (audit section 15, ADR-130). */
+.comparison-card {
+  border-left: 3px solid var(--border);
+}
+
+.verdict-line {
+  margin: 6px 0 0;
+}
+
+.verdict {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verdict.ok {
+  background: rgba(46, 160, 67, 0.16);
+  color: #2ea043;
+}
+
+.verdict.warn {
+  background: rgba(210, 153, 34, 0.16);
+  color: #d29922;
+}
+
+.verdict.bad {
+  background: rgba(248, 81, 73, 0.16);
+  color: #f85149;
+}
+
+.conclusion-sentence {
+  margin: 10px 0 0;
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+.risk-line,
+.next-line {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.next-line a {
+  margin-left: 6px;
+}
+
 /* Phone widths (ADR-111, docs/13_UI_UX.md section 9). A signal notification opened on a
    phone must show the page, not a 232px menu column: the shell stacks, the menu becomes a
    horizontally scrollable strip, and wide tables scroll inside the page instead of pushing

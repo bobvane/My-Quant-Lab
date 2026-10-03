@@ -412,3 +412,128 @@ def test_signals_say_what_they_are_not() -> None:
     # comment may still cite them; what the reader sees may not.
     template = SIGNALS.split("</script>", 1)[1]
     assert "docs/" not in template
+
+
+def test_the_backtest_result_answers_before_it_lists() -> None:
+    """The result screen leads with a sentence, and the tiers stay reachable (ADR-128).
+
+    The audit's finding about the backtest lab was ordering, not content: four metric
+    cards said "here are numbers" and nothing said "here is what happened, how bad it can
+    get, how much of this has been checked, and what to do next". So the conclusion card
+    comes *before* the research tools, the professional metrics move one click down, and
+    the advanced analyses stay behind the mode switch instead of being deleted.
+    """
+
+    for text in (
+        "历史回测结论",
+        'class="card conclusion-card"',
+        "conclusionHeadline",
+        "verdict",
+        'class="risk-line"',
+        'class="next-line"',
+        "可信程度怎么样？",
+        "evidenceRows",
+        "evidenceSentence",
+    ):
+        assert text in BACKTEST, text
+
+    # The first screen may not be the metrics table again.
+    assert "MIN_MEANINGFUL_TRADES" in BACKTEST
+    assert "min_backtest_trades" in BACKTEST  # the comment saying where 10 comes from
+    assert BACKTEST.index("conclusion-card") < BACKTEST.index("权益曲线")
+
+    # Order: conclusion, then the advanced (tier-3) tools, then the rest.
+    marker = BACKTEST.index('<template v-if="isAdvanced">')
+    close = BACKTEST.index("\n    </template>", marker)
+    assert BACKTEST.index("conclusion-card") < marker
+    gated = BACKTEST[marker:close]
+    for heading in (
+        "样本外验证（OOS）",
+        "滚动 Walk-Forward",
+        "参数敏感性分析",
+        "Monte Carlo 重采样",
+        "策略集成（加权投票）",
+    ):
+        assert heading in gated, heading
+    assert "这次回测的提醒" not in gated
+    # Basic mode still says the capability exists and where to switch.
+    assert "高级分析（普通模式下不占第一屏）" in BACKTEST
+    assert "● 高级模式" in BACKTEST
+
+    # Tier 1 readings stay on the first screen; tier 2 is one click away, not gone.
+    for label in ("总收益率", "最大回撤", "胜率", "交易次数", "盈亏效率", "年化复合收益率"):
+        assert f'label="{label}"' in BACKTEST, label
+    assert "查看详细分析" in BACKTEST
+    assert "showDetailAnalytics" in BACKTEST
+    assert '<table v-if="showDetailAnalytics">' in BACKTEST
+
+    # A new metric card must explain itself in place (the audit's section 11 rule).
+    for name in ("交易次数", "盈亏效率", "年化复合收益率", "平均持仓（根）"):
+        assert name in METRICS, name
+    assert "'平均持仓（根）':" in METRICS
+
+    assert "查看详细分析" in UI_SPEC
+
+
+def test_the_ai_summary_answers_five_questions_and_owes_none_of_them() -> None:
+    """AI's job is to summarise stored facts, not to produce them (audit section 13, ADR-129).
+
+    The five sections are 结论/原因/风险/可信程度/下一步. Four of them come from the
+    explanation the backend stores; 可信程度 is computed here from lifecycle evidence, so
+    it keeps working with no AI configured at all.
+    """
+
+    assert "AI 汇总（只解释已有数字，不重新计算）" in BACKTEST
+    for section in ("① 结论", "② 原因", "③ 风险", "④ 可信程度", "⑤ 下一步"):
+        assert section in BACKTEST, section
+
+    # ② and ③ are the stored explanation's own fields, with a fallback for older results.
+    assert "key_drivers" in BACKTEST and "why" in BACKTEST
+    assert "risk_notes" in BACKTEST
+    assert "what_to_watch_next" in BACKTEST
+    assert "what_could_invalidate" in BACKTEST
+
+    # ④ is local: the same evidence rows the card above is built from.
+    assert "evidenceSentence" in BACKTEST
+    assert "evidenceRows.value" in BACKTEST
+    # Missing AI must not read as a missing conclusion.
+    assert "未配置 AI" in BACKTEST
+
+    assert "AI 汇总" in UI_SPEC
+
+
+def test_the_paper_page_compares_itself_with_a_stored_backtest() -> None:
+    """The paper account is a verification tool, so it must show backtest vs paper (ADR-130).
+
+    The comparison joins nothing new: the backtest column is a *stored* run of the
+    account's bound strategy and the paper column is the performance endpoint. What the
+    page adds is the sentence the audit asked for — the two spans are different lengths,
+    so the two returns may not be compared directly. That sentence is computed from the
+    two equity curves' timestamps and is not an AI statement, because it must be true even
+    when no AI provider is configured.
+    """
+
+    assert "回测 vs 模拟" in PAPER
+    assert "不是记账工具，而是策略的验证工具" in PAPER
+    assert "comparison" in PAPER and "loadComparison" in PAPER
+
+    for call in (
+        "api.strategyVersions(",
+        "api.backtests(",
+        "api.backtest(",
+        "api.paperPerformance(",
+        "api.paperEquity(",
+    ):
+        assert call in PAPER, call
+
+    # The spans are described, and the page says the two columns are not comparable yet.
+    assert "spanLabel" in PAPER
+    assert "不能直接比大小" in PAPER
+    assert "暂时不能与多年历史回测直接比较" in PAPER
+
+    # No new numbers are invented: the columns are stored readings, printed as they are.
+    assert "run.total_return" in PAPER and "perf.metrics?.total_return" in PAPER
+    assert "run.max_drawdown" in PAPER and "perf.metrics?.max_drawdown" in PAPER
+    assert "run.number_of_trades" in PAPER and "perf.closed_trades" in PAPER
+
+    assert "回测 vs 模拟" in UI_SPEC

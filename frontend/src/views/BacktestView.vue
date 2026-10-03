@@ -12,6 +12,7 @@ import {
   type MonteCarloResult,
   type SensitivityResult,
   type Strategy,
+  type StrategyLifecycle,
   type StrategyVersion,
 } from '@/api'
 import EquityChart from '@/components/EquityChart.vue'
@@ -25,7 +26,7 @@ import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 import { isAdvanced } from '@/mode'
 // 引擎的指标键名与术语在这一页出现过三次（明细、敏感性表头、对比表头），
 // 三处都走同一个翻译表，否则同一个键会写出三种中文（ADR-127）。
-import { metricKeyLabel } from '@/wording'
+import { metricKeyLabel, nextStepText, stagePage, timeframeLabel } from '@/wording'
 
 const runs = ref<BacktestSummary[]>([])
 const onlyVersionFilter = ref(false)
@@ -895,10 +896,173 @@ async function explainCurrent() {
   }
 }
 
+// 回测结果的第一屏先说结论，再说细节（评审 §9、§10、§13；ADR-128、ADR-129）。
+//
+// 这里每个数字都取自引擎已经存下来的读数（`detail.metrics`）或生命周期证据
+// （`/lifecycle/strategies/{id}`）；这一页不重新计算任何量化事实，缺读数就写清楚缺什么。
+// `MIN_MEANINGFUL_TRADES` 必须与后端 `lifecycle.py` 的 `min_backtest_trades` 相同，
+// 否则同一个策略在首页「够样本」、在回测页「样本太少」。
+const MIN_MEANINGFUL_TRADES = 10
+
+const lifecycle = ref<StrategyLifecycle | null>(null)
+
+/** 展示中的这条回测属于哪个策略：证据卡说的是它，不是下拉框里碰巧选中的那个。 */
+const evidenceStrategyId = computed(() => {
+  const runVersion = detail.value?.strategy_version_id
+  if (runVersion !== undefined && versions.value.some((v) => v.id === runVersion)) {
+    return strategyId.value
+  }
+  const version = ensAllVersions.value.find((v) => v.id === runVersion)
+  return version?.strategy_id ?? strategyId.value
+})
+
+async function loadLifecycle() {
+  const id = evidenceStrategyId.value
+  if (id === null) {
+    lifecycle.value = null
+    return
+  }
+  try {
+    lifecycle.value = await api.lifecycle(id)
+  } catch (e) {
+    lifecycle.value = null
+    error.value = (e as Error).message
+  }
+}
+
+/** 引擎读数按需取用；`null` 就是「这次没有这个数」，不拿 0 顶上。 */
+function metricValue(key: string): number | null {
+  const raw = detail.value?.metrics?.[key]
+  return typeof raw === 'number' ? raw : null
+}
+
+/** 一句结论：这套策略历史上表现怎么样（评审 §9）。 */
+const conclusionHeadline = computed(() => {
+  const run = detail.value
+  if (!run) return ''
+  const ret = run.total_return
+  const performance =
+    ret === null || ret === undefined
+      ? '没有算出总收益'
+      : ret >= 0
+        ? `整体是赚钱的：累计收益 ${formatPercent(ret)}`
+        : `整体是亏钱的：累计收益 ${formatPercent(ret)}`
+  const period = `${run.symbol ?? '该标的'} · ${timeframeLabel(run.timeframe)}`
+  return `${period} 的历史数据里，这套策略${performance}，期间最大回撤 ${formatPercent(run.max_drawdown)}。`
+})
+
+/** 结论徽章：只有历史回测一层证据也敢说「值得继续验证」，但样本不够时先说样本。 */
+const verdict = computed(() => {
+  const run = detail.value
+  if (!run) return { tone: 'warn', label: '' }
+  const trades = run.number_of_trades ?? 0
+  if (trades < MIN_MEANINGFUL_TRADES) {
+    return { tone: 'warn', label: `样本太少（${trades} 笔），先别下结论` }
+  }
+  if (run.total_return === null || run.total_return === undefined) {
+    return { tone: 'warn', label: '这次回测没有算出收益，先看提醒' }
+  }
+  if (run.total_return <= 0) return { tone: 'bad', label: '历史回测没有赚钱，不建议继续' }
+  return { tone: 'ok', label: '值得继续验证' }
+})
+
+/** 最大风险（评审 §9）：回撤与最长连续亏损，两句话都来自已存读数。 */
+const worstPart = computed(() => {
+  const run = detail.value
+  if (!run) return ''
+  const bits: string[] = []
+  if (run.max_drawdown !== null && run.max_drawdown !== undefined) {
+    bits.push(`从最高点跌到随后最低点最深 ${formatPercent(Math.abs(run.max_drawdown))}`)
+  }
+  const streak = metricValue('max_consecutive_losses')
+  if (streak !== null) bits.push(`最长连续亏 ${streak} 笔`)
+  if (!bits.length) return '这次回测没有留下回撤或连续亏损的读数。'
+  return `${bits.join('，')} —— 这是这套策略最难熬的部分。`
+})
+
+/** 可信程度（评审 §9）：每一层证据是做过还是没做过，门槛来自生命周期。 */
+const evidenceRows = computed(() => {
+  const life = lifecycle.value
+  const gates = life?.gates ?? {}
+  const evidence = (life?.evidence ?? {}) as Record<string, unknown>
+  const count = (key: string): number => Number(evidence[key] ?? 0)
+  return [
+    {
+      name: '历史回测',
+      done: Boolean(gates.backtested),
+      detail: `${count('backtest_runs')} 次回测，其中交易最多的一次 ${count('backtest_best_trades')} 笔`,
+    },
+    {
+      name: '样本外验证（OOS）',
+      done: Boolean(gates.oos_tested),
+      detail: `${count('oos_windows')} 个样本外窗口`,
+    },
+    {
+      name: '滚动验证（Walk-Forward）',
+      done: wfResult.value !== null,
+      detail: wfResult.value
+        ? '本次页面已经跑过一次（只算本页状态，不构成策略证据）'
+        : '还没有跑：它检验样本外表现是否稳定',
+    },
+    {
+      name: '模拟验证',
+      done: Boolean(gates.paper_trading),
+      detail: `${count('paper_trades')} 笔模拟成交`,
+    },
+  ]
+})
+
+/** 下一步：生命周期有证据支撑的那一步；没有就退回主流程，话术与首页一致。 */
+const nextStep = computed(() => {
+  const life = lifecycle.value
+  const stage = life?.suggested_next
+  if (stage) {
+    return {
+      text: nextStepText(stage),
+      reason: life?.blocked_reason ? `现在还不能推进：${life.blocked_reason}` : '',
+      to: stagePage(stage)?.to ?? '',
+      linkText: stagePage(stage)?.label ?? '',
+    }
+  }
+  if (detail.value) {
+    return { text: nextStepText('backtested'), reason: '', to: '/backtest', linkText: '' }
+  }
+  return { text: nextStepText(null), reason: '', to: '', linkText: '' }
+})
+
+/** §10 二级：详细分析默认收起，一次点击就能全部打开。 */
+const showDetailAnalytics = ref(false)
+
+/** §13 ②原因：优先用 `key_drivers`，旧结果回退到 `why`；两者都没有就不编。 */
+const aiDrivers = computed<string[]>(() => {
+  const explanation = btExplanation.value?.explanation
+  if (!explanation) return []
+  if (explanation.key_drivers?.length) return explanation.key_drivers
+  return explanation.why ?? []
+})
+
+/** §13 ③风险：`risks` 与 `risk_notes` 都是对已存事实的说法，合并显示。 */
+const aiRisks = computed<string[]>(() => {
+  const explanation = btExplanation.value?.explanation
+  if (!explanation) return []
+  return [...(explanation.risks ?? []), ...(explanation.risk_notes ?? [])]
+})
+
+/** §13 ④可信程度：这一句来自已存证据，不是 AI 写的，所以 AI 没配置时它照样在。 */
+const evidenceSentence = computed(() => {
+  const done = evidenceRows.value.filter((row) => row.done).map((row) => row.name)
+  const missing = evidenceRows.value.filter((row) => !row.done).map((row) => row.name)
+  if (!missing.length) return `这几层证据都已经做过：${done.join('、')}。`
+  const doneText = done.length ? done.join('、') : '（还没有）'
+  return `已经做完的是${doneText}；还没有做的是${missing.join('、')} —— 上面的结论只在做过的这几层里成立。`
+})
+
 watch(strategyId, loadVersions)
+watch(evidenceStrategyId, loadLifecycle)
 onMounted(async () => {
   await load()
   await loadVersions()
+  await loadLifecycle()
   // Ensemble candidates span every strategy, so they load independently of the
   // single-strategy selection above.
   await loadEnsCandidates()
@@ -1013,6 +1177,105 @@ onMounted(async () => {
       </p>
     </div>
 
+    <!-- 第一屏：这套策略历史上表现怎么样、最坏能坏到哪里、这份结论有多可信、下一步做什么
+         （评审 §9；ADR-128）。全部读数来自引擎与生命周期证据。 -->
+    <div v-if="detail" class="card conclusion-card" style="margin-top: 14px">
+      <h3>历史回测结论</h3>
+      <p class="verdict-line">
+        <span class="verdict" :class="verdict.tone">{{ verdict.label }}</span>
+      </p>
+      <p class="conclusion-sentence">{{ conclusionHeadline }}</p>
+      <div class="grid cols-4" style="margin-top: 10px">
+        <StatCard
+          label="总收益率"
+          :value="formatPercent(detail.total_return)"
+          :tone="toneOf(detail.total_return)"
+          :sub="`期末权益 ${formatNumber(detail.final_equity)}`"
+        />
+        <StatCard
+          label="最大回撤"
+          :value="formatPercent(detail.max_drawdown)"
+          :tone="toneOf(detail.max_drawdown)"
+          sub="越小越好"
+        />
+        <StatCard
+          label="胜率"
+          :value="formatPercent(detail.win_rate)"
+          sub="方向猜对的频率"
+        />
+        <StatCard
+          label="交易次数"
+          :value="detail.number_of_trades ?? '—'"
+          sub="上面的结论有多少样本支撑"
+        />
+      </div>
+      <div class="grid cols-4" style="margin-top: 10px">
+        <StatCard
+          label="盈亏效率"
+          :value="formatNumber(metricValue('profit_factor'), 2)"
+          :tone="toneOf(metricValue('profit_factor'))"
+          sub="赚的钱 ÷ 亏的钱"
+        />
+        <StatCard
+          v-if="metricValue('cagr') !== null"
+          label="年化复合收益率"
+          :value="formatPercent(metricValue('cagr'))"
+          :tone="toneOf(metricValue('cagr'))"
+          sub="按年折算的复合增长"
+        />
+        <StatCard
+          v-if="metricValue('average_holding_bars') !== null"
+          label="平均持仓（根）"
+          :value="formatNumber(metricValue('average_holding_bars'), 1)"
+          :sub="`1 根 = 1 个${timeframeLabel(detail.timeframe)}数据点`"
+        />
+      </div>
+      <p class="risk-line"><b>最大风险：</b>{{ worstPart }}</p>
+      <p class="next-line">
+        <b>下一步：</b>{{ nextStep.text }}
+        <RouterLink v-if="nextStep.to && nextStep.linkText" :to="nextStep.to">
+          {{ nextStep.linkText }}
+        </RouterLink>
+        <span v-if="nextStep.reason" class="muted">（{{ nextStep.reason }}）</span>
+      </p>
+    </div>
+
+    <div v-if="detail" class="card" style="margin-top: 14px">
+      <h3>可信程度怎么样？</h3>
+      <p class="muted">
+        每一层证据是「做过」还是「没做过」，由系统按已存证据判断（生命周期门槛，不涉及模型）。
+        没做过的那一层，就是上面结论的边界。
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>证据</th>
+            <th>状态</th>
+            <th>已经存下来的东西</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in evidenceRows" :key="row.name">
+            <td>{{ row.name }}</td>
+            <td>{{ row.done ? '已完成' : '未完成' }}</td>
+            <td class="muted">{{ row.detail }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 评审 §10 的三级分析：OOS 分割、滚动 Walk-Forward、参数敏感性、Monte Carlo、
+         策略集成与投票阈值扫描默认收起，能力一点没少（ADR-126、ADR-128）。 -->
+    <div v-if="!isAdvanced" class="card" style="margin-top: 14px">
+      <h3>高级分析（普通模式下不占第一屏）</h3>
+      <p class="muted">
+        下面这些是研究工具，不是「先看结论」需要的东西：OOS 分割、滚动 Walk-Forward、参数敏感性、
+        Monte Carlo 重采样、策略集成与投票阈值扫描。它们的能力一点没少，只是在普通模式里默认收起 ——
+        要看就在顶部切到「● 高级模式」。
+      </p>
+    </div>
+
+    <template v-if="isAdvanced">
     <div class="card" style="margin-top: 14px">
       <h3>样本外验证（OOS）</h3>
       <div class="row">
@@ -1659,6 +1922,7 @@ onMounted(async () => {
         </p>
       </div>
     </div>
+    </template>
 
     <div v-if="detail && (detail.warnings?.length ?? 0) > 0" class="card" style="margin-top: 14px">
       <h4>这次回测的提醒</h4>
@@ -1667,32 +1931,6 @@ onMounted(async () => {
         别把这些数字当成一次干净的回测。
       </p>
       <p v-for="(w, i) in detail.warnings" :key="i" class="notice">{{ w }}</p>
-    </div>
-
-    <div v-if="detail" class="grid cols-4" style="margin-top: 14px">
-      <StatCard
-        label="总收益率"
-        :value="formatPercent(detail.total_return)"
-        :tone="toneOf(detail.total_return)"
-        :sub="`期末权益 ${formatNumber(detail.final_equity)}`"
-      />
-      <StatCard
-        label="最大回撤"
-        :value="formatPercent(detail.max_drawdown)"
-        :tone="toneOf(detail.max_drawdown)"
-        sub="越小越好"
-      />
-      <StatCard
-        label="夏普比率"
-        :value="formatNumber(detail.sharpe)"
-        :tone="toneOf(detail.sharpe)"
-        sub="风险调整后收益"
-      />
-      <StatCard
-        label="胜率"
-        :value="formatPercent(detail.win_rate)"
-        :sub="`交易 ${detail.number_of_trades ?? 0} 次`"
-      />
     </div>
 
     <div v-if="detail" class="card" style="margin-top: 14px">
@@ -1705,8 +1943,10 @@ onMounted(async () => {
       <MultiLineChart :series="drawdownSeries" height="220px" />
     </div>
 
+    <!-- AI 汇总整个研究结果（评审 §13；ADR-129）：结论、原因、风险、可信程度、下一步。
+         AI 只解释引擎算出来的事实，所以缺 AI 时这一页的结论照样成立。 -->
     <div v-if="detail" class="card" style="margin-top: 14px">
-      <h3>AI 解读（只解释已有数字，不重新计算）</h3>
+      <h3>AI 汇总（只解释已有数字，不重新计算）</h3>
       <div class="row" style="margin-bottom: 10px">
         <button :disabled="explainingBt" @click="explainCurrent">
           {{ explainingBt ? '解读中…' : '生成解读' }}
@@ -1714,16 +1954,45 @@ onMounted(async () => {
         <span v-if="btExplanation?.cached" class="muted">缓存命中，未产生费用</span>
       </div>
       <div v-if="btExplanation">
+        <h4>① 结论</h4>
         <p>{{ btExplanation.explanation.summary }}</p>
-        <p class="muted">{{ btExplanation.explanation.plain_language }}</p>
-        <ul v-if="btExplanation.explanation.key_drivers?.length" class="muted">
-          <li v-for="(d, idx) in btExplanation.explanation.key_drivers" :key="idx">{{ d }}</li>
-        </ul>
-        <p v-if="btExplanation.explanation.risks?.length" class="muted">
-          风险提示：{{ btExplanation.explanation.risks.join('；') }}
+        <p v-if="btExplanation.explanation.plain_language" class="muted">
+          {{ btExplanation.explanation.plain_language }}
         </p>
+
+        <h4>② 原因</h4>
+        <ul v-if="aiDrivers.length" class="answer-list">
+          <li v-for="(driver, idx) in aiDrivers" :key="idx">{{ driver }}</li>
+        </ul>
+        <p v-else class="muted">这次解读没有给出原因。没有原因就不编一个。</p>
+
+        <h4>③ 风险</h4>
+        <ul v-if="aiRisks.length" class="answer-list">
+          <li v-for="(risk, idx) in aiRisks" :key="idx">{{ risk }}</li>
+        </ul>
+        <p v-else class="muted">
+          这次解读没有给出风险条目；上面「最大风险」那段是引擎读数，它一直有效。
+        </p>
+
+        <h4>④ 可信程度</h4>
+        <p>{{ evidenceSentence }}</p>
+        <ul v-if="btExplanation.explanation.what_could_invalidate?.length" class="answer-list">
+          <li v-for="(item, idx) in btExplanation.explanation.what_could_invalidate" :key="idx">
+            什么会让它失效：{{ item }}
+          </li>
+        </ul>
+
+        <h4>⑤ 下一步</h4>
+        <ul v-if="btExplanation.explanation.what_to_watch_next.length" class="answer-list">
+          <li v-for="(item, idx) in btExplanation.explanation.what_to_watch_next" :key="idx">
+            {{ item }}
+          </li>
+        </ul>
+        <p v-else>{{ nextStep.text }}</p>
       </div>
-      <p v-else class="muted">尚未生成解读。未配置 AI 时此按钮不可用，量化功能不受影响。</p>
+      <p v-else class="muted">
+        尚未生成解读。未配置 AI 时这个按钮不可用，上面的结论、风险与可信程度都不受影响。
+      </p>
     </div>
 
     <div v-if="compareResult" class="card" style="margin-top: 14px">
@@ -1854,9 +2123,20 @@ onMounted(async () => {
       </div>
     </div>
 
+    <!-- 评审 §10 的二级指标：不再默认铺满页面，但一次点击就全部打开（ADR-128）。 -->
     <div v-if="detail && metricRows.length" class="card" style="margin-top: 14px">
-      <h3>指标明细</h3>
-      <table>
+      <div class="row" style="justify-content: space-between">
+        <h3>查看详细分析（二级指标）</h3>
+        <button class="ghost" @click="showDetailAnalytics = !showDetailAnalytics">
+          {{ showDetailAnalytics ? '收起详细分析' : '查看详细分析' }}
+        </button>
+      </div>
+      <p class="muted">
+        夏普比率、索提诺比率、年化复合收益率、每笔交易期望收益、持仓时间占比都在这里，默认收起是为了
+        让第一屏只说结论。逐笔的 R 倍数、MAE、MFE 在下面的「交易明细」里（
+        <a href="#trades">跳到交易明细</a>）。
+      </p>
+      <table v-if="showDetailAnalytics">
         <thead>
           <tr>
             <th>指标</th>
@@ -1872,7 +2152,7 @@ onMounted(async () => {
       </table>
     </div>
 
-    <div v-if="detail?.trades.length" class="card" style="margin-top: 14px">
+    <div v-if="detail?.trades.length" id="trades" class="card" style="margin-top: 14px">
       <div class="row" style="justify-content: space-between">
         <h3>交易明细</h3>
         <button class="ghost" @click="exportTradesCsv">导出 CSV</button>

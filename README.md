@@ -289,7 +289,7 @@ npm run build
 
 ## 版本与发布
 
-版本号从 `v0.0.1` 起，每段 0–9，到 10 进位（`v0.0.10 → v0.1.0`）。
+版本号三段，每段只占一位、到 10 进位：`v1.6.8 → v1.6.9 → v1.7.0`——第三段**永远**是一位，`v1.6.9` 之后是 `v1.7.0`，不存在更长的第三段（`scripts/version.sh set` 会直接拒绝不合规的版本号，ADR-079）。
 
 ```bash
 ./scripts/version.sh show          # 查看当前版本
@@ -302,6 +302,14 @@ git push origin main && git push origin <新版本号>
 1. 构建并推送 `backend` / `web` 镜像到 GHCR；
 2. 用该版本镜像跑一次冒烟测试；
 3. 创建 GitHub Release，附带 NAS 部署说明。
+
+### 部署节奏（ADR-086）
+
+只有**大版本**——`X.Y.0`，即版本号第三段为 `0`——才部署到 NAS：`v1.7.0`、`v1.8.0`、`v1.9.0` 这一类。
+补丁版本（`v1.6.3`、`v1.6.4`…）只提交、打标签、推送 GitHub，**不部署**：每个补丁都在仓库里积累并通过 CI，
+等下一个大版本一起上，NAS 因此只在语义上有意义的版本升级一次。
+
+升级时在 NAS 上 `docker compose pull && docker compose up -d`，再跑 `scripts/Test-NasDeployment.ps1` 验证。
 
 ---
 

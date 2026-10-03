@@ -32,6 +32,7 @@ PACKAGE_JSON = REPO_ROOT / "frontend" / "package.json"
 PACKAGE_LOCK = REPO_ROOT / "frontend" / "package-lock.json"
 INIT = REPO_ROOT / "backend" / "app" / "__init__.py"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
+README = REPO_ROOT / "README.md"
 
 BASH = shutil.which("bash")
 needs_bash = pytest.mark.skipif(BASH is None, reason="bash is required to exercise version.sh")
@@ -79,6 +80,29 @@ def test_the_documented_scheme_shows_the_carry() -> None:
     assert "carries over at 10" in header
     assert "v1.5.9 → v1.6.0" in header
     assert "v0.0.10" not in header, "the documentation still shows an uncarried version"
+
+
+def test_the_live_documents_do_not_teach_an_uncarried_version() -> None:
+    """ADR-079 fixed the script and left the same wrong example in the README.
+
+    The scheme is documented in places people actually read; the script is the
+    only one that cannot lie, because it refuses. A live document that shows
+    ``v0.0.10`` as the rule teaches the version the code rejects (ADR-085).
+    History rows in ``docs/15`` may still quote it while describing the fix, so
+    only the README -- what an operator reads before tagging -- is asserted.
+    """
+
+    readme = _text(README)
+    assert "v0.0.10" not in readme, "the README still shows the uncarried example"
+    assert "v1.6.9 → v1.7.0" in readme, "the README no longer shows the carry"
+
+
+def test_the_readme_states_which_versions_get_deployed() -> None:
+    """ADR-086: patches are pushed, only X.Y.0 reaches the NAS."""
+
+    readme = _text(README)
+    assert "ADR-086" in readme
+    assert "X.Y.0" in readme
 
 
 def test_every_version_reference_agrees_with_version_txt() -> None:

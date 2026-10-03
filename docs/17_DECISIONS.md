@@ -103,6 +103,7 @@ API 默认只绑定 `127.0.0.1`，由 web 容器代理 `/api`。
 **决策**：`v0.0.1 → v0.0.9 → v0.0.10 → v0.1.0`，由 `scripts/version.sh` 统一维护，
 同步写入 `version.txt`、`backend/pyproject.toml`、`backend/app/__init__.py`、
 `frontend/package.json` 与 `.env.example`。
+> 修订（ADR-079 / ADR-085）：上面 `v0.0.10` 这个示例是旧规则的写法，已废止 —— 第三段**永远**是一位，`v1.6.9` 之后是 `v1.7.0`；`scripts/version.sh set` 会直接拒绝多位的版本号。
 **理由**：版本号来源唯一，避免各处手工修改导致不一致。
 
 ## ADR-018：标签驱动发布到 GHCR
@@ -1987,3 +1988,49 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：可观测性的最小单位不是「有没有日志」，而是「用户看到的那一句话能不能定位到那一行日志」。所以关联号必须进 `message` —— 前端显示的是 `body.error.message`（`frontend/src/api.ts:20-33`），只放进结构化的 `details` 等于只给读 JSON 的人用。每请求唯一是同一件事的另一半：如果所有人共享一个常量，这个号就是装饰。8 位十六进制是刻意的取舍 —— 关联号的作用域是一个人的排障窗口，不是全局账本。
 - 影响与兼容：500 的 `message` 文案变了（仓库里没有断言旧文案的地方，前端原样显示，因此用户会看到可引用的号）；新增响应头 `X-Incident-Id`（代理与浏览器 Network 面板都会记录它）；生产下仍然不泄露异常类型与消息（ADR-077 的同一原则：公开发布的部署不该多说话），非生产行为不变。
 - 测试：`backend/tests/test_error_incident.py` 5 条全绿（与 ADR-081 的守卫合跑 = `16 passed, 723 deselected in 9.51s`）；先红证据是 `git show HEAD:backend/app/api/main.py` 里 `incident` 出现 0 次、`"message": "internal server error",` 一字不改（本 ADR 是新增能力，不是修一个回归，所以红的一半由「改动前 handler 里根本没有这个概念」这个事实给出，而不是靠失败测试）。边界：守卫证明响应与日志共享同一个号；它不能证明某个部署的日志采集把这些行留住了 —— 那取决于运行环境。
+
+
+## ADR-083：计数必须数全，而不是数记得住的那个（删除防护要数全部引用者）
+
+- 背景：ADR-081 把「删除不能让可复现的证据变成不可复现的数字」立成规则，但那一条只落在**行情**上。同一形状的缺陷在策略与 AI provider 上还在。`backend/app/api/routers/strategies.py:96-106`（改动前）的 `delete_strategy()` 唯一的防护是查 `backtest_runs`（经 `strategy_versions` join），而 `signals.strategy_version_id`（`backend/app/domain/models.py:434`，`nullable=False`、**无 `ondelete`**）与 `paper_accounts.strategy_id`（`models.py:502`，可空但**无 `ondelete`**）都不在防护里。策略→版本是 ORM 级 `cascade="all, delete-orphan"`（`models.py:204-206`），所以 `db.delete(strategy)` 会真的发出 `DELETE FROM strategy_versions …`，PostgreSQL 的正确拒绝变成 commit 上的 `IntegrityError` → 通用 500。这不是理论路径：信号由 `backend/app/simulation/signal_engine.py:230-246` 在生产路径写入，模拟盘账户由 `backend/app/api/routers/paper.py:47-53` 创建。AI provider 同族：`backend/app/data/ai_provider_service.py:285`（改动前）只查 `ai_tasks`，而 `ai_usage.provider_id` 与 `ai_usage.model_id`（`models.py:688-689`，均无 `ondelete`）不问 —— 又因为 `AIProvider.models` 有级联（`models.py:618-620`），「只有该 provider 名下某个模型有用量」同样挡不住这次删除。
+- 决策：
+  1. 把原则写成一条：删除防护要**数全部引用者**，而不是写防护时第一个想到的那一类。引用者清单是数据模型的事实，不是记忆。
+  2. `backend/app/api/routers/strategies.py` 新增 `_REFERENCE_LABELS`（`backtests`→回测记录、`signals`→信号记录、`paper_accounts`→模拟盘账户，元组顺序即消息里的报告顺序）、`_blocking_references(db, strategy_id) -> dict[str, int]`（版本子查询 + 三次 `db.scalar(select(func.count(...)))`，只返回非零项）与 `_blocked_delete_message(blocking)`（按类给条数，`、` 连接）；`delete_strategy()` 用它们取代 backtest-only 检查，仍然返回 **409**：`此策略被 2 条信号记录、1 条模拟盘账户 关联，不能直接删除。请先删除相关记录。`
+  3. `backend/app/data/ai_provider_service.py` 的 `delete_provider()` 在既有 AI task 检查之后，再用一次 `or_` 查询统计 `ai_usage`：`AIUsage.provider_id == provider_id` **或** `AIUsage.model_id.in_(select(AIModel.id).where(AIModel.provider_id == provider_id))`；命中则 `ProviderConfigError("this provider has AI usage history; deactivate it instead of deleting")`（与既有 task 分支同族：停用，而不是删除）。
+  4. 守卫 `backend/tests/test_delete_referrers.py`（6 条）：`test_a_signal_blocks_deleting_its_strategy`、`test_a_paper_account_blocks_deleting_its_strategy`、`test_the_refusal_counts_every_referrer`（两类引用同时存在时消息把**每一类的条数**都数出来）、`test_a_strategy_nobody_points_at_still_deletes`（**没有任何引用的策略仍然删得掉**，随后 GET 404）、`test_ai_usage_blocks_deleting_its_provider`、`test_ai_usage_of_a_model_alone_blocks_the_provider`（只有该 provider 名下某个模型的用量也拒绝）。
+- 理由：这个缺陷的形状是「防护只写了记得住的那一个引用者」。它在当时的测试里不会露头，因为测试库也不打开外键（ADR-081 才打开），只在生产里以 500 出现。两条路可以避免下一次：把引用完整性交给数据库并让错误可见（ADR-081），或在应用层把引用者数全。这里选后者，因为用户该看到的是「谁在用它、先删什么」，而不是一个被拒绝的删除。消息按类给条数而不是给一个总数，因为下一步动作取决于**哪一类**在挡路：删回测、删信号，还是关掉模拟盘账户。「仍然删得掉」那条守卫是刻意的 —— 一个从不放行的防护和从不拦截的防护一样坏，而且更隐蔽。
+- 影响与兼容：`DELETE /strategies/{id}` 仍然只在无引用时成功，但 409 的 detail 从单一「此策略有回测记录关联」变成按类计数的句子；有信号或有模拟盘账户的策略**再也不可能被删除**（此前是 500，现在是有解释的 409）；`delete_provider()` 的失败形态多了「有 AI 用量历史」一种。仓库里没有测试或前端断言旧的 409 文本（grep `此策略有回测记录关联` 在 `backend/tests` 与 `frontend/src` 零命中），前端 `frontend/src/api.ts` 原样显示 `error.detail`，所以用户看到的是新的可读句子。退役手段是停用/归档，不是删除 —— 与 ADR-081 的取值一致。
+- 测试：先红后绿。`git worktree` 检出 v1.6.2（`17d7f191e`）并拷入本 ADR 的守卫 = **7 failed, 2 passed in 15.61s**（7 条包含本 ADR 的 5 条与 ADR-084 的 2 条），失败形态不是断言而是线上那个 500 家族：`sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) FOREIGN KEY constraint failed`，策略路径的语句是 `[SQL: DELETE FROM strategy_versions WHERE strategy_versions.id = ?]`（抛在 `strategies.py` 的 `db.commit()`），provider 路径是 `[SQL: DELETE FROM ai_providers WHERE ai_providers.id = ?]`；同一次运行里 ADR-082 的日志行写着 `unhandled error on /api/v1/strategies/1 (incident bbfcc3b4)`（两个 ADR 在这里接上：一个让 500 可追查，一个让 500 不再发生）。实现后本 ADR 的 6 条全绿；批次读数见 ADR-085 的测试段。边界：守卫证明的是「拒绝的契约」（谁挡路、数出来的条数、无引用仍删得掉），它不能证明某个 NAS 上的 PostgreSQL 现在会给出 409 —— 那要等下一次大版本部署后用同一条 `DELETE` 复验。
+
+## ADR-084：没人读的设置就是没人兑现的承诺（删掉零消费者的旋钮）
+
+- 背景：`backend/app/core/config.py` 的 39 个 Settings 字段里，有 4 个在 config.py 之外**一次都没被读过**：`ai_provider_base_url`、`ai_provider_api_key`、`ai_default_model` 与 `scan_cron`。它们不是「留待将来」的空位，而是**已经有承诺的空位**：`.env.example` 教运维在这里填 provider 地址与密钥，`docker-compose.yml` 把它们透传进容器，`scan_cron` 的 `description` 写着「Celery beat crontab used by the signal scanner」。而 `backend/app/workers/celery_app.py:31` 的 `beat_schedule` 把扫描周期硬编码成 `crontab(minute="*/15")` —— 照着文档改 `SCAN_CRON` 的人会得到**零变化**，且没有任何提示。这与 ADR-077（示例密钥被当成合格配置）同族：文档承诺了系统不会兑现的行为。provider 的真正配置入口一直是数据库（Web 的「设置 → AI」，密钥加密存储，见 `backend/app/data/ai_provider_service.py`），环境变量这条路从来没有消费者。
+- 决策：
+  1. 删掉这 4 个字段（`config.py`，原 `:127-129` 与 `:135-138`）、`.env.example` 里对应的 3 行（`AI_PROVIDER_BASE_URL`/`AI_PROVIDER_API_KEY`/`AI_DEFAULT_MODEL`）与 `docker-compose.yml:38-40` 的透传；`.env.example` 的注释改为指明真实入口（Web 设置页，存数据库）。
+  2. 保留 `ai_daily_budget_usd`（`backend/app/api/routers/settings.py:57` 通过 `GET /settings` 暴露、`frontend/src/api.ts:570` 读取，有真实消费者）以及 `default_currency`/`default_timezone`。
+  3. 新增守卫 `backend/tests/test_no_dead_settings.py`（3 条）：`test_every_setting_is_read_somewhere`（`Settings` 的每个字段都必须在 `backend/app`、`scripts`、`docker`、`.github`、`frontend/src` 与 `docker-compose*.yml` 的合并文本里出现，形如 `.字段名`）、`test_every_documented_env_key_is_consumed`（`.env.example` 的每个键都必须被消费）、`test_the_knobs_that_did_nothing_are_gone`（被删掉的四个名字不许回来）。消费者扫描**刻意不含 `backend/tests`**：只有测试读的设置，对运维与用户而言仍然是没人读的。
+- 理由：两个方向都诚实 —— 要么把旋钮接上，要么把旋钮撤掉。`SCAN_CRON` 可以接上，但 `beat_schedule` 是模块导入时构造的，要变成运行时可配就得重做调度层；三个 AI 环境变量接上则会与「密钥只进数据库、加密存储」的既有决定冲突（ADR-039），多出第二个事实来源与第二条泄密路径。所以撤掉是成本最低且不制造矛盾的做法。`SettingsConfigDict(..., extra="ignore", ...)`（`config.py:59-64`）保证老 `.env` 里残留这些键不会让启动失败，因此这是一次**无痛移除**。守卫的作用是让「加设置」这个动作必须同时回答「谁读它」—— 一份只有文档的旋钮，会让下一个人在排障时浪费一小时去改一个没有读者的变量。
+- 影响与兼容：`AI_PROVIDER_BASE_URL`/`AI_PROVIDER_API_KEY`/`AI_DEFAULT_MODEL`/`SCAN_CRON` 不再是配置项（残留值被静默忽略，不报错）；provider 与模型的配置入口只有 Web 设置页；扫描周期仍固定 `*/15`（行为不变，只是文档不再暗示它可配）。守卫会让未来任何「只加字段不接读者」的改动在 CI 里失败。
+- 测试：本 ADR 的 3 条在 v1.6.2 上是红的（红证据读数见 ADR-083，其中一条报 `ai_provider_base_url is back; it had no reader (ADR-084)`，另一条把四个没人读的名字一起列出来），实现后全绿（读数见 ADR-085 的测试段）。
+
+## ADR-085：活文档不能教一条代码会拒绝的规则（README 的版本号示例）
+
+- 背景：ADR-079 把「第三段永远一位、逢 10 进位」固化进 `scripts/version.sh`（`set` 现在拒绝 `v1.5.16`），并从脚本头注释里删掉了违规示例 `v0.0.10 → v0.1.0`。但同一个示例还活在**用户真正读的那份文档**里：`README.md:292` 当时写着「版本号从 `v0.0.1` 起，每段 0–9，到 10 进位（`v0.0.10 → v0.1.0`）」。于是仓库同时教两条互斥的规则，而只有一条能过 `version.sh`。守卫当时只读 `scripts/version.sh`（`backend/tests/test_release_version_scheme.py:75-81`），README 无人看守。
+- 决策：
+  1. `README.md:292` 改成新规则的例句 `v1.6.8 → v1.6.9 → v1.7.0`，并写明「第三段**永远**是一位」「`scripts/version.sh set` 会直接拒绝不合规的版本号」。
+  2. `docs/17_DECISIONS.md:101-106` 的 ADR-017 保留原文（历史就是历史），但在 `**决策**` 之后加一行修订指针，指向 ADR-079/ADR-085。
+  3. 守卫扩展到活文档：`test_the_live_documents_do_not_teach_an_uncarried_version` 断言 README 不含 `v0.0.10` 且含 `v1.6.9 → v1.7.0`；**刻意不检查 `docs/15`** —— 它的历史行里合法地引用了这个违规例子来叙述 ADR-079 修了什么。
+- 理由：文档里错误示例的危害比脚本里的更大 —— 脚本的错误只在被读到时误导，README 的错误会在每个人打标签时被照着做。守卫要盯「活文档」（对**当前**行为的承诺），不要盯「历史文档」（ADR 与路线图记录当时发生了什么），否则守卫会逼着人篡改历史。区分标准是时态：现在时的规则必须与代码一致；过去时的记录不必。这条规则在本版由守卫自己证明了一次：第一版把 `docs/15` 也断言了，于是守卫在合法的历史引文上变红（`the roadmap still shows the uncarried example`），所以断言的边界被收回到 README。
+- 影响与兼容：README 的版本号段改写（无行为影响）；新增守卫会在未来任何人把违规示例写回 README 时失败；`docs/15` 的历史行不受影响。
+- 测试：本版批次 `pwsh -NoProfile -File scripts\Invoke-Tests.ps1 -Keyword "delete_referrers or no_dead_settings or release_version_scheme or ai_providers or delete_strategy" -SkipInstall` = **1 failed, 38 passed, 711 deselected**（唯一红点就是上面那条过严的守卫），修后 `test_release_version_scheme.py` = **13 passed**（含新增的 README 断言与 ADR-086 的部署节奏断言）、`ruff check app tests` 与 `ruff format --check app tests` 干净（144 files already formatted）。「先红」由守卫在 v1.6.2 的 README 上必然失败给出：`README.md:292` 当时确实写着 `v0.0.10`，报 `the README still shows the uncarried example`。 全量 `pwsh -NoProfile -File scripts\Invoke-Tests.ps1 -SkipInstall` = **746 passed, 4 skipped in 125.27s**（v1.6.2 基线 735 passed / 4 skipped，本版新增 11 条：`test_delete_referrers.py` 6 + `test_no_dead_settings.py` 3 + `test_release_version_scheme.py` 2；4 条 skip 仍是 `backend/tests/test_postgres_triggers.py` 的 `TEST_POSTGRES_URL not set`），前端 `pwsh -NoProfile -File scripts\Invoke-FrontendChecks.ps1 -SkipInstall` = `== FRONTEND OK: typecheck + build passed ==`（`vue-tsc --noEmit` + `vite build`，609 modules）。
+
+## ADR-086：只有大版本才部署到 NAS（第三段为 0）
+
+- 背景：用户在本轮开发中定下部署节奏：只有大版本（`X.Y.0`，即版本号第三段为 `0` 的版本，如 `v1.7.0`/`v1.8.0`/`v1.9.0`）才部署到 NAS；补丁版本（`v1.6.3`、`v1.6.4`…）不部署，同时要求加快开发节奏。此前每个版本都做一次 NAS 巡检（`scripts/Test-NasDeployment.ps1`、`scripts/verify-stack.sh`、手工 `docker compose up -d`），把大量时间花在重复的部署仪式上，而补丁之间的差异远小于一次部署的成本。
+- 决策：
+  1. 部署节奏写成规则：**只有 `X.Y.0` 部署到 NAS**；补丁版本只 commit + tag + push，由 CI 验证并积累。
+  2. 规则写进两处活文档：`README.md` 的「版本与发布」段新增 `### 部署节奏（ADR-086）`（含升级命令 `docker compose pull && docker compose up -d` 与用 `scripts/Test-NasDeployment.ps1` 复验），`docs/15_ROADMAP_ACCEPTANCE.md` 的 v1.6.3 行同样记录。
+  3. 守卫：`test_the_readme_states_which_versions_get_deployed` 断言 README 同时提到 `ADR-086` 与 `X.Y.0`，防止这条说明被后来的编辑顺手删掉。
+- 理由：部署是有成本的验证动作，它的价值与「两个版本之间发生了什么」成正比。补丁版本只含少量修复，让它们先在仓库里积累（每个版本仍有测试、文档与 CI 三作业），到大版本再一次性上 NAS，既减少人工步骤，也让每次部署对应一个语义上有意义的版本。速度不是靠少做验证换来的：测试、文档、CI 全绿与打 tag 仍是每个版本的硬要求，被砍掉的只是**重复的部署仪式**。
+- 影响与兼容：NAS 上的版本会滞后于 `main`（这是决策本身，不是遗漏）；用户升级时用 README 里的两条命令；`docs/15` 仍逐版记录（不部署不等于不记录）；补丁版本的验证边界从此是「CI 绿 + 守卫绿」，NAS 真机证据只在大版本提供。交付上仍要如实说明某个补丁版本未上 NAS，不能让读者以为它已在生产运行。
+- 测试：`test_the_readme_states_which_versions_get_deployed` 通过（读数同 ADR-085 的 13 passed）。本条是流程决策，没有行为代码改动，因此不提供红证据 —— 它的守卫只保证规则在文档里不被静默删除。

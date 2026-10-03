@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.models import AIModel, AIProvider
@@ -278,14 +278,26 @@ def delete_provider(db: Session, provider_id: int) -> str:
     if provider is None:
         raise ProviderConfigError(f"provider {provider_id} not found")
 
-    # Refuse to delete a provider that historical AI tasks still reference, so
-    # the audit trail keeps pointing at something real.
-    from app.domain.models import AITask
+    # Refuse to delete a provider that history still references, so the audit
+    # trail keeps pointing at something real. Both history tables count: a task
+    # and a usage row are written independently, and the provider's models
+    # cascade away with it, so usage of one of those models blocks the delete
+    # too (ADR-083).
+    from app.domain.models import AITask, AIUsage
 
-    used = db.scalar(select(AITask.id).where(AITask.provider_id == provider_id).limit(1))
-    if used is not None:
+    if db.scalar(select(AITask.id).where(AITask.provider_id == provider_id).limit(1)) is not None:
         raise ProviderConfigError(
             "this provider has AI task history; deactivate it instead of deleting"
+        )
+    model_ids = select(AIModel.id).where(AIModel.provider_id == provider_id)
+    usage = db.scalar(
+        select(AIUsage.id)
+        .where(or_(AIUsage.provider_id == provider_id, AIUsage.model_id.in_(model_ids)))
+        .limit(1)
+    )
+    if usage is not None:
+        raise ProviderConfigError(
+            "this provider has AI usage history; deactivate it instead of deleting"
         )
     name = provider.name
     db.delete(provider)

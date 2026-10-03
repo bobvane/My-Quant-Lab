@@ -124,18 +124,10 @@ class Settings(BaseSettings):
     # active provider declares", which avoids hard-coding DEMO-* tickers that
     # only exist for the synthetic provider.
     market_data_watchlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    ai_provider_base_url: str | None = None
-    ai_provider_api_key: str | None = None
-    ai_default_model: str | None = None
     ai_daily_budget_usd: float = 2.0
 
     default_currency: str = "USD"
     default_timezone: str = "UTC"
-
-    scan_cron: str = Field(
-        default="*/15 * * * *",
-        description="Celery beat crontab used by the signal scanner.",
-    )
 
     # --- Strategy lifecycle (Phase 8) -------------------------------------
     # Deterministic, evidence-gated promotion/degradation. Manual-only stages

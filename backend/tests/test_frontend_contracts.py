@@ -38,6 +38,16 @@ PAPER = (VIEWS / "PaperView.vue").read_text(encoding="utf-8")
 API_TEXT = API.read_text(encoding="utf-8")
 FORMAT_TEXT = FORMAT.read_text(encoding="utf-8")
 
+SRC = REPO_ROOT / "frontend" / "src"
+COMPONENTS = SRC / "components"
+APP = (SRC / "App.vue").read_text(encoding="utf-8")
+MODE = (SRC / "mode.ts").read_text(encoding="utf-8")
+WORDING = (SRC / "wording.ts").read_text(encoding="utf-8")
+METRICS = (SRC / "metrics.ts").read_text(encoding="utf-8")
+STAT_CARD = (COMPONENTS / "StatCard.vue").read_text(encoding="utf-8")
+METRIC_HINT = (COMPONENTS / "MetricHint.vue").read_text(encoding="utf-8")
+UI_SPEC = (REPO_ROOT / "docs" / "13_UI_UX.md").read_text(encoding="utf-8")
+
 # Fields the outcome API sends as fractions. `_pct` in the name does not mean the
 # value was multiplied by 100 — that is the whole bug (ADR-087).
 RATIO_FIELDS = ("pnl_pct", "mae_pct", "mfe_pct", "avg_pnl_pct", "total_pnl_pct")
@@ -60,9 +70,28 @@ def _exported_function_body(text: str, name: str) -> str:
 
 
 def _promise_all_block(text: str) -> str:
+    """Return the whole argument list of the first ``await Promise.all([``.
+
+    This used to stop at the first ``])`` it could find, which is often the end of a
+    *nested* call — ``.catch(() => note('模拟账户') ?? [])`` ends with exactly those two
+    characters — so a page with ten requests could report "every request answers for
+    itself" after inspecting three of them. Bracket depth is what "the block" means
+    (ADR-102).
+    """
+
     start = text.index("await Promise.all([")
-    end = text.index("])", start)
-    return text[start:end]
+    index = start + len("await Promise.all(")
+    depth = 0
+    while index < len(text):
+        char = text[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+        index += 1
+    raise AssertionError("unbalanced `await Promise.all([` in the source")
 
 
 def _bare_requests(block: str) -> list[str]:
@@ -260,3 +289,126 @@ def test_the_settings_page_can_open_a_temporary_tunnel() -> None:
     assert "await navigator.clipboard.writeText(url)" in SETTINGS
     for forbidden in ("child_process", "require(", "exec("):
         assert forbidden not in SETTINGS, forbidden
+
+
+def test_the_interface_has_a_basic_mode_that_hides_engineering_readings() -> None:
+    """The default screen is for a person; the engineering readings are one click away.
+
+    The audit's finding was not "too professional" but "two products in one page": the
+    engine version, the dataset hash and the ``BUY/SELL/WAIT`` vocabulary all sat on the
+    first screen (ADR-126). Hiding them is a *display* decision, so it lives in one
+    client-side module and a handful of ``v-if``s — never in the data layer.
+    """
+
+    for symbol in ("mql-mode", "'basic' | 'advanced'", "isAdvanced", "setMode", "initMode"):
+        assert symbol in MODE, symbol
+    # The switch changes what is drawn, not what is asked for or computed.
+    assert "api." not in MODE
+    assert "fetch(" not in MODE
+
+    assert "○ 普通模式" in APP and "● 高级模式" in APP
+    assert '<template v-if="isAdvanced">' in APP
+    assert '<RouterLink to="/resources">' in APP
+
+    # Dashboard: 系统状态 / 版本 / 系统构成 are advanced-mode readings now. Counting the
+    # attribute would be satisfied by gating *anything* three times (and stayed green with
+    # four gates while the 系统状态 card was plain), so this asks which readings disappear.
+    def _gated_stat_cards(source: str) -> tuple[set[str], set[str]]:
+        gated: set[str] = set()
+        always: set[str] = set()
+        for card in re.findall(r"<StatCard\b.*?/>", source, re.S):
+            label = card.split('label="', 1)[1].split('"', 1)[0]
+            (gated if 'v-if="isAdvanced"' in card else always).add(label)
+        return gated, always
+
+    gated, always = _gated_stat_cards(DASHBOARD)
+    assert {"系统状态", "版本"} <= gated
+    assert {"可执行信号", "观察中"} <= always
+    assert '<div v-if="isAdvanced" class="card"' in DASHBOARD
+
+    # Settings: 运行环境 and 审计日志 are whole groups that only advanced mode shows.
+    assert SETTINGS.count('<template v-if="isAdvanced">') >= 2
+
+    # Signals: the raw rule ids and the feature catalogue are advanced-mode material.
+    assert SIGNALS.count('v-if="isAdvanced') >= 2
+
+    assert "## 10. 界面模式" in UI_SPEC
+    assert "frontend/src/mode.ts" in UI_SPEC
+
+
+def test_the_home_page_answers_four_questions_in_plain_words() -> None:
+    """`/` answers four questions and nothing else, in that order (ADR-127).
+
+    What used to be first — system status, version, database, Redis, feature version,
+    DSL schema — is a status board, not an answer to "what should I do now".
+    """
+
+    for question in ("① 我在研究什么", "② 最近一次研究结论", "③ 下一步", "④ 需要你注意的事情"):
+        assert question in DASHBOARD, question
+    assert 'class="card answer-conclusion"' in DASHBOARD
+    # The conclusion is a sentence, and it may say it cannot give one yet.
+    assert "conclusionMissing" in DASHBOARD
+    assert "answer-main" in DASHBOARD
+
+    # ③ reads the lifecycle's own verdict instead of inventing a next stage.
+    assert "suggested_next" in DASHBOARD
+    assert "blocked_reason" in DASHBOARD
+    assert "stagePage(" in DASHBOARD
+
+    # ④ only lists warnings it can actually compute, and says so when there are none.
+    assert "暂时没有需要特别注意的事情" in DASHBOARD
+
+    # The four answers may not depend on a tenth request succeeding.
+    block = _promise_all_block(DASHBOARD)
+    assert "api.strategies().catch(" in block
+    assert "api.signals(undefined, 50).catch(" in DASHBOARD
+    assert "api.lifecycle(" in DASHBOARD
+
+
+def test_every_professional_word_carries_a_plain_translation() -> None:
+    """A metric says what it is before it says what it is called (ADR-127).
+
+    The audit kept every professional term and asked for one thing: the first time a
+    reader meets it, tell them what it is *for*. So the plain sentence sits on the card
+    (``metricPlain``) and the alias sits next to the name (``termAlias``); the four
+    questions stay behind one button, which is now labelled 详细解释.
+    """
+
+    for key in ("total_return", "max_drawdown", "sharpe", "win_rate", "profit_factor", "exposure"):
+        assert key in WORDING, key
+    for name in ("夏普比率", "最大回撤", "盈亏效率", "持仓时间占比", "收益 / 波动效率"):
+        assert name in WORDING, name
+    assert "export function termAlias(" in WORDING
+    assert "export function metricKeyLabel(" in WORDING
+    assert "export function metricPlain(" in METRICS
+
+    # The first sentence is on the card, not behind a click.
+    assert "metricPlain(label)" in STAT_CARD
+    assert "termAlias(label)" in STAT_CARD
+    assert "详细解释" in METRIC_HINT
+    for word in ("是什么", "怎么算", "为什么看它", "注意什么"):
+        assert word in METRIC_HINT, word
+
+    # Backtest tables print the reader's name, not the engine's.
+    assert "metricKeyLabel(m.key)" in BACKTEST
+
+
+def test_signals_say_what_they_are_not() -> None:
+    """A research signal must not read like an order, or like a price forecast.
+
+    `BUY`/`SELL`/`WAIT` are the API's vocabulary; the page translates them and keeps one
+    disclaimer next to the state and one next to the reference price (ADR-127).
+    """
+
+    assert "看多信号" in WORDING and "看空 / 退出信号" in WORDING and "暂不确认" in WORDING
+    assert "这是策略研究信号，不是自动交易指令。" in WORDING
+    assert "这是策略模型计算出的参考值，不代表未来价格预测。" in WORDING
+
+    assert "signalLabel(" in SIGNALS
+    assert "groupLabel(" in SIGNALS
+    assert "SIGNAL_DISCLAIMER" in SIGNALS
+    assert "REFERENCE_PRICE_DISCLAIMER" in SIGNALS
+    # The page may not send the reader to our spec documents to understand it. A code
+    # comment may still cite them; what the reader sees may not.
+    template = SIGNALS.split("</script>", 1)[1]
+    assert "docs/" not in template

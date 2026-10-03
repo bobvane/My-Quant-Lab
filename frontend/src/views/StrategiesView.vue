@@ -12,23 +12,8 @@ import {
   type StrategyValidation,
 } from '@/api'
 import { formatDateTime, formatNumber } from '@/format'
-
-const STAGE_LABELS: Record<string, string> = {
-  imported: '已导入',
-  normalized: '已规范化',
-  validated: '已校验',
-  backtested: '已回测',
-  oos_tested: '已做样本外',
-  paper_trading: '模拟盘',
-  reference_signal: '参考信号',
-  degraded: '已降级',
-  retired: '已退役',
-}
-
-function stageLabel(stage: string | null | undefined): string {
-  if (!stage) return '—'
-  return STAGE_LABELS[stage] ?? stage
-}
+// 阶段名称只有一处定义：普通模式和高阶视图必须用同一句话（ADR-127）。
+import { stageLabel } from '@/wording'
 
 // What a check actually did. ``checked`` is what older rows stored for all three
 // non-events, so it is labelled as history rather than guessed at (ADR-058).
@@ -279,9 +264,9 @@ async function syncData() {
   try {
     const result = await api.syncMarketData(symbol.value.trim(), '1d', lookbackDays.value) as Record<string, any>
     if (result.inserted > 0) {
-      info.value = `✅ 同步完成：${symbol.value} 新增 ${result.inserted} 根 K 线（系列 #${result.series_id}，其中 ${result.closed_bars_in_fetch} 根已收盘）。现在可以去「回测实验室」用它跑回测了。`
+      info.value = `✅ 同步完成：${symbol.value} 新增 ${result.inserted} 根 K 线（系列 #${result.series_id}，其中 ${result.closed_bars_in_fetch} 根已收盘）。现在可以去「回测」用它跑回测了。`
     } else {
-      info.value = `ℹ ${symbol.value} 数据已是最新（${result.message ?? '无新增'}）。可以到「回测实验室」用它跑回测。`
+      info.value = `ℹ ${symbol.value} 数据已是最新（${result.message ?? '无新增'}）。可以到「回测」用它跑回测。`
     }
     await load()
   } catch (e) {
@@ -736,8 +721,10 @@ onMounted(load)
 
 <template>
   <div>
-    <h1 class="page-title">行情与策略</h1>
-    <p class="page-sub">同步标准化 OHLCV，编写并校验统一策略 DSL。策略版本一旦创建即不可修改。</p>
+    <h1 class="page-title">我的策略</h1>
+    <p class="page-sub">
+      这是你的策略库：同步标准化 OHLCV、创建与导入策略、管理策略版本。版本一旦创建即不可修改。
+    </p>
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="info" class="notice">{{ info }}</p>

@@ -1,8 +1,33 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { api, type AIStatus, type ExplainResult, type HealthResponse, type PaperAccount, type SignalIntent, type SystemInfo } from '@/api'
+import { computed, onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
+import {
+  api,
+  type AIStatus,
+  type BacktestSummary,
+  type ExplainResult,
+  type HealthResponse,
+  type PaperAccount,
+  type SignalIntent,
+  type SignalRecord,
+  type Strategy,
+  type StrategyLifecycle,
+  type StrategyVersion,
+  type SystemInfo,
+} from '@/api'
 import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, signalDirection, toneOf } from '@/format'
+import { isAdvanced } from '@/mode'
+import {
+  REFERENCE_PRICE_DISCLAIMER,
+  SIGNAL_DISCLAIMER,
+  nextStepText,
+  qualityLabel,
+  signalLabel,
+  stageLabel,
+  stagePage,
+  timeframeLabel,
+} from '@/wording'
 
 const health = ref<HealthResponse | null>(null)
 const healthError = ref('')
@@ -22,6 +47,16 @@ const gfTesting = ref(false)
 const gfTestResult = ref<Record<string, any> | null>(null)
 const assets = ref<Array<Record<string, any>>>([])
 const seriesList = ref<Array<Record<string, any>>>([])
+
+// 研究中的那一个策略，和它的版本 / 回测 / 生命周期（ADR-127）。
+const strategies = ref<Strategy[]>([])
+const focusStrategy = ref<Strategy | null>(null)
+const focusVersions = ref<StrategyVersion[]>([])
+const focusRuns = ref<BacktestSummary[]>([])
+const focusLifecycle = ref<StrategyLifecycle | null>(null)
+// 已记录的历史信号（`/signals` 的账本行），和 `signals` 那个「刚扫描出来的意图」
+// 不是同一种东西：账本行用 `bar_timestamp` 而不是 `bar_time`（ADR-127）。
+const recentSignals = ref<SignalRecord[]>([])
 
 function assetSymbol(assetId: number): string {
   return assets.value.find((a) => Number(a.id) === assetId)?.symbol ?? `#${assetId}`
@@ -56,19 +91,52 @@ async function load() {
       failures.push(label)
       return null
     }
-    const [i, a, ai, assetsList, sList, appSettings] = await Promise.all([
+    const [i, a, ai, assetsList, sList, appSettings, strategyRows, recent] = await Promise.all([
       api.systemInfo().catch(() => note('系统信息')),
       api.paperAccounts().catch(() => note('模拟账户') ?? []),
       api.aiStatus().catch(() => null),
       api.assets().catch(() => []),
       api.series().catch(() => []),
       api.settings().catch(() => null),
+      api.strategies().catch(() => note('策略列表') ?? []),
+      api.signals(undefined, 50).catch(() => []),
     ])
     info.value = i
     accounts.value = a
     aiStatus.value = ai
     assets.value = assetsList
     seriesList.value = sList
+    strategies.value = strategyRows
+    recentSignals.value = recent
+
+    // 首页第一问「我在研究什么」必须先有答案，后面三问才有主语：先定下研究中的
+    // 策略（最新创建的那个），再问它的当前版本、这份版本的最近一次回测，以及生命
+    // 周期走到了哪一步。三次请求各自失败得很安静：一个还没开始研究的账户也要能
+    // 打开首页，而不是先看到一片报错（ADR-088）。
+    const focus =
+      [...strategies.value].sort(
+        (x, y) => y.created_at.localeCompare(x.created_at) || y.id - x.id,
+      )[0] ?? null
+    focusStrategy.value = focus
+    if (focus) {
+      focusVersions.value = await api.strategyVersions(focus.id).catch(() => {
+        note('策略版本')
+        return []
+      })
+      const version =
+        focusVersions.value.find((v) => v.is_current) ?? focusVersions.value[0] ?? null
+      if (version) {
+        focusRuns.value = await api.backtests(version.id).catch(() => {
+          note('回测结果')
+          return []
+        })
+      }
+      focusLifecycle.value = await api.lifecycle(focus.id).catch(() => {
+        note('策略进度')
+        return null
+      })
+    }
+
     if (failures.length) {
       error.value = `${failures.join('、')} 加载失败，页面其余内容仍然可用`
     }
@@ -104,6 +172,168 @@ async function runScan() {
 const actionable = () => signals.value.filter((s) => s.state === 'BUY' || s.state === 'SELL').length
 const waiting = () => signals.value.filter((s) => s.state === 'WAIT').length
 
+// --- 首页只回答的四个问题（ADR-127，评审 §5）-----------------------------------
+
+const latestRun = computed<BacktestSummary | null>(() => focusRuns.value[0] ?? null)
+
+const researchSymbol = computed(
+  () =>
+    latestRun.value?.symbol ??
+    (seriesList.value.length ? assetSymbol(Number(seriesList.value[0].asset_id)) : ''),
+)
+
+const researchTimeframe = computed(
+  () => latestRun.value?.timeframe ?? String(seriesList.value[0]?.timeframe ?? '1d'),
+)
+
+/** ① 我在研究什么：标的 · 周期 · 策略名，像一句话而不是三个 id。 */
+const researchFocus = computed(() => {
+  const strategy = focusStrategy.value
+  if (!strategy) return ''
+  return [researchSymbol.value, timeframeLabel(researchTimeframe.value), strategy.name]
+    .filter((part) => !!part)
+    .join(' · ')
+})
+
+const researchSub = computed(() => {
+  const strategy = focusStrategy.value
+  if (!strategy) return ''
+  const parts = [`当前阶段：${stageLabel(focusLifecycle.value?.current ?? strategy.lifecycle)}`]
+  parts.push(focusRuns.value.length ? `已经回测 ${focusRuns.value.length} 次` : '还没有回测记录')
+  return parts.join(' · ')
+})
+
+/** 这串数据有多长：既能说清结论覆盖的时间，也是「样本偏短」提醒的依据。 */
+const dataSpanYears = computed(() => {
+  const rows = seriesList.value
+  const row =
+    rows.find((item) => assetSymbol(Number(item.asset_id)) === researchSymbol.value) ?? rows[0]
+  const start = Date.parse(String(row?.series_start ?? ''))
+  const end = Date.parse(String(row?.series_end ?? ''))
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null
+  return (end - start) / (365.25 * 24 * 60 * 60 * 1000)
+})
+
+/** ② 最近一次研究结论：一句话，加上决定这句话可信度的几个数。 */
+const conclusion = computed(() => {
+  const run = latestRun.value
+  if (!run) return null
+  if (run.status !== 'completed') {
+    return {
+      headline: `最近一次回测还没有跑完（状态：${run.status}）。`,
+      detail: '跑完以后，这里会用一句话说清它过去的表现。',
+    }
+  }
+  const years = dataSpanYears.value
+  const period = years === null ? '这段历史数据' : `这段约 ${years.toFixed(1)} 年的历史数据`
+  const verdict =
+    run.total_return === null
+      ? '这次回测没有算出总收益'
+      : run.total_return >= 0
+        ? `这套策略在${period}里整体是赚钱的`
+        : `这套策略在${period}里整体是亏钱的`
+  const oosRuns = Number(focusLifecycle.value?.evidence?.oos_runs ?? 0)
+  return {
+    headline: `${verdict}：累计收益 ${formatPercent(run.total_return)}，最大回撤 ${formatPercent(run.max_drawdown)}。`,
+    detail: [
+      `胜率 ${formatPercent(run.win_rate)}`,
+      `交易 ${run.number_of_trades ?? '—'} 笔`,
+      '历史回测：已完成',
+      `样本外验证：${oosRuns > 0 ? '已完成' : '未完成'}`,
+    ].join(' · '),
+  }
+})
+
+const conclusionMissing = computed(() =>
+  focusStrategy.value
+    ? '这个策略还没有回测结果。到「回测」运行一次，结论会出现在这里。'
+    : '还没有可以研究的东西：先到「我的策略」创建或导入一个策略。',
+)
+
+/** ③ 下一步：生命周期有证据支撑的那一步，没有就退回主流程的下一步。 */
+const nextStep = computed(() => {
+  const lifecycle = focusLifecycle.value
+  const stage = lifecycle?.suggested_next
+  if (stage) {
+    return {
+      text: nextStepText(stage),
+      reason: lifecycle?.blocked_reason ? `现在还不能推进：${lifecycle.blocked_reason}` : '',
+      to: stagePage(stage)?.to ?? '',
+      linkText: stagePage(stage)?.label ?? '',
+    }
+  }
+  if (focusStrategy.value && latestRun.value) {
+    return { text: nextStepText('backtested'), reason: '', to: '/backtest', linkText: '去「回测」' }
+  }
+  if (focusStrategy.value) {
+    return {
+      text: nextStepText('validated'),
+      reason: '',
+      to: '/backtest',
+      linkText: '去「回测」',
+    }
+  }
+  return {
+    text: '先到「我的策略」创建或导入一个策略',
+    reason: '',
+    to: '/market',
+    linkText: '去「我的策略」',
+  }
+})
+
+/** ④ 需要你注意的事情：能算出来的都算出来，算不出来的不编。 */
+const warnings = computed<string[]>(() => {
+  const strategy = focusStrategy.value
+  if (!strategy) return []
+  const list: string[] = []
+  const run = latestRun.value
+  if (!run) {
+    list.push('这个策略还没有回测结果：现在对它的一切判断都还没有依据。')
+  } else if (run.status === 'completed') {
+    const trades = run.number_of_trades ?? 0
+    if (trades < 30) {
+      list.push(`这次回测只有 ${trades} 笔交易，样本偏少，收益率先别当真。`)
+    }
+    if ((run.max_drawdown ?? 0) < -0.2) {
+      list.push(
+        `历史最大回撤 ${formatPercent(run.max_drawdown)}：账户曾经一度跌掉这么多，先确认自己拿得住。`,
+      )
+    }
+    if ((run.total_return ?? 0) < 0) {
+      list.push('这段历史里整体是亏的：先弄清它靠什么赚钱，再谈要不要用。')
+    }
+  }
+  const years = dataSpanYears.value
+  if (years !== null && years < 5) {
+    list.push(`当前数据只有 ${years.toFixed(1)} 年，样本比较短，结论的把握要打折。`)
+  }
+  const oosRuns = Number(focusLifecycle.value?.evidence?.oos_runs ?? 0)
+  if (run?.status === 'completed' && oosRuns === 0) {
+    list.push('还没有做样本外验证：目前的结果只能说明它「过去」有效。')
+  }
+  if (focusLifecycle.value?.degraded) {
+    list.push(`这个策略已被标为降级：${focusLifecycle.value.degrade_reason ?? '没有写明原因'}。`)
+  }
+  if (focusLifecycle.value?.blocked_reason) {
+    list.push(`推进被挡住：${focusLifecycle.value.blocked_reason}`)
+  }
+  const newest = recentSignals.value.reduce<SignalRecord | null>((latest, signal) => {
+    if (!signal.bar_timestamp) return latest
+    if (!latest?.bar_timestamp) return signal
+    return Date.parse(signal.bar_timestamp) > Date.parse(latest.bar_timestamp) ? signal : latest
+  }, null)
+  const barTime = Date.parse(String(newest?.bar_timestamp ?? ''))
+  if (newest && Number.isFinite(barTime)) {
+    const months = (Date.now() - barTime) / (30.44 * 24 * 60 * 60 * 1000)
+    if (months >= 6) {
+      list.push(
+        `最近一次信号是 ${formatDateTime(newest.bar_timestamp)}，已经 ${Math.floor(months)} 个月没有新信号了。`,
+      )
+    }
+  }
+  return list
+})
+
 async function testGf() {
   error.value = ''
   gfTestResult.value = null
@@ -128,7 +358,7 @@ async function explainRow(index: number) {
       s.symbol ?? undefined,
       s.timeframe ?? '1d',
     )
-    explainedFor.value = `${s.symbol ?? ''} ${s.timeframe ?? ''} ${s.state}`
+    explainedFor.value = `${s.symbol ?? ''} ${s.timeframe ?? ''} ${signalLabel(s.state)}`
   } catch (e) {
     error.value = (e as Error).message
     explanation.value = null
@@ -142,29 +372,69 @@ onMounted(load)
 
 <template>
   <div>
-    <h1 class="page-title">研究仪表盘</h1>
+    <h1 class="page-title">研究首页</h1>
     <p class="page-sub">
-      这里只展示量化引擎已经算好的结果。AI 负责解释，不负责计算；本系统不连接券商，不会自动下单。
+      这一页只回答四件事：你在研究什么、最近一次结论是什么、下一步做什么、有什么要注意的。
+      更细的工程读数都在「系统管理」和高级模式里，不影响这里的判断。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
 
-    <div class="grid cols-4">
-      <StatCard
-        label="系统状态"
-        :value="health?.status ?? '—'"
-        :sub="health ? `数据库 ${health.database} / Redis ${health.redis}` : healthError || '连接中…'"
-      />
-      <StatCard label="版本" :value="health?.version ?? '—'" :sub="`引擎 ${health?.engine_version ?? '—'}`" />
+    <div class="grid cols-2 answers">
+      <div class="card">
+        <h3>① 我在研究什么</h3>
+        <p v-if="researchFocus" class="answer-main">{{ researchFocus }}</p>
+        <p v-else class="muted">还没有策略可选。到「我的策略」创建或导入一个，再回到这里。</p>
+        <p v-if="researchFocus && researchSub" class="muted">{{ researchSub }}</p>
+      </div>
+
+      <div class="card answer-conclusion">
+        <h3>② 最近一次研究结论</h3>
+        <p v-if="conclusion" class="answer-main">{{ conclusion.headline }}</p>
+        <p v-else class="muted">{{ conclusionMissing }}</p>
+        <p v-if="conclusion?.detail" class="muted">{{ conclusion.detail }}</p>
+      </div>
+
+      <div class="card">
+        <h3>③ 下一步</h3>
+        <p class="answer-main">{{ nextStep.text }}</p>
+        <p v-if="nextStep.reason" class="muted">{{ nextStep.reason }}</p>
+        <p v-if="nextStep.to">
+          <RouterLink :to="nextStep.to">{{ nextStep.linkText }}</RouterLink>
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>④ 需要你注意的事情</h3>
+        <ul v-if="warnings.length" class="answer-list">
+          <li v-for="(item, index) in warnings" :key="index">{{ item }}</li>
+        </ul>
+        <p v-else class="muted">暂时没有需要特别注意的事情。</p>
+      </div>
+    </div>
+
+    <div class="grid" :class="isAdvanced ? 'cols-4' : 'cols-2'" style="margin-top: 14px">
       <StatCard
         label="可执行信号"
         :value="signals.length ? actionable() : '—'"
-        sub="BUY / SELL（仅信息提醒）"
+        sub="看多 / 看空信号（仅为研究提醒，不会下单）"
       />
       <StatCard
         label="观察中"
         :value="signals.length ? waiting() : '—'"
-        sub="WAIT：条件未确认，不追单"
+        sub="暂不确认：入场条件还没满足，不追单"
+      />
+      <StatCard
+        v-if="isAdvanced"
+        label="系统状态"
+        :value="health?.status ?? '—'"
+        :sub="health ? `数据库 ${health.database} / Redis ${health.redis}` : healthError || '连接中…'"
+      />
+      <StatCard
+        v-if="isAdvanced"
+        label="版本"
+        :value="health?.version ?? '—'"
+        :sub="`引擎 ${health?.engine_version ?? '—'}`"
       />
     </div>
 
@@ -270,8 +540,11 @@ onMounted(load)
         <tbody>
           <tr v-for="s in seriesList" :key="String(s.id)">
             <td>{{ assetSymbol(Number(s.asset_id)) }}</td>
-            <td>{{ s.timeframe }}</td>
-            <td :class="qualityTone(String(s.quality_status))">{{ s.quality_status }}</td>
+            <td>{{ timeframeLabel(String(s.timeframe)) }}</td>
+            <td :class="qualityTone(String(s.quality_status))">
+              {{ qualityLabel(String(s.quality_status)) }}
+              <span v-if="isAdvanced" class="muted">（{{ s.quality_status }}）</span>
+            </td>
             <td class="muted">
               {{ String(s.series_start ?? '').slice(0, 10) }} → {{ String(s.series_end ?? '').slice(0, 10) }}
             </td>
@@ -284,6 +557,7 @@ onMounted(load)
     <div class="grid cols-2" style="margin-top: 14px">
       <div class="card">
         <h3>信号扫描（只用已收盘 K 线）</h3>
+        <p class="muted">{{ SIGNAL_DISCLAIMER }}</p>
         <div class="row" style="margin-bottom: 10px">
           <button :disabled="scanning" @click="runScan">
             {{ scanning ? '扫描中…' : '立即扫描' }}
@@ -306,8 +580,8 @@ onMounted(load)
           <tbody>
             <tr v-for="(s, i) in signals" :key="i">
               <td>{{ s.symbol ?? '—' }}</td>
-              <td>{{ s.timeframe ?? '—' }}</td>
-              <td><span class="badge" :class="s.state">{{ s.state }}</span></td>
+              <td>{{ timeframeLabel(s.timeframe) }}</td>
+              <td><span class="badge" :class="s.state">{{ signalLabel(s.state) }}</span></td>
               <td>{{ signalDirection(s.direction, s.closes_direction) }}</td>
               <td>{{ formatNumber(s.price_reference) }}</td>
               <td>{{ formatNumber(s.stop_reference) }}</td>
@@ -325,7 +599,8 @@ onMounted(load)
             </tr>
           </tbody>
         </table>
-        <p v-else class="muted">还没有扫描结果。先到「行情与策略」同步数据并创建策略，再回来扫描。</p>
+        <p v-if="signals.length" class="muted">{{ REFERENCE_PRICE_DISCLAIMER }}</p>
+        <p v-else class="muted">还没有扫描结果。先到「我的策略」同步数据并创建策略，再回来扫描。</p>
         <p v-if="aiStatus && !aiStatus.configured" class="muted" style="margin-top: 8px">
           AI 未配置：解释按钮不可用（{{ aiStatus.note }}）。量化功能不受影响。
         </p>
@@ -344,7 +619,7 @@ onMounted(load)
       </div>
 
       <div class="card">
-        <h3>模拟账户（与真实持仓完全隔离）</h3>
+        <h3>模拟验证（与真实持仓完全隔离）</h3>
         <table v-if="accounts.length">
           <thead>
             <tr>
@@ -376,8 +651,8 @@ onMounted(load)
       </div>
     </div>
 
-    <div class="card" style="margin-top: 14px">
-      <h3>系统构成</h3>
+    <div v-if="isAdvanced" class="card" style="margin-top: 14px">
+      <h3>系统构成（高级模式）</h3>
       <div class="row">
         <span v-for="m in info?.modules ?? []" :key="m" class="badge">{{ m }}</span>
       </div>

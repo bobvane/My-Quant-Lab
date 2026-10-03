@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { api, type HealthResponse } from '@/api'
 import { formatNumber } from '@/format'
+import { initMode, isAdvanced, mode, setMode } from '@/mode'
 
 const health = ref<HealthResponse | null>(null)
 
@@ -31,6 +32,11 @@ try {
   applyTheme('dark')
 }
 
+// 普通 / 高级模式（ADR-126）：默认是给人看的界面，工程读数留在高级模式。
+// The attribute is set before the first paint so a reload never flashes the
+// engineering rows on their way out.
+initMode()
+
 onMounted(async () => {
   try {
     health.value = await api.health()
@@ -58,16 +64,46 @@ onMounted(async () => {
       </div>
 
       <nav class="nav">
-        <RouterLink to="/">研究仪表盘</RouterLink>
-        <RouterLink to="/market">行情与策略</RouterLink>
+        <RouterLink to="/">研究首页</RouterLink>
+        <RouterLink to="/market">我的策略</RouterLink>
         <RouterLink to="/signals">信号</RouterLink>
-        <RouterLink to="/backtest">回测实验室</RouterLink>
-        <RouterLink to="/paper">模拟盘</RouterLink>
-        <RouterLink to="/resources">系统资源</RouterLink>
-        <RouterLink to="/settings">系统与审计</RouterLink>
+        <RouterLink to="/backtest">回测</RouterLink>
+        <RouterLink to="/paper">模拟验证</RouterLink>
+        <template v-if="isAdvanced">
+          <RouterLink to="/resources">系统资源</RouterLink>
+        </template>
+        <RouterLink to="/settings">系统管理</RouterLink>
       </nav>
 
-      <div class="sidebar-meta muted" style="margin-top: 24px">
+      <div class="mode-switch" role="group" aria-label="使用模式">
+        <button
+          type="button"
+          class="ghost"
+          :class="{ on: mode === 'basic' }"
+          :aria-pressed="mode === 'basic'"
+          @click="setMode('basic')"
+        >
+          ○ 普通模式
+        </button>
+        <button
+          type="button"
+          class="ghost"
+          :class="{ on: mode === 'advanced' }"
+          :aria-pressed="mode === 'advanced'"
+          @click="setMode('advanced')"
+        >
+          ● 高级模式
+        </button>
+      </div>
+      <p class="muted mode-note">
+        {{
+          isAdvanced
+            ? '高级模式：显示引擎版本、哈希与原始数据，方便排查问题。'
+            : '普通模式：只显示做决定要看的数字。'
+        }}
+      </p>
+
+      <div v-if="isAdvanced" class="sidebar-meta muted" style="margin-top: 24px">
         <div>引擎 {{ health?.engine_version ?? '—' }}</div>
         <div>特征 {{ health?.feature_version ?? '—' }}</div>
         <div>数据库 {{ health?.database ?? '—' }}</div>

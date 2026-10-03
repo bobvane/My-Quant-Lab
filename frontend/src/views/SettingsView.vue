@@ -10,6 +10,8 @@ import {
   type TemporaryAccessState,
 } from '@/api'
 import { formatDateTime, formatNumber } from '@/format'
+// 界面模式在这一页有两处作用：模式切换开关本身，以及决定工程读数是否出现（ADR-126）。
+import { isAdvanced, mode, setMode } from '@/mode'
 
 const events = ref<Array<Record<string, unknown>>>([])
 const auditTotal = ref(0)
@@ -548,13 +550,42 @@ onUnmounted(() => {
 
 <template>
   <div>
-    <h1 class="page-title">系统与审计</h1>
+    <h1 class="page-title">系统管理</h1>
     <p class="page-sub">
       密钥只写入、永不回显；AI 只负责解释引擎算好的数字。所有关键操作都会留下审计记录。
+      普通模式下这一页只留日常要用的分组；运行环境与审计日志这类排查读数在高级模式里。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="info" class="notice">{{ info }}</p>
+
+    <div class="card">
+      <h3>使用模式</h3>
+      <p class="muted">
+        普通模式隐藏工程细节（数据集与系列编号、哈希、引擎版本、原始 JSON 与技术错误文本），
+        高级模式把它们全部显示出来。切换只影响显示，不改变任何计算结果，也不会少算任何东西。
+      </p>
+      <div class="mode-switch">
+        <button
+          class="ghost"
+          :class="{ on: mode === 'basic' }"
+          :aria-pressed="mode === 'basic'"
+          @click="setMode('basic')"
+        >
+          ○ 普通模式
+        </button>
+        <button
+          class="ghost"
+          :class="{ on: mode === 'advanced' }"
+          :aria-pressed="mode === 'advanced'"
+          @click="setMode('advanced')"
+        >
+          ● 高级模式
+        </button>
+      </div>
+    </div>
+
+    <h2 class="group-head">AI 设置</h2>
 
     <div class="card">
       <h3>AI Provider（用于自然语言解释，非必需）</h3>
@@ -789,10 +820,12 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <h2 class="group-head">通知</h2>
+
     <div class="card" style="margin-top: 14px">
       <h3>信号通知（多渠道）</h3>
       <p class="muted">
-        当扫描产生 BUY/SELL（可选 WAIT）信号时，向所有启用的渠道发送：Generic Webhook、飞书、
+        当扫描产生看多 / 看空信号时（可选「暂不确认」也通知），向所有启用的渠道发送：Generic Webhook、飞书、
         Telegram、PushPlus、Email(SMTP)。密钥字段只写入、永不回显（留空表示保持原值）。
         通知仅在已收盘 K 线评估后触发，同一事件不会重复发送；AI 文案不会作为收益承诺。
       </p>
@@ -891,6 +924,8 @@ onUnmounted(() => {
       <p v-else class="muted">暂无通知记录。</p>
     </div>
 
+    <h2 class="group-head">系统设置</h2>
+
     <div class="card" style="margin-top: 14px">
       <h3>系统参数（system_settings）</h3>
       <p class="muted">
@@ -930,20 +965,30 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="card" style="margin-top: 14px">
-      <h3>运行环境</h3>
-      <table>
-        <tbody>
-          <tr v-for="(value, key) in environment" :key="key">
-            <td>{{ key }}</td>
-            <td>{{ value }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <template v-if="isAdvanced">
+      <h2 class="group-head">运行环境</h2>
 
-    <div class="card" style="margin-top: 14px">
-      <h3>审计日志（最近 {{ events.length }} 条，共 {{ auditTotal }} 条）</h3>
+      <div class="card" style="margin-top: 14px">
+        <h3>运行环境</h3>
+        <p class="muted">
+          后端进程实际读到的那份配置，出问题时用来对账。密钥类字段不会出现在这里。
+        </p>
+        <table>
+          <tbody>
+            <tr v-for="(value, key) in environment" :key="key">
+              <td>{{ key }}</td>
+              <td>{{ value }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+
+    <template v-if="isAdvanced">
+      <h2 class="group-head">审计日志</h2>
+
+      <div class="card" style="margin-top: 14px">
+        <h3>审计日志（最近 {{ events.length }} 条，共 {{ auditTotal }} 条）</h3>
       <div class="row" style="margin-bottom: 8px">
         <input v-model="filterEntityType" style="max-width: 160px" placeholder="实体类型（如 strategy）" />
         <input v-model="filterEntityId" style="max-width: 140px" placeholder="实体 ID（如 1）" />
@@ -975,16 +1020,20 @@ onUnmounted(() => {
         </tbody>
       </table>
       <p v-else class="muted">暂无审计记录。</p>
-    </div>
+      </div>
+    </template>
+
+    <h2 class="group-head">临时远程访问</h2>
 
     <!-- 临时远程访问（ADR-125）：按需开启的 Cloudflare Quick Tunnel，只代理内置
          Web 容器，默认 60 分钟自动过期，服务重启后不会自动恢复。 -->
     <div class="card" style="margin-top: 14px">
       <h3>临时远程访问</h3>
       <p class="muted" style="margin-top: 0">
-        用于临时 UX 测试、远程演示和故障排查。开启后把本项目的 Web 界面发布成临时公网地址，
-        最多运行 {{ Math.round(temporaryAccess.max_duration_seconds / 60) }} 分钟；隧道只指向内置
-        Web 服务，不开放任何新端口。
+        <span class="badge">开发 / 测试工具</span>
+        只在临时 UX 测试、远程演示和故障排查时打开：开启后把本项目的 Web 界面发布成临时公网地址，
+        最多运行 {{ Math.round(temporaryAccess.max_duration_seconds / 60) }} 分钟，关闭或到期后地址立即失效；
+        隧道只指向内置 Web 服务，不开放任何新端口。
       </p>
 
       <p v-if="!temporaryAccess.enabled" class="muted">
@@ -1046,6 +1095,8 @@ onUnmounted(() => {
         上的其它服务。
       </p>
     </div>
+
+    <h2 class="group-head">安全</h2>
 
     <div class="card" style="margin-top: 14px">
       <h3>安全边界</h3>

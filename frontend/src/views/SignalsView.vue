@@ -2,6 +2,14 @@
 import { computed, onMounted, ref } from 'vue'
 import { api, type ExplainResult, type SignalRecord } from '@/api'
 import { formatDateTime, formatNumber, formatPercent, signalDirection, toneOf } from '@/format'
+import { isAdvanced } from '@/mode'
+// 状态、周期、分组键都走同一个词汇表：同一件事在这一页只说一种话（ADR-127，评审 §12／§14）。
+import {
+  REFERENCE_PRICE_DISCLAIMER,
+  SIGNAL_DISCLAIMER,
+  signalLabel,
+  timeframeLabel,
+} from '@/wording'
 
 const signals = ref<SignalRecord[]>([])
 const stateFilter = ref('')
@@ -289,6 +297,18 @@ const invalidations = computed(() => {
 
 const STATES = ['', 'BUY', 'SELL', 'WAIT', 'NO_SIGNAL']
 
+/** 结果追踪的分组键是 ``state:BUY`` 这种机器名，先说清它是哪一类分组（ADR-127）。 */
+function groupLabel(key: string): string {
+  if (key === 'ALL') return '全部'
+  const [kind, ...rest] = key.split(':')
+  const value = rest.join(':')
+  if (kind === 'state') return `状态：${signalLabel(value)}`
+  if (kind === 'direction') return `方向：${signalDirection(value, null)}`
+  if (kind === 'timeframe') return `周期：${timeframeLabel(value)}`
+  if (kind === 'strategy') return `策略：${value}`
+  return key
+}
+
 async function load() {
   error.value = ''
   loading.value = true
@@ -346,8 +366,8 @@ onMounted(load)
   <div>
     <h1 class="page-title">信号</h1>
     <p class="page-sub">
-      信号只基于已收盘 K 线评估。BUY/SELL 为可操作状态，WAIT 表示入场条件部分满足，
-      NO_SIGNAL 为无事件。信号是研究信息，不会自动下单。
+      信号只基于已收盘 K 线评估：看多信号 / 看空 / 退出信号 是策略此刻给出的方向，暂不确认表示入场条件还没满足。
+      {{ SIGNAL_DISCLAIMER }}
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -361,7 +381,7 @@ onMounted(load)
           :class="stateFilter === s ? '' : 'ghost'"
           @click="stateFilter = s; resetAndLoad()"
         >
-          {{ s || '全部' }}
+          {{ s ? signalLabel(s) : '全部' }}
         </button>
         <input
           v-model="symbolFilter"
@@ -388,7 +408,7 @@ onMounted(load)
             <th>状态</th>
             <th>方向</th>
             <th>参考价</th>
-            <th>触发规则</th>
+            <th v-if="isAdvanced">触发规则</th>
             <th>组合上下文</th>
             <th>处理</th>
             <th></th>
@@ -400,10 +420,12 @@ onMounted(load)
             <td>{{ s.symbol ?? `#${s.asset_id}` }}</td>
             <td>{{ s.strategy_name ?? '—' }} <span class="muted">v{{ s.strategy_version }}</span></td>
             <td>{{ s.timeframe }}</td>
-            <td><span class="badge" :class="s.state">{{ s.state }}</span></td>
+            <td><span class="badge" :class="s.state">{{ signalLabel(s.state) }}</span></td>
             <td>{{ signalDirection(s.direction, s.closes_direction) }}</td>
             <td>{{ s.price_reference != null ? formatNumber(s.price_reference) : '—' }}</td>
-            <td class="muted">{{ (s.triggered_rules || []).join(', ') || '—' }}</td>
+            <td v-if="isAdvanced" class="muted">
+              {{ (s.triggered_rules || []).join(', ') || '—' }}
+            </td>
             <td class="muted">{{ contextNote(s) }}</td>
             <td>{{ s.status }}{{ s.notified_at ? ' · 已通知' : '' }}</td>
             <td>
@@ -445,7 +467,8 @@ onMounted(load)
     <div v-if="detailRow" class="card" style="margin-top: 14px">
       <h3>信号详情（#{{ detailRow?.id }} {{ detailRow?.symbol ?? `#${detailRow?.asset_id}` }}）</h3>
       <p class="muted">
-        `docs/13_UI_UX.md` 第 6 节承诺、此前一直缺的四段：当前状态、策略历史统计、真实持仓上下文、风险与失效条件（第 2、3、5、8 段在上面三张卡片里）。
+        四段合成一张图：这条信号现在是什么状态、这个策略历史上怎么样、你的真实持仓是什么处境、
+        什么情况说明它失效了。
       </p>
       <p v-if="detailNote" class="muted">{{ detailNote }}</p>
 
@@ -481,6 +504,7 @@ onMounted(load)
 
       <h4>风险 / 失效条件</h4>
       <p class="muted">策略价位：止损 {{ riskLevels.stop }} · 目标 {{ riskLevels.target }}</p>
+      <p class="muted">{{ REFERENCE_PRICE_DISCLAIMER }}</p>
       <template v-if="invalidations.length">
         <p class="muted">AI 解释点名的失效条件：</p>
         <ul class="muted">
@@ -495,7 +519,8 @@ onMounted(load)
     <div v-if="showOutcomes" class="card" style="margin-top: 14px">
       <h3>信号结果追踪</h3>
       <p class="muted">
-        回填的是「信号发出后价格如何走」：pnl% 为方向化收益，MAE/MFE 为最大不利/有利偏移。
+        回填的是「信号发出后价格如何走」：PnL% 是这笔信号方向化之后的收益，MAE% 是持仓期间最大浮亏
+        （最难受的时候亏到多少），MFE% 是最大浮盈（最顺利的时候赚到多少）。
       </p>
       <p v-if="outcomeSummary" class="muted">
         范围：{{ outcomeSummary.symbol ?? '全部标的' }} · 共 {{ outcomeSummary.signals }} 条信号，已评估
@@ -520,7 +545,7 @@ onMounted(load)
         </thead>
         <tbody>
           <tr v-for="(g, k) in outcomeSummary.groups" :key="k">
-            <td>{{ k }}</td>
+            <td>{{ groupLabel(String(k)) }}</td>
             <td>{{ g.count }}</td>
             <td>{{ g.win_rate != null ? formatPercent(g.win_rate) : '—' }}</td>
             <td :class="toneOf(g.avg_pnl_pct)">{{ g.avg_pnl_pct != null ? formatPercent(g.avg_pnl_pct, 3) : '—' }}</td>
@@ -572,11 +597,13 @@ onMounted(load)
     <div v-if="evidence" class="card" style="margin-top: 14px">
       <h3>信号证据（{{ evidenceFor }}）</h3>
       <p class="muted">
-        触发规则：{{ (evidence.triggered_rules || []).join(', ') || '—' }} ·
-        特征哈希 {{ String(evidence.feature_snapshot_hash || '').slice(0, 12) }}…
+        触发规则：{{ (evidence.triggered_rules || []).join(', ') || '—' }}
+        <span v-if="isAdvanced">
+          · 特征哈希 {{ String(evidence.feature_snapshot_hash || '').slice(0, 12) }}…</span
+        >
         <span v-if="evidence.portfolio_context?.note"> · {{ evidence.portfolio_context.note }}</span>
       </p>
-      <table v-if="evidence.feature_snapshot?.values">
+      <table v-if="isAdvanced && evidence.feature_snapshot?.values">
         <thead>
           <tr>
             <th>特征</th>
@@ -590,6 +617,9 @@ onMounted(load)
           </tr>
         </tbody>
       </table>
+      <p v-else-if="!isAdvanced && evidence.feature_snapshot?.values" class="muted">
+        这次计算用到的特征明细在高级模式里可以看到；上面的规则与上下文就是它的结论。
+      </p>
       <p v-else class="muted">该信号没有特征快照（可能是较早的信号）。</p>
     </div>
 

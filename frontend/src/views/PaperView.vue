@@ -197,7 +197,7 @@ onMounted(() => {
 
 <template>
   <div>
-    <h1 class="page-title">模拟盘</h1>
+    <h1 class="page-title">模拟验证</h1>
     <p class="page-sub">
       模拟账户使用虚拟资金，与 Ghostfolio 真实持仓完全隔离。成交按「信号参考价 + 滑点」计算并计入手续费；
       V1 为多头单持仓，且不包含任何券商下单接口。

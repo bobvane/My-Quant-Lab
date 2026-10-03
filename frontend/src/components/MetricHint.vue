@@ -1,7 +1,11 @@
 <script setup lang="ts">
 // Answers the four questions in place: what it is / how it is computed / why look at it /
 // what it does not tell you. Tooltip on hover, and the full note expands on click
-// (ADR-110, docs/13_UI_UX.md section 7).
+// (ADR-110, ADR-127, docs/13_UI_UX.md section 7).
+//
+// The button is labelled 详细解释 rather than 四问: the audit found that 「四问」 named
+// the mechanism instead of the thing the reader gets, so nobody clicked it. The first
+// answer is already on screen (StatCard renders `what`); this is where the rest lives.
 import { computed, ref } from 'vue'
 
 import { metricNote } from '@/metrics'
@@ -27,7 +31,7 @@ const questions = [
       :title="`${label}：${note.what}`"
       @click="open = !open"
     >
-      四问
+      详细解释
     </button>
     <dl v-if="open" class="metric-note">
       <template v-for="question in questions" :key="question.key">

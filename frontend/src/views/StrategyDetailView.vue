@@ -17,6 +17,8 @@ import {
 } from '@/api'
 import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
+// 数据集版本号、接口路径这类工程读数只在高级模式出现（ADR-126）。
+import { isAdvanced } from '@/mode'
 
 const route = useRoute()
 const strategyId = Number(route.params.strategyId)
@@ -199,7 +201,7 @@ onMounted(load)
 <template>
   <section>
     <p>
-      <RouterLink to="/market">← 返回行情与策略</RouterLink>
+      <RouterLink to="/market">← 返回我的策略</RouterLink>
     </p>
     <h1>{{ strategy?.name ?? `策略 #${strategyId}` }}</h1>
     <p v-if="error" class="error">{{ error }}</p>
@@ -421,8 +423,10 @@ onMounted(load)
         <h3>回测（Backtest）</h3>
         <template v-if="latestRun">
           <p class="muted">
-            当前版本最近一次回测（运行 #{{ latestRun.id }}，{{ latestRun.status }}，数据集
-            {{ latestRun.dataset_version_id }}）。回测实验室里有完整的成交明细与参数。
+            当前版本最近一次回测（运行 #{{ latestRun.id }}，{{ latestRun.status }}<span
+              v-if="isAdvanced"
+              >，数据集 {{ latestRun.dataset_version_id }}</span
+            >）。「回测」页里有完整的成交明细与参数。
           </p>
           <div class="grid">
             <StatCard label="总收益率" :value="formatPercent(latestRun.total_return)" :tone="toneOf(latestRun.total_return)" />
@@ -434,7 +438,7 @@ onMounted(load)
         </template>
         <p v-else class="muted">
           当前版本还没有跑过回测。不是零，是还没有数据 —— 去
-          <RouterLink to="/backtest">回测实验室</RouterLink> 跑一次，再回来看这一节。
+          <RouterLink to="/backtest">回测</RouterLink> 跑一次，再回来看这一节。
         </p>
         <table v-if="runs.length > 1">
           <thead>
@@ -467,9 +471,12 @@ onMounted(load)
       <section class="card">
         <h3>样本外与滚动验证（OOS / Walk-forward）</h3>
         <p class="muted">
-          这些结果<strong>不落库</strong>：样本外与滚动验证由回测实验室按需计算（`POST /research/oos`、
-          `POST /research/walk-forward`），系统留下的只有审计事件，所以下面是从生命周期证据
-          里读到的<strong>发生过几次</strong>，不是一份完整评估。要看每一次的读数，去回测实验室重跑。
+          这些结果<strong>不落库</strong>：样本外与滚动验证由「回测」页按需计算，系统留下的只有审计事件，
+          所以下面是从生命周期证据里读到的<strong>发生过几次</strong>，不是一份完整评估。要看每一次的读数，
+          去「回测」重跑。
+          <span v-if="isAdvanced">
+            （接口：<code>POST /research/oos</code>、<code>POST /research/walk-forward</code>）
+          </span>
         </p>
         <table>
           <tbody>
@@ -490,13 +497,13 @@ onMounted(load)
       </section>
 
       <section class="card">
-        <h3>模拟盘（Paper Trading）</h3>
+        <h3>模拟验证（Paper Trading）</h3>
         <p class="muted">
-          归因按<strong>账户</strong>：模拟盘交易只带账户与它当时的策略版本名，系统不会把一笔成交倒推给
+          归因按<strong>账户</strong>：模拟验证的交易只带账户与它当时的策略版本名，系统不会把一笔成交倒推给
           某个策略，所以这里列的是「绑定到这个策略的账户」，而不是声称这些盈亏都属于这个策略。
         </p>
         <p v-if="!myAccounts.length" class="muted">
-          还没有绑定到这个策略的模拟账户。在 <RouterLink to="/paper">模拟盘</RouterLink>
+          还没有绑定到这个策略的模拟账户。在 <RouterLink to="/paper">模拟验证</RouterLink>
           新建账户时选上它，这条线才会接起来。
         </p>
         <template v-else>

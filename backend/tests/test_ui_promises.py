@@ -412,7 +412,7 @@ DETAIL_SECTIONS = (
     "规则（Rules）",
     "回测（Backtest）",
     "样本外与滚动验证（OOS / Walk-forward）",
-    "模拟盘（Paper Trading）",
+    "模拟验证（Paper Trading）",
     "当前信号（Current Signals）",
     "AI 解释（AI Explanation）",
 )

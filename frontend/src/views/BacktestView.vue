@@ -22,6 +22,10 @@ import SensitivityChart from '@/components/SensitivityChart.vue'
 import StatCard from '@/components/StatCard.vue'
 import ThresholdSweepChart from '@/components/ThresholdSweepChart.vue'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
+import { isAdvanced } from '@/mode'
+// 引擎的指标键名与术语在这一页出现过三次（明细、敏感性表头、对比表头），
+// 三处都走同一个翻译表，否则同一个键会写出三种中文（ADR-127）。
+import { metricKeyLabel } from '@/wording'
 
 const runs = ref<BacktestSummary[]>([])
 const onlyVersionFilter = ref(false)
@@ -903,9 +907,10 @@ onMounted(async () => {
 
 <template>
   <div>
-    <h1 class="page-title">回测实验室</h1>
+    <h1 class="page-title">回测</h1>
     <p class="page-sub">
-      同一「策略版本 + 数据集 + 参数 + 引擎版本 + 特征版本」必然得到相同结果。样本不足的指标显示 N/A，不会编造。
+      运行一次历史回测，然后看结论：这套策略过去表现如何、为什么、风险有多大、下一步该做什么。
+      同一「策略版本 + 数据集 + 参数 + 引擎版本 + 特征版本」必然得到相同结果；样本不足的指标显示 N/A，不会编造。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -1003,7 +1008,7 @@ onMounted(async () => {
         </span>
       </div>
       <p class="muted" style="margin-bottom: 0">
-        先到「行情与策略」同步该标的的数据；同一版本重复运行会得到相同结果（结果哈希可验证）。
+        先到「我的策略」同步该标的的数据；同一版本重复运行会得到相同结果（结果哈希可验证）。
         仓位管理会写入本次回测的执行模型，因此改变它会让结果哈希随之变化。
       </p>
     </div>
@@ -1038,7 +1043,7 @@ onMounted(async () => {
           </thead>
           <tbody>
             <tr v-for="k in ['total_return', 'max_drawdown', 'sharpe', 'win_rate', 'number_of_trades']" :key="k">
-              <td>{{ k }}<MetricHint :label="k" /></td>
+              <td>{{ metricKeyLabel(k) }}<MetricHint :label="k" /></td>
               <td :class="oosResult.in_sample[k] != null ? toneOf(oosResult.in_sample[k]) : ''">
                 {{ formatMetric(k, oosResult.in_sample[k]) }}
               </td>
@@ -1218,7 +1223,7 @@ onMounted(async () => {
           <thead>
             <tr>
               <th>参数</th>
-              <th>{{ sensResult.metric }}</th>
+              <th>{{ metricKeyLabel(sensResult.metric) }}</th>
               <th>总收益</th>
               <th>最大回撤</th>
               <th>交易数</th>
@@ -1727,7 +1732,7 @@ onMounted(async () => {
         <thead>
           <tr>
             <th>回测 #</th>
-            <th v-for="m in compareResult.metrics" :key="m">{{ m }}</th>
+            <th v-for="m in compareResult.metrics" :key="m">{{ metricKeyLabel(m) }}</th>
           </tr>
         </thead>
         <tbody>
@@ -1784,7 +1789,7 @@ onMounted(async () => {
             </tr>
           </tbody>
         </table>
-        <p v-else class="muted">还没有回测记录。到「行情与策略」创建策略后即可运行。</p>
+        <p v-else class="muted">还没有回测记录。到「我的策略」创建策略后即可运行。</p>
         <div class="row" style="margin-top: 8px">
           <button :disabled="comparing || compareIds.length < 2" @click="runCompare">
             {{ comparing ? '对比中…' : `对比选中（${compareIds.length}）` }}
@@ -1792,7 +1797,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div class="card">
+      <div v-if="isAdvanced" class="card">
         <h3>结果可复现性</h3>
         <table v-if="detail">
           <tbody>
@@ -1860,7 +1865,7 @@ onMounted(async () => {
         </thead>
         <tbody>
           <tr v-for="m in metricRows" :key="m.key">
-            <td>{{ m.key }}</td>
+            <td>{{ metricKeyLabel(m.key) }}</td>
             <td :class="toneOf(m.value)">{{ m.value != null ? formatMetric(m.key, m.value) : 'N/A' }}</td>
           </tr>
         </tbody>

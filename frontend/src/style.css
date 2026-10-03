@@ -442,6 +442,87 @@ code {
   opacity: 0.4;
 }
 
+/* The first screen answers four questions and nothing else (ADR-127, docs/13_UI_UX.md
+   section 2). The answer to "what did it do" is the one that has to win the glance, so it
+   carries an accent edge and a slightly larger first line; the rest stay quiet. */
+.answers .answer-main {
+  margin: 0 0 4px;
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.answers .answer-conclusion {
+  border-left: 3px solid var(--accent);
+}
+
+.answers .answer-conclusion .answer-main {
+  font-size: 15.5px;
+}
+
+.answer-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* A metric says what it is in the reader's words: the alias sits next to the label and the
+   one-line plain explanation under the number (ADR-127). The four-question note is still one
+   click away in MetricHint. */
+.metric-alias {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.metric-plain {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* Basic / advanced switch (ADR-126): it changes what is shown, never what is calculated. */
+.mode-switch {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mode-switch button.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.mode-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+/* Group headings on /settings: the page is one long scroll of cards, so the groups that
+   exist inside it are named instead of being left to card order (ADR-126, section 16). */
+.group-head {
+  margin: 24px 0 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.group-head + .card {
+  margin-top: 12px;
+}
+
 /* Phone widths (ADR-111, docs/13_UI_UX.md section 9). A signal notification opened on a
    phone must show the page, not a 232px menu column: the shell stacks, the menu becomes a
    horizontally scrollable strip, and wide tables scroll inside the page instead of pushing

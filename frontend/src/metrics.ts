@@ -1,12 +1,15 @@
-// Professional metrics explain themselves in place (ADR-110, docs/13_UI_UX.md section 7).
+// Professional metrics explain themselves in place (ADR-110, ADR-127, docs/13_UI_UX.md section 7).
 //
 // Every entry answers the same four questions, in this order:
 //   what  - what this number is
 //   how   - how it is computed
 //   why   - why somebody looks at it
 //   watch - what it does NOT tell you
-// The hint is rendered by frontend/src/components/MetricHint.vue, which is used by
-// StatCard.vue (every metric card) and by the metric tables in BacktestView.vue.
+// `what` is also the sentence every metric card shows by default, without being
+// asked: the audit found that an explanation hidden behind a button the reader has
+// to discover is an explanation most readers never see (audit §11). The remaining
+// three answers stay behind 「详细解释」, rendered by MetricHint.vue, which is used
+// by StatCard.vue (every metric card) and by the metric tables in BacktestView.vue.
 // A new metric card must either get an entry here or be listed in NOT_A_METRIC;
 // backend/tests/test_ui_promises.py fails when it is neither.
 
@@ -161,4 +164,14 @@ export const NOT_A_METRIC: readonly string[] = ['系统状态', '版本']
 
 export function metricNote(label: string): MetricNote | null {
   return METRIC_NOTES[label] ?? null
+}
+
+/**
+ * The one sentence a metric card shows by default (audit §11).
+ *
+ * Empty for labels that are readouts of the app rather than metrics, so the card
+ * simply renders no explanation line instead of an empty paragraph.
+ */
+export function metricPlain(label: string): string {
+  return METRIC_NOTES[label]?.what ?? ''
 }

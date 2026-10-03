@@ -1251,3 +1251,77 @@ watcher 路径不需要额外请求：它比较的本来就是 `get_head_commit(
   （`backend/tests/test_migration_revisions.py`，4 passed）。
 - 真栈复核：删掉验证库后 `alembic upgrade head` 末行
   `Running upgrade 0007_backtest_result_warnings -> 0008_github_pending_review`。
+
+## ADR-065：胜率必须跟它的分母一起发布（`signals`/`decided`/`undecided`，docs/12 Signals）
+
+### 背景
+
+`GET /signals/outcome-summary` 只聚合**已经有结果行**的信号：
+`rows = db.execute(select(SignalOutcome, Signal).join(Signal, Signal.id == SignalOutcome.signal_id))`
+（`backend/app/api/routers/signals.py:120-161`），返回 `{"evaluated": len(rows), "groups": {...}}`。
+没有结果行的信号在这个响应里**完全不出现**，而它们通常才是多数：评估器要等信号之后
+`DEFAULT_BARS_AFTER = 10` 根 K 线（`backend/app/simulation/outcome_evaluator.py:25`）才回填，
+该标的根本没有 K 线序列的信号也永远没有结果行。于是 400 条信号里 327 条未决时，页面只写
+「整体胜率 72%」，读者无法知道这个数字是从 73 条里算出来的，还是从全部 400 条里算出来的。
+
+同一张卡片还把**分页长度当总数**：`frontend/src/views/SignalsView.vue:250` 的标题是
+`信号结果追踪（{{ outcomes.length }} 条）`，而 `outcomes` 来自 `GET /signals/outcomes`
+（`backend/app/api/routers/signals.py:79-117`）——返回裸数组、`limit` 默认 50（上限 500）、没有 total。
+400 条结果时标题写「50 条」、同一张卡片下一行写「样本 73」，两个互相矛盾的口径。
+
+第三个更安静的口径错误：summary **不接受** `symbol`，而列表接受
+（`frontend/src/api.ts:769-776`、`SignalsView.vue:73-74` 只把 `symbolFilter` 传给列表），
+于是按标的过滤后的行旁边配着全局统计。
+
+顺带记下：`outcome_summary` 的 docstring 与 `backend/tests/test_outcome_summary.py` 的模块 docstring
+都写「docs/09 §8」，但 docs/09 §8 是「Strategy evidence layers」，与信号结果无关 —— 这个端点在文档里
+本来没有归属。
+
+### 决策
+
+1. `GET /signals/outcome-summary` 新增 `symbol` 查询参数，与 `/signals/outcomes` 同口径：先按
+   `Asset.symbol` 精确解析，未知标的返回空范围，**不回落到全局平均**。
+2. 响应固定携带范围与三个计数：
+   `{"symbol": <范围或 null>, "signals": <范围内信号总数>, "decided": <有可用结果的信号数>,
+   "undecided": signals - decided, "bars_after": DEFAULT_BARS_AFTER, "groups": {...}}`。
+   `decided` 就是每个 `count`/`win_rate` 的分母；`undecided` 是还没有结果的信号（要等信号后
+   `bars_after` 根 K 线，或该标的还没有 K 线序列）。
+3. `evaluated` 改名为 `decided`：同一个数字只留一个名字。
+4. `decided` 只数**有可用 pnl 的结果行**（`pnl_pct is not None`），因此
+   `decided == groups["ALL"]["count"]` 恒成立。
+5. 前端卡片不再用分页长度当总数：标题改为「信号结果追踪」，新增一行
+   「范围：<symbol 或 全部标的> · 共 N 条信号，已评估 M 条（另有 K 条还没有结果…）」，
+   表格上方注明「下表是最近 N 条已评估信号」，并把 `symbolFilter` 一起传给 summary；
+   空表文案区分「一条信号都没有」与「有信号但还没有一条等到结果」。
+6. 文档归属修正：两处「docs/09 §8」改为 docs/12，并在 docs/12 写下这三个计数的含义。
+
+### 理由
+
+- 胜率是比率，比率脱离分母就没有意义：`73/73` 与 `73/400` 读起来是同一句话，但一个是结论、
+  一个是「73 条上的初步印象」。
+- 未决信号既不能计入胜率、也不能算成亏损（那等于凭空造出失败），唯一诚实的位置是分母旁边。
+  评估器自己的返回值里本来就有 `insufficient_data`/`skipped`，但那个数字活在 Celery 任务的返回值里，
+  用户永远看不到；把「还没有结果」放进用户看得见的响应，是「记录必须说明自己覆盖了什么」
+  这条线的延续（ADR-054/055/056/057/058/060/061/062/063/064）。
+- 用 `signals - decided` 而不是逐条判断「为什么未决」：把 327 条未决拆成「还差几根 K 线」与
+  「没有序列」需要为每条信号查未来 K 线（400 次查询），而这两类原因都写在 `bars_after` 与
+  「没有 K 线序列」这句话里。宁可把规则说清，也不猜一个更细的分母。
+- 分母只数有 pnl 的行，让分母、`count`、`win_rate` 三者永远一致，不引入「分母 5、样本 4」
+  这种新的自相矛盾。
+- 范围必须显式：同一个端点过滤与不过滤时都能用，所以它必须自己说明这次数字属于哪个范围，
+  而不是让读者从旁边的表格去猜。
+
+### 影响与兼容
+
+- `evaluated` 是破坏性改名，但消费者只有前端一处（`frontend/src/api.ts` 的类型与
+  `SignalsView.vue`），已同步。
+- 未知 `symbol` 返回全 0 的空范围（与 `/signals/outcomes?symbol=...` 返回 `[]` 一致），不是 404。
+- 数据库无变化、无迁移。
+
+### 测试
+
+- `test_the_summary_states_the_denominator_of_its_win_rate`：3 条已决 + 4 条未决 →
+  `signals 7 / decided 3 / undecided 4`，胜率只按 3 条算，且 `decided + undecided == signals`。
+- `test_the_summary_only_counts_the_symbol_it_names`、`test_an_unknown_symbol_is_an_empty_scope_not_a_global_average`、
+  `test_an_outcome_without_a_pnl_is_not_a_decided_signal`；原 `test_outcome_summary_groups` 改用 `decided`
+  并断言 `bars_after == 10`（`backend/tests/test_outcome_summary.py`，6 passed）。

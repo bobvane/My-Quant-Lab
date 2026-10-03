@@ -770,10 +770,15 @@ export const api = {
     request<Array<Record<string, any>>>(
       `/signals/outcomes?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''}`,
     ),
-  signalOutcomeSummary: () =>
-    request<{ evaluated: number; groups: Record<string, Record<string, any>> }>(
-      '/signals/outcome-summary',
-    ),
+  signalOutcomeSummary: (symbol?: string) =>
+    request<{
+      symbol: string | null
+      signals: number
+      decided: number
+      undecided: number
+      bars_after: number
+      groups: Record<string, Record<string, any>>
+    }>(`/signals/outcome-summary${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`),
   scanSignals: () =>
     request<{ evaluated: number; created: number; signals: SignalIntent[]; disclaimer: string }>(
       '/signals/scan',

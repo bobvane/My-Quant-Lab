@@ -307,6 +307,17 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
 `POST /signals/{id}/explain`
 `POST /signals/{id}/acknowledge`
 
+`GET /signals/outcome-summary` 的胜率永远跟它的分母一起返回（ADR-065）：
+
+- `symbol`：这些数字描述的范围（`null` 为全部标的）；端点接受 `?symbol=`，与 `GET /signals/outcomes`
+  同口径，未知标的返回空范围而不是全局平均。
+- `signals` / `decided` / `undecided`：范围内信号总数 / 已有可用结果的数量 / 其余数量。
+  `decided` 是每个 `count` 与 `win_rate` 的分母，且 `decided == groups.ALL.count`。
+- `bars_after`：评估器要在信号之后看到多少根 K 线才回填结果（`DEFAULT_BARS_AFTER = 10`）；
+  `undecided` 就是还没等到这些 K 线、或该标的还没有 K 线序列的信号。
+- 未决信号既不计入胜率，也不算亏损 —— 它们只是还没有结果。
+- 状态字段 `evaluated` 已改名为 `decided`（同一个数字只留一个名字）。
+
 ## Feature Snapshots
 
 The exact feature row each signal was computed from (reproducible evidence).

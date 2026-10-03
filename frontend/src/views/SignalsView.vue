@@ -71,7 +71,7 @@ async function toggleOutcomes() {
   try {
     const [rows, summary] = await Promise.all([
       api.signalOutcomes(50, symbolFilter.value.trim() || undefined),
-      api.signalOutcomeSummary().catch(() => null),
+      api.signalOutcomeSummary(symbolFilter.value.trim() || undefined).catch(() => null),
     ])
     outcomes.value = rows
     outcomeSummary.value = summary
@@ -247,13 +247,20 @@ onMounted(load)
     </div>
 
     <div v-if="showOutcomes" class="card" style="margin-top: 14px">
-      <h3>信号结果追踪（{{ outcomes.length }} 条）</h3>
+      <h3>信号结果追踪</h3>
       <p class="muted">
         回填的是「信号发出后价格如何走」：pnl% 为方向化收益，MAE/MFE 为最大不利/有利偏移。
       </p>
+      <p v-if="outcomeSummary" class="muted">
+        范围：{{ outcomeSummary.symbol ?? '全部标的' }} · 共 {{ outcomeSummary.signals }} 条信号，已评估
+        {{ outcomeSummary.decided }} 条<template v-if="outcomeSummary.undecided > 0"
+          >，另有 {{ outcomeSummary.undecided }} 条还没有结果（要等信号后
+          {{ outcomeSummary.bars_after }} 根 K 线，或该标的还没有 K 线序列）</template
+        >。
+      </p>
       <div v-if="outcomeSummary?.groups?.ALL" class="row" style="margin-bottom: 8px">
         <span class="stat small">整体胜率 {{ formatPercent(outcomeSummary.groups.ALL.win_rate) }}</span>
-        <span class="muted">样本 {{ outcomeSummary.groups.ALL.count }} · 平均 {{ formatNumber(outcomeSummary.groups.ALL.avg_pnl_pct, 3) }}% · 累计 {{ formatNumber(outcomeSummary.groups.ALL.total_pnl_pct, 3) }}%</span>
+        <span class="muted">样本 {{ outcomeSummary.groups.ALL.count }}（已评估的信号）· 平均 {{ formatNumber(outcomeSummary.groups.ALL.avg_pnl_pct, 3) }}% · 累计 {{ formatNumber(outcomeSummary.groups.ALL.total_pnl_pct, 3) }}%</span>
       </div>
       <table v-if="outcomeSummary && Object.keys(outcomeSummary.groups).length > 1" style="margin-bottom: 10px">
         <thead>
@@ -275,6 +282,7 @@ onMounted(load)
           </tr>
         </tbody>
       </table>
+      <p v-if="outcomes.length" class="muted">下表是最近 {{ outcomes.length }} 条已评估信号。</p>
       <table v-if="outcomes.length">
         <thead>
           <tr>
@@ -307,7 +315,12 @@ onMounted(load)
           </tr>
         </tbody>
       </table>
-      <p v-else class="muted">还没有信号结果（需价格前进后由定时任务回填）。</p>
+      <p v-else class="muted">
+        还没有信号结果<template v-if="outcomeSummary && outcomeSummary.signals > 0"
+          >（共 {{ outcomeSummary.signals }} 条信号，还没有一条等到信号后
+          {{ outcomeSummary.bars_after }} 根 K 线）</template
+        ><template v-else>（需价格前进后由定时任务回填）</template>。
+      </p>
     </div>
 
     <div v-if="evidence" class="card" style="margin-top: 14px">

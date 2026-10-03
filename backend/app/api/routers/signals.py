@@ -10,7 +10,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import SignalOut
@@ -118,18 +118,50 @@ def list_outcomes(
 
 
 @router.get("/outcome-summary", summary="Aggregated signal-outcome statistics")
-def outcome_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
-    """Win rate / average PnL across evaluated signal outcomes (docs/09 §8).
+def outcome_summary(
+    db: Session = Depends(get_db),
+    symbol: str | None = None,
+) -> dict[str, Any]:
+    """Win rate / average PnL across evaluated signal outcomes (docs/12 Signals).
 
     Pure aggregation of stored outcomes — no recomputation, no AI.
+
+    A win rate means nothing without the population it was computed from, so
+    this response always carries the three counts next to it: ``signals``
+    (every signal in scope), ``decided`` (signals whose outcome has been
+    measured) and ``undecided`` (the rest — still waiting for ``bars_after``
+    candles after the signal, or for the symbol to have a candle series at
+    all). ``decided`` is the denominator of every ``count``/``win_rate`` below,
+    and ``symbol`` says which scope the numbers describe (ADR-065).
     """
 
     from app.domain.models import SignalOutcome
+    from app.simulation.outcome_evaluator import DEFAULT_BARS_AFTER
 
-    rows = db.execute(
-        select(SignalOutcome, Signal).join(Signal, Signal.id == SignalOutcome.signal_id)
-    ).all()
+    asset_id: int | None = None
+    if symbol:
+        asset = db.scalar(select(Asset).where(Asset.symbol == symbol))
+        if asset is None:
+            return {
+                "symbol": symbol,
+                "signals": 0,
+                "decided": 0,
+                "undecided": 0,
+                "bars_after": DEFAULT_BARS_AFTER,
+                "groups": {},
+            }
+        asset_id = asset.id
+
+    outcome_stmt = select(SignalOutcome, Signal).join(Signal, Signal.id == SignalOutcome.signal_id)
+    signal_count_stmt = select(func.count()).select_from(Signal)
+    if asset_id is not None:
+        outcome_stmt = outcome_stmt.where(Signal.asset_id == asset_id)
+        signal_count_stmt = signal_count_stmt.where(Signal.asset_id == asset_id)
+
+    rows = db.execute(outcome_stmt).all()
+    signals = int(db.scalar(signal_count_stmt) or 0)
     buckets: dict[str, list[float]] = {}
+    decided = 0
 
     def bucket_for(token: str) -> list[float]:
         return buckets.setdefault(token, [])
@@ -138,6 +170,7 @@ def outcome_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
         pnl = float(outcome.pnl_pct) if outcome.pnl_pct is not None else None
         if pnl is None:
             continue
+        decided += 1
         bucket_for("ALL").append(pnl)
         bucket_for(f"direction:{signal.direction}").append(pnl)
         bucket_for(f"timeframe:{signal.timeframe}").append(pnl)
@@ -158,7 +191,14 @@ def outcome_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
             "total_pnl_pct": round(sum(values), 4),
         }
 
-    return {"evaluated": len(rows), "groups": {k: summarise(v) for k, v in sorted(buckets.items())}}
+    return {
+        "symbol": symbol,
+        "signals": signals,
+        "decided": decided,
+        "undecided": signals - decided,
+        "bars_after": DEFAULT_BARS_AFTER,
+        "groups": {k: summarise(v) for k, v in sorted(buckets.items())},
+    }
 
 
 @router.get("/{signal_id}", response_model=SignalOut, summary="Get one signal")

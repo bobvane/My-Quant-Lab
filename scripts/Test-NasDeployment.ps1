@@ -101,6 +101,26 @@ function Invoke-Api {
     }
 }
 
+# The status code of a request that is *expected* to fail, read from the response
+# itself. Matching a status against the English prose of the error made the
+# unknown-id check unable to fail: its own success message ("期望 404，却返回了
+# 200") contains "404", so a 200 was caught by the catch and reported as 符合预期
+# (ADR-090).
+function Get-ApiStatus {
+    param([string]$Path)
+    $headers = @{}
+    if ($Token) { $headers['Authorization'] = "Bearer $Token" }
+    try {
+        Invoke-WebRequest -Uri "$api$Path" -Method GET -Headers $headers -TimeoutSec 60 -UseBasicParsing -ErrorAction Stop | Out-Null
+        return 200
+    }
+    catch {
+        $resp = $_.Exception.Response
+        if ($resp -and $resp.StatusCode) { return [int]$resp.StatusCode }
+        throw
+    }
+}
+
 Write-Output "My Quant Lab — NAS 端到端检查"
 Write-Output "target: $Base   time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
@@ -276,15 +296,12 @@ else {
         if ($missing.Count -gt 0) { throw "OpenAPI 未注册路由: $($missing -join ', ')" }
 
         # An unknown id must be 404 (not 500/405). A 200 here would mean the id
-        # lookup is broken.
-        try {
-            Invoke-Api -Path '/ai/tasks/999999' | Out-Null
-            throw '期望 404，却返回了 200'
-        }
-        catch {
-            if ($_.Exception.Message -match '404') { '两个路由均已注册；unknown id -> 404 (符合预期)' }
-            else { throw $_ }
-        }
+        # lookup is broken. The status code is read from the response, never from
+        # the message text: the failure message below used to be caught by its own
+        # `-match '404'` and printed as success (ADR-090).
+        $unknown = Get-ApiStatus -Path '/ai/tasks/999999'
+        if ($unknown -ne 404) { throw "unknown id 期望 404，实际 $unknown" }
+        '两个路由均已注册；unknown id -> 404 (符合预期)'
     }
 
     Step '模拟盘账户列表' {

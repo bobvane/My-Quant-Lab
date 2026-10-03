@@ -26,7 +26,10 @@ LOAD_INTERVAL=2
 API="http://127.0.0.1:8080/api/v1"
 OUT="resource-baseline-$(date +%Y%m%d-%H%M).md"
 
-CONTAINERS="quantlab-api quantlab-worker quantlab-scheduler quantlab-web quantlab-postgres quantlab-redis"
+# quantlab-docker-proxy is a default service of docker-compose.yml (it is what lets the
+# API read container stats), so the baseline has to include it: sampling grepped every
+# `^quantlab-` container while the report only ever printed the list below (ADR-090).
+CONTAINERS="quantlab-api quantlab-worker quantlab-scheduler quantlab-web quantlab-postgres quantlab-redis quantlab-docker-proxy"
 
 command -v docker >/dev/null 2>&1 || { echo "docker 不可用，请在 NAS 主机上运行本脚本"; exit 1; }
 

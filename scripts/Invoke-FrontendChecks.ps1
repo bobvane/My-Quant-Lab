@@ -98,7 +98,7 @@ Write-Output "`n== npm run build =="
 npm run build 2>&1 | Select-Object -Last 40
 if ($LASTEXITCODE -ne 0) { $failures += 'build' }
 
-if ($isUnc -and -not $KeepMirror) {
+if ($needsMirror -and -not $KeepMirror) {
     Remove-Item -LiteralPath (Join-Path $work 'dist') -Recurse -Force -ErrorAction SilentlyContinue
 }
 

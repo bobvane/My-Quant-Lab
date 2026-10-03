@@ -154,7 +154,7 @@ docker compose up -d
 ```
 
 - Web UI: http://<nas-ip>:8081
-- API docs: http://<nas-ip>:8080/docs
+- API docs: http://<nas-ip>:8081/docs
 - Market data defaults to `synthetic` (deterministic offline data). Set
   `MARKET_DATA_PROVIDER=yahoo_finance` for real quotes.
 - AI is optional; quantitative features work with AI disabled.

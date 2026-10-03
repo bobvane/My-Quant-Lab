@@ -359,7 +359,7 @@ jobs:
             docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-api
             exit 1
           fi
-          python3 -c "import json;d=json.load(open('/tmp/scan.json'));print('evaluated =', d['evaluated'])"
+          python3 -c "import json;d=json.load(open('/tmp/scan.json'));assert isinstance(d['evaluated'],int) and d['evaluated']>=0, d;assert d.get('disclaimer'), d;print('evaluated =', d['evaluated'], '| created =', d['created'])"
 
       - name: Dump logs on failure
         if: failure()

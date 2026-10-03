@@ -113,6 +113,10 @@ if ($webOk) {
 else {
     Write-Output "vite did not come up; tail of stderr:"
     Get-Content -LiteralPath (Join-Path $env:TEMP 'mql-web.err') -ErrorAction SilentlyContinue | Select-Object -Last 30
+    # Same shape as the API half above: a self-check that cannot fail is decoration
+    # (ADR-073). The caller has to be able to tell "the stack is up" from "it is not".
+    Write-Output "START_LOCAL_STACK_FAILED (web did not answer on :$WebPort)"
+    exit 1
 }
 
 Write-Output ""

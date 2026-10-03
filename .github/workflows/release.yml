@@ -46,6 +46,29 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Releasing ${version}"
 
+      # The version scheme has a guard (`backend/tests/test_release_version_scheme.py`),
+      # but it runs on `ci.yml`, which is triggered by pushes to main — never by a tag.
+      # So the one event that actually publishes could not see the one check that would
+      # have stopped it. Read version.txt here: the tag and the file it releases must
+      # agree, and the tag must still look like vX.Y.Z (ADR-091).
+      - name: The tag must agree with version.txt
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          tag="${version#v}"
+          declared="$(tr -d '[:space:]' < version.txt)"
+          declared="${declared#v}"
+          if ! [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]$ ]]; then
+            echo "tag '$version' is not vX.Y.Z; see docs/17 ADR-017" >&2
+            exit 1
+          fi
+          if [ "$tag" != "$declared" ]; then
+            echo "tag says '$version' but version.txt says '$declared'" >&2
+            echo "run 'bash scripts/version.sh set ${version}' before tagging" >&2
+            exit 1
+          fi
+          echo "tag ${version} matches version.txt (${declared})"
+
       # `latest` must point at the NEWEST release, not at whichever run finished last.
       # Releases are deliberately not serialised (cancel-in-progress: false, so a
       # release is never cancelled), so pushing several tags close together let an

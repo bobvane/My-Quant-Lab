@@ -94,11 +94,91 @@ export const QUALITY_LABELS: Record<string, string> = {
   invalid: '数据有问题',
   stale: '数据偏旧',
   partial: '数据不完整',
+  unknown: '还没有数据',
 }
 
 export function qualityLabel(status: string | null | undefined): string {
   if (!status) return '—'
   return QUALITY_LABELS[status] ?? status
+}
+
+/**
+ * Paper-account states (review report P0-2): `active` / `closed` are database
+ * values. A reader who does not program should not have to learn them.
+ */
+export const ACCOUNT_STATUS_LABELS: Record<string, string> = {
+  active: '运行中',
+  inactive: '已暂停',
+  closed: '已关闭',
+}
+
+export function accountStatusLabel(status: string | null | undefined): string {
+  if (!status) return '—'
+  return ACCOUNT_STATUS_LABELS[status] ?? status
+}
+
+/** Where a persisted signal stands in the operator's own workflow. */
+export const SIGNAL_STATUS_LABELS: Record<string, string> = {
+  pending: '未确认',
+  acknowledged: '已确认',
+}
+
+export function signalStatusLabel(status: string | null | undefined): string {
+  if (!status) return '—'
+  return SIGNAL_STATUS_LABELS[status] ?? status
+}
+
+/** How a signal's own outcome turned out, once the bar it pointed at has closed. */
+export const OUTCOME_LABELS: Record<string, string> = {
+  pending: '还没走完',
+  profitable: '这次赚钱了',
+  unprofitable: '这次亏钱了',
+}
+
+export function outcomeLabel(state: string | null | undefined): string {
+  if (!state) return '—'
+  return OUTCOME_LABELS[state] ?? state
+}
+
+/**
+ * Which market data source is configured, in one plain sentence (review report P1-7).
+ *
+ * The default symbol depends on it: the demo provider only serves `DEMO-AAPL` and
+ * `DEMO-BTC`, so leaving `DEMO-AAPL` in the box under a real provider guarantees an
+ * empty series. Both the data page and the backtest page ask this instead of guessing.
+ */
+export const PROVIDER_LABELS: Record<string, string> = {
+  synthetic: '演示数据（只服务 DEMO-AAPL、DEMO-BTC 两个代码）',
+  yahoo_finance: '雅虎财经（真实日线行情）',
+}
+
+export function providerLabel(provider: string | null | undefined): string {
+  if (!provider) return '还没有读到行情源'
+  return PROVIDER_LABELS[provider] ?? provider
+}
+
+/** The symbol worth suggesting for this provider, before the reader types their own. */
+export function defaultSymbolFor(provider: string | null | undefined): string {
+  return provider === 'synthetic' ? 'DEMO-AAPL' : 'AAPL'
+}
+
+/**
+ * Whether a strategy version passed its own validation (review report P0-2).
+ *
+ * The engine stores `pending` / `valid` / `invalid` (`backend/app/data/strategy_service.py:190`
+ * writes the last two), and those three words used to be printed verbatim in the
+ * version dropdowns. Plain mode now says them in Chinese; the raw value stays
+ * visible in advanced mode.
+ */
+export const VALIDATION_LABELS: Record<string, string> = {
+  pending: '还没有校验',
+  valid: '已通过校验',
+  invalid: '没有通过校验',
+}
+
+export function validationLabel(status: string | null | undefined): string {
+  if (!status) return '—'
+  return VALIDATION_LABELS[status] ?? status
 }
 
 /**

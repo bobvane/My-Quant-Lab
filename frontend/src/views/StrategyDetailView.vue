@@ -19,6 +19,7 @@ import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 // 数据集版本号、接口路径这类工程读数只在高级模式出现（ADR-126）。
 import { isAdvanced } from '@/mode'
+import { accountStatusLabel, stageLabel, validationLabel } from '@/wording'
 
 const route = useRoute()
 const strategyId = Number(route.params.strategyId)
@@ -230,7 +231,7 @@ onMounted(load)
             </tr>
             <tr>
               <td>状态 / 生命周期</td>
-              <td>{{ strategy.status }} · {{ strategy.lifecycle }}</td>
+              <td>{{ strategy.status }} · {{ stageLabel(strategy.lifecycle) }}</td>
             </tr>
             <tr>
               <td>版本数</td>
@@ -342,7 +343,7 @@ onMounted(load)
             <tr v-for="version in versions" :key="version.id">
               <td>{{ version.version }}</td>
               <td>{{ version.schema_version }}</td>
-              <td>{{ version.validation_status }}</td>
+              <td>{{ validationLabel(version.validation_status) }}</td>
               <td>{{ version.is_current ? '是' : '否' }}</td>
               <td>{{ formatDateTime(version.created_at) }}</td>
               <td>
@@ -522,7 +523,7 @@ onMounted(load)
                 <td>{{ account.name }}（#{{ account.id }}）</td>
                 <td>{{ formatNumber(account.cash) }}</td>
                 <td>{{ formatNumber(account.net_deposits) }}</td>
-                <td>{{ account.status }}</td>
+                <td>{{ accountStatusLabel(account.status) }}</td>
                 <td>{{ account.reset_count }}</td>
               </tr>
             </tbody>

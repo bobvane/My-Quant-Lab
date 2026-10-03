@@ -276,6 +276,25 @@ a {
   color: var(--muted);
 }
 
+/* 归档是一种状态，不是信号方向：复用 `.badge.WAIT` 会把「暂不确认」的黄色
+   语义借给数据行（评审报告 P0-2）。 */
+.badge.archived {
+  color: var(--muted);
+  border-style: dashed;
+  font-weight: 500;
+}
+
+/* 危险操作（删除数据、重置模拟账户）用警告色，让它在成排的 ghost 按钮里
+   一眼可见（评审报告 P2-14）；确认对话框负责说明影响范围。 */
+button.danger {
+  color: var(--sell);
+  border-color: rgba(248, 81, 73, 0.5);
+}
+
+button.danger:hover {
+  background: rgba(248, 81, 73, 0.12);
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -508,6 +527,39 @@ code {
   color: var(--accent);
 }
 
+/* Settings tabs (review report P1-9): four short pages instead of one long scroll. */
+.tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 16px 0 4px;
+}
+
+.tabs .tab {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 14px;
+  text-align: left;
+}
+
+.tabs .tab small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.tabs .tab.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tabs .tab.on small {
+  color: var(--accent);
+  opacity: 0.8;
+}
+
 .mode-note {
   margin: 8px 0 0;
   color: var(--muted);
@@ -626,6 +678,24 @@ code {
   color: var(--muted);
 }
 
+/* First-use guidance on the home page (review report P2-12): a numbered walk into the
+   four-step flow, dismissible, and only shown while there is nothing to look at yet. */
+.guide-card {
+  border-left: 3px solid var(--accent);
+}
+
+.guide-steps {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.guide-steps a {
+  color: var(--accent);
+}
+
 /* Phone widths (ADR-111, docs/13_UI_UX.md section 9). A signal notification opened on a
    phone must show the page, not a 232px menu column: the shell stacks, the menu becomes a
    horizontally scrollable strip, and wide tables scroll inside the page instead of pushing
@@ -680,5 +750,52 @@ code {
 
   .code-block {
     max-height: 260px;
+  }
+}
+
+/* Phone widths, second breakpoint (review report P1-8). At 375px the numbers above are
+   not enough: the 560px-wide tables made `.main` scroll sideways, so the whole page had a
+   horizontal scrollbar. Here the page stops scrolling sideways and each card becomes its
+   own scroll container, the menu wraps instead of scrolling, and the mode switch stacks. */
+@media (max-width: 480px) {
+  .main {
+    padding: 14px 10px 32px;
+    overflow-x: visible;
+  }
+
+  .nav {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .mode-switch {
+    flex-wrap: wrap;
+  }
+
+  .card {
+    overflow-x: auto;
+    padding: 12px 12px 14px;
+  }
+
+  table {
+    min-width: 460px;
+  }
+
+  .grid.cols-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .grid.cols-3,
+  .grid.cols-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .row {
+    flex-wrap: wrap;
+  }
+
+  .conclusion-card .stat,
+  .comparison-card .stat {
+    font-size: 22px;
   }
 }

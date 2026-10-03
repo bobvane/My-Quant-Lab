@@ -51,6 +51,9 @@ MAIN_TS = (SRC / "main.ts").read_text(encoding="utf-8")
 RESEARCH = (VIEWS / "ResearchView.vue").read_text(encoding="utf-8")
 DATA = (VIEWS / "DataView.vue").read_text(encoding="utf-8")
 STYLE = (SRC / "style.css").read_text(encoding="utf-8")
+STRATEGY_DETAIL = (VIEWS / "StrategyDetailView.vue").read_text(encoding="utf-8")
+VITE_CONFIG = (REPO_ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
+ENV_DTS = (SRC / "env.d.ts").read_text(encoding="utf-8")
 
 # Fields the outcome API sends as fractions. `_pct` in the name does not mean the
 # value was multiplied by 100 — that is the whole bug (ADR-087).
@@ -826,3 +829,250 @@ def test_the_typography_separates_a_conclusion_from_its_controls() -> None:
 
     assert "## 13. 排版层级" in UI_SPEC
     assert "frontend/src/style.css" in UI_SPEC
+
+
+def test_the_version_comes_from_the_build_not_from_an_async_call() -> None:
+    """The product review's P0-1: one version, on every page, at every moment.
+
+    The sidebar and the footer used to print ``health?.version ?? '—'`` and
+    ``?? '0.0.1'``. Both read a value that only exists after ``GET /health`` answers, so
+    the version flickered to a placeholder — and the fallback number was wrong on
+    purpose. The number is now baked in at build time, and the settings page shows the
+    same constant instead of the backend's self-report.
+    """
+
+    assert "__APP_VERSION__" in VITE_CONFIG
+    assert "readFileSync(new URL('./package.json', import.meta.url)" in VITE_CONFIG
+    assert "JSON.stringify(version)" in VITE_CONFIG
+    assert "declare const __APP_VERSION__: string" in ENV_DTS
+
+    assert "const APP_VERSION = __APP_VERSION__" in APP
+    assert "v{{ APP_VERSION }}" in APP
+    assert "My Quant Lab v{{ APP_VERSION }}" in APP
+    # No placeholder path survives: neither the em dash fallback nor the wrong number.
+    assert "health?.version" not in APP
+    assert "0.0.1" not in APP
+
+    # The settings page's own "版本" reading is the same constant.
+    assert ':value="APP_VERSION"' in SETTINGS
+    assert "const APP_VERSION = __APP_VERSION__" in SETTINGS
+
+
+def test_plain_mode_never_prints_a_raw_enum() -> None:
+    """The product review's P0-2: an enum is an engine word, not a report.
+
+    ``valid``, ``active``, ``pending`` and ``profitable`` used to appear verbatim in the
+    data, paper, signals and strategy pages. Each one now goes through a translation
+    table in ``wording.ts``; the raw value is still reachable, but only behind
+    ``isAdvanced``.
+    """
+
+    for helper in (
+        "accountStatusLabel",
+        "signalStatusLabel",
+        "outcomeLabel",
+        "validationLabel",
+        "providerLabel",
+        "defaultSymbolFor",
+    ):
+        assert f"export function {helper}(" in WORDING, helper
+    for table in (
+        "ACCOUNT_STATUS_LABELS",
+        "SIGNAL_STATUS_LABELS",
+        "OUTCOME_LABELS",
+        "VALIDATION_LABELS",
+    ):
+        assert f"export const {table}" in WORDING, table
+
+    assert "accountStatusLabel(a.status)" in PAPER
+    assert "accountStatusLabel(a.status)" in DASHBOARD
+    assert "accountStatusLabel(account.status)" in STRATEGY_DETAIL
+    assert "signalStatusLabel(s.status)" in SIGNALS
+    assert "signalStatusLabel(s.status)" in PAPER
+    assert "outcomeLabel(o.outcome_state)" in SIGNALS
+    assert "validationLabel(version.validation_status)" in STRATEGY_DETAIL
+    assert "validationLabel(v.validation_status)" in RESEARCH
+    assert "validationLabel(v.validation_status)" in BACKTEST
+
+    # No bare enum survives in those bindings.
+    for bare in (
+        "{{ a.status }}",
+        "{{ s.status }}",
+        "{{ o.outcome_state }}",
+        "{{ account.status }}",
+        "{{ version.validation_status }}",
+        "{{ v.validation_status }}",
+    ):
+        for name, source in (
+            ("SignalsView.vue", SIGNALS),
+            ("PaperView.vue", PAPER),
+            ("DashboardView.vue", DASHBOARD),
+            ("StrategyDetailView.vue", STRATEGY_DETAIL),
+        ):
+            assert bare not in source, (name, bare)
+
+    # The one raw quality value left on the data page is gated behind advanced mode.
+    for name, source in (("DataView.vue", DATA), ("DashboardView.vue", DASHBOARD)):
+        for line in source.splitlines():
+            if "{{ s.quality_status }}" in line:
+                assert 'v-if="isAdvanced"' in line, (name, line)
+
+
+def test_a_disabled_button_says_why() -> None:
+    """The product review's P0-4 and P1-10: a dead button has to explain itself.
+
+    Every control that starts disabled now prints the missing ingredient next to
+    itself, and the paper page's hand-typed signal id moved behind ``isAdvanced``:
+    the ordinary way in is the signal list, which needs no id at all.
+    """
+
+    assert "const runBlockedReason = computed(" in BACKTEST
+    assert "还差一个策略版本" in BACKTEST
+    assert "还差一个标的代码" in BACKTEST
+    assert 'v-if="runBlockedReason"' in BACKTEST
+
+    assert "const startBlockedReason = computed(" in RESEARCH
+    assert 'v-if="!canStart"' in RESEARCH
+
+    assert 'v-if="!analyzing && !repoUrl.trim()"' in STRATEGIES
+    assert 'v-if="!signalId"' in PAPER
+    # The hand-typed id is a fallback, and the header says which way is the normal one.
+    assert "<td>{{ signalStatusLabel(s.status) }}</td>" in PAPER
+    assert "不必手抄信号 ID" in PAPER
+    paper_execute = PAPER.index("执行信号（虚拟成交）")
+    assert '<template v-if="isAdvanced">' in PAPER[paper_execute:]
+
+
+def test_the_home_page_does_not_call_a_two_trade_sample_worth_it() -> None:
+    """The product review's P0-3: two trades are not a verdict.
+
+    The home page used to answer "整体是赚钱的：累计收益 0.19%" for a run with two
+    trades. Under the same threshold the backend uses to gate its own lifecycle
+    evidence, the page now refuses to conclude anything.
+    """
+
+    assert "const MIN_TRADES_FOR_VERDICT = 10" in DASHBOARD
+    assert "样本太少（只有 ${trades} 笔交易），暂时不能判断这套策略是否有效" in DASHBOARD
+    assert "还说明不了问题" in DASHBOARD
+    assert "min_backtest_trades" in DASHBOARD
+
+
+def test_the_ai_unavailable_note_is_chinese() -> None:
+    """The product review's P1-5: the provider's own English string is not the message.
+
+    ``aiStatus.note`` is the backend's sentence to an operator. The page now says what
+    is missing and where to fix it, and keeps the original wording for advanced mode —
+    where the reader is the operator.
+    """
+
+    assert "const aiUnavailableText = computed(" in DASHBOARD
+    assert "AI 还没有配置" in DASHBOARD
+    assert "isAdvanced.value && note" in DASHBOARD
+    assert "（后端原话：${note}）" in DASHBOARD
+    assert "AI 未配置：解释按钮不可用（{{ aiStatus.note }}）" not in DASHBOARD
+
+
+def test_the_signal_page_does_not_say_loading_and_empty_at_once() -> None:
+    """The product review's P1-6: "加载中…" and "没有信号。" were both true at once."""
+
+    assert 'v-if="!loading && !signals.length"' in SIGNALS
+    assert "加载中…" in SIGNALS
+
+
+def test_no_page_starts_on_a_symbol_the_provider_cannot_serve() -> None:
+    """The product review's P1-7 and P2-15: ``DEMO-AAPL`` under a real provider is empty.
+
+    The demo provider serves exactly two symbols, so a hard-coded default guarantees a
+    zero-bar sync as soon as the provider is ``yahoo_finance``. Both pages now ask the
+    backend which provider is configured, suggest a symbol that provider can serve, and
+    stop touching the field once the reader types in it.
+    """
+
+    for name, source in (("DataView.vue", DATA), ("BacktestView.vue", BACKTEST)):
+        assert "ref('DEMO-AAPL')" not in source, name
+        assert "symbolTouched" in source, name
+        assert '@input="symbolTouched = true"' in source, name
+        assert "api.systemInfo()" in source, name
+    assert "defaultSymbolFor(" in DATA
+    assert "defaultSymbolFor(marketProvider.value)" in BACKTEST
+    assert "providerLabel(marketProvider)" in BACKTEST
+    assert "providerText" in DATA
+    assert "当前行情源" in DATA and "当前行情源" in BACKTEST
+
+
+def test_a_narrow_screen_gets_its_own_breakpoint() -> None:
+    """The product review's P1-8: at 375px the page scrolled sideways.
+
+    The 820px breakpoint made ``.main`` scroll horizontally and forced a 560px table,
+    which is wider than the phone. A second breakpoint wraps the parts that can wrap.
+    """
+
+    narrow = STYLE.split("@media (max-width: 480px)", 1)
+    assert len(narrow) == 2, "no 480px breakpoint"
+    block = narrow[1]
+    assert "overflow-x: visible" in block
+    assert "flex-wrap: wrap" in block
+    assert ".grid.cols-3," in block
+    assert ".grid.cols-4 {" in block
+    assert "repeat(2, minmax(0, 1fr))" in block
+    assert "min-width: 460px" in block
+
+
+def test_the_settings_page_is_split_into_tabs() -> None:
+    """The product review's P1-9: one very long scroll became four short pages.
+
+    The tabs hide nothing that used to be visible in advanced mode — they use
+    ``v-show``, so switching a tab re-renders nothing and every existing ``isAdvanced``
+    gate still decides what a reading shows.
+    """
+
+    assert "type SettingsTab = 'ai' | 'notify' | 'system' | 'runtime'" in SETTINGS
+    assert "const SETTINGS_TABS" in SETTINGS
+    assert "const activeTab = ref<SettingsTab>('ai')" in SETTINGS
+    assert 'class="tabs" role="tablist"' in SETTINGS
+    assert 'role="tab"' in SETTINGS
+    for tab in ("'ai'", "'notify'", "'system'", "'runtime'"):
+        assert f'v-show="activeTab === {tab}"' in SETTINGS, tab
+    # v-show, not v-if: no group loses its own advanced gate.
+    assert SETTINGS.count('<template v-if="isAdvanced">') >= 4
+    assert '<h2 class="group-head">系统信息</h2>' in SETTINGS
+    # The AI diagnostics are readings, not the settings a reader has to fill in.
+    assert "普通模式下只要上面这一张卡填好就能用 AI 解释了" in SETTINGS
+
+
+def test_the_first_visit_gets_a_way_in() -> None:
+    """The product review's P2-12 and P2-13: a first-time reader needs a starting point.
+
+    The home page shows a dismissible four-step lead-in while there is no strategy yet,
+    and points at the data page when the stored span is too short to conclude from.
+    Neither is a new page, and neither decides anything.
+    """
+
+    assert "const GUIDE_KEY = 'mql-guide-dismissed'" in DASHBOARD
+    assert "guideDismissed" in DASHBOARD
+    assert "const showGuide = computed(" in DASHBOARD
+    assert "function dismissGuide()" in DASHBOARD
+    assert 'class="card guide-card"' in DASHBOARD
+    assert "第一次用？按这四步走" in DASHBOARD
+    assert "知道了，不再显示" in DASHBOARD
+    assert '<RouterLink to="/data">到「数据」同步更长的一段</RouterLink>' in DASHBOARD
+
+
+def test_dangerous_actions_look_dangerous() -> None:
+    """The product review's P2-14: closing or deleting is not a neutral grey button.
+
+    There is one ``.danger`` treatment now (used by the data page's delete, the paper
+    account's reset, and the new close action), and closing an account explains what
+    survives it before asking.
+    """
+
+    assert "button.danger {" in STYLE
+    assert "button.danger:hover {" in STYLE
+    assert "color: var(--sell)" in STYLE
+    assert "function closeAccount(" in PAPER
+    assert 'class="ghost danger"' in PAPER
+    assert 'class="danger"' in PAPER
+    body = _function_body(PAPER, "closeAccount")
+    assert "window.confirm(" in body
+    assert "if (!ok) return" in body
+    assert "await setStatus(account, 'close')" in body

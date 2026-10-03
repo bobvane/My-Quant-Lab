@@ -17,6 +17,7 @@ import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, signalDirection, toneOf } from '@/format'
 import { isAdvanced } from '@/mode'
 import {
+  accountStatusLabel,
   REFERENCE_PRICE_DISCLAIMER,
   SIGNAL_DISCLAIMER,
   nextStepText,
@@ -194,6 +195,12 @@ const dataSpanYears = computed(() => {
   return (end - start) / (365.25 * 24 * 60 * 60 * 1000)
 })
 
+/**
+ * 少于这个笔数就先不下结论。数字与后端生命周期门槛 `min_backtest_trades = 10`
+ * 对齐：这里给的是同一句话的首页版本（评审报告 P0-3）。
+ */
+const MIN_TRADES_FOR_VERDICT = 10
+
 /** ② 最近一次研究结论：一句话，加上决定这句话可信度的几个数。 */
 const conclusion = computed(() => {
   const run = latestRun.value
@@ -206,17 +213,24 @@ const conclusion = computed(() => {
   }
   const years = dataSpanYears.value
   const period = years === null ? '这段历史数据' : `这段约 ${years.toFixed(1)} 年的历史数据`
-  const verdict =
-    run.total_return === null
+  const trades = run.number_of_trades ?? 0
+  const thin = trades < MIN_TRADES_FOR_VERDICT
+  const verdict = thin
+    ? `样本太少（只有 ${trades} 笔交易），暂时不能判断这套策略是否有效`
+    : run.total_return === null
       ? '这次回测没有算出总收益'
       : run.total_return >= 0
         ? `这套策略在${period}里整体是赚钱的`
         : `这套策略在${period}里整体是亏钱的`
   const oosRuns = Number(focusLifecycle.value?.evidence?.oos_runs ?? 0)
   return {
-    headline: `${verdict}：累计收益 ${formatPercent(run.total_return)}，最大回撤 ${formatPercent(run.max_drawdown)}。`,
+    headline: thin
+      ? `${verdict}。`
+      : `${verdict}：累计收益 ${formatPercent(run.total_return)}，最大回撤 ${formatPercent(run.max_drawdown)}。`,
     detail: [
-      `胜率 ${formatPercent(run.win_rate)}`,
+      thin
+        ? `只成交了 ${trades} 笔，收益 ${formatPercent(run.total_return)} 还说明不了问题`
+        : `胜率 ${formatPercent(run.win_rate)}`,
       `交易 ${run.number_of_trades ?? '—'} 笔`,
       '历史回测：已完成',
       `样本外验证：${oosRuns > 0 ? '已完成' : '未完成'}`,
@@ -314,6 +328,43 @@ const warnings = computed<string[]>(() => {
   return list
 })
 
+/**
+ * 未配置 AI 时要说人话。后端 `note` 是英文原话（评审报告 P1-5），普通模式只给中文，
+ * 英文原话留给高级模式 —— 排查问题的时候才需要它。
+ */
+const aiUnavailableText = computed(() => {
+  const base =
+    'AI 还没有配置，所以「AI 解释」按钮用不了：到「系统管理 → AI 设置」填一个模型服务即可。' +
+    '回测、指标与模拟盘都不受影响。'
+  const note = aiStatus.value?.note ?? ''
+  return isAdvanced.value && note ? `${base}（后端原话：${note}）` : base
+})
+
+/**
+ * 首次使用引导（评审报告 P2-12）：一个还没同步过数据的人，先要知道从哪一步开始。
+ * 只在「还没有任何策略」时出现，可以直接关掉，关掉的选择记在 localStorage 里。
+ */
+const GUIDE_KEY = 'mql-guide-dismissed'
+const guideDismissed = ref(false)
+try {
+  guideDismissed.value = localStorage.getItem(GUIDE_KEY) === '1'
+} catch {
+  guideDismissed.value = false
+}
+
+const showGuide = computed(
+  () => !guideDismissed.value && !focusStrategy.value && strategies.value.length === 0,
+)
+
+function dismissGuide(): void {
+  guideDismissed.value = true
+  try {
+    localStorage.setItem(GUIDE_KEY, '1')
+  } catch {
+    // 记不住也没关系：这次会话里它已经关掉了。
+  }
+}
+
 async function testGf() {
   error.value = ''
   gfTestResult.value = null
@@ -360,6 +411,20 @@ onMounted(load)
 
     <p v-if="error" class="error">{{ error }}</p>
 
+    <!-- 首次使用引导（评审报告 P2-12）：只在什么都还没有的时候出现，可以关掉。 -->
+    <div v-if="showGuide" class="card guide-card" style="margin-bottom: 14px">
+      <div class="row" style="justify-content: space-between; align-items: flex-start">
+        <h3 style="margin: 0">第一次用？按这四步走</h3>
+        <button class="ghost" @click="dismissGuide">知道了，不再显示</button>
+      </div>
+      <ol class="guide-steps">
+        <li><RouterLink to="/data">先同步一段行情</RouterLink>：有一个标的的历史数据才有得研究。</li>
+        <li><RouterLink to="/research">到「研究策略」选标的、选策略、点开始研究</RouterLink>。</li>
+        <li>回测跑完后，回这一页看②③④：结论是什么、下一步做什么、要注意什么。</li>
+        <li>觉得还行的策略，到「模拟验证」用虚拟资金跑一段时间再和回测比。</li>
+      </ol>
+    </div>
+
     <div class="grid cols-2 answers">
       <div class="card">
         <h3>① 我在研究什么</h3>
@@ -392,6 +457,11 @@ onMounted(load)
         <p v-else class="muted">暂时没有需要特别注意的事情。</p>
       </div>
     </div>
+
+    <p v-if="dataSpanYears !== null && dataSpanYears < 5" class="muted" style="margin-top: 12px">
+      现在这份数据只有 {{ dataSpanYears.toFixed(1) }} 年。
+      <RouterLink to="/data">到「数据」同步更长的一段</RouterLink>，结论才更有分量。
+    </p>
 
     <div class="grid cols-2" style="margin-top: 14px">
       <StatCard
@@ -570,7 +640,7 @@ onMounted(load)
         <p v-if="signals.length" class="muted">{{ REFERENCE_PRICE_DISCLAIMER }}</p>
         <p v-else class="muted">还没有扫描结果。先到「我的策略」同步数据并创建策略，再回来扫描。</p>
         <p v-if="aiStatus && !aiStatus.configured" class="muted" style="margin-top: 8px">
-          AI 未配置：解释按钮不可用（{{ aiStatus.note }}）。量化功能不受影响。
+          {{ aiUnavailableText }}
         </p>
         <div v-if="explanation" class="notice" style="margin-top: 10px">
           <strong>AI 解释 · {{ explainedFor }}</strong>
@@ -608,7 +678,7 @@ onMounted(load)
                   {{ formatPaperPnlPct(a.net_deposits, a.realized_pnl) }}）</span
                 >
               </td>
-              <td>{{ a.status }}</td>
+              <td>{{ accountStatusLabel(a.status) }}</td>
             </tr>
           </tbody>
         </table>
@@ -622,7 +692,7 @@ onMounted(load)
     <p v-if="isAdvanced" class="muted" style="margin-top: 14px">
       系统状态、版本、引擎、数据库、Redis、特征版本与 DSL Schema 已经搬到
       <RouterLink to="/settings">系统管理 → 系统信息</RouterLink>：它们回答的是「软件本身怎么样」，
-      不是「我现在该做什么」（评审 §6；ADR-134）。
+      不是「我现在该做什么」。
     </p>
   </div>
 </template>

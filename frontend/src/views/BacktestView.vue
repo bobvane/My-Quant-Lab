@@ -27,7 +27,15 @@ import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 import { isAdvanced } from '@/mode'
 // 引擎的指标键名与术语在这一页出现过三次（明细、敏感性表头、对比表头），
 // 三处都走同一个翻译表，否则同一个键会写出三种中文（ADR-127）。
-import { metricKeyLabel, nextStepText, stagePage, timeframeLabel } from '@/wording'
+import {
+  defaultSymbolFor,
+  metricKeyLabel,
+  nextStepText,
+  providerLabel,
+  stagePage,
+  timeframeLabel,
+  validationLabel,
+} from '@/wording'
 
 const runs = ref<BacktestSummary[]>([])
 const onlyVersionFilter = ref(false)
@@ -42,7 +50,11 @@ const versions = ref<StrategyVersion[]>([])
 const assets = ref<Asset[]>([])
 const strategyId = ref<number | null>(null)
 const versionId = ref<number | null>(null)
-const symbol = ref('DEMO-AAPL')
+const symbol = ref('')
+// 默认标的跟着当前行情源走（评审报告 P2-15）：演示数据源只服务 DEMO-AAPL / DEMO-BTC，
+// 真行情源用真实代码；用户自己输入过之后就不再动它。
+const symbolTouched = ref(false)
+const marketProvider = ref('')
 const timeframe = ref('1d')
 const running = ref(false)
 const oosResult = ref<Record<string, any> | null>(null)
@@ -743,14 +755,19 @@ const sensChartPoints = computed(() =>
 async function load() {
   error.value = ''
   try {
-    const [r, s, a] = await Promise.all([
+    const [r, s, a, systemInfo] = await Promise.all([
       api.backtests(onlyVersionFilter.value ? (versionId.value ?? undefined) : undefined),
       api.strategies(),
       api.assets(),
+      api.systemInfo().catch(() => null),
     ])
     runs.value = r
     strategies.value = s
     assets.value = a
+    marketProvider.value = systemInfo?.market_data_provider ?? ''
+    if (!symbolTouched.value && !symbol.value.trim()) {
+      symbol.value = defaultSymbolFor(marketProvider.value)
+    }
     if (runs.value.length) {
       detail.value = await api.backtest(runs.value[0].id)
     }
@@ -841,6 +858,15 @@ function dayStart(value: string): string {
 function dayEnd(value: string): string {
   return new Date(`${value}T23:59:59Z`).toISOString()
 }
+
+// Why the run button is not clickable yet (review report P0-4): a disabled button
+// with no explanation is a dead end for a reader who does not know the dependency.
+const runBlockedReason = computed(() => {
+  if (running.value) return ''
+  if (versionId.value === null) return '左边还差一个策略版本：先在「我的策略」里建一个，再回到这里选它。'
+  if (!symbol.value.trim()) return '还差一个标的代码：填一个代码（例如 SPY），按钮才能点。'
+  return ''
+})
 
 async function runNew() {
   error.value = ''
@@ -1102,6 +1128,7 @@ async function applyResearchQuery() {
   }
   if (requestedSymbol) {
     symbol.value = requestedSymbol
+    symbolTouched.value = true
     handedOver = true
   }
   if (requestedTimeframe) timeframe.value = requestedTimeframe
@@ -1151,20 +1178,31 @@ onMounted(async () => {
         </select>
         <select v-model="versionId" style="max-width: 200px">
           <option v-for="v in versions" :key="v.id" :value="v.id">
-            {{ v.version }}{{ v.is_current ? '（当前）' : '' }} · {{ v.validation_status }}
+            {{ v.version }}{{ v.is_current ? '（当前）' : '' }} · {{ validationLabel(v.validation_status) }}
           </option>
         </select>
-        <input v-model="symbol" list="asset-list" style="max-width: 160px" placeholder="标的代码" />
+        <input
+          v-model="symbol"
+          list="asset-list"
+          style="max-width: 160px"
+          placeholder="标的代码"
+          @input="symbolTouched = true"
+        />
         <datalist id="asset-list">
           <option v-for="a in assets" :key="a.id" :value="a.symbol" />
         </datalist>
         <select v-model="timeframe" style="max-width: 110px">
           <option value="1d">日线</option>
         </select>
-        <button :disabled="running || versionId === null" @click="runNew">
+        <button :disabled="running || versionId === null || !symbol.trim()" @click="runNew">
           {{ running ? '计算中…' : '开始回测' }}
         </button>
       </div>
+
+      <p class="muted" style="margin: 8px 0 0">
+        当前行情源：{{ providerLabel(marketProvider) }}
+      </p>
+      <p v-if="runBlockedReason" class="muted" style="margin: 6px 0 0">{{ runBlockedReason }}</p>
 
       <div class="row" style="margin-top: 8px">
         <label class="muted" style="display: flex; align-items: center; gap: 6px">

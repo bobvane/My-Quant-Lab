@@ -6,6 +6,10 @@ import { initMode, isAdvanced, mode, setMode } from '@/mode'
 
 const health = ref<HealthResponse | null>(null)
 
+// 版本号在构建期注入（评审报告 P0-1）：不再等 `GET /health` 回来才有值，
+// 所以侧边栏与页脚在任何页面、任何时刻都显示同一个版本。
+const APP_VERSION = __APP_VERSION__
+
 type Theme = 'dark' | 'light'
 const theme = ref<Theme>('dark')
 
@@ -60,7 +64,7 @@ onMounted(async () => {
     <aside class="sidebar">
       <div class="brand">
         My Quant Lab
-        <small>个人量化策略实验室 · v{{ health?.version ?? '—' }}</small>
+        <small>个人量化策略实验室 · v{{ APP_VERSION }}</small>
       </div>
 
       <nav class="nav">
@@ -120,7 +124,7 @@ onMounted(async () => {
     <main class="main">
       <RouterView />
       <footer class="muted" style="margin-top: 28px">
-        My Quant Lab v{{ health?.version ?? '0.0.1' }} — 本项目仅用于策略研究、回测与模拟，
+        My Quant Lab v{{ APP_VERSION }} — 本项目仅用于策略研究、回测与模拟，
         不构成投资建议，也不会连接任何券商。
       </footer>
     </main>

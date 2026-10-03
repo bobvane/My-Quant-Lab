@@ -3,6 +3,13 @@ import { computed, onMounted, ref } from 'vue'
 import { api, type PaperAccount, type PaperPosition, type SignalRecord } from '@/api'
 import EquityChart from '@/components/EquityChart.vue'
 import StatCard from '@/components/StatCard.vue'
+import { isAdvanced } from '@/mode'
+import {
+  accountStatusLabel,
+  signalLabel,
+  signalStatusLabel,
+  timeframeLabel,
+} from '@/wording'
 import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, signalDirection, toneOf } from '@/format'
 
 const accounts = ref<PaperAccount[]>([])
@@ -127,6 +134,19 @@ async function executeSignal(account: PaperAccount) {
   }
 }
 
+/**
+ * Closing an account is a dangerous button, so it asks first and says what changes
+ * (review report P2-14): new fills stop, the recorded trades stay, and it can be
+ * reopened. `setStatus` keeps doing the work.
+ */
+async function closeAccount(account: PaperAccount) {
+  const ok = window.confirm(
+    `关闭「${account.name}」之后这个账户不再接受新的虚拟成交，已经记下的持仓与交易记录都会保留。随时可以「重开」。确定关闭？`,
+  )
+  if (!ok) return
+  await setStatus(account, 'close')
+}
+
 async function setStatus(account: PaperAccount, action: 'close' | 'reopen') {
   error.value = ''
   info.value = ''
@@ -136,7 +156,7 @@ async function setStatus(account: PaperAccount, action: 'close' | 'reopen') {
       action === 'close'
         ? await api.closePaperAccount(account.id)
         : await api.reopenPaperAccount(account.id)
-    info.value = `${account.name} 状态：${r.status}`
+    info.value = `${account.name} 状态：${accountStatusLabel(r.status)}`
     await load()
   } catch (e) {
     error.value = (e as Error).message
@@ -351,7 +371,7 @@ onMounted(() => {
             <td>{{ formatNumber(a.net_deposits) }}</td>
             <td>{{ formatNumber(a.cash) }}</td>
             <td :class="toneOf(a.realized_pnl)">{{ formatNumber(a.realized_pnl) }}</td>
-            <td>{{ a.status }}</td>
+            <td>{{ accountStatusLabel(a.status) }}</td>
             <td>{{ a.reset_count }}</td>
             <td>{{ formatDateTime(a.created_at) }}</td>
             <td>
@@ -367,9 +387,9 @@ onMounted(() => {
               </button>
               <button
                 v-if="a.status === 'active'"
-                class="ghost"
+                class="ghost danger"
                 :disabled="busy === a.id"
-                @click="setStatus(a, 'close')"
+                @click="closeAccount(a)"
               >
                 关闭
               </button>
@@ -458,25 +478,35 @@ onMounted(() => {
     <div v-if="accounts.length" class="card card-quiet" style="margin-top: 14px">
       <h3>执行信号（虚拟成交）</h3>
       <p class="muted">
-        填写一个已持久化的信号 ID，对指定账户按该信号成交。BUY 开仓、SELL 平仓；账户关闭时拒绝成交。
+        信号不会自动成交：执行哪一条由你决定。往下看「最新信号」表，点那一行右侧的
+        「→ 账户名」按钮，就按那条信号在对应账户里虚拟成交。BUY 开仓、SELL 平仓；
+        账户已关闭时拒绝成交。
       </p>
-      <div class="row" style="margin-top: 8px">
-        <input
-          v-model.number="signalId"
-          type="number"
-          min="1"
-          style="max-width: 140px"
-          placeholder="信号 ID"
-        />
-        <button
-          v-for="a in accounts"
-          :key="a.id"
-          :disabled="busy === a.id || !signalId"
-          @click="executeSignal(a)"
-        >
-          执行 → {{ a.name }}
-        </button>
-      </div>
+      <template v-if="isAdvanced">
+        <p class="muted" style="margin-top: 8px">
+          高级模式：也可以直接按信号 ID 执行（ID 见「信号」页的持久化记录），或者对某个账户调仓：
+        </p>
+        <div class="row" style="margin-top: 8px">
+          <input
+            v-model.number="signalId"
+            type="number"
+            min="1"
+            style="max-width: 140px"
+            placeholder="信号 ID"
+          />
+          <button
+            v-for="a in accounts"
+            :key="a.id"
+            :disabled="busy === a.id || !signalId"
+            @click="executeSignal(a)"
+          >
+            执行 → {{ a.name }}
+          </button>
+        </div>
+        <p v-if="!signalId" class="muted" style="margin-top: 8px">
+          按钮现在点不动，因为还没有填写信号 ID：填一个已持久化的信号 ID，再选账户执行。
+        </p>
+      </template>
       <div class="row" style="margin-top: 8px">
         <input v-model.number="fundAmount" type="number" style="max-width: 160px" placeholder="注资金额（可为负）" />
         <button
@@ -536,7 +566,10 @@ onMounted(() => {
 
     <div v-if="accounts.length" class="card" style="margin-top: 14px">
       <h3>最新信号</h3>
-      <p class="muted">最近 10 条已持久化的信号。可以直接对某个账户执行，不必手抄信号 ID。</p>
+      <p class="muted">
+        最近 10 条已持久化的信号。要执行就点那一行右侧的「→ 账户名」，不必手抄信号 ID；
+        手抄 ID 的入口留在高级模式。
+      </p>
       <p v-if="loadingSignals" class="muted">读取中…</p>
       <table v-else-if="recentSignals.length">
         <thead>
@@ -546,7 +579,8 @@ onMounted(() => {
             <th>资产</th>
             <th>周期</th>
             <th>方向</th>
-            <th>状态</th>
+            <th>信号</th>
+            <th>处理</th>
             <th>执行</th>
           </tr>
         </thead>
@@ -557,7 +591,8 @@ onMounted(() => {
             <td>{{ s.symbol }}</td>
             <td>{{ s.timeframe }}</td>
             <td>{{ signalDirection(s.direction, s.closes_direction) }}</td>
-            <td>{{ s.state }}</td>
+            <td>{{ signalLabel(s.state) }}</td>
+            <td>{{ signalStatusLabel(s.status) }}</td>
             <td>
               <button
                 v-for="a in accounts"

@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, type Asset, type Strategy, type StrategyVersion } from '@/api'
 import { isAdvanced } from '@/mode'
-import { timeframeLabel } from '@/wording'
+import { timeframeLabel, validationLabel } from '@/wording'
 
 // 「研究策略」这一页就是把「从想法到结论」的第一步讲清楚（评审 §4、§7、§24；ADR-131、ADR-132）。
 //
@@ -103,7 +103,7 @@ const versionWarning = computed(() => {
   const version = chosenVersion.value
   if (!version) return ''
   if (version.validation_status && version.validation_status !== 'valid') {
-    return `这个版本在库里记录的校验状态是「${version.validation_status}」，不是 valid。研究之前先确认它的规则。`
+    return `这个版本在库里记录的校验状态是「${validationLabel(version.validation_status)}」，还没有通过校验。研究之前先确认它的规则。`
   }
   return ''
 })
@@ -111,6 +111,15 @@ const versionWarning = computed(() => {
 const canStart = computed(
   () => chosenSeriesId.value !== null && versionId.value !== null && !dateOrderWrong.value && !sizeInvalid.value,
 )
+
+/** 按钮点不动的时候要说清为什么（评审报告 P0-4），而不是留一个灰按钮。 */
+const startBlockedReason = computed(() => {
+  if (chosenSeriesId.value === null) return '还不能开始：上面第①步还没有选标的数据。'
+  if (versionId.value === null) return '还不能开始：第②步还没有选策略版本。'
+  if (dateOrderWrong.value) return '还不能开始：起始日期晚于结束日期。'
+  if (sizeInvalid.value) return '还不能开始：仓位比例需要大于 0 且不超过 1。'
+  return ''
+})
 
 /** Execution overrides, mirroring the backtest page's own options (docs/23, ADR-045). */
 function sizingQuery(): Record<string, string> {
@@ -214,8 +223,7 @@ onMounted(async () => {
     <h1 class="page-title">研究策略</h1>
     <p class="page-sub">
       想研究一个策略，只需要四步：选一个标的、选一个策略、设几个参数、开始研究。
-      数据集、Series ID、DSL、哈希这些工程概念在高级模式里才出现，普通模式下你不用先理解它们
-      （评审 §4、§7；ADR-131）。
+      数据集、Series ID、DSL、哈希这些工程概念在高级模式里才出现，普通模式下你不用先理解它们。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -265,8 +273,10 @@ onMounted(async () => {
           </option>
         </select>
         <select v-model.number="versionId" style="max-width: 240px">
+          <option :value="0" disabled>先选一个策略版本</option>
           <option v-for="v in versions" :key="v.id" :value="v.id">
-            {{ v.version }}{{ v.is_current ? '（当前）' : '' }} · {{ v.validation_status }}
+            {{ v.version }}{{ v.is_current ? '（当前）' : '' }} ·
+            {{ v.validation_status === 'valid' ? '已校验' : `校验状态：${validationLabel(v.validation_status)}` }}
           </option>
         </select>
       </div>
@@ -337,6 +347,7 @@ onMounted(async () => {
         之后在「回测」页随时能再打开来看；这一页不产生任何量化数字。
       </p>
       <button :disabled="!canStart" @click="startResearch">开始研究</button>
+      <p v-if="!canStart" class="muted" style="margin-top: 8px">{{ startBlockedReason }}</p>
     </div>
   </div>
 </template>

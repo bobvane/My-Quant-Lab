@@ -5,9 +5,11 @@ import { formatDateTime, formatNumber, formatPercent, signalDirection, toneOf } 
 import { isAdvanced } from '@/mode'
 // 状态、周期、分组键都走同一个词汇表：同一件事在这一页只说一种话（ADR-127，评审 §12／§14）。
 import {
+  outcomeLabel,
   REFERENCE_PRICE_DISCLAIMER,
   SIGNAL_DISCLAIMER,
   signalLabel,
+  signalStatusLabel,
   timeframeLabel,
 } from '@/wording'
 
@@ -427,7 +429,7 @@ onMounted(load)
               {{ (s.triggered_rules || []).join(', ') || '—' }}
             </td>
             <td class="muted">{{ contextNote(s) }}</td>
-            <td>{{ s.status }}{{ s.notified_at ? ' · 已通知' : '' }}</td>
+            <td>{{ signalStatusLabel(s.status) }}{{ s.notified_at ? ' · 已通知' : '' }}</td>
             <td>
               <button class="ghost" :disabled="evidencing === s.id" @click="showEvidence(s)">
                 {{ evidencing === s.id ? '读取中…' : '证据' }}
@@ -450,7 +452,7 @@ onMounted(load)
           </tr>
         </tbody>
       </table>
-      <div v-else class="row">
+      <div v-if="!loading && !signals.length" class="row">
         <p class="muted">没有信号。</p>
         <button class="ghost" :disabled="scanning" @click="scan">
           {{ scanning ? '扫描中…' : '立即扫描' }}
@@ -474,7 +476,7 @@ onMounted(load)
 
       <h4>当前状态</h4>
       <p class="muted">
-        信号：{{ formatDateTime(detailRow?.bar_timestamp) }} · {{ detailRow?.state }} /
+        信号：{{ formatDateTime(detailRow?.bar_timestamp) }} · {{ signalLabel(detailRow?.state) }} /
         {{ signalDirection(detailRow?.direction, detailRow?.closes_direction) }} · 参考价
         {{ detailRow?.price_reference != null ? formatNumber(detailRow?.price_reference) : '—' }}
       </p>
@@ -578,7 +580,7 @@ onMounted(load)
             <td class="muted">{{ formatDateTime(String(o.bar_timestamp)) }}</td>
             <td class="muted">{{ o.entry_time ? formatDateTime(String(o.entry_time)) : '—' }}</td>
             <td class="muted">{{ o.exit_time ? formatDateTime(String(o.exit_time)) : '—' }}</td>
-            <td>{{ o.outcome_state }}</td>
+            <td>{{ outcomeLabel(o.outcome_state) }}</td>
             <td :class="toneOf(o.pnl_pct)">{{ o.pnl_pct != null ? formatPercent(o.pnl_pct, 3) : '—' }}</td>
             <td class="muted">{{ o.mae_pct != null ? formatPercent(o.mae_pct, 3) : '—' }}</td>
             <td class="muted">{{ o.mfe_pct != null ? formatPercent(o.mfe_pct, 3) : '—' }}</td>

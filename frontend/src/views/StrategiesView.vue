@@ -437,7 +437,7 @@ function snapshotExplanation(snapshot: GithubSnapshot | null): string {
   if (reason === 'manual_import') return '这个 commit 是人工审核后导入的。'
   if (extraction.imported === true) return '已从这个 commit 生成新的策略版本。'
   if (extraction.imported === false) return '已读取这个 commit，但抽取出的策略没有变化。'
-  return '这条快照没有记录原因（ADR-058 之前的旧记录）。'
+  return '这条快照没有记录原因（早期版本留下的记录）。'
 }
 
 function snapshotCoverage(snapshot: GithubSnapshot | null): string {
@@ -570,7 +570,7 @@ const COMMIT_SHA_RE = /^[0-9a-fA-F]{7,40}$/
 function commitLabel(value?: string | null): string {
   const text = (value ?? '').trim()
   if (!text) return '—'
-  return COMMIT_SHA_RE.test(text) ? `${text.slice(0, 12)}…` : `${text}（ADR-060 之前记的是分支名）`
+  return COMMIT_SHA_RE.test(text) ? `${text.slice(0, 12)}…` : `${text}（早期记录的分支名）`
 }
 
 function shortCommit(value?: string | null): string {
@@ -767,7 +767,7 @@ onMounted(load)
     <h1 class="page-title">我的策略</h1>
     <p class="page-sub">
       这是你的策略库：用一句人话创建策略、管理版本、从 GitHub 导入策略。版本一旦创建即不可修改。
-      行情数据现在在「数据」页；从想法到回测的四步在「研究策略」页（评审 §7、§8；ADR-131、ADR-132）。
+      行情数据现在在「数据」页；从想法到回测的四步在「研究策略」页。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -778,7 +778,7 @@ onMounted(load)
         <h3>用一句人话创建策略</h3>
         <p class="muted" style="margin-bottom: 8px">
           回答几个问题就能建一个策略：系统把你的回答写成规则，规则就是这份策略的版本内容。
-          想直接写 JSON 的话，高级模式下有「策略 DSL」编辑器（评审 §8；ADR-132）。
+          想直接写 JSON 的话，高级模式下有「策略 DSL」编辑器。
         </p>
         <div class="row" style="margin-bottom: 8px">
           <input v-model="formName" style="max-width: 190px" placeholder="策略名" />
@@ -1032,7 +1032,7 @@ onMounted(load)
       <h3>从 GitHub 导入（只读分析，不执行仓库代码）</h3>
       <p class="muted">
         七步只有拿到自己的证据才放行：没有分析结果就到不了第 2 步，不安全构造没有人工确认就出不了第 4 步，
-        DSL 不是合法 JSON 就到不了第 6 步，校验通过之后又改过文本就回到第 5 步（ADR-113）。
+        DSL 不是合法 JSON 就到不了第 6 步，校验通过之后又改过文本就回到第 5 步。
       </p>
       <ol class="wizard-steps">
         <li
@@ -1093,6 +1093,9 @@ onMounted(load)
           </button>
           <span class="muted">输入公开仓库地址后，系统只下载文本做静态分析，绝不执行仓库里的任何代码</span>
         </div>
+        <p v-if="!analyzing && !repoUrl.trim()" class="muted" style="margin-top: 8px">
+          「分析仓库」现在点不动，因为上面还没有填仓库地址：粘一个公开的 GitHub 仓库链接再试。
+        </p>
       </div>
 
       <div v-else-if="wizardStep === 2 && analysis">

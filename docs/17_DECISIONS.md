@@ -2719,3 +2719,100 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 - 测试：`backend/tests/test_frontend_contracts.py::test_the_typography_separates_a_conclusion_from_its_controls` 断言 `frontend/src/style.css` 含 `.card-quiet` + `border-style: dashed`、三张结果卡的 accent 左边框、26px 读数与 72ch 限宽，并且五个页面各有至少一张 `class="card card-quiet"` 卡、结果卡仍是 `comparison-card`/`conclusion-card`、研究页 ④ 不被静音；`docs/13_UI_UX.md` §13 记录同一条原则。
 
+## ADR-136：版本号在构建期注入，界面不再显示占位版本
+
+- 背景：产品评审报告 P0-1 实测到侧边栏在首页显示 `v1.9.4`、切到别的页面变成 `v—`，页脚则显示 `v0.0.1`。根因是 `frontend/src/App.vue` 的模板读 `health?.version ?? '—'` 与 `?? '0.0.1'`：`health` 来自异步的 `api.health()`，任何未拿到响应的时刻（首屏、后端慢、`/health` 失败）都会落到占位值，而那个占位值恰好写成了 `0.0.1`。
+
+- 决策：版本号改由构建期注入。`frontend/vite.config.ts` 读 `frontend/package.json` 的 `version`，用 `define: { __APP_VERSION__: JSON.stringify(version) }` 编译进产物；`frontend/src/env.d.ts` 声明 `declare const __APP_VERSION__: string`；`App.vue` 与 `SettingsView.vue` 各自 `const APP_VERSION = __APP_VERSION__`，侧边栏、页脚与设置页「系统信息 → 版本」三处显示同一个常量（设置页的副标题仍写引擎版本与后端自报版本，供对账用）。
+
+- 理由：版本号是构建事实，不是运行时读数 —— 它随镜像一起产生，本来就不需要问后端。构建期注入让它在任何页面、任何时刻都是同一个值，也顺手删掉了那个会误导人的 `0.0.1` 回退；`scripts/version.sh set vX.Y.Z` 仍然同步 6 处，只是现在其中一处（`frontend/package.json`）同时是界面的来源。
+
+- 影响与兼容：`GET /health` 的 `version` 字段与设置页的「后端自报」读数都保留，高级模式仍能看出前后端是否一致；`__APP_VERSION__` 是编译期常量，没有新增请求、没有新增依赖（`node:fs` 是 Vite 配置本就允许的构建期 API）。测试里 `App.vue` 不再出现 `health?.version` 与 `0.0.1` 两串字符，等于把回归钉在源码上。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_version_comes_from_the_build_not_from_an_async_call` 断言 `vite.config.ts` 含 `__APP_VERSION__` 与 `readFileSync(new URL('./package.json', import.meta.url)`、`env.d.ts` 有声明、`App.vue` 有 `const APP_VERSION = __APP_VERSION__` 且模板出现 `v{{ APP_VERSION }}` 与 `My Quant Lab v{{ APP_VERSION }}`、`App.vue` 不含 `health?.version` 与 `0.0.1`、设置页的「版本」卡用 `:value="APP_VERSION"`。
+
+## ADR-137：普通模式的词表扩到账户状态、信号状态、结果与校验状态
+
+- 背景：产品评审报告 P0-2 逐处点名普通模式仍在打印引擎枚举：数据页的 `quality_status`（`valid`）、模拟验证账户表的 `a.status`（`active`）、信号页的 `s.status`、`outcome_state`（`profitable`）、回测与研究页版本下拉里的 `validation_status`。这些词是引擎的词，不是给读者的报告；同一份事实（例如「账户在运行」）在不同页面还会写成不同的样子。
+
+- 决策：把 `frontend/src/wording.ts` 当成唯一的翻译表，新增四组标签与函数：`ACCOUNT_STATUS_LABELS` + `accountStatusLabel`（`active→运行中`、`inactive→已暂停`、`closed→已关闭`）、`SIGNAL_STATUS_LABELS` + `signalStatusLabel`（`pending→未确认`、`acknowledged→已确认`）、`OUTCOME_LABELS` + `outcomeLabel`（`pending→还没走完`、`profitable→这次赚钱了`、`unprofitable→这次亏钱了`）、`VALIDATION_LABELS` + `validationLabel`（`pending→还没有校验`、`valid→已通过校验`、`invalid→没有通过校验`），并补上 `QUALITY_LABELS` 缺的 `unknown`。所有页面改走这些函数；原始值只在 `isAdvanced` 下以 `<code>` 附注的形式保留（数据页质量列的做法）。
+
+- 理由：ADR-126 的规则是「隐藏复杂度，不删除能力」，所以正确做法不是把枚举从界面上删掉，而是**普通模式说人话、高级模式留原文**。集中在一张表里还可以防止同一个键在两个页面写出两种中文（ADR-127 的同一原则）。
+
+- 影响与兼容：纯前端文案映射，没有改任何接口、字段、计算或渲染顺序；`quality_status` / `validation_status` 等原始值仍在 DOM 里（高级模式），排查问题时不需要回到后端日志。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_plain_mode_never_prints_a_raw_enum` 断言六个辅助函数与四张表存在、五个页面调用了对应的 `*Label(`、并且 `{{ a.status }}` / `{{ s.status }}` / `{{ o.outcome_state }}` / `{{ account.status }}` / `{{ version.validation_status }}` / `{{ v.validation_status }}` 六种裸绑定在这四个视图里都不存在、质量列的原始值所在行必须同时含 `v-if="isAdvanced"`。
+
+## ADR-138：点不动的按钮必须说明原因，手抄信号 ID 退到高级模式
+
+- 背景：产品评审报告 P0-4 指出四个按钮一开始就是灰的、却不说明差什么：研究策略的「开始研究」（缺策略版本）、回测的「开始回测」（缺版本或标的）、我的策略的「分析仓库」（缺仓库地址）、模拟验证的「执行信号」（缺信号 ID）。P1-10 进一步指出：让读者到信号页抄一个数字 ID 再回来粘贴，本身就是把数据库主键当交互。
+
+- 决策：每个会因缺输入而禁用的按钮，旁边都渲染一句 `v-if` 说明：`ResearchView` 新增 `startBlockedReason`（未选数据 / 未选版本 / 日期倒置 / 比例非法四种），`BacktestView` 新增 `runBlockedReason`（缺版本 / 缺标的两种），`StrategiesView` 在「分析仓库」下加一句缺地址说明，`PaperView` 在执行按钮下加一句缺 ID 说明。同时把「手抄信号 ID」的输入框与执行按钮整块移进 `<template v-if="isAdvanced">`，普通模式的入口改成「最新信号」表里每行的「→ 账户名」这一列，卡内文字直接说「不必手抄信号 ID」。
+
+- 理由：禁用态是一种单向门 —— 按钮灰着，读者只能猜。把原因写出来等于把依赖关系写出来（「先有版本，才能回测」），这正是评审 §23 要求的「每个页面回答：现在能做什么、为什么不能」。信号 ID 是数据库概念，普通用户不该看到它；但高级用户排障时需要它，所以保留而不删除。
+
+- 影响与兼容：`runNew()` 自身仍然做全部校验（按钮的禁用只是提前告知，不是唯一防线），禁用的判定条件补上 `!symbol.trim()`；`executePaperSignal` 的端点与调用方式没有变化，只是入口从输入框换成列表按钮。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_a_disabled_button_says_why` 断言 `runBlockedReason` / `startBlockedReason` 两个 computed 存在且含对应话术、研究页 ④ 有 `v-if="!canStart"`、策略库有 `v-if="!analyzing && !repoUrl.trim()"`、模拟页有 `v-if="!signalId"` 且「执行信号（虚拟成交）」之后出现 `<template v-if="isAdvanced">`、信号表头含 `signalStatusLabel(s.status)` 与「不必手抄信号 ID」。
+
+## ADR-139：样本不足时首页不下结论，AI 未配置时提示用中文
+
+- 背景：产品评审报告 P0-3 记录首页在只有 2 笔交易的回测上写「这套策略在这段约 1.1 年的历史数据里整体是赚钱的：累计收益 0.19%，最大回撤 -8.78%」——把 2 笔交易说成了结论。P1-5 记录「AI 未配置：解释按钮不可用」后面直接拼了后端英文原文（`No AI provider configured. Set one up under Settings (OpenAI-compatible endpoint + k…`）。
+
+- 决策：首页 `conclusion` 增加 `MIN_TRADES_FOR_VERDICT = 10`（与后端生命周期门槛 `min_backtest_trades` 同值，并在注释里写明这个对应关系）；`trades` 低于它时 headline 改为「样本太少（只有 N 笔交易），暂时不能判断这套策略是否有效。」，首条 detail 改为「只成交了 N 笔，收益 x 还说明不了问题」。AI 提示改为 `aiUnavailableText` computed：普通模式给一句中文（「AI 还没有配置，所以「AI 解释」按钮用不了：到「系统管理 → AI 设置」填一个模型服务即可。回测、指标与模拟盘都不受影响。」），后端原话只在高级模式追加「（后端原话：…）」。
+
+- 理由：这两条是同一类错误 —— **把系统内部的话直接当成给用户的话**。2 笔交易不是证据，不该有结论的措辞；provider 的英文 self-report 是给运维的，不是给读者的。前者按小样本保守处理，后者翻译并保留原文供排查，两者都不隐藏任何事实。
+
+- 影响与兼容：阈值只影响措辞，不影响任何数字（累计收益、回撤照样显示）；`MIN_TRADES_FOR_VERDICT` 是前端常量，不与后端通信，后端 `min_backtest_trades` 变化时注释会提醒同步。AI 未配置这一路径本来就不影响回测、指标与模拟盘，文案现在把这一点说明。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_home_page_does_not_call_a_two_trade_sample_worth_it` 断言阈值常量、小样本话术与 `min_backtest_trades` 注释存在；`::test_the_ai_unavailable_note_is_chinese` 断言 `aiUnavailableText`、中文提示、高级模式才附 `（后端原话：${note}）`，且旧的英文拼接句已从首页消失。
+
+## ADR-140：默认标的跟着行情源走，不再写死 DEMO-AAPL
+
+- 背景：产品评审报告 P1-7 与 P2-15 记录数据页与回测页都把标的输入框预填成 `DEMO-AAPL`。`synthetic` 演示源只服务 `DEMO-AAPL` / `DEMO-BTC` 两个代码，所以一旦把 `MARKET_DATA_PROVIDER` 换成 `yahoo_finance`，这个默认值必然同步出 0 根 K 线 —— 首次使用的人会以为「系统坏了」。
+
+- 决策：`wording.ts` 增加 `PROVIDER_LABELS` / `providerLabel()` / `defaultSymbolFor()`；数据页与回测页的 `symbol` 初值改为空串，两个页面都在自己的 `Promise.all` 里取 `api.systemInfo()`（失败即 `null`，各自不影响其它面板），把 `market_data_provider` 记进 `provider` / `marketProvider`，并**只在读者还没输入过**（`symbolTouched` 为 false 且输入框为空）时填入 `defaultSymbolFor(provider)`（`synthetic → DEMO-AAPL`，其它 → `AAPL`）。两个页面都显示一句「当前行情源：…」，回测页的 `symbolTouched` 在从研究页交接（query 带 `symbol`）时也置为 true。
+
+- 理由：默认值是一个承诺 —— 它承诺「按下按钮就能得到东西」。写死演示代码在演示源下成立、在真行情源下立刻变成 0 根 K 线，所以默认值必须由当前配置决定。反过来，一旦用户自己动过输入框，再改它就是抢用户的输入，所以用「未触碰」作为闸门。
+
+- 影响与兼容：两处新增 `api.systemInfo()` 请求（各自 `.catch`，沿用 ADR-088 的「每个请求自己负责」）；`DataView` 原先本地的 `PROVIDER_LABELS` 与两个 computed 删除、改为引用共享表，避免两份副本漂移。行情源未知时回退成 `AAPL` 并在页面上直说「还没有读到行情源」。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_no_page_starts_on_a_symbol_the_provider_cannot_serve` 断言两个视图都不含 `ref('DEMO-AAPL')`、都含 `symbolTouched`、`@input="symbolTouched = true"` 与 `api.systemInfo()`，并断言回测页用 `defaultSymbolFor(marketProvider.value)` 与 `providerLabel(marketProvider)`、两页都显示「当前行情源」。
+
+## ADR-141：系统管理页分四个标签页，AI 诊断读数进高级模式
+
+- 背景：产品评审报告 P1-9 认为系统管理页过长（九个分组一条滚动条）；P0-2 的同一类问题在这一页也存在：AI 模型目录、提示词模板、用量、任务记录（`task_type`、`prompt_name`、`cost_usd`、`token_usage`）在普通模式下也直接铺开，而普通用户在这一页真正要做的只有一件事 —— 填一个模型服务。
+
+- 决策：`SettingsView.vue` 顶部加一行标签栏（`role="tablist"` / `role="tab"`，四个标签：AI 设置 / 通知 / 系统设置 / 运行与审计），分组用 `v-show="activeTab === …"` 包裹：AI 设置（AI 设置组）、通知（通知组）、系统设置（系统设置 + 安全）、运行与审计（系统信息 + 运行环境 + 审计日志 + 临时远程访问）。AI 那四个诊断卡整块移进 `<template v-if="isAdvanced">`，普通模式位置留一句「模型目录、提示词模板、用量与任务记录都是排查用的读数，在高级模式下显示…」。
+
+- 理由：用 `v-show` 而不是 `v-if` 是刻意的 —— 切标签不该重新请求、也不该绕过任何分组自己的 `isAdvanced` 门；页面变短的收益与「哪些读数属于高级层」的规则互不干扰。临时远程访问留在普通模式的「运行与审计」里，因为评审 §17 对它的要求只是标注为开发/测试工具，而不是藏起来。
+
+- 影响与兼容：没有删除任何分组、没有改任何请求（设置页的 `Promise.all` 与 `.catch` 一字未动）、`<h2 class="group-head">系统信息</h2>` 仍是字面存在，所以既有的 `test_the_engineering_readings_live_in_the_settings_page` 与 `>= 3` 个 `<template v-if="isAdvanced">` 的断言继续成立；新样式 `.tabs` / `.tabs .tab` 只加排版，不动配色。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_settings_page_is_split_into_tabs` 断言 `SettingsTab` 联合类型、四个标签 id、`role="tablist"` / `role="tab"`、四个 `v-show="activeTab === '…'"`、`<template v-if="isAdvanced">` 数量 `>= 4`、`系统信息` 分组标题仍在、AI 诊断的普通模式说明句存在。
+
+## ADR-142：移动端补第二个断点（480px），危险操作有独立视觉与说明
+
+- 背景：产品评审报告 P1-8 记录 375px 下页面有横向滚动条、侧边栏变成横向滚动条、四列卡片互相挤压；P2-14 记录危险操作（删除数据、关闭/重置模拟账户）与普通按钮长得一样、确认框也没说清影响范围。
+
+- 决策：① `frontend/src/style.css` 在原有 `@media (max-width: 820px)` 之后新增 `@media (max-width: 480px)`：`.main` 不再横向滚动、`.nav` 换行而不是滚动、`.card` 自己成为横向滚动容器（`overflow-x: auto`）、表格最小宽度从 560px 降到 460px、`.grid.cols-2` 单列、`.grid.cols-3/4` 两列、`.row` 允许换行、结论卡读数降到 22px。② 新增 `button.danger`（`color: var(--sell)` + 红色边框 + hover 淡红底）与 `.badge.archived`（灰色虚线，替代此前借用 `.badge.WAIT` 表示「已归档」的黄色语义）。③ 模拟账户新增 `closeAccount(account)`：先 `window.confirm` 说明「关闭后不再接受新的虚拟成交，持仓与交易记录都会保留，随时可以重开」，确认后才调 `setStatus(account, 'close')`；关闭按钮改用 `class="ghost danger"`。
+
+- 理由：P1-8 的根因是断点太少 —— 820px 的规则（`.main { overflow-x: auto }` + 560px 表格）是为平板写的，在手机上正好制造出横向滚动。危险操作的根因是语汇太少 —— 界面只有一种按钮语气，读者无法从外观区分「保存」与「关闭账户」，而 `.badge.WAIT` 被复用又会让人以为归档是「暂不确认」。
+
+- 影响与兼容：纯 CSS + 一个确认流程，没有改后端、没有删任何能力；`test_ui_promises.py` 的断点守卫只要求存在一个 `max-width >= 480` 的断点，新增断点不冲突。`window.confirm` 是项目既有的确认方式（ADR-089 一族），这里沿用而不引入新的弹窗组件。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_a_narrow_screen_gets_its_own_breakpoint` 断言 480px 断点里出现 `overflow-x: visible`、`flex-wrap: wrap`、`.grid.cols-3,`/`.grid.cols-4 {`、`repeat(2, minmax(0, 1fr))` 与 `min-width: 460px`；`::test_dangerous_actions_look_dangerous` 断言 `button.danger` / `button.danger:hover` / `color: var(--sell)` 与 `closeAccount` 的 `window.confirm(` + `if (!ok) return` + `setStatus(account, 'close')`。
+
+## ADR-143：首次使用给一条四步引导，数据太短就在首页指路
+
+- 背景：产品评审报告 P2-12 认为首页缺少首次使用的引导（一个新用户打开首页只看得到「还没有可以研究的东西」）；P2-13 认为导航顺序与新手流程不一致（数据 → 我的策略 → 研究策略 → 回测），但报告给出的两种修法之一是「在首页的下一步引导里指向数据页」。
+
+- 决策：① 首页在 `strategies` 为空且没有焦点策略时显示一张可关闭的引导卡（`class="card guide-card"`）：标题「第一次用？按这四步走」，四步分别指向 `/data`（同步一段行情）、`/research`（选标的与策略）、回本页看 ②③④、`/paper`（模拟验证）；关闭状态记在 `localStorage` 的 `mql-guide-dismissed`，关闭按钮文案「知道了，不再显示」。② 当已存数据的跨度小于 5 年时，四问下方补一句指路：「现在这份数据只有 N 年。到「数据」同步更长的一段，结论才更有分量。」（`<RouterLink to="/data">`）。导航顺序保持不变。
+
+- 理由：新用户需要的不是更多信息，而是一个起点；而起点必须只在「还没有策略」时出现，否则它自己就变成噪音。P2-13 的两个修法里，改导航顺序会动到已经被守卫钉住的九条导航（docs/13 §1 要求文档顺序与 `App.vue` 一致，`main.ts` 路由顺序也要对齐），收益与风险不成比例；把「数据」放在四问的下一步里，既解决「不知道先去哪」，又不重排信息架构。
+
+- 影响与兼容：引导条只在没有策略时出现，可关闭且记住选择（`localStorage`，与主题 `mql-theme`、模式 `mql-mode` 同一种做法）；数据跨度提示只在跨度已知且小于 5 年时出现，不改变任何结论的措辞与数字。
+
+- 测试：`backend/tests/test_frontend_contracts.py::test_the_first_visit_gets_a_way_in` 断言 `GUIDE_KEY = 'mql-guide-dismissed'`、`guideDismissed`、`showGuide` computed、`dismissGuide()`、`class="card guide-card"`、标题与关闭按钮文案，以及首页含 `<RouterLink to="/data">到「数据」同步更长的一段</RouterLink>`。
+
+

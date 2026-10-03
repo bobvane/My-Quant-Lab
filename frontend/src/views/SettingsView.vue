@@ -26,6 +26,20 @@ const auditTotal = ref(0)
 const health = ref<HealthResponse | null>(null)
 const healthError = ref('')
 const serverInfo = ref<SystemInfo | null>(null)
+// 版本号在构建期注入（评审报告 P0-1），与侧边栏、页脚显示同一个值。
+const APP_VERSION = __APP_VERSION__
+
+// 这一页原本是一条很长的滚动条（评审报告 P1-9），现在按用途分成四个标签页。
+// 用 `v-show` 而不是 `v-if`：切标签不重新请求，也不会动到各分组自己的
+// `isAdvanced` 门（高级模式该显示的读数一个都不会少）。
+type SettingsTab = 'ai' | 'notify' | 'system' | 'runtime'
+const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; hint: string }> = [
+  { id: 'ai', label: 'AI 设置', hint: '模型服务与解释提示词' },
+  { id: 'notify', label: '通知', hint: '邮件 / Webhook 与测试' },
+  { id: 'system', label: '系统设置', hint: '运行参数与安全边界' },
+  { id: 'runtime', label: '运行与审计', hint: '版本、环境、审计日志、临时远程访问' },
+]
+const activeTab = ref<SettingsTab>('ai')
 const environment = ref<Partial<AppSettingsEnvironment>>({})
 const systemSettings = ref<Array<Record<string, any>>>([])
 const newSettingKey = ref('')
@@ -616,6 +630,22 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <div class="tabs" role="tablist">
+      <button
+        v-for="tab in SETTINGS_TABS"
+        :key="tab.id"
+        class="ghost tab"
+        :class="{ on: activeTab === tab.id }"
+        role="tab"
+        :aria-selected="activeTab === tab.id"
+        @click="activeTab = tab.id"
+      >
+        {{ tab.label }}
+        <small>{{ tab.hint }}</small>
+      </button>
+    </div>
+
+    <div v-show="activeTab === 'ai'">
     <h2 class="group-head">AI 设置</h2>
 
     <div class="card">
@@ -690,6 +720,11 @@ onUnmounted(() => {
       </p>
     </div>
 
+    <p v-if="!isAdvanced" class="muted">
+      模型目录、提示词模板、用量与任务记录都是排查用的读数，在高级模式下显示；普通模式下只要上面这一张卡填好就能用 AI 解释了。
+    </p>
+
+    <template v-if="isAdvanced">
     <div class="card" style="margin-top: 14px">
       <h3>AI 模型目录（路由用）</h3>
       <table v-if="aiModels.length">
@@ -851,6 +886,11 @@ onUnmounted(() => {
       </div>
     </div>
 
+    </template>
+
+    </div>
+
+    <div v-show="activeTab === 'notify'">
     <h2 class="group-head">通知</h2>
 
     <div class="card" style="margin-top: 14px">
@@ -955,6 +995,9 @@ onUnmounted(() => {
       <p v-else class="muted">暂无通知记录。</p>
     </div>
 
+    </div>
+
+    <div v-show="activeTab === 'system'">
     <h2 class="group-head">系统设置</h2>
 
     <div class="card" style="margin-top: 14px">
@@ -996,6 +1039,9 @@ onUnmounted(() => {
       </div>
     </div>
 
+    </div>
+
+    <div v-show="activeTab === 'runtime'">
     <template v-if="isAdvanced">
       <h2 class="group-head">系统信息</h2>
 
@@ -1004,7 +1050,7 @@ onUnmounted(() => {
         <p class="muted">
           这一组读数回答的是「软件本身怎么样」：服务是否健康、跑的是哪个版本、引擎与特征版本、
           行情源和 DSL Schema。它原来挤在首页第一屏，但那块地方应该回答「我现在该做什么」，
-          所以搬到这里（评审 §6；ADR-134）。
+          所以搬到这里。
         </p>
         <div class="grid cols-4" style="margin-top: 14px">
           <StatCard
@@ -1016,8 +1062,8 @@ onUnmounted(() => {
           />
           <StatCard
             label="版本"
-            :value="health?.version ?? '—'"
-            :sub="`引擎 ${health?.engine_version ?? '—'}`"
+            :value="APP_VERSION"
+            :sub="`引擎 ${health?.engine_version ?? '—'} · 后端自报 ${health?.version ?? '—'}`"
           />
         </div>
         <div class="row" style="margin-top: 12px">
@@ -1164,6 +1210,9 @@ onUnmounted(() => {
       </p>
     </div>
 
+    </div>
+
+    <div v-show="activeTab === 'system'">
     <h2 class="group-head">安全</h2>
 
     <div class="card" style="margin-top: 14px">
@@ -1175,6 +1224,7 @@ onUnmounted(() => {
         <li>GitHub 导入的代码视为不可信输入，V1 只做文本与结构分析，不执行。</li>
         <li>策略版本与已完成的回测结果不可修改，历史结论永远可复现。</li>
       </ul>
+    </div>
     </div>
   </div>
 </template>

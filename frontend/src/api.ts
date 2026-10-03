@@ -187,11 +187,28 @@ export interface GithubImportResult {
   strategy_id: number
   strategy_version_id: number
   version: string
+  /** True when the server picked the version because the request named none (ADR-061). */
+  version_assigned: boolean
   /** The commit recorded on the new version: the one the analysis read (ADR-060). */
   source_commit: string
   validation_status: string
   immutable_hash: string
   warnings: Array<Record<string, unknown>>
+}
+
+/**
+ * What an import of `name` would do: the versions that slug already has and the
+ * one the server would assign. `can_assign` is false when the existing versions
+ * cannot be read as `major.minor.patch`, so a version has to be named (ADR-061).
+ */
+export interface GithubVersionPlan {
+  name: string
+  slug: string
+  strategy_id: number | null
+  versions: string[]
+  next_version: string | null
+  can_assign: boolean
+  reason: string
 }
 
 /**
@@ -822,23 +839,30 @@ export const api = {
       `/importer/github/sources/${id}/check`,
     ),
   /**
+   * What an import would do before it does it: the versions this name already has
+   * and the one the server would assign next (ADR-061).
+   */
+  githubVersionPlan: (name: string) =>
+    request<GithubVersionPlan>(`/importer/github/versions?name=${encodeURIComponent(name)}`),
+  /**
    * Import a reviewed draft. `commit` is required: the version has to name the
    * revision the analysis read, and a branch name is not a revision (ADR-060).
+   * Omitting `version` lets the server assign the next free one (ADR-061).
    */
   importGithubStrategy: (
     repoUrl: string,
     name: string,
-    version: string,
     dsl: Record<string, unknown>,
     commit: string,
     ref?: string,
+    version?: string,
   ) =>
     request<GithubImportResult>('/importer/github/import', {
       method: 'POST',
       body: JSON.stringify({
         repo_url: repoUrl,
         name,
-        version,
+        version: version || undefined,
         dsl,
         commit,
         ref: ref || undefined,

@@ -583,8 +583,28 @@ class GithubImportRequest(BaseModel):
         description="Commit SHA the reviewed analysis read; stored as source_commit",
     )
     name: str = Field(min_length=1, max_length=128)
-    version: str = Field(default="1.0.0", min_length=1, max_length=32)
+    # Omitted means "the service that owns the version ledger picks the next free
+    # one"; a default of `1.0.0` was a guess that collided with the first import
+    # of the same strategy every time (ADR-061).
+    version: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+        description="Explicit strategy version; omit to let the server assign the next one",
+    )
     dsl: dict[str, Any]
+
+
+class GithubVersionPlanOut(BaseModel):
+    """What a name resolves to before an import: the ledger and the next version."""
+
+    name: str
+    slug: str
+    strategy_id: int | None = None
+    versions: list[str]
+    next_version: str | None = None
+    can_assign: bool
+    reason: str = ""
 
 
 class AIStatusOut(BaseModel):

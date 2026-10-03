@@ -718,3 +718,113 @@ def test_import_endpoint_creates_strategy_from_reviewed_dsl(client) -> None:
 
     check = client.get(f"/api/v1/strategies/versions/{body['strategy_version_id']}/verify")
     assert check.json()["intact"] is True
+
+
+def _importable_dsl() -> dict:
+    """A reviewed draft: the machine's findings plus the exit block a human added."""
+
+    meta = _meta()
+    draft, _ = build_draft_dsl(
+        meta, analyze_repository_files([RepoFile("strat.py", 100, "a", content=EMA_CROSS_SOURCE)])
+    )
+    draft["exit"] = {"long": {"any": [{"op": "lt", "left": "close", "right": "ema20"}]}}
+    return draft
+
+
+def _post_import(client, *, name: str, **body):
+    return client.post(
+        "/api/v1/importer/github/import",
+        json={
+            "repo_url": "https://github.com/acme/strat",
+            "ref": "main",
+            "commit": _FAKE_COMMIT,
+            "name": name,
+            "dsl": _importable_dsl(),
+            **body,
+        },
+    )
+
+
+def test_import_endpoint_assigns_the_next_version_when_none_is_named(client) -> None:
+    """The ledger owner numbers versions: a hard-coded default collides (ADR-061)."""
+
+    first = _post_import(client, name="Ledger Strategy")
+    assert first.status_code == 201, first.text
+    assert first.json()["version"] == "1.0.0"
+    assert first.json()["version_assigned"] is True
+
+    second = _post_import(client, name="Ledger Strategy")
+    assert second.status_code == 201, second.text
+    assert second.json()["version"] == "1.0.1"
+    assert second.json()["version_assigned"] is True
+    # The same name is the same strategy: the second import is a new version of it.
+    assert second.json()["strategy_id"] == first.json()["strategy_id"]
+
+
+def test_import_endpoint_keeps_the_version_the_reviewer_names(client) -> None:
+    named = _post_import(client, name="Named Strategy", version="2.5.0")
+    assert named.status_code == 201, named.text
+    assert named.json()["version"] == "2.5.0"
+    assert named.json()["version_assigned"] is False
+
+    # A named version is not silently renumbered: the collision is the caller's.
+    again = _post_import(client, name="Named Strategy", version="2.5.0")
+    assert again.status_code == 422
+    assert "already exists" in again.text
+
+    # ...and the ledger still has its own next version available for an unnamed import.
+    unnamed = _post_import(client, name="Named Strategy")
+    assert unnamed.status_code == 201, unnamed.text
+    assert unnamed.json()["version"] == "2.5.1"
+
+
+def test_version_ledger_reports_what_would_be_assigned(client) -> None:
+    before = client.get("/api/v1/importer/github/versions", params={"name": "Ledger Strategy"})
+    assert before.status_code == 200, before.text
+    assert before.json() == {
+        "name": "Ledger Strategy",
+        "slug": "ledger-strategy",
+        "strategy_id": None,
+        "versions": [],
+        "next_version": "1.0.0",
+        "can_assign": True,
+        "reason": "",
+    }
+
+    created = _post_import(client, name="Ledger Strategy")
+    assert created.status_code == 201
+
+    after = client.get("/api/v1/importer/github/versions", params={"name": "Ledger Strategy"})
+    body = after.json()
+    assert body["strategy_id"] == created.json()["strategy_id"]
+    assert body["versions"] == ["1.0.0"]
+    assert body["next_version"] == "1.0.1"
+
+
+def test_version_ledger_refuses_to_increment_a_version_it_cannot_read(client) -> None:
+    """A hand-named version is still legal; it just cannot be auto-incremented."""
+
+    strategy = client.post("/api/v1/strategies", json={"name": "Exotic", "description": "x"})
+    assert strategy.status_code == 201, strategy.text
+    strategy_id = strategy.json()["id"]
+    seed = client.post(
+        f"/api/v1/strategies/{strategy_id}/versions",
+        json={"version": "v2-beta", "dsl": _importable_dsl()},
+    )
+    assert seed.status_code == 201, seed.text
+
+    plan = client.get("/api/v1/importer/github/versions", params={"name": "Exotic"}).json()
+    assert plan["can_assign"] is False
+    assert plan["next_version"] is None
+    assert plan["versions"] == ["v2-beta"]
+    assert "v2-beta" in plan["reason"]
+
+    # Unnamed import refuses with that reason instead of inventing a version.
+    refused = _post_import(client, name="Exotic")
+    assert refused.status_code == 422
+    assert "v2-beta" in refused.text
+
+    # The reviewer can still name one.
+    explicit = _post_import(client, name="Exotic", version="1.0.0")
+    assert explicit.status_code == 201, explicit.text
+    assert explicit.json()["version"] == "1.0.0"

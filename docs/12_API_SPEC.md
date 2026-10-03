@@ -372,6 +372,7 @@ re-imported automatically when a new commit lands):
 `GET /importer/github/sources/{id}`
 `GET /importer/github/sources/{id}/check`     (live commit check -> has_update)
 `GET /importer/github/sources/{id}/snapshots`
+`GET /importer/github/versions?name=...`      (version ledger for a name -> next_version)
 `POST /importer/github/import`                (persist a reviewed DSL as a strategy)
 
 `POST /importer/github/analyze` is read-only and returns the review surface: the
@@ -401,6 +402,17 @@ findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
   counted as parsed (`files_parsed`, `coverage.unparsed_python_files`, ADR-059); to
   `1.4.0` when the report started naming the `commit` it read instead of only the `ref`
   it was asked for (ADR-060).
+- `version` on `POST /importer/github/import` is **optional**: omitted means "the server
+  that owns the version ledger assigns the next free patch version" (`1.0.0` for a new
+  strategy, `1.0.1` after `1.0.0`, compared as three integers so `1.0.9` → `1.0.10`).
+  The response reports `version_assigned` (`true` when the server chose it). A version
+  the caller names is used verbatim and still has to be free (a duplicate is a 422), and
+  a ledger whose versions cannot be read as `major.minor.patch` makes an unnamed import a
+  422 that names the offending version instead of guessing (ADR-061, docs/05 §4.5).
+- `GET /importer/github/versions?name=...` answers what an import of that name would do
+  before anything is written: `{name, slug, strategy_id, versions, next_version,
+  can_assign, reason}` (`strategy_id` is null when the slug is still unclaimed,
+  `next_version` is null when `can_assign` is false).
 - `files_unparsed` = `[{path, reason}]` for files that were fetched but whose parse
   failed. They contributed nothing to the findings, so the draft cannot contain the rules
   they declare; the `reason` is the parser's own error, sanitised.

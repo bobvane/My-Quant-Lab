@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from pydantic import ValidationError
@@ -23,10 +24,17 @@ __all__ = [
     "create_strategy_version",
     "immutable_hash",
     "load_spec",
+    "next_version",
     "parse_spec",
     "record_audit",
     "slugify",
+    "strategy_version_plan",
 ]
+
+# Versions this service is willing to increment on its own. A version it cannot
+# read as three numbers is still a legal version (reviewers use `v2-beta`), it
+# just has to be named by the caller instead of guessed (ADR-061).
+_VERSION_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$")
 
 
 def slugify(name: str) -> str:
@@ -57,6 +65,69 @@ def immutable_hash(dsl: dict[str, Any], version: str) -> str:
 
 def load_spec(strategy_version: StrategyVersion) -> StrategySpec:
     return StrategySpec.model_validate(strategy_version.dsl_json)
+
+
+def next_version(existing: Iterable[str]) -> str:
+    """Return the next free patch version after the highest one in ``existing``.
+
+    ``1.0.0`` for a strategy that has no versions yet, ``1.0.1`` after ``1.0.0``
+    and so on. Anything that is not ``major.minor.patch`` raises ``ValueError``:
+    the ledger cannot be incremented, so the caller has to name the version
+    rather than have this function invent one that might collide (ADR-061).
+    """
+
+    versions = list(existing)
+    if not versions:
+        return "1.0.0"
+
+    parsed: list[tuple[int, int, int]] = []
+    for version in versions:
+        match = _VERSION_RE.match(version)
+        if match is None:
+            raise ValueError(
+                f"cannot assign a version: existing version {version!r} is not "
+                f"major.minor.patch, so name the version explicitly"
+            )
+        parsed.append((int(match["major"]), int(match["minor"]), int(match["patch"])))
+
+    major, minor, patch = max(parsed)
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def strategy_version_plan(db: Session, name: str) -> dict[str, Any]:
+    """Describe the version ledger a name resolves to: what exists, what comes next.
+
+    The service that owns immutability owns numbering: callers ask what would be
+    assigned instead of guessing `1.0.0` and walking into a duplicate (ADR-061).
+    """
+
+    slug = slugify(name)
+    strategy = db.scalar(select(Strategy).where(Strategy.slug == slug))
+    versions: list[str] = []
+    if strategy is not None:
+        versions = list(
+            db.scalars(
+                select(StrategyVersion.version)
+                .where(StrategyVersion.strategy_id == strategy.id)
+                .order_by(StrategyVersion.id)
+            ).all()
+        )
+
+    plan: dict[str, Any] = {
+        "name": name,
+        "slug": slug,
+        "strategy_id": strategy.id if strategy is not None else None,
+        "versions": versions,
+        "next_version": None,
+        "can_assign": True,
+        "reason": "",
+    }
+    try:
+        plan["next_version"] = next_version(versions)
+    except ValueError as exc:
+        plan["can_assign"] = False
+        plan["reason"] = str(exc)
+    return plan
 
 
 def create_strategy_version(

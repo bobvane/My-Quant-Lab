@@ -9,7 +9,10 @@ Two-step flow, human in the loop:
    validates it through the same pipeline as hand-written strategies, and only
    then creates a Strategy + immutable StrategyVersion. The request has to name
    the commit the analysis read: the version and the watched source are recorded
-   against that SHA, not against the branch that was asked for (ADR-060).
+   against that SHA, not against the branch that was asked for (ADR-060). The
+   version itself is assigned by the service that owns the ledger unless the
+   reviewer names one (ADR-061); ``GET /importer/github/versions`` answers what
+   would be assigned before anything is written.
 
 Repository code is never executed, never cloned, never run in any worker.
 """
@@ -20,14 +23,25 @@ import datetime as dt
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.schemas import GithubAnalyzeOut, GithubAnalyzeRequest, GithubImportRequest
+from app.api.schemas import (
+    GithubAnalyzeOut,
+    GithubAnalyzeRequest,
+    GithubImportRequest,
+    GithubVersionPlanOut,
+)
 from app.core.db import get_db
 from app.data.github_source_service import record_snapshot
-from app.data.strategy_service import create_strategy_version, parse_spec, record_audit, slugify
+from app.data.strategy_service import (
+    create_strategy_version,
+    parse_spec,
+    record_audit,
+    slugify,
+    strategy_version_plan,
+)
 from app.domain.models import GitHubSnapshot, GitHubSource, Strategy
 from app.importer import (
     GitHubClient,
@@ -137,6 +151,20 @@ def analyze_repository(payload: GithubAnalyzeRequest) -> GithubAnalyzeOut:
     )
 
 
+@router.get("/versions", response_model=GithubVersionPlanOut, summary="Version ledger for a name")
+def version_ledger(
+    name: str = Query(min_length=1, max_length=128), db: Session = Depends(get_db)
+) -> GithubVersionPlanOut:
+    """Report what ``name`` resolves to before an import writes anything (ADR-061).
+
+    The import endpoint owns version numbering, so the caller can ask what would
+    be assigned instead of guessing ``1.0.0`` and finding out from a 422.
+    """
+
+    plan = strategy_version_plan(db, name)
+    return GithubVersionPlanOut(**plan)
+
+
 @router.post("/import", status_code=201, summary="Import a reviewed DSL as a strategy")
 def import_strategy(payload: GithubImportRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -159,6 +187,14 @@ def import_strategy(payload: GithubImportRequest, db: Session = Depends(get_db))
             },
         )
 
+    version = payload.version
+    version_assigned = version is None
+    if version is None:
+        plan = strategy_version_plan(db, payload.name)
+        if not plan["can_assign"]:
+            raise HTTPException(status_code=422, detail=plan["reason"])
+        version = plan["next_version"]
+
     slug = slugify(payload.name)
     strategy = db.scalar(select(Strategy).where(Strategy.slug == slug))
     if strategy is None:
@@ -176,7 +212,7 @@ def import_strategy(payload: GithubImportRequest, db: Session = Depends(get_db))
         version_row = create_strategy_version(
             db,
             strategy,
-            version=payload.version,
+            version=version,
             dsl=payload.dsl,
             source_commit=payload.commit,
             source_url=f"https://github.com/{owner}/{repo}",
@@ -185,6 +221,7 @@ def import_strategy(payload: GithubImportRequest, db: Session = Depends(get_db))
                 "repository": f"{owner}/{repo}",
                 "ref": payload.ref,
                 "commit": payload.commit,
+                "version_assigned": version_assigned,
             },
         )
     except ValueError as exc:
@@ -201,6 +238,7 @@ def import_strategy(payload: GithubImportRequest, db: Session = Depends(get_db))
             "ref": payload.ref,
             "commit": payload.commit,
             "version": version_row.version,
+            "version_assigned": version_assigned,
             "immutable_hash": version_row.immutable_hash,
         },
     )
@@ -211,6 +249,7 @@ def import_strategy(payload: GithubImportRequest, db: Session = Depends(get_db))
         "strategy_id": strategy.id,
         "strategy_version_id": version_row.id,
         "version": version_row.version,
+        "version_assigned": version_assigned,
         "source_commit": version_row.source_commit,
         "validation_status": version_row.validation_status,
         "immutable_hash": version_row.immutable_hash,

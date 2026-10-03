@@ -1068,3 +1068,33 @@ watcher 路径不需要额外请求：它比较的本来就是 `get_head_commit(
 **测试**
 
 `backend/tests/test_importer.py` 新增 `test_fetch_reads_the_commit_the_ref_pointed_at`（记录 tree 与文件请求的 ref：`meta.ref == "main"`、`meta.commit == _FAKE_COMMIT`、两次文件请求都带该 SHA、`/commits/` 只查一次、没有 `/git/trees/main`）与 `test_a_commit_sha_is_taken_as_is_and_an_unresolvable_ref_fails`（传 SHA → 不发 `/commits/`；仓库返回 `{"message": "Not Found"}` → `GitHubError("could not resolve ref …")`）；`test_analyze_endpoint_reports_its_coverage` 断言 `analysis_version == "1.4.0"` 与响应 `commit`；新增 `test_import_endpoint_requires_the_commit_it_was_reviewed_at`（缺 `commit` / `commit="main"` / `commit="abc12"` 都是 422）。`backend/tests/test_github_sources.py` 的导入测试改发 `ref` + `commit`，断言 `source_commit`、`evidence_json["commit"]`、快照 commit 都是该 SHA，新增 `test_an_import_without_a_ref_still_records_its_commit`（不传 ref 也照样记快照）。`backend/scripts/probe_commit_provenance.py` 用内存客户端打印每次请求用的修订并断言全部带 SHA，另测 watcher 路径零查询与不可解析 ref 的拒绝。
+
+## ADR-061：版本号由拥有账本的 service 分配（`next_version`、`strategy_version_plan`、docs/05 §4.5）
+
+**背景**
+
+1. `GithubImportRequest.version` 的默认值是 `"1.0.0"`（`backend/app/api/schemas.py`），而 Web UI 的 `importReviewed` 干脆硬编码 `'1.0.0'`（`frontend/src/views/StrategiesView.vue:485`）。服务端对同名策略按 slug 复用（`import_strategy` 里 `slugify(payload.name)` 查 `Strategy`），于是**同一个仓库第二次导入必然**撞上 `create_strategy_version` 的 `version '{version}' already exists for this strategy`（422，`backend/app/data/strategy_service.py:87`）。
+2. 页面上没有任何地方能改这个版本号：`importName` 有输入框，版本号没有。调用方既看不到这个名字已有哪几版，也无从推断该填什么——它唯一能做的是猜。
+3. 版本号是**不可变账本**的一部分（策略版本一旦创建不可修改），但决定权被放在了调用方，而账本在服务端手里。这是 ADR-060 的同族问题：事实由谁拥有，就该由谁命名。
+4. v1.5.0 的真栈验收里，我自己的验证脚本也撞了 422，第一反应是"产品缺陷还是脚本写错"——这正说明这个接口把不该由调用方知道的事情推给了调用方。
+
+**决策**
+
+1. `strategy_service` 新增 `next_version(existing: Iterable[str]) -> str`：空 → `1.0.0`；否则取 `major/minor/patch` **整数**三元的最大值再补丁 +1（`1.0.9` → `1.0.10`，`1.9.0` → `1.10.0`——字符串比较会得到 `1.9.1`）。出现读不成 `major.minor.patch` 的版本时 `raise ValueError("cannot assign a version: existing version 'v2-beta' is not major.minor.patch, so name the version explicitly")`。
+2. `strategy_service` 新增 `strategy_version_plan(db, name) -> dict`：返回 `{name, slug, strategy_id, versions, next_version, can_assign, reason}`——账本在哪里、下一个是什么、能不能自动分配。`can_assign` 为假时 `next_version` 为 `None`、`reason` 说明原因。
+3. `GithubImportRequest.version` 由 `str = "1.0.0"` 改为 `str | None = None`；`import_strategy` 在省略时走 `strategy_version_plan`，`can_assign` 为假就 422（把 `reason` 当成 detail），否则用 `next_version`。人工命名的版本仍按原样使用。
+4. 导入响应新增 `version_assigned`（布尔），`evidence_json` 与审计 payload 也记录它——事后能分辨"这一版是谁定的号"。
+5. 新增 `GET /importer/github/versions?name=...`（`response_model=GithubVersionPlanOut`），在写任何东西之前回答上述计划。
+6. 前端 `importGithubStrategy(repoUrl, name, dsl, commit, ref?, version?)`（版本号后置为可选）；`StrategiesView.vue` 新增版本号输入框 + `watch(importName)`（300ms 防抖）查询账本，显示"将新建策略（slug …），版本 1.0.0"或"将在已有策略 #N（slug …）上创建新版本 1.0.1；已有版本：…"；手填的版本号已存在时**禁用**导入按钮并给出错误提示；导入失败后重新查询账本，让提示与服务器刚才说的话一致。
+
+**理由**
+
+"谁拥有账本，谁分配号码"是唯一能让调用方不需要猜测的安排：服务端已经知道这个 slug 有哪些版本，而调用方只能看到自己手里的那一次分析。把默认值设成 `1.0.0` 不是"给个方便的默认值"，而是**在没有依据的情况下替服务端做了一个会被拒绝的决定**。
+
+不自动迁移、也不"分配一个能用的号"绕过不可读版本：`v2-beta` 是人工命名的合法版本，服务端读不懂它就不该假装能排在它后面；报错并点名它，比生成 `1.0.1` 然后与某个未来版本相撞更诚实（同 ADR-058 保留 `checked`、ADR-060 保留分支名）。
+
+前端禁用按钮基于"最近一次读到的账本"，服务端仍然最终裁决：这是提示，不是保证。UI 在"点下去必然 422"的情况下还让按钮可点，等于把服务端的约束藏起来。
+
+**测试**
+
+`backend/tests/test_importer.py` 新增 `test_import_endpoint_assigns_the_next_version_when_none_is_named`（两次不带 `version` 的导入 → `1.0.0`、`1.0.1`，`version_assigned` 皆为真，且 `strategy_id` 相同）、`test_import_endpoint_keeps_the_version_the_reviewer_names`（`2.5.0` 原样使用且 `version_assigned` 为假，重复 → 422，随后不带版本 → `2.5.1`）、`test_version_ledger_reports_what_would_be_assigned`（导入前后 `GET /versions` 的完整字典与 `1.0.0` → `1.0.1`）、`test_version_ledger_refuses_to_increment_a_version_it_cannot_read`（种入 `v2-beta` → `can_assign` 假、理由点名它、不带版本 422、显式 `1.0.0` 仍 201）。`backend/scripts/probe_version_ledger.py` 离线用内存 SQLite 打印五个 `next_version` 用例（含 `1.9.0` / `1.10.0` 的整数比较）、不可读版本的拒绝，以及三次账本快照。

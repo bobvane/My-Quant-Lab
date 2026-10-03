@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   api,
   type Asset,
   type GithubAnalysis,
   type GithubSnapshot,
+  type GithubVersionPlan,
   type SignalIntent,
   type Strategy,
   type StrategyLifecycle,
@@ -383,9 +384,65 @@ const repoToken = ref('')
 const repoMaxFiles = ref(12)
 const repoMaxSeconds = ref(120)
 const importName = ref('')
+const importVersion = ref('')
+const versionPlan = ref<GithubVersionPlan | null>(null)
+const versionPlanLoading = ref(false)
 const analyzing = ref(false)
 const importing = ref(false)
 const analysis = ref<GithubAnalysis | null>(null)
+
+// Numbering belongs to the service that owns the version ledger: ask it what an
+// import of this name would do instead of hard-coding `1.0.0` and discovering the
+// collision from a 422 (ADR-061).
+let versionPlanTimer: ReturnType<typeof setTimeout> | null = null
+
+async function refreshVersionPlan() {
+  const name = importName.value.trim()
+  if (!name) {
+    versionPlan.value = null
+    return
+  }
+  versionPlanLoading.value = true
+  try {
+    versionPlan.value = await api.githubVersionPlan(name)
+  } catch {
+    // A ledger we could not read is not a ledger we can promise anything about.
+    versionPlan.value = null
+  } finally {
+    versionPlanLoading.value = false
+  }
+}
+
+watch(importName, () => {
+  if (versionPlanTimer) clearTimeout(versionPlanTimer)
+  versionPlanTimer = setTimeout(() => void refreshVersionPlan(), 300)
+})
+
+const namedVersion = computed(() => importVersion.value.trim())
+
+// Only a version the caller names can collide: an assigned one is chosen from the
+// ledger we just read.
+const namedVersionTaken = computed(
+  () =>
+    !!namedVersion.value &&
+    !!versionPlan.value?.versions.includes(namedVersion.value),
+)
+
+const plannedVersionNote = computed(() => {
+  if (namedVersion.value) {
+    return namedVersionTaken.value
+      ? `版本 ${namedVersion.value} 已存在于这个策略上，服务器会拒绝；换一个版本号或留空让服务器分配。`
+      : `将以版本 ${namedVersion.value} 导入（由你命名）。`
+  }
+  const plan = versionPlan.value
+  if (!plan) return versionPlanLoading.value ? '正在查询版本账本…' : ''
+  if (!plan.can_assign) {
+    return `${plan.reason}；请手动填写版本号。`
+  }
+  return plan.strategy_id === null
+    ? `将新建策略（slug ${plan.slug}），版本 ${plan.next_version}。`
+    : `将在已有策略 #${plan.strategy_id}（slug ${plan.slug}）上创建新版本 ${plan.next_version}；已有版本：${plan.versions.join('、') || '无'}。`
+})
 
 // The analysis is a review surface, not a guarantee: say out loud how much of
 // the repository it actually read, because the files it never fetched are the
@@ -482,16 +539,23 @@ async function importReviewed() {
     const result = await api.importGithubStrategy(
       repoUrl.value.trim(),
       importName.value.trim() || analysis.value.repo,
-      '1.0.0',
       dsl,
       analysis.value.commit,
       analysis.value.ref,
+      namedVersion.value || undefined,
     )
-    info.value = `已导入策略 #${result.strategy_id}（版本 ${result.version}，${result.validation_status}，来源 commit ${shortCommit(result.source_commit)}）`
+    const how = result.version_assigned ? '由服务器分配' : '由你命名'
+    info.value = `已导入策略 #${result.strategy_id}（版本 ${result.version}，${how}，${result.validation_status}，来源 commit ${shortCommit(result.source_commit)}）`
     analysis.value = null
+    importVersion.value = ''
+    versionPlan.value = null
     await load()
+    await loadGhSources()
   } catch (e) {
     error.value = (e as Error).message
+    // The ledger moved under us (or was read wrong): re-read it so the note and
+    // the disabled state match what the server just said.
+    await refreshVersionPlan()
   } finally {
     importing.value = false
   }
@@ -878,10 +942,21 @@ onMounted(load)
         </p>
         <div class="row" style="margin-top: 10px">
           <input v-model="importName" style="max-width: 260px" placeholder="策略名称" />
-          <button :disabled="importing" @click="importReviewed">
+          <input
+            v-model="importVersion"
+            style="max-width: 200px"
+            placeholder="版本（留空 = 服务器分配）"
+          />
+          <button
+            :disabled="importing || namedVersionTaken"
+            @click="importReviewed"
+          >
             {{ importing ? '导入中…' : '确认导入' }}
           </button>
         </div>
+        <p v-if="plannedVersionNote" :class="namedVersionTaken ? 'error' : 'muted'">
+          {{ plannedVersionNote }}
+        </p>
       </div>
       <p v-else class="muted">
         输入公开仓库地址后，系统只下载文本做静态分析：识别指标、规则与参数，

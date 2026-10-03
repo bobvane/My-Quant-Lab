@@ -90,6 +90,15 @@ watcher 里这条区别决定了是否"记为已见"：上限造成的缺口是�
 - 旧数据里 `source_commit` 可能是分支名（如 `main`）。前端把不像 SHA 的值渲染成 `main（ADR-060 之前记的是分支名）`，而不是让它看起来像一个 commit。
 - `analysis_version` 提升到 `1.4.0`：响应多了 `commit`，且"读的是哪个修订"的语义变了。
 
+### 4.5 版本号由拥有账本的一方分配（ADR-061）
+
+策略版本一旦创建就不可修改，所以"这个名字的第几版"是一份**账本**，它的所有者是服务端，不是调用方。旧实现把这个决定推给了调用方：`GithubImportRequest.version` 直接默认 `"1.0.0"`，Web UI 更是在 `importReviewed` 里硬编码 `'1.0.0'`——于是同一个仓库第二次导入必然撞上 `version '1.0.0' already exists for this strategy`（422），而页面上没有任何地方能改版本号。调用方既看不到已有版本，也无从知道该填什么；它唯一能做的就是猜，猜错就失败。
+
+- `GithubImportRequest.version` 变成**可选**（`None` = 由服务端分配）。省略时 `import_strategy` 调用 `strategy_version_plan`（`app/data/strategy_service.py`），用 `next_version` 取**下一个空闲补丁号**：没有任何版本 → `1.0.0`；已有 `1.0.0` → `1.0.1`；已有 `1.0.0`/`1.0.9` → `1.0.10`。比较按 `major/minor/patch` 三个整数做，所以 `1.9.0` 之后是 `1.10.0` 而不是字符串比较得到的 `1.9.1`。
+- 账本里出现**读不成 `major.minor.patch` 的版本**（例如审阅者自己命名的 `v2-beta`）时，服务端**拒绝分配**（422，理由里点名那个版本），而不是发明一个可能撞车的号；此时调用方必须显式给版本号。人工命名的版本仍然合法，它只是不能被自动递增。
+- `GET /importer/github/versions?name=...` 在**写任何东西之前**回答"这个名字现在有什么、下一个会是什么"：`{name, slug, strategy_id, versions, next_version, can_assign, reason}`。UI 用它来（a）显示"将新建策略 / 将在策略 #N 上创建版本 x.y.z"，（b）在审阅者手填的版本号已经存在时直接禁用导入按钮——不再让人点下去才发现 422。
+- 导入响应新增 `version_assigned`（`true` = 服务端分配），`evidence_json` 与审计记录也记它。`version` 由审阅者命名时行为不变（重复仍然 422）。
+
 ## 5. AI Extraction 输出
 
 必须结构化：

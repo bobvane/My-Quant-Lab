@@ -372,10 +372,10 @@ jobs:
           fi
           python3 -c "import json;d=json.load(open('/tmp/scan.json'));assert isinstance(d['evaluated'],int) and d['evaluated']>=0, d;assert d.get('disclaimer'), d;print('evaluated =', d['evaluated'], '| created =', d['created'])"
 
-      - name: "Exposure assertions (ADR-103/104)"
+      - name: "Exposure assertions (ADR-103/104/106)"
         run: |
           set -euo pipefail
-          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.build.yml"
+          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example"
           API=http://127.0.0.1:8080
           WEB=http://127.0.0.1:8081
           TOKEN=ci-exposure-token-1
@@ -386,17 +386,26 @@ jobs:
           # while the web container keeps presenting it for the browser
           # (ADR-103/104). One recreate, three claims.
           #
-          # The two overrides go into a copy of the example env file rather than
-          # the shell environment: compose decides what wins between the shell
-          # and `--env-file`, and a step that quietly lost these two values would
-          # assert nothing while reporting success.
-          cp .env.example /tmp/exposure.env
-          {
-            echo "WEB_BIND=127.0.0.1"
-            echo "API_AUTH_TOKEN=$TOKEN"
-          } >> /tmp/exposure.env
-          COMPOSE="$COMPOSE --env-file /tmp/exposure.env"
-          $COMPOSE up -d --no-deps api web
+          # The stack was created with per-run secrets that only the boot step's
+          # shell knew (ADR-077), so recreating these two containers without
+          # reading those values back would hand the API the example defaults and
+          # lose it the database. They are read out of the running container, and
+          # the two overrides are exported rather than written into an env file,
+          # because shell values win over --env-file in this repository (ADR-077).
+          read_env() {
+            docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' quantlab-api \
+              | sed -n "s/^$1=//p" | head -n 1
+          }
+          export POSTGRES_PASSWORD="$(read_env POSTGRES_PASSWORD)"
+          export SECRET_KEY="$(read_env SECRET_KEY)"
+          [ -n "$POSTGRES_PASSWORD" ] || { echo "cannot read the password the API is running on"; exit 1; }
+          export WEB_BIND=127.0.0.1
+          export API_AUTH_TOKEN="$TOKEN"
+          # These are the compose service names, and --no-deps keeps the database,
+          # the queue and the proxy out of the recreate: a step that named a
+          # service which does not exist would fail before its first assertion
+          # (ADR-106, and how this step first failed in CI).
+          $COMPOSE up -d --no-deps quantlab-api quantlab-web
 
           ok=0
           for _ in $(seq 1 60); do

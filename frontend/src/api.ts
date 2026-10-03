@@ -76,6 +76,10 @@ export interface Strategy {
   slug: string
   description: string | null
   source_type: string
+  /** Provenance: where this strategy came from, and under which licence (ADR-114). */
+  source_url: string | null
+  license: string | null
+  author: string | null
   status: string
   lifecycle: string
   created_at: string
@@ -591,6 +595,8 @@ export interface AppSettings {
 export interface PaperAccount {
   id: number
   name: string
+  /** The strategy this account is bound to, if any: attribution is per account (ADR-114). */
+  strategy_id: number | null
   /** Money the account was funded with: deposits minus withdrawals (ADR-066). */
   net_deposits: number
   cash: number
@@ -626,11 +632,23 @@ export const api = {
   systemInfo: () => request<SystemInfo>('/system/info'),
   assets: () => request<Asset[]>('/assets'),
   strategies: () => request<Strategy[]>('/strategies'),
+  // One strategy, for the nine-part detail page: the list row carries no provenance (ADR-114).
+  strategy: (id: number) => request<Strategy>(`/strategies/${id}`),
   strategyVersions: (id: number) => request<StrategyVersion[]>(`/strategies/${id}/versions`),
   activateVersion: (versionId: number) =>
     request<StrategyVersion>(`/strategy-versions/${versionId}/activate`, { method: 'PUT' }),
   strategyLineage: (strategyId: number) =>
     request<Record<string, any>>(`/strategies/${strategyId}/lineage`),
+  // Recomputes the stored immutable hash: a version whose text no longer hashes to
+  // what was archived is a different strategy wearing the same name (ADR-114).
+  verifyStrategyVersion: (versionId: number) =>
+    request<{
+      strategy_version_id: number
+      version: string
+      stored_hash: string
+      recomputed_hash: string
+      intact: boolean
+    }>(`/strategies/versions/${versionId}/verify`),
   versionParameters: (versionId: number) =>
     request<Array<Record<string, any>>>(`/strategy-versions/${versionId}/parameters`),
   createStrategy: (name: string, description?: string) =>
@@ -825,6 +843,15 @@ export const api = {
         symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
       }`,
     ),
+  // The current (unpersisted) signal for one strategy version: a preview is what a
+  // signal *would* be right now, and it needs a symbol because a strategy does not
+  // name one (ADR-114).
+  signalPreview: (strategyVersionId: number, symbol?: string, timeframe = '1d') =>
+    request<Record<string, any>>(
+      `/signals/preview/${strategyVersionId}?timeframe=${encodeURIComponent(timeframe)}${
+        symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
+      }`,
+    ),
   signalOutcomes: (limit = 50, symbol?: string) =>
     request<Array<Record<string, any>>>(
       `/signals/outcomes?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''}`,
@@ -860,6 +887,13 @@ export const api = {
     }>(`/paper/accounts/${accountId}/equity`),
   paperPositions: (accountId: number) =>
     request<PaperPosition[]>(`/paper/accounts/${accountId}/positions`),
+  // Trades carry the strategy *version label* they came from, not a strategy id:
+  // attribution is per account, and this page says so rather than inventing a join
+  // the backend does not make (ADR-114).
+  paperTrades: (accountId?: number, limit = 100) =>
+    request<Array<Record<string, any>>>(
+      `/paper/trades?limit=${limit}${accountId ? `&account_id=${accountId}` : ''}`,
+    ),
   executePaperSignal: (accountId: number, signalId: number) =>
     request<PaperExecution>(`/paper/accounts/${accountId}/execute`, {
       method: 'POST',

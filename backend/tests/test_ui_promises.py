@@ -15,6 +15,8 @@ These guards bind the promises to the code:
 * every section must carry exactly one ``状态：`` line, and a section that is
   not ``已实现`` must say what is missing.
 * ``已实现（<path>）`` must name files that exist.
+* §3's nine parts must live on one detail page, each section reading its own source,
+  and a missing reading must be named rather than left blank.
 * §4's assumptions block must exist on the backtest page.
 * §5's equity curve and latest-signal list must exist on the paper page.
 * §6's four owed segments must exist on the signal page, and a "current" reading
@@ -44,6 +46,7 @@ BACKTEST = REPO_ROOT / "frontend" / "src" / "views" / "BacktestView.vue"
 PAPER = REPO_ROOT / "frontend" / "src" / "views" / "PaperView.vue"
 SIGNALS = REPO_ROOT / "frontend" / "src" / "views" / "SignalsView.vue"
 STRATEGIES = REPO_ROOT / "frontend" / "src" / "views" / "StrategiesView.vue"
+DETAIL = REPO_ROOT / "frontend" / "src" / "views" / "StrategyDetailView.vue"
 API = REPO_ROOT / "frontend" / "src" / "api.ts"
 METRICS = REPO_ROOT / "frontend" / "src" / "metrics.ts"
 METRIC_HINT = REPO_ROOT / "frontend" / "src" / "components" / "MetricHint.vue"
@@ -107,9 +110,20 @@ def test_the_navigation_tree_is_the_shipped_navigation() -> None:
         f"(App.vue: {[(path, label) for path, label in labels]}, "
         f"documented: {documented}): a page nobody routed is a page that 404s (ADR-107)"
     )
-    assert [path for _, path in documented] == [path for path, _ in routes], (
+    # A detail route has a parameter and no navigation entry of its own: it may not
+    # inflate the seven-row tree, but it may not hide from the spec either (ADR-114).
+    nav_routes = [route for route in routes if ":" not in route[0]]
+    detail_routes = [route for route in routes if ":" in route[0]]
+    assert [path for _, path in documented] == [path for path, _ in nav_routes], (
         "the documented order no longer matches the route table in frontend/src/main.ts"
     )
+    spec = _text(SPEC)
+    for path, name in detail_routes:
+        assert path in spec, (
+            f"frontend/src/main.ts routes {path} ({name}) and docs/13_UI_UX.md never names it: "
+            "an undocumented detail page is the nine-entry tree again, one page at a time "
+            "(ADR-114)"
+        )
 
 
 def test_every_section_says_whether_it_exists() -> None:
@@ -387,4 +401,80 @@ def test_the_outstanding_list_covers_exactly_the_unfinished_sections() -> None:
         "the outstanding list at the end of docs/13_UI_UX.md and the per-section 状态 "
         f"lines disagree: sections {sorted(unfinished - listed)} are unfinished but not "
         f"listed, sections {sorted(listed - unfinished)} are listed but marked done (ADR-107)"
+    )
+
+
+# The nine parts §3 promises on one page, in the order the plan listed them.
+DETAIL_SECTIONS = (
+    "概览（Overview）",
+    "血统（Provenance）",
+    "版本历史（Version History）",
+    "规则（Rules）",
+    "回测（Backtest）",
+    "样本外与滚动验证（OOS / Walk-forward）",
+    "模拟盘（Paper Trading）",
+    "当前信号（Current Signals）",
+    "AI 解释（AI Explanation）",
+)
+
+
+def test_the_strategy_detail_page_shows_its_nine_sections() -> None:
+    """§3's nine parts lived on four other pages; one page had to own them (ADR-114)."""
+    section = next(body for number, _, body in _sections() if number == 3)
+    for name in DETAIL_SECTIONS:
+        assert name in section, f"docs/13 §3 no longer promises the {name} part"
+
+    assert DETAIL.exists(), (
+        "docs/13 §3 promises an independent strategy detail page and "
+        "frontend/src/views/StrategyDetailView.vue does not exist: the nine parts stayed "
+        "spread over /market, /backtest, /paper and /signals (ADR-114)"
+    )
+    page = _text(DETAIL)
+    for name in DETAIL_SECTIONS:
+        assert f"<h3>{name}</h3>" in page, (
+            f"the detail page renders no {name} section: a part that exists only in the spec "
+            "is the nine-part page the spec already had (ADR-114)"
+        )
+
+    # Every section reads a source of its own: a paragraph about a strategy is not a reading.
+    for call in (
+        "api.strategy(",
+        "api.strategyLineage(",
+        "api.strategyVersions(",
+        "api.verifyStrategyVersion(",
+        "api.backtests(",
+        "api.lifecycle(",
+        "api.paperAccounts(",
+        "api.paperTrades(",
+        "api.signalPreview(",
+        "api.strategyEvidence(",
+        "api.aiStatus(",
+    ):
+        assert call in page, (
+            f"the detail page never calls {call}: a section rendered without its own source is "
+            "prose, and prose cannot be checked (ADR-114)"
+        )
+    assert "api.explainSignalPreview(" in page or "api.explainBacktest(" in page, (
+        "the AI section is not a request: §3 promises an AI explanation, and a section that "
+        "explains nothing is a label (ADR-114)"
+    )
+
+    # A reading that does not exist must be named, because a blank reads as zero.
+    for honest in (
+        "不是零，是还没有数据",
+        "未记录",
+        "不落库",
+        "归因按",
+        "还没有配置 AI",
+        "只解释已有数字",
+    ):
+        assert honest in page, (
+            f"the detail page never says {honest!r}: §3's parts have holes (no backtest, no "
+            "commits, no paper account, no AI provider), and an unnamed hole reads as a "
+            "measurement (ADR-114)"
+        )
+
+    assert "/strategy/" in _text(STRATEGIES), (
+        "nothing in the strategy library links to the detail route: the page would exist and "
+        "no reader could reach it (ADR-114)"
     )

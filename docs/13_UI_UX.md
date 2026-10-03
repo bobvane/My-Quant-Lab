@@ -6,7 +6,7 @@
 - `状态：部分实现（缺少 <清单>）` —— 已经做到的部分照实写，缺的部分写在同一行里。
 - `状态：尚未实现（<计划或「未安排」>）` —— 只出现在本文件末尾的欠账一节，正文不再用将来时描述不存在的东西。
 
-守卫 `backend/tests/test_ui_promises.py` 把第 1 节的导航树与 `frontend/src/main.ts:16-22` 的路由、`frontend/src/App.vue:60-68` 的导航标签逐条对照，并核对每个 `已实现` 点名的文件存在 —— 所以这份文件不会再悄悄承诺一个不存在的页面（ADR-107）。
+守卫 `backend/tests/test_ui_promises.py` 把第 1 节的导航树与 `frontend/src/main.ts:17-23` 的路由、`frontend/src/App.vue:60-68` 的导航标签逐条对照，并核对每个 `已实现` 点名的文件存在 —— 所以这份文件不会再悄悄承诺一个不存在的页面（ADR-107）。
 
 ## 1. Navigation
 
@@ -25,6 +25,8 @@
 ```
 
 早期版本在这一节画过一棵更长的树：Strategies 下挂 Strategy Library、GitHub Sources、Experimental、Strategy Detail，另有两个顶级项 Portfolio Context 与 Data Health。这些**都不是独立页面**：策略库、GitHub 导入、策略血统与版本、组合概览（Ghostfolio 上下文）、数据健康分别作为 `/market` 与 `/` 的区块存在。本文件按现状记录，不再列不存在的页面。
+
+唯一的例外是第 3 节的策略详情页：它有自己的一条路由 `/strategy/:strategyId`（`frontend/src/main.ts:26`），但**不占导航**——它从 `/market` 策略库每一行的「详情」进入，所以上面的七条仍然是七条。守卫把带参数的路由与导航路由分开核对：详情路由不得改变导航树的行数，但必须在本文件里被点名（ADR-114）。
 
 ## 2. Dashboard
 
@@ -50,18 +52,19 @@
 
 ## 3. Strategy Detail
 
-状态：部分实现（缺少 独立的策略详情页：Overview、Rules、Current Signals、AI Explanation 四段在 `/market` 上没有对应区块）
+状态：已实现（frontend/src/views/StrategyDetailView.vue, frontend/src/main.ts, frontend/src/views/StrategiesView.vue）
 
-策略的细节目前分布在三个页面，而不是一个九段的详情页：
+`/strategy/:strategyId` 是独立页面，从 `/market` 策略库每一行的「详情」进入（`frontend/src/main.ts:26`），九段都在这一页上（ADR-114）：
 
-- 策略库与策略血统（Provenance）：`frontend/src/views/StrategiesView.vue` 的「策略血统」区块
-- 版本历史（Version History）与生命周期：「策略 #<id> 版本」「策略生命周期（基于证据，无 AI 介入）」
-- 规则（Rules）：同页的「策略 DSL（声明式，JSON 形式）」
-- 回测与样本外/滚动验证（Backtest、OOS / Walk-forward）：`frontend/src/views/BacktestView.vue`
-- 模拟盘（Paper Trading）：`frontend/src/views/PaperView.vue`
-- 当前信号与 AI 解释（Current Signals、AI Explanation）：`frontend/src/views/SignalsView.vue`
-
-九段式详情页仍是计划，尚未实现。
+1. 概览（Overview）：`GET /strategies/{id}` 的身份字段（ID、Slug、来源类型、状态与生命周期、版本数、创建时间），加上 `GET /lifecycle/strategies/{id}` 的当前阶段、证据支持的下一步、被挡原因、退步标记与逐门通过情况；没有证据支持任何下一步时就写没有，而不是替它建议一个。
+2. 血统（Provenance）：来源类型/地址/许可/作者，以及每个版本的提交、来源地址、提示词版本与不可变哈希。没记下的写「未记录」，不猜。
+3. 版本历史（Version History）：所有版本的 Schema、校验状态、是否当前、创建时间与哈希；「校验」按钮调用 `GET /strategies/versions/{version_id}/verify` 重新计算哈希并与存档比对，不一致就写「哈希不一致（文本已变）」。
+4. 规则（Rules）：当前版本 DSL 的指标、入场、出场（`all`/`any` 组按策略自己的词渲染）、风险与执行参数——读的是策略自己说的话，不是回测的结论。
+5. 回测（Backtest）：当前版本的回测运行列表与最近一次的关键读数（总收益率、最大回撤、夏普比率、胜率、期末权益）。没有运行时写「不是零，是还没有数据」，并把读者送到回测实验室。
+6. 样本外与滚动验证（OOS / Walk-forward）：只从生命周期证据里读「已记录过几次」与最近一次摘要，并明说这些结果**不落库**——`POST /research/oos` 与 `POST /research/walk-forward` 按需计算，系统留下的只有审计事件，所以这一节不是一份完整评估。
+7. 模拟盘（Paper Trading）：绑定到这个策略的账户（`GET /paper/accounts` 的 `strategy_id`）与它们的交易，并明说归因按账户：模拟盘交易只带账户与当时的策略版本名，系统不会把一笔成交倒推给某个策略。
+8. 当前信号（Current Signals）：`GET /signals/preview/{strategy_version_id}` 的当前（未持久化）信号与 `GET /signals/evidence/{strategy_version_id}` 的五层确定性证据（规则匹配、经验统计、模拟盘统计、组合上下文、信号意图）。预览需要标的，因为策略自己不点名任何标的，所以标的那一格是必填的。
+9. AI 解释（AI Explanation）：`GET /ai/status` 说明是否配置；已配置时可以解释当前信号预览（`POST /signals/preview-explain`）或最近一次回测（`POST /backtests/{run_id}/explain`），只解释已有数字、不参与计算；未配置时明说未配置，并写明九段在没有任何 AI 的情况下全部可用。
 
 ## 4. Backtest Lab
 
@@ -124,6 +127,6 @@
 
 ## 10. 欠账（尚未实现的承诺，按本文件顺序）
 
-- 独立的策略详情页与其中的 Overview、Rules、Current Signals、AI Explanation 四段（第 3 节）
+（无）
 
-这一节是上面 `尚未实现` / `缺少` 的汇总视图；两份清单必须一致，守卫会核对。
+这一节是上面 `尚未实现` / `缺少` 的汇总视图；两份清单必须一致，守卫会核对。截至 v1.7.8，本文件列出的承诺全部已实现：最后一条欠账（独立的策略详情页）由 v1.7.8 收下，这一节从此只保留一处说明——下面不再有「尚未实现」的正文承诺，新的计划写在别处，不写进这份按现状记录的规格。

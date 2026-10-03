@@ -834,6 +834,8 @@ onMounted(load)
                 </button>
               </td>
               <td>
+                <!-- The nine-part detail page lives at its own route, reached from here (ADR-114). -->
+                <RouterLink class="ghost" :to="`/strategy/${s.id}`">详情</RouterLink>
                 <button class="ghost" @click="toggleVersions(s)">
                   {{ expandedId === s.id ? '收起版本' : '版本' }}
                 </button>

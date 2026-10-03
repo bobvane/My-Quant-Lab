@@ -401,6 +401,13 @@ code {
   word-break: break-word;
 }
 
+/* Hashes and identifiers are read character by character (ADR-114). */
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
 /* The seven-step GitHub import wizard (ADR-113, docs/13_UI_UX.md section 8). A step that
    cannot be reached yet is drawn as locked instead of silently failing on click. */
 .wizard-steps {

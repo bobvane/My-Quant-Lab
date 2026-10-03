@@ -473,6 +473,11 @@ findings, the draft DSL, and a `coverage` block (ADR-056, docs/05 §4.1).
 `GET /audit/logs`
 `GET /audit/logs/entity/{entity_type}/{entity_id}`
 
+- `action` 是审计记录里「这条记录说了什么发生了」的字段，界面直接渲染它。
+  对 `strategy_lifecycle_changed` 它只有四个取值：`promote`（流水线内前进一步）、
+  `degrade`（被标记为降级）、`retire`（人工退休）、`restore`（从终态回到流水线）。
+  `retired` 不是「前进到最高阶段」，所以退休**不得**记为 `promote`（ADR-063）。
+
 ## System Settings
 
 `GET /settings`

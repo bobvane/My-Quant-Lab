@@ -1,8 +1,13 @@
 """remember the commit whose draft is waiting for a human reviewer
 
-Revision ID: 0008_github_source_pending_review
+Revision ID: 0008_github_pending_review
 Revises: 0007_backtest_result_warnings
 Create Date: 2026-10-03 03:00:00.000000
+
+The id is short on purpose: Alembic stores it in ``alembic_version.version_num``,
+which it creates as ``VARCHAR(32)`` on PostgreSQL. The first release of this
+migration used the 33-character ``0008_github_source_pending_review`` and every
+PostgreSQL deployment failed to migrate (ADR-064).
 
 Why this exists
 ---------------
@@ -26,7 +31,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0008_github_source_pending_review"
+revision: str = "0008_github_pending_review"
 down_revision: str | None = "0007_backtest_result_warnings"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

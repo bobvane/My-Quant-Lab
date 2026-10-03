@@ -8,7 +8,10 @@ where "AI says so" upgrades a strategy. Accordingly this module:
   backtests, walk-forward runs, paper trades);
 * applies fixed thresholds, never a model;
 * moves at most one stage at a time, so the roadmap stays visible;
-* writes an audit event containing the evidence snapshot on every change.
+* writes an audit event containing the evidence snapshot on every change;
+* names the direction of that change (``promote``/``degrade``/``retire``/
+  ``restore``) instead of inferring it from a rank, because leaving the pipeline
+  is not the same move as reaching the top of it (ADR-063).
 
 ``reference_signal`` and ``retired`` are manual-only: they are never applied
 automatically.
@@ -35,6 +38,7 @@ from app.domain.models import (
 )
 
 __all__ = [
+    "LIFECYCLE_ACTIONS",
     "LifecycleError",
     "LifecycleThresholds",
     "apply_lifecycle",
@@ -322,7 +326,7 @@ def apply_lifecycle(
         event_type="strategy_lifecycle_changed",
         entity_type="strategy",
         entity_id=str(strategy.id),
-        action="promote" if _rank(target_stage) > _rank(previous) else "degrade",
+        action=_transition_action(previous, target_stage),
         actor=actor,
         payload={
             "from": previous,
@@ -337,9 +341,24 @@ def apply_lifecycle(
     return strategy
 
 
-def _rank(stage: str) -> int:
-    order = (*PIPELINE, *MANUAL_ONLY)
-    try:
-        return order.index(stage)
-    except ValueError:
-        return -1
+LIFECYCLE_ACTIONS = ("promote", "degrade", "retire", "restore")
+
+
+def _transition_action(previous: str, target: str) -> str:
+    """Name the move the audit trail is about to record.
+
+    ``retired`` is the last entry of :data:`MANUAL_ONLY`, and ``degraded`` is in
+    neither pipeline tuple, so the rank comparison this replaced read "leave the
+    pipeline" as "advance to the highest stage" and filed every retirement as a
+    promotion. The label names where the move lands instead: a flagged or
+    retired strategy, or -- when a terminal strategy re-enters the pipeline --
+    a restore. Nothing else is a step forward.
+    """
+
+    if target == _DEGRADED:
+        return "degrade"
+    if target == _RETIRED:
+        return "retire"
+    if previous in _TERMINAL:
+        return "restore"
+    return "promote"

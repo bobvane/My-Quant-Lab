@@ -25,6 +25,7 @@ from app.domain.models import (
     StrategyVersion,
 )
 from app.strategies.lifecycle import (
+    LIFECYCLE_ACTIONS,
     LifecycleError,
     LifecycleThresholds,
     apply_lifecycle,
@@ -224,18 +225,89 @@ def test_lifecycle_change_is_audited_with_evidence(db_session) -> None:
     strategy, _version, _series, _asset = _base(db_session)
     apply_lifecycle(db_session, strategy, "normalized", actor="user", note="reviewed")
 
-    from app.domain.models import AuditLog
-
-    events = [
-        row
-        for row in db_session.query(AuditLog).all()
-        if row.event_type == "strategy_lifecycle_changed"
-    ]
+    events = _lifecycle_events(db_session)
     assert len(events) == 1
     payload = events[0].payload_json or {}
     assert payload["from"] == "imported"
     assert payload["to"] == "normalized"
     assert "evidence" in payload
+    assert events[0].action in LIFECYCLE_ACTIONS
+
+
+# --------------------------------------------------------------------------- #
+# Direction in the audit trail (ADR-063)
+# --------------------------------------------------------------------------- #
+def _lifecycle_events(db_session) -> list:
+    from app.domain.models import AuditLog
+
+    return [
+        row
+        for row in db_session.query(AuditLog).all()
+        if row.event_type == "strategy_lifecycle_changed"
+    ]
+
+
+def _last_lifecycle_event(db_session):
+    events = _lifecycle_events(db_session)
+    assert events, "the lifecycle change was not audited at all"
+    return events[-1]
+
+
+def test_retiring_a_strategy_is_recorded_as_a_retirement(db_session) -> None:
+    strategy, version, _series, asset = _base(db_session, lifecycle="paper_trading")
+    _add_paper(db_session, strategy, version, asset, trades=12, pnl=400.0)
+
+    apply_lifecycle(db_session, strategy, "retired", actor="user", note="no longer used")
+
+    event = _last_lifecycle_event(db_session)
+    # ``retired`` sits at the end of MANUAL_ONLY, so comparing ranks made the
+    # move out of the pipeline look like the largest promotion available.
+    assert event.action == "retire"
+    assert event.payload_json["from"] == "paper_trading"
+    assert event.payload_json["to"] == "retired"
+
+
+def test_retiring_a_degraded_strategy_is_not_a_promotion(db_session) -> None:
+    strategy, _version, _series, _asset = _base(db_session, lifecycle="degraded")
+
+    apply_lifecycle(db_session, strategy, "retired", actor="user")
+
+    assert _last_lifecycle_event(db_session).action == "retire"
+
+
+def test_a_step_forward_is_still_recorded_as_a_promotion(db_session) -> None:
+    strategy, version, series, _asset = _base(db_session, lifecycle="validated")
+    _add_backtest(db_session, version, series, trades=25)
+
+    apply_lifecycle(db_session, strategy, "backtested", actor="user")
+
+    event = _last_lifecycle_event(db_session)
+    assert event.action == "promote"
+    assert event.payload_json["to"] == "backtested"
+
+
+def test_a_losing_paper_strategy_is_recorded_as_a_degradation(db_session) -> None:
+    strategy, version, _series, asset = _base(db_session, lifecycle="oos_tested")
+    _add_paper(db_session, strategy, version, asset, trades=15, pnl=-500.0)
+
+    apply_lifecycle(db_session, strategy, "degraded", actor="system")
+
+    event = _last_lifecycle_event(db_session)
+    assert event.action == "degrade"
+    assert event.payload_json["to"] == "degraded"
+
+
+def test_leaving_a_terminal_stage_is_recorded_as_a_restore(db_session) -> None:
+    strategy, version, _series, asset = _base(db_session, lifecycle="retired")
+    _add_paper(db_session, strategy, version, asset, trades=12, pnl=400.0)
+    assert evaluate_lifecycle(db_session, strategy)["reference_eligible"] is True
+
+    apply_lifecycle(db_session, strategy, "reference_signal", actor="user")
+
+    event = _last_lifecycle_event(db_session)
+    assert event.action == "restore"
+    assert event.payload_json["from"] == "retired"
+    assert event.payload_json["to"] == "reference_signal"
 
 
 def test_custom_thresholds_are_honoured(db_session) -> None:

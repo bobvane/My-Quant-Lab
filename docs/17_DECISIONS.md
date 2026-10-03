@@ -1114,7 +1114,7 @@ watcher 路径不需要额外请求：它比较的本来就是 `get_head_commit(
 
 1. 无人值守导入与人工导入共用**同一个裁决者**：`strategy_service.strategy_dsl_problem(dsl)`（`parse_spec` + `validate_strategy`），在写任何东西之前先问；返回 `None` 才继续导入，否则把裁决原话记下来。两条路径问同一个函数，才不会出现"人工导入被拒绝、watcher 却写进去了"这种分叉。
 2. 裁决不通过 → 结果记为新的 `review_required`：快照 `reason="requires_review"`、`detail` 是裁决文本、`transient=false`、`imported=false`，`last_import_status="review_required"`，**不创建任何版本**。
-3. 该 commit 写进新的可空列 `GitHubSource.pending_review_commit`（迁移 `0008_github_source_pending_review`）。`current_commit` 同时推进（同一个 commit 再抓一次也只会得到同一个结论），但"还在等人工"必须由独立列表达：否则下一次 beat 看到 `head == current_commit` 直接报 `unchanged`，把等待状态抹掉。
+3. 该 commit 写进新的可空列 `GitHubSource.pending_review_commit`（迁移 `0008_github_pending_review`；v1.5.2 里这个迁移的 id 有 33 个字符，超过 Alembic 在 PostgreSQL 上建的 `VARCHAR(32)` 列，改名经过见 ADR-064）。`current_commit` 同时推进（同一个 commit 再抓一次也只会得到同一个结论），但"还在等人工"必须由独立列表达：否则下一次 beat 看到 `head == current_commit` 直接报 `unchanged`，把等待状态抹掉。
 4. 等待中的 commit 不再抓取：`check_source` 在 `head == current_commit` 判定**之前**先比 `pending_review_commit == head`，命中即返回 `review_required`（只花一次 HEAD 请求）。顺序是关键——放在后面就等于允许"unchanged"覆盖等待。
 5. 人工导入**那个** commit 会清空 `pending_review_commit`（`_persist_github_source` 里逐 commit 比较）；导入别的 commit 不清空——等待属于某个修订，不属于仓库。
 6. 更新的 commit 取代旧等待：head 变了就走常规路径，能导入则一并清空等待。
@@ -1133,3 +1133,121 @@ watcher 路径不需要额外请求：它比较的本来就是 `get_head_commit(
 **测试**
 
 `backend/tests/test_github_watch.py`：新增 `test_the_import_gate_names_what_blocks_an_unattended_import`（合法草案 `None`；缺离场规则 → `invalid strategy DSL -> : Value error, at least one exit rule is required`；引用 `future_close` 的可解析草案 → `invalid strategy DSL -> entry.long.right:` 且含 `unavailable future data`，即校验器那条**安静**分支也被挡住）、`test_an_exit_less_draft_is_refused_instead_of_crashing`（`review_required` + 快照 `requires_review` + `detail` 含离场规则 + `pending_review_commit`、版本数不变、`current_commit` 推进）、`test_a_pending_review_survives_the_next_run_without_refetching`（假 client 的 `fetch_repository` 直接 `AssertionError` → 仍然 `review_required`、零快照）、`test_a_new_commit_clears_a_review_that_was_never_done`（head 变新 → 正常导入且清空等待）、`test_an_import_that_raises_is_recorded_not_raised`（`create_strategy_version` 抛 `RuntimeError("ledger exploded")` → `error`、`import_failed`、`current_commit` 不变）、`test_a_source_with_nothing_linked_says_so`（`no_linked_strategy` 与 `dsl_unchanged` 区分开）、`test_a_source_that_crashes_does_not_stop_the_run`（两个来源，第一个抛错 → `{"checked": 2, "error": 1, "unchanged": 1}` 且第二个仍被检查）、`test_the_watcher_numbers_versions_with_the_ledger`（删掉 `test_bump_version_scheme`，改断言账本的整数编号）。`backend/tests/test_github_sources.py`：新增 `test_importing_the_pending_commit_clears_the_review` 与 `test_importing_another_commit_keeps_the_pending_review`。`backend/scripts/probe_watch_refusal.py` 离线跑真 `check_source` 三次（拒绝 → 再问一次不重抓 → 新 commit 取代并清空等待）并打印快照原因与 `detail`。
+
+## ADR-063：生命周期审计必须说出它实际做的动作（`retire`/`restore`，`_transition_action`，docs/12 Audit Logs）
+
+### 背景
+
+- `apply_lifecycle` 每次阶段变更都写 `strategy_lifecycle_changed` 审计事件，`action` 字段用
+  `"promote" if _rank(target_stage) > _rank(previous) else "degrade"` 推出方向。
+- `_rank(stage)` 的名字排成 `(*PIPELINE, *MANUAL_ONLY)`，即
+  `imported, normalized, validated, backtested, oos_tested, paper_trading, reference_signal, retired`。
+  于是 **`retired` 排在整个序的最高位**，而 `degraded` 根本不在序里（返回 `-1`）。
+- 结论是：把策略退休 —— 生命周期里最重的动作 —— 被记成 `"promote"`，即「晋级」。
+  `degraded -> retired` 也同样是 `"promote"`。实测（一次性探针，真 `apply_lifecycle`）：
+  `paper_trading -> retired` 写 `promote`，`degraded -> retired` 写 `promote`，
+  `paper_trading -> degraded` 写 `degrade`，`validated -> backtested` 写 `promote`。
+- 这不是内部小事：审计表 UI（`frontend/src/views/SettingsView.vue:832`）把 `action` 原样渲染在
+  「动作」列，所以页面上一次「退休」显示为 `promote`；`GET /audit/logs` 的 `action` 也是同一个值。
+- 没有任何测试看过这个字段：全仓只有 `backend/app/strategies/lifecycle.py:325` 与 `:340` 提到
+  `_rank`，测试里 promote/degrade 只作为函数名出现（`test_promotes_one_step_at_a_time_with_evidence`
+  `backend/tests/test_lifecycle.py:158`），没有断言 `action` 的用例。
+- 根因不是笔误，而是**用排名比较表达方向**：流水线序表达「谁在谁前面」，表达不了
+  「离开流水线」和「被标记」——`retired` 在流水线之外，`degraded` 在两条元组之外。
+
+### 决策
+
+1. 用 `_transition_action(previous: str, target: str) -> str` 取代 `_rank` 比较，并删除 `_rank`
+   （`backend/app/strategies/lifecycle.py`）。
+2. 词表固定为 `LIFECYCLE_ACTIONS = ("promote", "degrade", "retire", "restore")`，并从模块导出，
+   供测试与文档引用。
+3. 裁决顺序：`target == degraded -> "degrade"`；`target == retired -> "retire"`；
+   `previous in (degraded, retired) -> "restore"`；其余 `"promote"`。
+   即：**先看落到哪里**（被标记 / 退休），再看是不是从终态回到流水线，剩下的才是前进一步。
+4. `retired -> degraded` 记 `degrade`（落到被标记态），`retired -> reference_signal` 记 `restore`。
+5. 自动化路径不变：`degraded` 仍然只由规则给出（`degrade_pnl_threshold`），`retired` 永远只能人工；
+   `actor` 也照旧（人 `user`、规则 `system`）。
+6. 测试（`backend/tests/test_lifecycle.py`，新增 5 条）：退休记 `retire`（两种来路）、
+   亏损记 `degrade`、前进记 `promote`、从 `retired` 回到 `reference_signal` 记 `restore`；
+   原有的审计测试补一条 `action in LIFECYCLE_ACTIONS`，防止未来新增词表外的取值。
+7. 探针 `backend/scripts/probe_lifecycle_direction.py`（离线、内存 SQLite）把五种走法打印成一张表，
+   任何一格与词表不符即 exit 1。
+8. `docs/12_API_SPEC.md` 的 Audit Logs 小节写明 `action` 的四个取值与「退休不得记为 promote」。
+
+### 理由
+
+- **审计记录存在的意义是回答问题**。当有人翻到「谁把这套策略停了」，它必须能回答；把退休写成
+  「晋级」比没有记录更糟：它让停止看起来像鼓励，而这个字段正在页面上被直接阅读。
+- **方向不是序关系**。流水线是一条链，「离开链」「被标记」不是链上的位置；`degraded` 甚至不在
+  任何元组里。要么把方向写成显式的裁决（本决策），要么就得先把 `degraded`/`retired` 硬塞进序里
+  —— 那等于用排名的假象继续掩盖语义。
+- **词表是契约**。`action` 已被 UI 与 API 消费，取值应当是有限、可枚举、可断言的；把它写成常量并
+  让测试引用，才能在下一次改生命周期时立刻发现越界。
+- 与 ADR-062 同一族：**记录必须说出实际发生的事**，宁可多一个新词（`retire`），也不要复用
+  「晋级」去描述停止。
+
+## ADR-064：迁移 id 必须放得进 Alembic 自己的 32 字符列（`0008_github_pending_review`，ADR-062 的迁移改名）
+
+### 背景
+
+- v1.5.2 的迁移 id 是 `0008_github_source_pending_review`，**33 个字符**。
+- Alembic 在 PostgreSQL 上把版本表建成 `alembic_version.version_num VARCHAR(32)`，而迁移执行的最后一步是
+  `UPDATE alembic_version SET version_num = '<新 id>' WHERE ...`。于是这条迁移在 PostgreSQL 上必然失败：
+
+  ```
+  psycopg.errors.StringDataRightTruncation: value too long for type character varying(32)
+  sqlalchemy.exc.DataError: (psycopg.errors.StringDataRightTruncation) value too long ...
+  [SQL: UPDATE alembic_version SET version_num='0008_github_source_pending_review'
+        WHERE alembic_version.version_num = '0007_backtest_result_warnings']
+  ```
+
+- 后果不是「迁移慢一点」，而是**Postgres 部署起不来**：整个迁移事务回滚（`add_column` 与版本更新同事务，
+  库仍停在 `0007_backtest_result_warnings`），`compose` 的 entrypoint 重试三次后
+  `[entrypoint] ERROR: migrations failed; refusing to start`，容器被判 unhealthy。
+- v1.5.2 的 CI 因此变红（run `37084884774`，headSha `b6e2c6d3c`）：`backend tests + lint` 的
+  「Run PostgreSQL regression tests」四条 setup error 全是这条 `DataError`，
+  `docker compose smoke test` 的「Boot the stack」也是同一个原因；同一提交的 `frontend build` 与 release 流水线是绿的。
+- 为什么本地一路看不出来：本地 581 条测试跑在 **SQLite** 上（`alembic upgrade head` 到临时文件），SQLite
+  不强制列长度，迁移成功；而唯一会碰 PostgreSQL 的 `backend/tests/test_postgres_triggers.py` 四条在本地因
+  `TEST_POSTGRES_URL` 未设置被 **skip**。也就是说「只在 Postgres 上必炸」的缺陷在本地没有任何一条路径能暴露它。
+
+### 决策
+
+1. 迁移 id 改为 `0008_github_pending_review`（25 字符）。文件名保留描述性的
+   `backend/alembic/versions/0008_github_source_pending_review.py`，沿用仓库既有先例
+   （`0001_initial_schema.py` 的 id 是 `0001_initial`、`0004_resource_monitor_tables.py` 的 id 是
+   `0004_resource_monitor`：文件名说人话，id 只求短且唯一）。
+2. 新增守卫测试 `backend/tests/test_migration_revisions.py`，不需要任何数据库即可运行（因此本地与 CI 都会跑）：
+   - 每个迁移的 `revision` 长度 ≤ 32（常量 `ALEMBIC_VERSION_COLUMN = 32`，注释写明它来自 Alembic 在
+     PostgreSQL 上建的 `version_num VARCHAR(32)`）；
+   - `revision` 唯一；
+   - 每个 `down_revision` 都能解析到一条存在的迁移；
+   - 整条链恰好一个 head。
+3. ADR-062 与 `docs/15` 里指向这条迁移的旧 id 同步改名，并留一句「改名经过见 ADR-064」，避免文档指向一个
+   不存在的 revision。
+
+### 理由
+
+- **上限不是我们的选择**：`VARCHAR(32)` 由 Alembic 自己建，我们能选的只有名字长度。把「能存进去」写成断言，
+  比让每个人记住这个上限可靠。
+- **守卫必须离线可跑**：CI 里唯一真正的 Postgres 检查依赖 `TEST_POSTGRES_URL`，本地默认没有；如果守卫只能
+  在 Postgres 上跑，它就会和这次一样在本地被 skip 掉。所以新测试读迁移文件本身（`ast` 解析，不需要数据库）。
+- **改 id 而不是改列宽**：`alembic_version` 是 Alembic 的表，扩大列宽需要先跑一条迁移——而迁移本身要先写进
+  这张表，鸡生蛋问题；改名是唯一没有自举问题的修法。
+- 与 ADR-060/061/062 同一族：**记录里写的东西必须是系统真能承担的东西**——这次是版本号，不是分支名或状态。
+
+### 影响与兼容
+
+- PostgreSQL 部署不受影响：旧 id 的迁移**从未成功过**，数据库仍是 `0007_backtest_result_warnings`，重新拉取
+  新镜像会直接走到 `0008_github_pending_review`。
+- 已经用 v1.5.2 在 **SQLite** 上迁移过的本地库会停在旧 id 上，`alembic upgrade head` 报
+  `Can't locate revision identified by '0008_github_source_pending_review'`。修法二选一：
+  `UPDATE alembic_version SET version_num='0008_github_pending_review'`，或删掉本地库重建（本地库都是可丢弃的）。
+
+### 测试
+
+- `test_every_revision_id_fits_the_alembic_version_column`、`test_every_down_revision_resolves_to_a_migration`、
+  `test_the_chain_has_exactly_one_head`、`test_versions_directory_is_not_empty`
+  （`backend/tests/test_migration_revisions.py`，4 passed）。
+- 真栈复核：删掉验证库后 `alembic upgrade head` 末行
+  `Running upgrade 0007_backtest_result_warnings -> 0008_github_pending_review`。

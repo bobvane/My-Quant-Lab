@@ -71,6 +71,7 @@ from app.api.routers import (
 from app.api.routers.health import warm_dependency_probes
 from app.core.config import settings
 from app.core.logging import configure_logging
+from app.data.market_data_repo import SeriesNotResolved
 from app.infrastructure.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,16 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.exception_handler(SeriesNotResolved)
+    async def series_not_resolved_handler(request: Request, exc: SeriesNotResolved):
+        # "Which series does this request mean?" is answered in one place
+        # (``resolve_series``), so the answer -- including "I cannot tell" -- is
+        # reported in one shape for every endpoint that resolves a series (ADR-119).
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):

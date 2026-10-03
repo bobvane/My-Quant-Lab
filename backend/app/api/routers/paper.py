@@ -10,7 +10,7 @@ import datetime as dt
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import (
@@ -35,10 +35,36 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/paper", tags=["paper-trading"])
 
 
+def _realized_by_account(db: Session, account_ids: list[int]) -> dict[int, float]:
+    """Realized P&L per account, in one query.
+
+    The account list is what the paper panel and the dashboard read, and neither may
+    present `cash - net_deposits` as the P&L: a position that is open spent the cash, so
+    a full-size buy used to be shown as -100% (ADR-124).
+    """
+    if not account_ids:
+        return {}
+    rows = db.execute(
+        select(PaperTrade.account_id, func.sum(PaperTrade.pnl))
+        .where(PaperTrade.account_id.in_(account_ids), PaperTrade.exit_time.is_not(None))
+        .group_by(PaperTrade.account_id)
+    ).all()
+    return {int(account_id): float(total or 0.0) for account_id, total in rows}
+
+
+def _account_payload(
+    db: Session, account: PaperAccount, *, realized: float | None = None
+) -> PaperAccountOut:
+    if realized is None:
+        realized = _realized_by_account(db, [account.id]).get(account.id, 0.0)
+    return PaperAccountOut.model_validate(account).model_copy(update={"realized_pnl": realized})
+
+
 @router.get("/accounts", response_model=list[PaperAccountOut], summary="List paper accounts")
 def list_accounts(db: Session = Depends(get_db)) -> list[PaperAccountOut]:
     rows = db.scalars(select(PaperAccount).order_by(PaperAccount.id)).all()
-    return [PaperAccountOut.model_validate(row) for row in rows]
+    realized = _realized_by_account(db, [row.id for row in rows])
+    return [_account_payload(db, row, realized=realized.get(row.id, 0.0)) for row in rows]
 
 
 @router.post(
@@ -65,7 +91,7 @@ def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)) -
     )
     db.commit()
     db.refresh(account)
-    return PaperAccountOut.model_validate(account)
+    return _account_payload(db, account, realized=0.0)
 
 
 @router.get("/accounts/{account_id}", response_model=PaperAccountOut, summary="Get paper account")
@@ -73,7 +99,7 @@ def get_account(account_id: int, db: Session = Depends(get_db)) -> PaperAccountO
     account = db.get(PaperAccount, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="paper account not found")
-    return PaperAccountOut.model_validate(account)
+    return _account_payload(db, account)
 
 
 def _aware(moment: dt.datetime) -> dt.datetime:
@@ -81,12 +107,27 @@ def _aware(moment: dt.datetime) -> dt.datetime:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=dt.UTC)
 
 
-def replay_equity_curve(db: Session, account: PaperAccount) -> list[dict[str, float | str]]:
-    """Rebuild an account's equity history from the events that moved it (ADR-108).
+def _trade_span(trades: list[PaperTrade]) -> dt.timedelta | None:
+    """How much time the trades actually cover, or None when they cover none.
 
-    Funding is read back from the audit log instead of assumed, because a deposit
-    moves the baseline: a curve drawn as "today's net deposits plus realized P&L"
-    would rewrite the past every time money entered or left the account.
+    A metric series with one point per trade is not a calendar: annualising it as if
+    each point were a day turned two trades a few weeks apart into a four-digit CAGR.
+    """
+    entries = [_aware(t.entry_time) for t in trades if t.entry_time is not None]
+    exits = [_aware(t.exit_time) for t in trades if t.exit_time is not None]
+    if not entries or not exits:
+        return None
+    span = max(exits) - min(entries)
+    return span if span > dt.timedelta(0) else None
+
+
+def _account_life(
+    db: Session, account: PaperAccount
+) -> tuple[dt.datetime, float, list[tuple[dt.datetime, float]], list[PaperTrade]]:
+    """What moved this account, and when: start, opening cash, funding, closed trades.
+
+    The equity curve and the performance metrics must agree about the account's
+    current life, so both read it from here instead of each rebuilding it.
     """
     closed = list(
         db.scalars(
@@ -113,6 +154,19 @@ def replay_equity_curve(db: Session, account: PaperAccount) -> list[dict[str, fl
         for event in events
         if event.event_type == "paper_account_funded" and _aware(event.created_at) >= start
     ]
+    # Whatever was not put in after the opening is what the account started with.
+    opening = float(account.initial_cash) - sum(amount for _, amount in flows)
+    return start, opening, flows, closed
+
+
+def replay_equity_curve(db: Session, account: PaperAccount) -> list[dict[str, float | str]]:
+    """Rebuild an account's equity history from the events that moved it (ADR-108).
+
+    Funding is read back from the audit log instead of assumed, because a deposit
+    moves the baseline: a curve drawn as "today's net deposits plus realized P&L"
+    would rewrite the past every time money entered or left the account.
+    """
+    start, opening, flows, closed = _account_life(db, account)
     moves: list[tuple[dt.datetime, float]] = list(flows)
     moves += [
         (_aware(trade.exit_time), float(trade.pnl or 0))
@@ -120,8 +174,6 @@ def replay_equity_curve(db: Session, account: PaperAccount) -> list[dict[str, fl
         if trade.exit_time is not None and _aware(trade.exit_time) >= start
     ]
     moves.sort(key=lambda move: move[0])
-    # Whatever was not put in after the opening is what the account started with.
-    opening = float(account.initial_cash) - sum(amount for _, amount in flows)
     points: list[dict[str, float | str]] = [
         {"timestamp": start.isoformat(), "equity": round(opening, 4)}
     ]
@@ -198,12 +250,6 @@ def account_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
         ).all()
     )
     net_deposits = float(account.initial_cash)
-    # The metrics stay measured against the current baseline: the equity curve publishes
-    # funding as the step it is, and feeding that series here would report a deposit as a
-    # gain (ADR-108).
-    equity = [net_deposits]
-    for trade in trades:
-        equity.append(equity[-1] + float(trade.pnl or 0))
     trade_dicts = [
         {
             "pnl": float(t.pnl or 0),
@@ -213,20 +259,67 @@ def account_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
         }
         for t in trades
     ]
-    metrics = compute_metrics(np.asarray(equity, dtype=float), trade_dicts, timeframe="1d")
+    if net_deposits <= 0:
+        # No positive denominator, so no ratios: keep the money series so `final_equity`
+        # still describes the account (ADR-066).
+        legacy = [net_deposits]
+        for trade in trades:
+            legacy.append(legacy[-1] + float(trade.pnl or 0))
+        metrics = compute_metrics(np.asarray(legacy, dtype=float), trade_dicts, timeframe="1d")
+        final_equity = legacy[-1]
+    else:
+        # The ratio series is funding-neutral: every trade is measured against the money
+        # it actually ran on, so a deposit or withdrawal moves the baseline instead of
+        # being published as a gain (+100% used to come out of "withdraw everything after
+        # a profit", ADR-121). The money figures stay money.
+        start, opening, flows, _closed = _account_life(db, account)
+        # Every closed trade belongs to the current life: a reset deletes them, so there
+        # is nothing to filter out here (and the curve's own `start` filter exists to keep
+        # funding steps out of the past, not to drop trades).
+        index = [1.0]
+        equity = opening
+        pending = list(flows)
+        for trade in trades:
+            moment = _aware(trade.exit_time)
+            while pending and pending[0][0] <= moment:
+                equity += pending.pop(0)[1]
+            pnl = float(trade.pnl or 0)
+            if equity > 0:
+                index.append(index[-1] * (1.0 + pnl / equity))
+            equity += pnl
+        # One point per trade is not a calendar: annualise over the time the trades
+        # actually span, not over "a point means a day" (ADR-121).
+        span = _trade_span(trades)
+        years = span.total_seconds() / (86_400.0 * 365.25) if span is not None else 0.0
+        values = np.asarray(index, dtype=float)
+        if years > 0:
+            metrics = compute_metrics(
+                values, trade_dicts, timeframe="1d", bars_per_year=len(index) / years
+            )
+        else:
+            metrics = compute_metrics(values, trade_dicts, timeframe="1d")
+            if metrics.cagr is not None:
+                metrics.cagr = None
+                metrics.notes.append(
+                    "the closed trades span no time, so there is no period to annualise over"
+                )
+        final_equity = net_deposits + sum(float(t.pnl or 0) for t in trades)
+        metrics.initial_capital = net_deposits
+        metrics.final_equity = final_equity
     return {
         "account_id": account_id,
         "net_deposits": net_deposits,
-        "final_equity": equity[-1],
+        "final_equity": final_equity,
         "closed_trades": len(trades),
         "metrics": metrics.as_dict(),
         # Why a metric is missing is part of the answer: without this the caller only
         # sees `null` and has to guess (ADR-066).
         "metric_notes": metrics.notes,
         "note": (
-            "指标由已平仓交易的权益序列计算；持仓未实现盈亏不计入。"
-            "期末权益 = 净入金（入金 − 提现）+ 已实现盈亏；"
-            "净入金 ≤ 0 时不发布收益率类指标（ADR-066）。"
+            "指标由已平仓交易计算；持仓未实现盈亏不计入。收益率是资金中性的"
+            "（每笔交易按它实际动用的钱计算），入金/提现只移动基准，不算收益也不算"
+            "回撤；年化用交易真实跨越的时间。期末权益 = 净入金（入金 − 提现）+ "
+            "已实现盈亏；净入金 ≤ 0 时不发布收益率类指标（ADR-066、ADR-121）。"
         ),
     }
 

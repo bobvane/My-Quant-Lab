@@ -358,9 +358,12 @@ onMounted(load)
             <tr v-for="a in accounts" :key="a.id">
               <td>{{ a.name }}</td>
               <td>{{ formatNumber(a.net_deposits) }} {{ a.base_currency }}</td>
-              <td :class="toneOf(a.cash - a.net_deposits)">
+              <td :class="toneOf(a.realized_pnl)">
                 {{ formatNumber(a.cash) }}
-                <span class="muted">({{ formatPaperPnlPct(a.net_deposits, a.cash) }})</span>
+                <span class="muted"
+                  >（已实现盈亏 {{ formatNumber(a.realized_pnl) }} ·
+                  {{ formatPaperPnlPct(a.net_deposits, a.realized_pnl) }}）</span
+                >
               </td>
               <td>{{ a.status }}</td>
             </tr>

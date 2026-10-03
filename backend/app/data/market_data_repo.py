@@ -7,6 +7,7 @@ feature engine and the backtest engine accept.
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import hashlib
 from collections.abc import Iterable
 
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.domain.models import Asset, MarketDataBar, MarketDataSeries
 
 __all__ = [
+    "SeriesNotResolved",
     "assess_bars_quality",
     "bars_to_frame",
     "frame_to_bars",
@@ -24,11 +26,16 @@ __all__ = [
     "load_bars",
     "latest_closed_bar_time",
     "refresh_series_content_hash",
+    "resolve_series",
     "series_content_hash",
     "upsert_bars",
 ]
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "amount", "is_closed", "source_hash"]
+
+# Columns a re-sync may refresh on an existing row. ``series_id``/``timestamp``
+# identify the row and no provider produces ``amount``.
+_REFRESHABLE_BAR_FIELDS = ("open", "high", "low", "close", "volume", "is_closed", "source_hash")
 
 # Daily bars with a bigger jump than this are treated as a data gap. Weekends
 # (2 days) and most holidays (<=4 days) stay below it.
@@ -194,10 +201,69 @@ def load_bars(
     return bars_to_frame(rows)
 
 
-def upsert_bars(db: Session, series: MarketDataSeries, bars: list[dict[str, object]]) -> int:
-    """Insert bars, skipping timestamps that already exist (idempotent sync)."""
+def _field_matches(stored: object, incoming: object) -> bool:
+    """Compare a stored column with an incoming value at the column's own scale.
+
+    Prices live in ``Numeric(20, 8)`` columns, so they come back as ``Decimal``
+    rounded to eight places while a provider hands back a full-precision float.
+    Comparing those two directly reports a change on every single sync; comparing
+    them at the stored scale answers the question that matters — "did the provider
+    tell us something different?".
+    """
+
+    if stored is None or incoming is None:
+        return stored is None and incoming is None
+    if isinstance(stored, decimal.Decimal) and not isinstance(incoming, decimal.Decimal):
+        try:
+            incoming = decimal.Decimal(str(incoming))
+        except decimal.InvalidOperation:  # pragma: no cover - defensive
+            return False
+    if isinstance(stored, decimal.Decimal) and isinstance(incoming, decimal.Decimal):
+        try:
+            return stored == incoming.quantize(stored)
+        except decimal.InvalidOperation:  # pragma: no cover - extreme exponents
+            return False
+    return bool(stored == incoming)
+
+
+def _refresh_bar(row: MarketDataBar, bar: dict[str, object]) -> bool:
+    """Copy changed fields onto an existing bar; return whether anything changed."""
+
+    changed = False
+    for field in _REFRESHABLE_BAR_FIELDS:
+        if field not in bar or bar[field] is None:
+            continue
+        incoming = bar[field]
+        if _field_matches(getattr(row, field), incoming):
+            continue
+        setattr(row, field, incoming)
+        changed = True
+    return changed
+
+
+def upsert_bars(
+    db: Session,
+    series: MarketDataSeries,
+    bars: list[dict[str, object]],
+    *,
+    report: dict[str, int] | None = None,
+) -> int:
+    """Insert new bars and refresh timestamps that already exist.
+
+    Returns the number of *inserted* rows. Repeated syncs of unchanged data write
+    nothing, but a timestamp that comes back with different values is updated in
+    place: a bar first stored while it was still forming has to be allowed to
+    become the finished bar, otherwise every closed-bar reader stays frozen on the
+    day of the first sync while the series still looks current (ADR-118).
+
+    ``report``, when passed, is filled in place with ``inserted`` and ``updated``
+    counts, so a caller can tell "nothing to do" from "the same window arrived
+    with final prices".
+    """
 
     if not bars:
+        if report is not None:
+            report.update({"inserted": 0, "updated": 0})
         return 0
 
     # Compare in naive-UTC form: SQLite returns naive datetimes, so comparing
@@ -211,22 +277,25 @@ def upsert_bars(db: Session, series: MarketDataSeries, bars: list[dict[str, obje
     timestamps = [bar["timestamp"] for bar in bars]
     naive_keys = [_naive_utc(t) for t in timestamps]  # type: ignore[arg-type]
     existing = {
-        _naive_utc(value)
-        for value in db.scalars(
-            select(MarketDataBar.timestamp).where(
+        _naive_utc(row.timestamp): row
+        for row in db.scalars(
+            select(MarketDataBar).where(
                 MarketDataBar.series_id == series.id,
                 MarketDataBar.timestamp.in_(naive_keys),
             )
         ).all()
     }
     inserted = 0
+    updated = 0
     for bar, key in zip(bars, naive_keys, strict=True):
-        if key in existing:
+        row = existing.get(key)
+        if row is None:
+            db.add(MarketDataBar(series_id=series.id, **bar))  # type: ignore[arg-type]
+            inserted += 1
             continue
-        db.add(MarketDataBar(series_id=series.id, **bar))  # type: ignore[arg-type]
-        existing.add(key)
-        inserted += 1
-    if inserted:
+        if _refresh_bar(row, bar):
+            updated += 1
+    if inserted or updated:
         # SQLite returns naive datetimes; normalise both sides to aware UTC
         # before comparing.
         def _utc(value: dt.datetime | None) -> dt.datetime | None:
@@ -243,7 +312,99 @@ def upsert_bars(db: Session, series: MarketDataSeries, bars: list[dict[str, obje
     # Whoever writes bars also stamps their hash, so a series can never claim a
     # content hash that its stored bars do not produce (ADR-092).
     refresh_series_content_hash(db, series)
+    if report is not None:
+        report.update({"inserted": inserted, "updated": updated})
     return inserted
+
+
+class SeriesNotResolved(LookupError):
+    """A request does not name exactly one stored series.
+
+    The HTTP status the API layer should answer with travels on the exception, so
+    the rule lives in one place while every caller reports the same thing
+    (ADR-119).
+    """
+
+    def __init__(self, detail: str, *, status_code: int = 404) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+
+
+def _asset_by_symbol(db: Session, symbol: str) -> Asset:
+    asset = db.scalar(select(Asset).where(Asset.symbol == symbol))
+    if asset is None:
+        raise SeriesNotResolved(f"asset '{symbol}' not found")
+    return asset
+
+
+def resolve_series(
+    db: Session,
+    *,
+    symbol: str | None = None,
+    asset_id: int | None = None,
+    series_id: int | None = None,
+    timeframe: str | None = None,
+) -> MarketDataSeries:
+    """Answer "which stored series does this request mean?" (ADR-119).
+
+    A symbol plus a timeframe is not enough to identify a series: the unique key
+    also holds the provider source and the dataset version, so a second provider
+    (or a re-sync under a new source) leaves two rows for the same pair. The rule
+    is:
+
+    * an explicit ``series_id`` must exist, and when the request also names a
+      symbol, an asset or a timeframe they must agree with that row (422
+      otherwise);
+    * otherwise one of ``symbol`` / ``asset_id`` is required (422), and the series
+      is chosen among the non-archived rows for (asset, timeframe) by coverage:
+      the one whose data reaches furthest wins, ties broken by the newest row.
+
+    Archived series are never selected implicitly -- they are the ones a person
+    hid on purpose.
+    """
+
+    if series_id is not None:
+        series = db.get(MarketDataSeries, series_id)
+        if series is None:
+            raise SeriesNotResolved(f"series {series_id} not found")
+        if symbol is not None and series.asset_id != _asset_by_symbol(db, symbol).id:
+            raise SeriesNotResolved(
+                f"series {series_id} does not belong to '{symbol}'", status_code=422
+            )
+        if asset_id is not None and series.asset_id != asset_id:
+            raise SeriesNotResolved(
+                f"series {series_id} does not belong to asset {asset_id}", status_code=422
+            )
+        if timeframe is not None and series.timeframe != timeframe:
+            raise SeriesNotResolved(
+                f"series {series_id} is {series.timeframe}, not {timeframe}", status_code=422
+            )
+        return series
+
+    if asset_id is None:
+        if not symbol:
+            raise SeriesNotResolved("either series_id or symbol is required", status_code=422)
+        asset_id = _asset_by_symbol(db, symbol).id
+    wanted = timeframe or "1d"
+    series = db.scalars(
+        select(MarketDataSeries)
+        .where(
+            MarketDataSeries.asset_id == asset_id,
+            MarketDataSeries.timeframe == wanted,
+            MarketDataSeries.is_archived.is_(False),
+        )
+        .order_by(
+            # NULLS LAST is not the default on PostgreSQL, and a series that never
+            # synced has no coverage at all.
+            MarketDataSeries.series_end.desc().nullslast(),
+            MarketDataSeries.id.desc(),
+        )
+    ).first()
+    if series is None:
+        label = symbol or f"asset {asset_id}"
+        raise SeriesNotResolved(f"no market data for '{label}' {wanted}; sync first")
+    return series
 
 
 def latest_closed_bar_time(series: MarketDataSeries) -> dt.datetime | None:

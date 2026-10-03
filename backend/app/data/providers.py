@@ -21,16 +21,18 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "PROVIDER_NAMES",
+    "SUPPORTED_TIMEFRAMES",
     "MarketDataProvider",
     "ProviderError",
     "SymbolNotServed",
+    "SyntheticProvider",
+    "UnsupportedTimeframe",
     "YahooFinanceProvider",
     "asset_metadata_for",
     "get_market_data_provider",
     "infer_asset_class",
     "mark_closed_bars",
     "resolve_provider_name",
-    "SyntheticProvider",
 ]
 
 _TIMEFRAMES = {
@@ -40,6 +42,23 @@ _TIMEFRAMES = {
     "1h": "1h",
     "1d": "1d",
     "1w": "1wk",
+}
+
+# Every timeframe any provider can serve. A request outside this set is refused
+# rather than quietly answered with daily bars (ADR-120).
+SUPPORTED_TIMEFRAMES = frozenset(_TIMEFRAMES)
+
+# How long a bar of each timeframe lasts, used to decide whether it has closed.
+# Calendar timeframes are compared by date; intraday ones by their exact period.
+# Close is a fact about one bar, not about the newest one (ADR-117).
+_CALENDAR_PERIOD_DAYS = {"1d": 1, "1w": 7, "1wk": 7}
+_INTRADAY_PERIOD_SECONDS = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1_800,
+    "1h": 3_600,
+    "4h": 14_400,
 }
 
 # Crypto pairs quote 24/7 and carry no exchange session.
@@ -58,6 +77,15 @@ class SymbolNotServed(ProviderError):
 
     Kept distinct so the API can answer 400 (wrong provider chosen) instead of
     502 (something upstream broke).
+    """
+
+
+class UnsupportedTimeframe(ProviderError):
+    """The provider cannot produce bars at the requested resolution.
+
+    Raised instead of substituting a different timeframe: a series labelled ``1h``
+    that actually holds daily bars is worse than an error, because features,
+    backtests and signals then read the wrong resolution without anyone noticing.
     """
 
 
@@ -82,15 +110,31 @@ def infer_asset_class(symbol: str) -> str:
     return "stock"
 
 
+def _bar_period(timeframe: str) -> tuple[int, int] | None:
+    """Return ``(calendar_days, seconds)`` for a timeframe, or ``None`` if unknown."""
+
+    if timeframe in _CALENDAR_PERIOD_DAYS:
+        return _CALENDAR_PERIOD_DAYS[timeframe], 0
+    if timeframe in _INTRADAY_PERIOD_SECONDS:
+        return 0, _INTRADAY_PERIOD_SECONDS[timeframe]
+    return None
+
+
 def mark_closed_bars(
     frame: pd.DataFrame, timeframe: str, timezone_name: str = "UTC", now: dt.datetime | None = None
 ) -> pd.DataFrame:
-    """Flag whether the final bar has actually closed.
+    """Flag, bar by bar, whether each bar has actually closed.
 
-    A provider happily returns today's still-forming daily candle. Treating it
-    as closed would let the strategy see an unfinished bar — exactly the
-    lookahead the project forbids. Intraday timeframes are always treated as
-    potentially open except when the bar timestamp is already in the past.
+    A provider happily returns today's still-forming daily candle. Treating it as
+    closed would let the strategy see an unfinished bar — exactly the lookahead
+    the project forbids. Every bar is therefore judged against *its own* period:
+    it counts as closed once the period it covers is over. Judging only the last
+    bar, or comparing its date with today's, gets two cases wrong — the weekly bar
+    whose timestamp is this Monday (still running on Wednesday) and the hourly bar
+    containing ``now``.
+
+    A timeframe whose length is unknown is never assumed closed; the newest bar
+    stays forming, because guessing its period is the same mistake one level up.
     """
 
     out = frame.copy()
@@ -103,20 +147,27 @@ def mark_closed_bars(
     except Exception:
         tz = dt.UTC
     reference = (now or dt.datetime.now(tz=dt.UTC)).astimezone(tz)
+    reference_utc = reference.astimezone(dt.UTC)
 
-    last_ts = pd.Timestamp(out.index[-1])
-    if last_ts.tzinfo is None:
-        last_ts = last_ts.tz_localize("UTC")
-    last_local = last_ts.tz_convert(tz)
+    period = _bar_period(timeframe)
+    if period is None:
+        out.iloc[-1, out.columns.get_loc("is_closed")] = False
+        return out
+    period_days, period_seconds = period
 
-    if timeframe in {"1d", "1w"}:
-        # A daily/weekly bar covering today is not finished until the day ends.
-        if last_local.date() >= reference.date():
-            out.iloc[-1, out.columns.get_loc("is_closed")] = False
-    else:
-        # Intraday: the bar containing "now" is still forming.
-        if last_local >= reference.replace(second=0, microsecond=0):
-            out.iloc[-1, out.columns.get_loc("is_closed")] = False
+    flags: list[bool] = []
+    for raw in out.index:
+        stamp = pd.Timestamp(raw)
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize("UTC")
+        if period_days:
+            local = stamp.tz_convert(tz)
+            flags.append(reference.date() >= local.date() + dt.timedelta(days=period_days))
+        else:
+            closes_at = stamp.tz_convert(dt.UTC) + dt.timedelta(seconds=period_seconds)
+            flags.append(reference_utc >= closes_at)
+
+    out["is_closed"] = flags
     return out
 
 
@@ -161,6 +212,9 @@ class SyntheticProvider:
 
     KNOWN_SYMBOLS = ("DEMO-AAPL", "DEMO-BTC")
 
+    # The random walk is a daily series; it cannot stand in for intraday bars.
+    TIMEFRAMES = frozenset({"1d"})
+
     def list_assets(self) -> list[dict[str, Any]]:
         return [
             {
@@ -200,6 +254,12 @@ class SyntheticProvider:
                 f"the synthetic provider only serves {', '.join(self.KNOWN_SYMBOLS)}; "
                 f"'{symbol}' is not one of them. Set MARKET_DATA_PROVIDER=yahoo_finance "
                 "to fetch real market data."
+            )
+        if timeframe not in self.TIMEFRAMES:
+            raise UnsupportedTimeframe(
+                f"the synthetic provider only produces {', '.join(sorted(self.TIMEFRAMES))} "
+                f"bars, so it cannot serve '{timeframe}'. Set MARKET_DATA_PROVIDER="
+                "yahoo_finance for intraday data."
             )
 
         import zlib
@@ -247,6 +307,8 @@ class YahooFinanceProvider:
     """Thin wrapper over ``yfinance`` (install optional extra ``market-data``)."""
 
     name = "yahoo_finance"
+
+    TIMEFRAMES = SUPPORTED_TIMEFRAMES
 
     def __init__(self) -> None:
         self._module: Any | None = None
@@ -312,8 +374,15 @@ class YahooFinanceProvider:
         ``Date`` or ``Datetime``, and an in-progress session yields NaN rows.
         """
 
+        # Checked before ``_ensure()``: a wrong timeframe is a caller error and must
+        # not depend on the optional dependency being installed.
+        if timeframe not in _TIMEFRAMES:
+            raise UnsupportedTimeframe(
+                f"yahoo finance cannot serve '{timeframe}'; supported: "
+                f"{', '.join(sorted(_TIMEFRAMES))}."
+            )
         yf = self._ensure()
-        interval = _TIMEFRAMES.get(timeframe, "1d")
+        interval = _TIMEFRAMES[timeframe]
         try:
             raw = yf.download(
                 symbol,

@@ -16,7 +16,8 @@ import logging
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.domain.models import MarketDataSeries, Signal, SignalOutcome
+from app.data.market_data_repo import SeriesNotResolved, load_bars, resolve_series
+from app.domain.models import Signal, SignalOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,6 @@ def evaluate_pending_outcomes(
     Returns counts: {"evaluated": N, "insufficient_data": M, "skipped": K,
     "not_an_entry": E} — ``E`` counts the closing signals, which are not work.
     """
-
-    from app.data.market_data_repo import load_bars
 
     # Find entry signals without an outcome row.
     pending = db.scalars(
@@ -88,13 +87,9 @@ def evaluate_pending_outcomes(
         if signal_ts.tzinfo is None:
             signal_ts = signal_ts.replace(tzinfo=dt.UTC)
 
-        series = db.scalar(
-            select(MarketDataSeries).where(
-                MarketDataSeries.asset_id == signal.asset_id,
-                MarketDataSeries.timeframe == signal.timeframe,
-            )
-        )
-        if series is None:
+        try:
+            series = resolve_series(db, asset_id=signal.asset_id, timeframe=signal.timeframe)
+        except SeriesNotResolved:
             skipped += 1
             continue
 

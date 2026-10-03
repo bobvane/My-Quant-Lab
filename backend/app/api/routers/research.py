@@ -24,7 +24,7 @@ from app.api.schemas import (
     WalkForwardRequest,
 )
 from app.core.db import get_db
-from app.data.market_data_repo import load_bars
+from app.data.market_data_repo import load_bars, resolve_series
 from app.data.strategy_service import load_spec, record_audit
 from app.domain.models import (
     Asset,
@@ -48,20 +48,7 @@ def walk_forward(payload: WalkForwardRequest, db: Session = Depends(get_db)) -> 
     if strategy_version is None:
         raise HTTPException(status_code=404, detail="strategy version not found")
 
-    if payload.symbol:
-        asset = db.scalar(select(Asset).where(Asset.symbol == payload.symbol))
-        if asset is None:
-            raise HTTPException(status_code=404, detail=f"asset '{payload.symbol}' not found")
-        series = db.scalar(
-            select(MarketDataSeries).where(
-                MarketDataSeries.asset_id == asset.id,
-                MarketDataSeries.timeframe == payload.timeframe,
-            )
-        )
-    else:
-        series = None
-    if series is None:
-        raise HTTPException(status_code=404, detail="market data series not found")
+    series = resolve_series(db, symbol=payload.symbol, timeframe=payload.timeframe)
 
     frame = load_bars(db, series, only_closed=True)
     if len(frame) < payload.train_bars + payload.test_bars:
@@ -107,19 +94,7 @@ def oos(payload: OOSRequest, db: Session = Depends(get_db)) -> OOSOut:
     if strategy_version is None:
         raise HTTPException(status_code=404, detail="strategy version not found")
 
-    asset = (
-        db.scalar(select(Asset).where(Asset.symbol == payload.symbol)) if payload.symbol else None
-    )
-    if payload.symbol and asset is None:
-        raise HTTPException(status_code=404, detail=f"asset '{payload.symbol}' not found")
-    series = db.scalar(
-        select(MarketDataSeries).where(
-            MarketDataSeries.timeframe == payload.timeframe,
-            *([MarketDataSeries.asset_id == asset.id] if asset else []),
-        )
-    )
-    if series is None:
-        raise HTTPException(status_code=404, detail="market data series not found")
+    series = resolve_series(db, symbol=payload.symbol, timeframe=payload.timeframe)
 
     frame = load_bars(db, series, only_closed=True)
     spec = load_spec(strategy_version)
@@ -168,19 +143,7 @@ def sensitivity(payload: SensitivityRequest, db: Session = Depends(get_db)) -> S
     if strategy_version is None:
         raise HTTPException(status_code=404, detail="strategy version not found")
 
-    asset = (
-        db.scalar(select(Asset).where(Asset.symbol == payload.symbol)) if payload.symbol else None
-    )
-    if payload.symbol and asset is None:
-        raise HTTPException(status_code=404, detail=f"asset '{payload.symbol}' not found")
-    series = db.scalar(
-        select(MarketDataSeries).where(
-            MarketDataSeries.timeframe == payload.timeframe,
-            *([MarketDataSeries.asset_id == asset.id] if asset else []),
-        )
-    )
-    if series is None:
-        raise HTTPException(status_code=404, detail="market data series not found")
+    series = resolve_series(db, symbol=payload.symbol, timeframe=payload.timeframe)
 
     frame = load_bars(db, series, only_closed=True)
     if len(frame) < 60:
@@ -469,19 +432,8 @@ def _resolve_ensemble_inputs(
             )
         )
 
-    asset = (
-        db.scalar(select(Asset).where(Asset.symbol == payload.symbol)) if payload.symbol else None
-    )
-    if payload.symbol and asset is None:
-        raise HTTPException(status_code=404, detail=f"asset '{payload.symbol}' not found")
-    series = db.scalar(
-        select(MarketDataSeries).where(
-            MarketDataSeries.timeframe == payload.timeframe,
-            *([MarketDataSeries.asset_id == asset.id] if asset else []),
-        )
-    )
-    if series is None:
-        raise HTTPException(status_code=404, detail="market data series not found")
+    series = resolve_series(db, symbol=payload.symbol, timeframe=payload.timeframe)
+    asset = series.asset
 
     frame = load_bars(db, series, only_closed=True)
     if len(frame) < 60:

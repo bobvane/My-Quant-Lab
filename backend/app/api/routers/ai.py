@@ -105,9 +105,9 @@ def explain_preview(payload: dict[str, Any], db: Session = Depends(get_db)) -> E
     The AITask row is still persisted for audit and cache purposes.
     """
 
-    from app.data.market_data_repo import load_bars
+    from app.data.market_data_repo import load_bars, resolve_series
     from app.data.strategy_service import load_spec
-    from app.domain.models import Asset, MarketDataSeries, StrategyVersion
+    from app.domain.models import StrategyVersion
     from app.features.engine import build_features
     from app.strategies.executor import run_strategy
 
@@ -121,15 +121,7 @@ def explain_preview(payload: dict[str, Any], db: Session = Depends(get_db)) -> E
     version = db.get(StrategyVersion, strategy_version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="strategy version not found")
-    asset = db.scalar(select(Asset).where(Asset.symbol == symbol)) if symbol else None
-    series = db.scalar(
-        select(MarketDataSeries).where(
-            MarketDataSeries.timeframe == timeframe,
-            *([MarketDataSeries.asset_id == asset.id] if asset else []),
-        )
-    )
-    if series is None:
-        raise HTTPException(status_code=404, detail="no matching market data series")
+    series = resolve_series(db, symbol=symbol, timeframe=timeframe)
 
     bars = load_bars(db, series, only_closed=True, limit=800)
     if bars.empty:
@@ -144,7 +136,7 @@ def explain_preview(payload: dict[str, Any], db: Session = Depends(get_db)) -> E
         "kind": "signal",
         "state": intent.get("state"),
         "direction": intent.get("direction"),
-        "symbol": asset.symbol if asset else None,
+        "symbol": series.asset.symbol if series.asset is not None else symbol,
         "timeframe": timeframe,
         "bar_time": intent.get("bar_time"),
         "price_reference": intent.get("price_reference"),

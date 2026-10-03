@@ -2422,3 +2422,121 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 - 测试：新增 `backend/tests/test_fill_timing.py`（4 条）—— `test_a_stop_is_not_placed_by_the_bar_it_triggers_on`（80 根平地，每根 close 恒 100、ATR 恒 2；bar 70 的 low 只到 85：用本根 close 算出的止损 98 不会触发，用上一根算出的 96 才会，断言 `exit_time == index[70]`、`exit_price ≈ 96 * (1 - slippage)`）、`test_a_rule_exit_fills_at_the_next_bar_open`（每条 `exit_reason == "rule_exit"` 的成交价都等于其 `exit_time` 那根的开盘价加滑点；首笔在 `index[73]`、≈ 80 * (1 - slippage)）、`test_an_exit_signal_carries_the_bar_it_decided_on_and_the_bar_it_filled_on`（规则出场的 SELL 行 `bar_time == index[72]`、`fill_time == index[73]`、`fill_price ≈ 80 * (1 - slippage)`）、`test_an_ensemble_rule_exit_fills_at_the_next_bar_open`（同一帧跑 `run_ensemble([EnsembleMember(label="solo", spec=..., weight=1.0)], frame, vote_threshold=0.0)`，断言同一件事）。红证据：把该文件拷到 v1.7.9 `6f22267ab` 的工作树上跑 → **4 failed in 4.35s** —— `tests\test_fill_timing.py:172: KeyError: 'fill_time'`（出场信号从不记录成交时刻）、`tests\test_fill_timing.py:188: assert 89.955 == 109.94500000000001`（ensemble 的规则出场用决策 bar 的收盘 90 成交，而下一根开盘是 110）、以及自指止损与单策略规则出场两条。三处空测试同时重写为真守卫：`test_fill_uses_next_bar_open_not_signal_bar` 改按 `result.signals` 里 `direction in {"LONG","SHORT"}` 的行断言 `fill_time` 是 `bar_time` 的下一根、`fill_price` 等于那根开盘加滑点、每笔 trade 的 `entry_price` 等于对应信号的 `fill_price`；`test_trades_never_look_ahead` 从信号本身构造「决策 → 成交」两张表，断言每笔 trade 的 `entry_time` 都是某条信号的 `fill_time` 且严格晚于它的 `bar_time`；`test_ambiguous_fill_is_flagged_and_pessimistic` 的入场规则改为 `close > low`、出场改为 `close < low`，断言交易数从 0 变成 > 0、`ambiguous_fill` 确实被标记、且全部按 `stop_loss` 结算。`backend/tests/test_api.py` 新增 `test_a_run_reports_the_engine_that_actually_ran`：POST 一次回测并断言响应与 `GET /backtests/{id}` 的 `engine_version` / `feature_version` 等于代码里的常量（它在常量仍是 `"1.0.0"` 时也通过 —— 它守的是「字面量回来了就红」）。
 
+## ADR-117：一根 K 线收没收盘，是它自己的事实
+
+- 背景：v1.8.0 之后对数据面做了一轮只读审计（31 项），本版按用户划定的范围收下其中 9 项。① `backend/app/data/providers.py` 的 `mark_closed_bars` 只把**最后一根** K 线拿出来和「今天」比较：日/周线比日期（`last_local.date() >= reference.date()` → 本周一那根周线，在周三仍被判为收盘），日内比整点（`reference.replace(second=0, microsecond=0)` → 正在走的那个小时被判为收盘）。② UTC 20:00–24:00 之间，美股当日那根早已收完的日线反而会被判成仍在形成。这不是一个可以拖着的显示问题：D1 修好之后「同步会改写已落库的 K 线」（ADR-118），错误的闭合标记从此会被写进库里，并被 `load_bars(only_closed=True)` 当成策略可见的事实。这是同一族的第十四副面孔：**同一个字段在两根 K 线上有两种含义** —— `is_closed` 既表示「这根已经收完」，又表示「它是最新的那根」。
+
+- 决策：
+  1. 新增 `_CALENDAR_PERIOD_DAYS = {"1d": 1, "1w": 7, "1wk": 7}` 与 `_INTRADAY_PERIOD_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400}`，以及 `_bar_period(timeframe) -> tuple[int, int] | None`。
+  2. `mark_closed_bars(frame, timeframe, timezone_name="UTC", now=None)` 逐根判定并逐根赋值 `out["is_closed"] = flags`：日历周期为 `reference.date() >= local.date() + timedelta(days=period_days)`，日内周期为 `reference_utc >= stamp.tz_convert(dt.UTC) + timedelta(seconds=period_seconds)`。
+  3. 周期未知（`_bar_period` 返回 `None`）时不猜：只把最后一根留作未收盘，其余保持原值 —— 「猜它的长度」正是本 ADR 要修的那个错误，只是抬高层级。
+
+- 理由：日线分支与旧实现逐位一致（`reference.date() >= local.date() + 1 天` 等价于旧式 `!= 今天` 的补集，且旧式只对最后一根生效而新式对每根生效——对日线而言每根的历史判定本就是「不是今天就是收盘」），因此这次改动的风险全部落在周线与日内，而那正是旧逻辑错的地方。逐根判定的代价是 O(根数) 的循环，而这里的根数就是一次 fetch 的量（数百根）。
+
+- 影响与兼容：`mark_closed_bars` 的签名与三处调用点（`backend/app/api/routers/market_data.py:208`、`backend/app/workers/tasks.py:84`、测试）不变。日线结果不变；周线与日内 K 线的 `is_closed` 与响应里的 `still_forming_bars` 会变。不新增迁移：错误标记的存量行由 ADR-118 的重复同步自然改写（worker 每小时重发最近 400 天）。
+
+- 测试：`backend/tests/test_bar_lifecycle.py` 的 6 条 D2 用例 —— 本周那根周线未收盘、上周那根已收盘、正在走的整点小时未收盘、已过去的整点小时已收盘、日线逐根按自己的日子判定（`[True, True, False, False]`）、未知周期（"3d"）绝不假设收盘。红证据：把该文件拷到 v1.8.0 发布提交 `3a9a2bb84` 的工作树上单跑 → **7 failed, 2 passed in 1.95s**（含 `tests\test_bar_lifecycle.py:197: KeyError: 'updated'`，那是 D1 的一半）。
+
+## ADR-118：重复同步必须能改写已经落库的那根 K 线
+
+- 背景：`backend/app/data/market_data_repo.py` 的 `upsert_bars` 是**只插不改**的：`if key in existing: continue`。第一次同步时那根还没走完的 K 线（`is_closed=False`、`close` 是盘中价）从此被冻结；更糟的是 `series_start/series_end/last_sync_at` 只在 `if inserted:` 里刷新，于是「这个系列覆盖到哪里」也在第一次之后就停止前进。审计里这条被列为 D1：一个「第一次同步留下的未收盘 K 线，第二次同步不会变成最终收盘值」的可复现缺陷。
+
+- 决策：
+  1. 新增 `_REFRESHABLE_BAR_FIELDS = ("open", "high", "low", "close", "volume", "is_closed", "source_hash")`、`_field_matches(stored, incoming)`（把库里的值与来值都按存储列的小数位 `quantize` 后比较，避免 float 往返把「没变」读成「变了」）与 `_refresh_bar(row, bar) -> bool`（逐字段比对，只写真正变化的字段，返回是否改过）。
+  2. `upsert_bars(db, series, bars, *, report: dict[str, int] | None = None) -> int` 改为把已存在的键映射到**整行**，新键插入、旧键走 `_refresh_bar`；返回值仍是 `inserted`（4 个既有调用点与既有测试零改动），新增的关键字参数就地填入 `{"inserted": n, "updated": m}`。
+  3. `if inserted or updated:` 才刷新 `series_start/series_end/last_sync_at`；`refresh_series_content_hash` 仍无条件执行（标记变化也要反映到内容哈希上）。
+  4. `POST /market-data/sync` 传入 `report` 并在响应里新增 `updated`（空帧早返回也补 `"updated": 0`）。
+
+- 理由：一根还没收盘的 K 线的值不是最终值，把它当成不可变对象，等于把「还没结束」写成了「结束了」。用 `report` 出参而不是改返回值，是因为返回值已经被 worker 用来统计「新增了几根」，而这次要新增的信息是另一个问题（「改写了几根」）—— 两个问题各有一个名字（与 ADR-108/ADR-115 同族）。这也让修复在部署后**自愈**：worker 每小时重发最近 400 天，存量被冻结的行会在下一次同步时被改写，不需要回填迁移。
+
+- 影响与兼容：`updated` 是响应里的纯增量字段；`GET /market-data/series/{id}/bars` 与回测读到的 K 线从此会随收盘更新（这是本次要修的行为本身）。`_field_matches` 的比较发生在 Python 侧，SQLite 与 PostgreSQL 行为一致。
+
+- 测试：`backend/tests/test_bar_lifecycle.py` 的 3 条 D1 用例 —— 第二次 upsert 刷新那一根（`(3, 0)` → `(0, 1)`、收盘数 2 → 3、末根 close 101.0、总行数仍 3）、重复同步同一批数据写零行（`(0, 0)`）、以及端到端的 `test_a_later_sync_moves_the_closed_horizon_forward`（`now` 从 2026-09-30 12:00 走到 2026-10-01 09:00：首次 `inserted == 11` / `still_forming_bars == 1` / 10 根收盘，第二次 `inserted == 0` / `updated == 1` / `still_forming_bars == 0` / 11 根收盘）。红证据见 ADR-117（同一次红跑）。
+
+## ADR-119：同一标的有多份数据时，只有一个函数回答用哪一份
+
+- 背景：`MarketDataSeries` 的唯一键包含 `source_id` 与 `dataset_version`（`backend/app/domain/models.py:148-154`），所以一个 `(asset, timeframe)` 可以有多行。而解析这段数据的代码有八处，全部是同一个形状：`db.scalar(select(MarketDataSeries).where(asset_id == ..., timeframe == ...))` —— 没有 `ORDER BY`，没有 `is_archived` 过滤，`symbol` 缺省时还会匹配**任意资产**的第一行（`backend/app/api/routers/backtests.py:49-54`、`research.py:56/:116/:177/:478`、`signals.py:324-329`、`ai.py:124-130`、`backend/app/simulation/outcome_evaluator.py:91-99`）。回测结果本身也不说它读的是哪一行：`BacktestSummaryOut` 有 `dataset_hash`，没有来源。前端从不发 `series_id`（`frontend/src/api.ts:720-743`），所以「用哪一份」实际上由数据库的返回顺序决定。这是同一族的第十五副面孔：**同一个问题有八个答案，而且没有一个答案有名字**。
+
+- 决策：
+  1. 新增 `resolve_series(db, *, symbol=None, asset_id=None, series_id=None, timeframe=None) -> MarketDataSeries`（`backend/app/data/market_data_repo.py`），作为唯一入口：显式 `series_id` 必须存在（否则 404），并且若同时给了 `symbol`/`asset_id`/`timeframe` 就必须与那一行一致（矛盾 → 422，detail 形如 `series 2 is 1d, not 1h`）；否则必须给 `symbol` 或 `asset_id`（都没有 → 422），再在非归档行里按 `order_by(MarketDataSeries.series_end.desc().nullslast(), MarketDataSeries.id.desc())` 取第一条 —— **规则是「覆盖到最远的那份数据赢，平手取最新的那一行」**；一行都没有 → 404 `no market data for '<symbol>' <timeframe>; sync first`。
+  2. 新增 `SeriesNotResolved(LookupError)`（带 `.detail` 与 `.status_code`），在 `backend/app/api/main.py` 注册一个异常处理器，统一输出 `{"detail": ...}`；八处解析点全部改走 `resolve_series`（`signals.py` 与 `outcome_evaluator.py` 保留原有的容忍语义：解析不到就 `None` / `skipped += 1`）。
+  3. 结果可追溯：回测的 `_summary` 增加 `source`（`series.source.name`），`BacktestSummaryOut` 增加 `dataset_version` 与 `source`，落库的 `summary_json` 也带着 `source`；`create_backtest` 已把 `dataset_version_id = series.id` 写进 `BacktestRun`，两者合起来才能从一次回测回答「哪一行、哪个版本、哪个来源」。
+
+- 理由：「用哪一份数据」必须由一个函数回答，否则每加一个端点就多一个答案。显式 `series_id` 与请求冲突时返回 422 而不是静默采纳，是因为调用方的意图已经自相矛盾 —— 挑一边就是替它猜（ADR-115 的同一原则）。`series_end` 优先、`id` 兜底，是把「哪份数据更完整」而不是「哪行先被写进库」当作判据；归档行永不参与，因为归档这个动作本身就是「不要再用了」。
+
+- 影响与兼容：解析失败从「随便拿第一行」变成有语义的 404/422（grep 确认没有任何测试断言旧的 `no market data...sync first` / `no matching market data series` 文案）；`BacktestSummaryOut` 的两个字段是纯增量；不改表结构。`research.py` 的四个解析点在 `symbol` 缺省时不再匹配任意资产（这正是缺陷的一部分）。
+
+- 测试：`backend/tests/test_series_resolution.py` 9 条 —— 数据更新的那份胜出（而不是行更晚的那份）、规则与行序无关、被归档的系列永不被选、结果带着 series/source/dataset_version、显式 `series_id` 与 timeframe 矛盾 → 422、一致时胜出、指向别的资产的 series_id → 422、`resolve_series` 在既无 symbol 也无 series_id 时抛 `SeriesNotResolved`、`POST /research/walk-forward` 无 symbol → 4xx。红证据：把该文件拷到 `3a9a2bb84` 的工作树上单跑 → **7 failed, 2 passed in 5.52s**（如 `AssertionError: {"detail":"market data series not found"}`、`"symbol":"OTHER"` 出现在别的资产被采纳的响应里）。接线后的邻接回归：`test_series_resolution` + `test_series_deletion` + `test_outcome_evaluator` + `test_sensitivity_api` + `test_ensemble_api` + `test_ai_router` + `test_signal_semantics` + `test_wait_and_snapshot` → **75 passed in 21.54s**。
+
+## ADR-120：请求的周期必须是被真正服务的那个周期
+
+- 背景：`SyntheticProvider.get_ohlcv` 完全忽略 `timeframe`，永远返回 `pd.date_range(..., freq="D")`；`YahooFinanceProvider` 用 `interval = _TIMEFRAMES.get(timeframe, "1d")` 把未知周期**静默回落成日线**。于是 `POST /market-data/sync {timeframe: "4h"}` 会用日线数据建一个 `timeframe="4h"` 的系列，并把这些日线标成收盘（`is_closed=True`）—— 响应里只有一个 `timeframe` 字段，而它同时表示「你请求的」和「我给你的」。审计里这条是 D3。
+
+- 决策：
+  1. 新增 `SUPPORTED_TIMEFRAMES = frozenset(_TIMEFRAMES)`（仍是 1m/5m/15m/1h/1d/1w）与 `UnsupportedTimeframe(ProviderError)`；`__all__` 同步补上。
+  2. 各 provider 自己声明能力：`SyntheticProvider.TIMEFRAMES = frozenset({"1d"})`，`YahooFinanceProvider.TIMEFRAMES = SUPPORTED_TIMEFRAMES`；两个 `get_ohlcv` 的入口在服务任何数据之前校验并抛 `UnsupportedTimeframe`。
+  3. yahoo 的校验放在 `self._ensure()` **之前**（不为了报错去 import/初始化 yfinance），并删除 `_TIMEFRAMES.get(timeframe, "1d")` 的静默回落，改为 `_TIMEFRAMES[timeframe]`。
+  4. `POST /market-data/sync` 把 `UnsupportedTimeframe` 与 `SymbolNotServed` 一起映射为 400。
+
+- 理由：静默回落的代价不是「少了一个周期」，而是**数据带着一个它没有的名字**被写进库：那 11 根日线从此是一份 `timeframe="4h"` 的行情，回测会按 4 小时的口径去用它（`BARRS_PER_YEAR`、`holding_bars`、年化）。拒绝比回落诚实。把「支持哪些周期」放在 provider 上而不是路由上，是因为它是一条关于数据源的事实。
+
+- 影响与兼容：默认（synthetic）provider 下 `timeframe != "1d"` 从「200 + 错数据」变成 400；前端只发 `1d`（`frontend/src/api.ts:676-679`、`BacktestView.vue`），无行为变化。**没有**顺手把 30m/4h 加进 `_TIMEFRAMES`：`_INTRADAY_PERIOD_SECONDS` 里有它们的长度（供闭合判定用），但 provider 不支持就是不支持。
+
+- 测试：`backend/tests/test_timeframe_integrity.py` 7 条 —— synthetic 拒绝 1h、仍服务 1d、yahoo 在 `_ensure()` 之前拒绝未知周期且 `provider._module is None`、各 provider 的 `TIMEFRAMES` 都 ⊆ `SUPPORTED_TIMEFRAMES`、`POST /sync timeframe=1h` → 400 且不留下被误标的系列、`timeframe=1d` 正常、`UnsupportedTimeframe` 是 `ProviderError` 的子类。红证据：该文件在 `3a9a2bb84` 的工作树上无法收集 —— `ImportError: cannot import name 'SUPPORTED_TIMEFRAMES' from 'app.data.providers'`（这是最直接的红）。
+
+## ADR-121：入金不是收益，年化要用真正经过的时间
+
+- 背景：`GET /paper/accounts/{id}/performance` 的 `net_deposits = float(account.initial_cash)` 是**今天**的净入金，而权益序列从它起步、每笔交易加一次 `trade.pnl`。于是①存 10,000、赚 1,000、提 4,000 的报告 `total_return = 1_000/6_000 = 16.67%`（真实是 +10%），提现在被算成收益；②提现造成的台阶同时被算成回撤；③序列「一个点＝一笔交易」，而 `compute_metrics` 按 `timeframe="1d"`（252 个周期/年）年化 —— 两笔交易各 +1.5% 得到 CAGR ≈ +555%，`years = len(equity)/252` 把「两笔交易」当成了「两天」。同一族的第十六副面孔：**同一个数字同时表示「账户里有多少钱」和「策略赚了多少」**。`/equity` 端点早已按资金流事件重放修好（ADR-108 的另一半），所以两个端点此前给出的是两条不同的曲线。
+
+- 决策：
+  1. 从 `replay_equity_curve` 抽出 `_account_life(db, account) -> (start, opening, flows, closed_trades)`：`/equity` 的重放与 `/performance` 的指标共用同一份「什么在什么时候动过这个账户」。
+  2. `net_deposits <= 0` 时保留旧口径（喂 `[net_deposits]` 再逐笔加 pnl），这样 `compute_metrics` 仍给出 `initial capital is not positive...` 的 note 与 `final_equity = 0`，两条既有测试（提过头、提空）逐字不变。
+  3. 否则构造**资金中性指数**：`index = [1.0]`，按 `exit_time` 逐笔处理，先把该时刻之前的资金流并入当刻权益（`equity += flow`），再 `index.append(index[-1] * (1 + pnl/equity))`（`equity > 0` 才计），然后 `equity += pnl`。入金与提现因此是指数里的台阶，而不是收益或回撤。
+  4. 年化用真实经过的时间：`years = (最后一笔 exit_time − 最早一笔 entry_time) / 365.25`，并传给 `compute_metrics(..., bars_per_year=len(index)/years)`（一个点对应「一笔交易」，而一年有 `len(index)/years` 笔）；跨度 ≤ 0 时先按默认口径算完再把 `metrics.cagr` 置 `None`，并加 note `the closed trades span no time, so there is no period to annualise over`。
+  5. 金额口径不变：`metrics.initial_capital = net_deposits`、`final_equity = net_deposits + 已实现盈亏`；响应 note 说明「收益率资金中性，入金/提现不算收益也不算回撤，年化用真实时间」（ADR-066、ADR-121）。
+
+- 理由：出入金是账户与外部之间的转移，把它算进收益，等于让用户往账户里多存钱这件事本身产生收益率。用 TWR（每个子区间按当时权益计收益率、再连乘）而不是简单收益率，是因为「这笔交易用了多少钱」在入金/提现之后变了。第三条：一个点一笔交易不是日历 —— 与 ADR-116 同族，一个数字必须说得清它算的是哪一段时间。
+
+- 影响与兼容：`/performance` 的 `total_return`、`max_drawdown`、`cagr`、`volatility`、`sharpe`、`sortino` 数值会变（历史响应不被存储，落库的历史回测快照不受影响）；`net_deposits` 与 `final_equity` 的口径不变。`backend/tests/test_paper_engine.py:374-390` 原本把错误的分母钉成了期望值，本版改为 `total_return == pytest.approx(0.10, rel=1e-9)` 并写明「+1,000 是在那笔交易真正使用的 10,000 上赚到的」。
+
+- 测试：`backend/tests/test_paper_performance.py` 6 条 —— 提现不抬高收益率（0.10）、之后的入金不是收益、每笔交易按它运行时的钱计量（TWR 0.21 而非 0.155）、提现不是回撤（`max_drawdown == -500/11_000`）、年化用真实时间（183 天 → `(1.0201)**(1/(183/365.25)) - 1`）、没有时间经过时不给 CAGR（`None` + note 含 "no period"）。红证据：同一文件在未改动的生产代码上 → **6 failed in 3.90s**，逐条实测 0.1667 / 0.0667 / 0.155 / -0.1667 / 4.320969817873112 / 2.5034271933694074。测试夹具的两个坑一并固化：资金流事件必须直接写 `AuditLog`（`/fund` 用墙上时钟盖章，落不到两根夹具交易之间），账户的 `created_at` 必须 `_backdate` 到夹具日期之前（否则重放按 `>= start` 把交易全过滤掉）。
+
+## ADR-122：现金守卫必须跑在账本真正记账的数量上
+
+- 背景：`backend/app/simulation/paper_engine.py` 用 `quantity = budget / (fill_price * (1 + fee_rate))` 这个 28 位有效数字的商直接算 `cash_out = quantity * fill_price + fees`，再与 `account.cash` 比较。当买入用满现金（默认 `max_position_pct=1.0`）时，`quantity * fill_price + fees` 会比 `cash` 大一个「最后一位的单位」（1E-24 量级），于是一笔账上完全付得起的订单被拒成 `insufficient cash`。随机价格实测：cash=5000 → 12.8%、7000 → 21.8%、12 345.67 → 17.6%、999.99 → 34.9% 触发；整数价（10000、100000）恰好 0%，所以既有测试从未碰到。
+
+- 决策：新增 `_QUANTITY_SCALE = Decimal("1E-10")`，`_open_long` 里把数量先 `quantize(_QUANTITY_SCALE, rounding=ROUND_DOWN)`，**再用取整后的数量**算手续费、`cash_out` 与不足守卫。`PaperPosition.quantity` 与 `PaperTrade.quantity` 是 `Numeric(24, 10)`，账本本来就会把它四舍五入到这个刻度。
+
+- 理由：用一个账本存不下的精度去拒绝一笔账本付得起的订单，是把计算误差当成了资金不足。向下取整而不是四舍五入，是为了让「买满」永远不会因为舍入而多花一厘钱（少买一点点比透支好）。
+
+- 影响与兼容：成交数量现在最多 10 位小数（与列定义一致，现金与持仓的漂移也随之消失）；`insufficient cash` 只在真正不足时出现（`test_a_buy_that_really_cannot_be_afforded_is_still_refused` 保留）。没有改 `max_position_pct` 或费用公式。
+
+- 测试：`backend/tests/test_paper_fills.py` —— 7 组 `(cash, price)` 参数化（5000/199.99、7000/2.71828、999.99/0.07、999.99/91.7、12345.67/45.67、14999.37/12.34、8888.88/333.33；这些对是用脚本在 venv 里枚举 `q*fill+fees > cash` 挑出来的）断言成交后 `cash == 0`、一条真正付不起（cash=0）仍被拒、以及时间两条（见 ADR-123）。红证据：修复前 **8 failed, 2 passed in 1.77s**（诊断行 `PaperError: insufficient cash`）；修复后 `test_paper_fills` + `test_paper_engine` + `test_paper_equity_curve` → **29 passed in 5.47s**。
+
+## ADR-123：成交时刻取自成交价那一根 K 线
+
+- 背景：成交价来自信号那根 K 线的收盘（`paper_engine.py` 模块 docstring 自述如此），成交时刻却是 `moment = now or dt.datetime.now(tz=dt.UTC)`，而调用点不传 `now`。于是 `PaperTrade.entry_time` / `exit_time` / `PaperOrder.filled_at` 写的是**执行的那一刻**：补执行一条历史信号会把一笔一月的交易记成今天；而权益重放按 `exit_time` 排序（`paper.py:84-132`），它就被插进了历史的中间。
+
+- 决策：新增 `_fill_moment(signal, now) -> dt.datetime`（显式 `now` 优先，否则 `_aware(signal.bar_timestamp)`），`execute_signal` 用它作为成交时刻；`_aware` 继续处理 SQLite 返回的 naive 时间戳。
+
+- 理由：价格与时刻必须来自同一根 K 线。两个字段各自回答「这笔交易发生在什么时候」，如果它们的答案互相矛盾，那么按时间排序的重放、持仓时长、以及任何「历史上此刻的权益」都会跟着错（与 ADR-116「成交必须发生在决策之后」同族）。
+
+- 影响与兼容：新的成交时间戳变成信号那根 K 线的时间（历史数据的 `entry_time` 不回填）；调用方仍可用 `now=` 覆盖（用于测试与手工补录）。`GET /paper/trades` 与 `/equity` 的时间轴从此与 K 线对齐。
+
+- 测试：`test_paper_fills.py::test_a_fill_is_timed_by_the_bar_its_signal_came_from`（`PaperOrder.filled_at` 与 `PaperTrade.entry_time` 都等于 bar 时间；随后的 SELL 落在它自己那根 K 线上且 entry < exit）与 `test_an_explicit_moment_still_overrides_the_bar`（`now=2026-03-01` 生效）。红证据含在 ADR-122 的同一次红跑里（`assert ... 2026-10-03 ... == 2026-01-02`）。
+
+## ADR-124：盈亏不能从现金倒推
+
+- 背景：前端 `paperPnlPct` 用 `(cash - netDeposits) / netDeposits` 把「账户里还剩多少现金」当成盈亏，`PaperView.vue` 与 `DashboardView.vue` 都这么显示。这在账户没有持仓时恰好等于盈亏，而在有持仓时完全错：一笔用满余额的买入会让现金变成 0、持仓还在账上，于是界面把一个**刚建立**的仓位显示成 -100%。后端也没有给过别的数：`PaperAccountOut` 只有 `cash` 与 `net_deposits`，虽然 `GET /paper/accounts/{id}/equity` 早就返回了 `realized_pnl`。
+
+- 决策：
+  1. `PaperAccountOut` 增加 `realized_pnl: float = 0.0`；`backend/app/api/routers/paper.py` 新增 `_realized_by_account(db, account_ids)`（一条 `select(PaperTrade.account_id, func.sum(PaperTrade.pnl)).where(account_id.in_(...), exit_time.is_not(None)).group_by(account_id)`，避免列表页 N+1）与 `_account_payload(db, account, *, realized=None)`，`list_accounts` / `get_account` / `create_account` 统一走它。
+  2. 前端 `paperPnlPct(netDeposits, realizedPnl)`（`frontend/src/format.ts`）与 `formatPaperPnlPct` 的第二个参数改为已实现盈亏，函数体 `return realizedPnl / netDeposits`；`frontend/src/api.ts` 的 `PaperAccount` 增加 `realized_pnl: number`。
+  3. `PaperView.vue` 与 `DashboardView.vue` 改传 `a.realized_pnl`，卡片/单元格的涨跌色也按它着色（现金不再按盈亏着色）；模拟盘表格新增「已实现盈亏」列。
+
+- 理由：现金回答「钱在哪里」，盈亏回答「赚了多少」—— 同一个数字不能同时承担两个问题（ADR-065、ADR-108、ADR-115 同族）。列表页给出已实现盈亏并且只发一条聚合查询，是因为界面需要它而列表是最常被读的端点。**记录在案、未处理**：`realized_pnl` 不含未实现盈亏（持仓市值），因此「有持仓时的总盈亏」仍需要 `/equity` 的持仓明细；本版按用户划定的范围不引入持仓估值。
+
+- 影响与兼容：响应纯增量（旧客户端忽略 `realized_pnl` 不受影响）；`paperPnlPct` 的第二个参数语义变化，但它是 `frontend/src/format.ts` 的内部函数，唯二调用点已同步。测试夹具 `test_the_account_list_publishes_the_realized_result` 用「现金 1,000、净入金 10,000、已实现 +1,000」这一组数，正是因为旧的公式在那里会给出 -90%。
+
+- 测试：`backend/tests/test_paper_performance.py::test_the_account_list_publishes_the_realized_result`（列表与详情的 `realized_pnl == 1_000`、`cash == 1_000`、`cash - net_deposits == -9_000`）与 `backend/tests/test_frontend_contracts.py::test_paper_pnl_is_the_realized_result_not_the_spent_cash`（`paperPnlPct` 体中含 `realizedPnl / netDeposits` 且不再出现 `cash`；`api.ts` 声明 `realized_pnl: number`；两个视图都传 `a.realized_pnl`、都按它着色、都不再有 `a.cash - a.net_deposits`）。红证据：这两个文件在 `3a9a2bb84` 的工作树上 → **8 failed, 9 passed in 2.87s**，含 `KeyError: 'realized_pnl'` 与 `assert 'realizedPnl / netDeposits' in '... return (cash - netDeposits) / netDeposits'`。
+

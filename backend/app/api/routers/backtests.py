@@ -16,10 +16,9 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import BacktestCreate, BacktestOut, BacktestSummaryOut
 from app.core.db import get_db
-from app.data.market_data_repo import load_bars, series_content_hash
+from app.data.market_data_repo import load_bars, resolve_series, series_content_hash
 from app.data.strategy_service import load_spec, record_audit
 from app.domain.models import (
-    Asset,
     BacktestMetric,
     BacktestResult,
     BacktestRun,
@@ -36,28 +35,17 @@ router = APIRouter(prefix="/backtests", tags=["backtests"])
 
 
 def _resolve_series(db: Session, payload: BacktestCreate) -> MarketDataSeries:
-    if payload.series_id:
-        series = db.get(MarketDataSeries, payload.series_id)
-        if series is None:
-            raise HTTPException(status_code=404, detail="series not found")
-        return series
-    if not payload.symbol:
-        raise HTTPException(status_code=400, detail="either series_id or symbol is required")
-    asset = db.scalar(select(Asset).where(Asset.symbol == payload.symbol))
-    if asset is None:
-        raise HTTPException(status_code=404, detail=f"asset '{payload.symbol}' not found")
-    series = db.scalar(
-        select(MarketDataSeries).where(
-            MarketDataSeries.asset_id == asset.id,
-            MarketDataSeries.timeframe == payload.timeframe,
-        )
+    """Which stored series this request means (ADR-119, ``resolve_series``).
+
+    The timeframe is only checked against an explicit ``series_id`` when the caller
+    actually sent one: it has a default, so treating the default as a demand would
+    reject a request that only names a series.
+    """
+
+    timeframe = payload.timeframe if "timeframe" in payload.model_fields_set else None
+    return resolve_series(
+        db, symbol=payload.symbol, series_id=payload.series_id, timeframe=timeframe
     )
-    if series is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"no market data for '{payload.symbol}' {payload.timeframe}; sync first",
-        )
-    return series
 
 
 @router.post("", response_model=BacktestOut, summary="Run a backtest")
@@ -241,6 +229,9 @@ def _summary(outcome: Any, series: MarketDataSeries) -> dict[str, Any]:
     return {
         "dataset_version_id": series.id,
         "dataset_version": series.dataset_version,
+        # Which provider the data came from. A run is only reproducible against the
+        # same series, so the source has to travel with the result (ADR-119).
+        "source": series.source.name if series.source is not None else None,
         "initial_capital": outcome.initial_capital,
         "final_equity": outcome.final_equity,
         "total_return": outcome.metrics.get("total_return"),
@@ -427,6 +418,12 @@ def _to_summary(run: BacktestRun) -> BacktestSummaryOut:
         final_equity=summary.get("final_equity"),
         symbol=series.asset.symbol if series is not None and series.asset is not None else None,
         timeframe=series.timeframe if series is not None else summary.get("timeframe"),
+        # The stored summary is the immutable record of what ran; the live series is
+        # only a fallback for runs stored before these fields existed.
+        dataset_version=summary.get("dataset_version")
+        or (series.dataset_version if series is not None else None),
+        source=summary.get("source")
+        or (series.source.name if series is not None and series.source is not None else None),
     )
 
 

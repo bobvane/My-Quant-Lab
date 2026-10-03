@@ -23,6 +23,7 @@ from app.data.market_data_repo import (
 from app.data.providers import (
     ProviderError,
     SymbolNotServed,
+    UnsupportedTimeframe,
     asset_metadata_for,
     get_market_data_provider,
     mark_closed_bars,
@@ -180,7 +181,7 @@ def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_d
 
     try:
         frame: pd.DataFrame = provider.get_ohlcv(payload.symbol, payload.timeframe, start, end)
-    except SymbolNotServed as exc:
+    except (SymbolNotServed, UnsupportedTimeframe) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ProviderError as exc:
         logger.warning("market data provider error for %s: %s", payload.symbol, exc)
@@ -195,6 +196,7 @@ def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_d
             "timeframe": payload.timeframe,
             "provider": provider_name,
             "inserted": 0,
+            "updated": 0,
             "message": (
                 "provider returned no bars. Possible causes: (1) the ticker is wrong; "
                 "(2) the market has no data in this range; (3) the data provider is "
@@ -224,7 +226,8 @@ def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_d
 
     source = _ensure_source(db, provider_name)
     series = get_or_create_series(db, asset=asset, timeframe=payload.timeframe, source_id=source.id)
-    inserted = upsert_bars(db, series, frame_to_bars(frame))
+    report: dict[str, int] = {}
+    inserted = upsert_bars(db, series, frame_to_bars(frame), report=report)
     quality_status, quality = assess_bars_quality(frame)
     series.quality_status = quality_status
     db.commit()
@@ -234,6 +237,9 @@ def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_d
         "provider": provider_name,
         "series_id": series.id,
         "inserted": inserted,
+        # Bars that already existed but came back different — typically a candle
+        # that was stored while it was still forming and has now closed (ADR-118).
+        "updated": report["updated"],
         "closed_bars_in_fetch": closed_bars,
         "still_forming_bars": forming_bars,
         "series_start": series.series_start,

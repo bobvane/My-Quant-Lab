@@ -385,8 +385,9 @@ def test_a_profitable_account_still_reports_a_profit_after_a_withdrawal(client, 
     assert body["net_deposits"] == pytest.approx(6_000)
     assert body["final_equity"] == pytest.approx(7_000)
     assert body["final_equity"] == pytest.approx(moved.json()["cash"])
-    # +1,000 booked on 6,000 of the account's own money.
-    assert body["metrics"]["total_return"] == pytest.approx(1_000 / 6_000, rel=1e-9)
+    # +1,000 earned on the 10,000 the trade actually ran on. The withdrawn 4,000 did not
+    # make the return bigger: funding moves the baseline, not the result (ADR-121).
+    assert body["metrics"]["total_return"] == pytest.approx(0.10, rel=1e-9)
     assert body["metrics"]["total_return"] > 0
 
 

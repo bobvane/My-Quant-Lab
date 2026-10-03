@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -41,6 +41,13 @@ from app.domain.models import (
 __all__ = ["PaperError", "PaperExecutionSettings", "execute_signal"]
 
 _BPS = Decimal(10_000)
+
+# `PaperPosition.quantity` and `PaperTrade.quantity` are Numeric(24, 10): a quantity
+# the account cannot hold is a quantity the ledger would round anyway, so the cash
+# guard has to run on the rounded value, not on the raw 28-digit quotient. The raw
+# quotient of a full-size buy overshoots the balance by one unit in the last place,
+# which used to reject orders the cash could cover (ADR-122).
+_QUANTITY_SCALE = Decimal("1E-10")
 
 
 class PaperError(ValueError):
@@ -62,6 +69,24 @@ def _fee_rate(bps: float) -> Decimal:
     return _dec(bps) / _BPS
 
 
+def _aware(moment: dt.datetime) -> dt.datetime:
+    """SQLite hands back naive timestamps for tz-aware columns."""
+
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=dt.UTC)
+
+
+def _fill_moment(signal: Signal, now: dt.datetime | None) -> dt.datetime:
+    """The bar the signal was decided on, unless the caller names the moment itself.
+
+    The fill price is that bar's close, so the default fill time has to be that bar
+    too: stamping it with ``datetime.now()`` put a January trade on today's date and
+    the equity replay (which orders by that stamp) inserted it into the middle of
+    history (ADR-123).
+    """
+
+    return now if now is not None else _aware(signal.bar_timestamp)
+
+
 def execute_signal(
     db: Session,
     account: PaperAccount,
@@ -73,7 +98,7 @@ def execute_signal(
     """Execute ``signal`` against ``account`` and persist the result."""
 
     limits = settings or PaperExecutionSettings()
-    moment = now or dt.datetime.now(tz=dt.UTC)
+    moment = _fill_moment(signal, now)
 
     if account.status != "active":
         raise PaperError("paper account is not active")
@@ -148,7 +173,9 @@ def _open_long(
     budget = _dec(account.cash) * _dec(limits.max_position_pct)
     if fill_price <= 0:
         raise PaperError("invalid fill price")
-    quantity = budget / (fill_price * (1 + fee_rate))
+    quantity = (budget / (fill_price * (1 + fee_rate))).quantize(
+        _QUANTITY_SCALE, rounding=ROUND_DOWN
+    )
     if quantity <= 0:
         raise PaperError("insufficient cash")
     fees = quantity * fill_price * fee_rate

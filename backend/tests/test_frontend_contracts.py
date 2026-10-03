@@ -27,6 +27,7 @@ import re
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 VIEWS = REPO_ROOT / "frontend" / "src" / "views"
 API = REPO_ROOT / "frontend" / "src" / "api.ts"
+FORMAT = REPO_ROOT / "frontend" / "src" / "format.ts"
 
 SIGNALS = (VIEWS / "SignalsView.vue").read_text(encoding="utf-8")
 BACKTEST = (VIEWS / "BacktestView.vue").read_text(encoding="utf-8")
@@ -35,6 +36,7 @@ SETTINGS = (VIEWS / "SettingsView.vue").read_text(encoding="utf-8")
 STRATEGIES = (VIEWS / "StrategiesView.vue").read_text(encoding="utf-8")
 PAPER = (VIEWS / "PaperView.vue").read_text(encoding="utf-8")
 API_TEXT = API.read_text(encoding="utf-8")
+FORMAT_TEXT = FORMAT.read_text(encoding="utf-8")
 
 # Fields the outcome API sends as fractions. `_pct` in the name does not mean the
 # value was multiplied by 100 — that is the whole bug (ADR-087).
@@ -45,6 +47,14 @@ def _function_body(text: str, name: str) -> str:
     """Return the body of ``async function <name>(`` up to the closing brace."""
 
     start = text.index(f"async function {name}(")
+    end = text.index("\n}\n", start)
+    return text[start:end]
+
+
+def _exported_function_body(text: str, name: str) -> str:
+    """Return the body of ``export function <name>(`` up to the closing brace."""
+
+    start = text.index(f"export function {name}(")
     end = text.index("\n}\n", start)
     return text[start:end]
 
@@ -189,3 +199,21 @@ def test_the_views_do_not_keep_a_second_copy_of_the_rule() -> None:
 
     assert "* 100" not in SIGNALS
     assert "formatPercent" in SIGNALS and "formatNumber" in SIGNALS
+
+
+def test_paper_pnl_is_the_realized_result_not_the_spent_cash() -> None:
+    """`cash - net_deposits` is the P&L only while the account holds nothing.
+
+    A buy that spends the whole balance leaves cash at zero and a position on the books
+    (ADR-124), so a fresh full-size buy was printed as -100% on the paper card, in the
+    paper table and on the dashboard.
+    """
+
+    body = _exported_function_body(FORMAT_TEXT, "paperPnlPct")
+    assert "realizedPnl / netDeposits" in body
+    assert "cash" not in body
+    assert "realized_pnl: number" in API_TEXT
+    for text in (PAPER, DASHBOARD):
+        assert "formatPaperPnlPct(a.net_deposits, a.realized_pnl)" in text
+        assert "toneOf(a.realized_pnl)" in text
+        assert "a.cash - a.net_deposits" not in text

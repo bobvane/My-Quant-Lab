@@ -35,6 +35,12 @@ API base: `/api/v1`
 
 参数：symbol、timeframe、start、end、provider。这些是 **JSON 请求体**（`MarketDataSyncRequest`）的字段，**不是 query 参数** —— 曾经被印成 query 参数，按那份文档发请求只会拿到 422。
 
+响应里的 `inserted` 是**新写入**的 K 线数，`updated` 是**被改写**的已存在 K 线数（ADR-118）：一根在同步时还没收盘的 K 线会在它收盘之后的下一次同步里被改写（收盘价、最高最低、`is_closed`），因此第二次同步的 `inserted` 常常是 0 而 `updated` 不是 0。`closed_bars_in_fetch` 与 `still_forming_bars` 是这一次取回的数据里已经收盘/仍在形成的根数。
+
+`timeframe` 必须是**数据源真正服务的周期**：`SUPPORTED_TIMEFRAMES` 目前是 1m / 5m / 15m / 1h / 1d / 1w，而默认的 synthetic provider 只服务 `1d`；请求别的周期返回 **400**（`UnsupportedTimeframe`），不会静默回落成日线（ADR-120）。未知标的是 400（`SymbolNotServed`）。
+
+序列解析（哪个标的、哪个周期用哪一份数据）由 `resolve_series` 一处回答（ADR-119）：请求里显式给 `series_id` 时它必须存在且与 `symbol`/`timeframe` 一致（矛盾 → 422，缺失 → 404），否则取该 `(asset, timeframe)` 下**未归档且覆盖到最远**的那一行（平手取最新一行），一行都没有 → 404 `no market data for '<symbol>' <timeframe>; sync first`。同一标的存在多份数据（不同来源/数据集版本）时，这是唯一一条回答。
+
 ## Market Data Series
 
 `GET /market-data/series` [已实现] —— 列出行情数据序列。
@@ -83,6 +89,13 @@ API base: `/api/v1`
 回测摘要除指标外还返回 `dataset_version_id` / `symbol` / `timeframe`：只有 id 无法判断两次
 回测是否可比（同一策略在不同标的/周期上的结果本就不同），集成对比表读这两个字段来标记
 「不同数据窗口」。
+
+摘要还返回 `dataset_version` 与 `source`（ADR-119）：`dataset_version_id` 说的是「哪一行
+`market_data_series`」，这两个字段说的是「哪个数据集版本、哪个数据来源」。同一
+`(asset, timeframe)` 可以有多行序列（唯一键包含 `source_id` 与 `dataset_version`），所以
+一次回测的结果必须能说明它读的是哪一行，否则 `dataset_hash` 有了、来源却没有。选择哪一行
+由 `resolve_series` 一处回答（见 Market Data），创建时若 `series_id` 与 `symbol`/`timeframe`
+自相矛盾会得到 **422**。
 
 创建回测与单次回测查询都返回 `warnings`，且**是同一份**：引擎的警告
 （被忽略的参数覆盖、warm-up 长于数据）跟结果一起存进 `backtest_results.warnings_json`
@@ -281,9 +294,13 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
 `GET /paper/accounts/{account_id}/trades` [已实现] —— 账户成交列表。
 `POST /paper/accounts/{account_id}/reset` [已实现] —— 重置账户（强提醒并生成审计事件）。
 
-账户响应里的资金字段是 `net_deposits`（净入金 = 入金 − 提现）与 `cash`（当前现金），
-**没有** `initial_cash`：基准会随入金与提现一起上下移动，所以“初始资金”这个名字会说谎
-（ADR-066）。创建时的请求体仍然是 `initial_cash`——那一刻它确实等于净入金；
+账户响应里的资金字段是 `net_deposits`（净入金 = 入金 − 提现）、`cash`（当前现金）与
+`realized_pnl`（已平仓交易的盈亏合计），**没有** `initial_cash`：基准会随入金与提现一起
+上下移动，所以“初始资金”这个名字会说谎（ADR-066）。`realized_pnl` 是**纯增量**字段
+（ADR-124）：`cash - net_deposits` 只在账户没有持仓时才等于盈亏，一笔用满余额的买入会让
+现金变成 0、持仓还在账上，于是「盈亏」被读成 -100%；列表、单账户与创建三个端点都返回它
+（列表用一条聚合查询，不是逐账户查询）。它不含未实现盈亏（持仓市值）。
+创建时的请求体仍然是 `initial_cash`——那一刻它确实等于净入金；
 创建、列表与单账户三个端点的响应字段都是 `net_deposits`（数据库列名 `initial_cash` 保留，
 只是历史命名）。
 
@@ -297,6 +314,13 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
 `metric_notes` 数组里（例如 `initial capital is not positive, so ratio metrics have no
 denominator`），前端据此显示「—」而不是 `NaN%`/`-100%`。
 
+分母为正时，`/performance` 报的是**资金中性收益率**（ADR-121）：入金与提现在指标序列里
+是一级台阶（并入当刻权益），既不算收益也不算回撤，每笔交易按它运行时的权益计算收益率再
+连乘。`cagr` 用**真正经过的时间**年化（最后一笔 `exit_time` 减最早一笔 `entry_time`，
+每笔交易对应一个观测点，`bars_per_year = 观测点数 / 年数`），所以两笔交易各 +1.5% 不再
+等于「两个交易日 +1.5%」；已平仓交易的时间跨度为零时 `cagr` 为 `null`，note 说明没有可
+年化的区间。`final_equity` 仍然是 `net_deposits + 已实现盈亏`，金额口径不变。
+
 ## Paper Positions
 
 `GET /paper/accounts/{account_id}/positions` [已实现] —— 列出当前持仓。
@@ -304,6 +328,13 @@ denominator`），前端据此显示「—」而不是 `NaN%`/`-100%`。
 `GET /paper/accounts/{account_id}/performance` [已实现]  (equity-derived metrics)
 `GET /paper/accounts/{account_id}/orders` [已实现] —— 账户订单列表。
 `POST /paper/accounts/{account_id}/execute` [已实现]  (execute a persisted signal; virtual fill)
+
+成交时刻取自**成交价那一根 K 线**（ADR-123）：成交价是信号那根 K 线的收盘价，所以
+`PaperTrade.entry_time` / `exit_time` 与 `PaperOrder.filled_at` 默认就是那根 K 线的时间，
+而不是「执行被点下的那一刻」——补执行一条历史信号不会再被记成今天，权益重放（按
+`exit_time` 排序）也不会把它插进历史的中间。调用方仍可显式传入时刻来覆盖它（测试与手工
+补录）。成交数量按 `Numeric(24, 10)` 向下取整后再计算手续费与现金余额，因此一笔用满余额
+的买入不会被 Decimal 末位误差拒成 `insufficient cash`（ADR-122）。
 `POST /paper/accounts/{account_id}/close` [已实现] —— 关闭（冻结）一个模拟账户。
 `POST /paper/accounts/{account_id}/reopen` [已实现] —— 重新打开已关闭的模拟账户。
 `POST /paper/accounts/{account_id}/fund` [已实现] —— 入金/提现（有审计）。

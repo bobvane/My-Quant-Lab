@@ -221,8 +221,8 @@ onMounted(() => {
         :key="a.id"
         :label="a.name"
         :value="formatNumber(a.cash)"
-        :tone="toneOf(a.cash - a.net_deposits)"
-        :sub="`净入金 ${formatNumber(a.net_deposits)} ${a.base_currency} · 盈亏 ${formatPaperPnlPct(a.net_deposits, a.cash)}`"
+        :tone="toneOf(a.realized_pnl)"
+        :sub="`净入金 ${formatNumber(a.net_deposits)} ${a.base_currency} · 已实现盈亏 ${formatNumber(a.realized_pnl)}（${formatPaperPnlPct(a.net_deposits, a.realized_pnl)}）`"
       />
     </div>
 
@@ -235,6 +235,7 @@ onMounted(() => {
             <th>名称</th>
             <th>净入金</th>
             <th>当前现金</th>
+            <th>已实现盈亏</th>
             <th>状态</th>
             <th>重置次数</th>
             <th>创建时间</th>
@@ -246,7 +247,8 @@ onMounted(() => {
             <td>{{ a.id }}</td>
             <td>{{ a.name }}</td>
             <td>{{ formatNumber(a.net_deposits) }}</td>
-            <td :class="toneOf(a.cash - a.net_deposits)">{{ formatNumber(a.cash) }}</td>
+            <td>{{ formatNumber(a.cash) }}</td>
+            <td :class="toneOf(a.realized_pnl)">{{ formatNumber(a.realized_pnl) }}</td>
             <td>{{ a.status }}</td>
             <td>{{ a.reset_count }}</td>
             <td>{{ formatDateTime(a.created_at) }}</td>

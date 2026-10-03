@@ -214,10 +214,13 @@ class BacktestSummaryOut(BaseModel):
     number_of_trades: int | None = None
     final_equity: float | None = None
     # Which series/timeframe the run was made on. `dataset_version_id` alone is an
-    # opaque id; without these two a caller cannot tell whether two runs are even
-    # comparable (the ensemble comparison table reads them to say so).
+    # opaque id; without these a caller cannot tell whether two runs are even
+    # comparable (the ensemble comparison table reads them to say so), and cannot
+    # trace a number back to the dataset it came from (ADR-119).
     symbol: str | None = None
     timeframe: str | None = None
+    dataset_version: str | None = None
+    source: str | None = None
 
 
 class BacktestOut(BacktestSummaryOut):
@@ -436,6 +439,10 @@ class PaperAccountOut(BaseModel):
     # directions, so what it holds is the account's net deposits (ADR-066).
     net_deposits: float = Field(validation_alias="initial_cash")
     cash: float
+    # Realized P&L of the closed trades, so a caller can name a profit without calling
+    # `cash - net_deposits`, which is only the same number while nothing is open: a
+    # full-size buy spends the cash and would read as -100% (ADR-124).
+    realized_pnl: float = 0.0
     status: str
     reset_count: int
     created_at: dt.datetime

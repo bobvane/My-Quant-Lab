@@ -27,25 +27,28 @@ export function formatDateTime(value: string | null | undefined): string {
 
 /**
  * P&L of a paper account as a fraction of the money it was funded with.
+ *
+ * `realizedPnl` is the account's realized P&L, not `cash - netDeposits`: a position that
+ * is still open has spent the cash, so a full-size buy would show as -100% (ADR-124).
  * `null` when there is no positive net-deposit baseline to divide by: an account
- * withdrawn down to (or past) its deposits has no meaningful return percentage,
- * and printing `-100%`/`NaN%` there would read as a trading loss (ADR-066).
+ * withdrawn down to (or past) its deposits has no meaningful return percentage, and
+ * printing `-100%`/`NaN%` there would read as a trading loss (ADR-066).
  */
 export function paperPnlPct(
   netDeposits: number | null | undefined,
-  cash: number | null | undefined,
+  realizedPnl: number | null | undefined,
 ): number | null {
   if (netDeposits === null || netDeposits === undefined) return null
-  if (cash === null || cash === undefined) return null
+  if (realizedPnl === null || realizedPnl === undefined) return null
   if (!(netDeposits > 0)) return null
-  return (cash - netDeposits) / netDeposits
+  return realizedPnl / netDeposits
 }
 
 export function formatPaperPnlPct(
   netDeposits: number | null | undefined,
-  cash: number | null | undefined,
+  realizedPnl: number | null | undefined,
 ): string {
-  const pct = paperPnlPct(netDeposits, cash)
+  const pct = paperPnlPct(netDeposits, realizedPnl)
   return pct === null ? '—' : formatPercent(pct)
 }
 

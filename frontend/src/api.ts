@@ -607,6 +607,11 @@ export interface PaperAccount {
   /** Money the account was funded with: deposits minus withdrawals (ADR-066). */
   net_deposits: number
   cash: number
+  /**
+   * Realized P&L of the closed trades. P&L is not `cash - net_deposits`: an open
+   * position has spent the cash, so a full-size buy would read as -100% (ADR-124).
+   */
+  realized_pnl: number
   base_currency: string
   status: string
   reset_count: number

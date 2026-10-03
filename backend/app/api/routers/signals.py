@@ -15,9 +15,9 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import SignalOut
 from app.core.db import get_db
-from app.data.market_data_repo import load_bars
+from app.data.market_data_repo import SeriesNotResolved, load_bars, resolve_series
 from app.data.strategy_service import load_spec
-from app.domain.models import Asset, MarketDataSeries, Signal, Strategy, StrategyVersion
+from app.domain.models import Asset, Signal, Strategy, StrategyVersion
 from app.features.engine import build_features
 from app.simulation.signal_engine import (
     latest_intent_for_series,
@@ -223,12 +223,12 @@ def signal_evidence(signal_id: int, db: Session = Depends(get_db)) -> dict[str, 
     row = db.get(Signal, signal_id)
     if row is None:
         raise HTTPException(status_code=404, detail="signal not found")
-    series = db.scalar(
-        select(MarketDataSeries).where(
-            MarketDataSeries.asset_id == row.asset_id,
-            MarketDataSeries.timeframe == row.timeframe,
-        )
-    )
+    try:
+        series = resolve_series(db, asset_id=row.asset_id, timeframe=row.timeframe)
+    except SeriesNotResolved:
+        # A signal whose series was purged still has its own evidence row; the
+        # snapshot layer is simply absent rather than an error.
+        series = None
     snapshot = None
     if series is not None:
         snap = db.scalar(
@@ -316,19 +316,7 @@ def preview(
     version = db.get(StrategyVersion, strategy_version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="strategy version not found")
-    asset = None
-    if symbol:
-        asset = db.scalar(select(Asset).where(Asset.symbol == symbol))
-        if asset is None:
-            raise HTTPException(status_code=404, detail=f"asset '{symbol}' not found")
-    series = db.scalar(
-        select(MarketDataSeries).where(
-            MarketDataSeries.timeframe == timeframe,
-            *([MarketDataSeries.asset_id == asset.id] if asset else []),
-        )
-    )
-    if series is None:
-        raise HTTPException(status_code=404, detail="no matching market data series")
+    series = resolve_series(db, symbol=symbol, timeframe=timeframe)
     return dict(latest_intent_for_series(db, version, series))
 
 
@@ -348,15 +336,7 @@ def evidence(
     version = db.get(StrategyVersion, strategy_version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="strategy version not found")
-    asset = db.scalar(select(Asset).where(Asset.symbol == symbol)) if symbol else None
-    series = db.scalar(
-        select(MarketDataSeries).where(
-            MarketDataSeries.timeframe == timeframe,
-            *([MarketDataSeries.asset_id == asset.id] if asset else []),
-        )
-    )
-    if series is None:
-        raise HTTPException(status_code=404, detail="no matching market data series")
+    series = resolve_series(db, symbol=symbol, timeframe=timeframe)
 
     bars = load_bars(db, series, only_closed=True, limit=800)
     spec = load_spec(version)
@@ -405,7 +385,7 @@ def evidence(
         "holdings_for_symbol": None,
         "note": "Ghostfolio is not configured or unreachable.",
     }
-    symbol_name = asset.symbol if asset else None
+    symbol_name = series.asset.symbol if series.asset is not None else None
     if symbol_name:
         try:
             from app.data.ghostfolio import GhostfolioAdapter
@@ -437,7 +417,7 @@ def evidence(
 
     return {
         "strategy_version_id": version.id,
-        "symbol": asset.symbol if asset else None,
+        "symbol": symbol_name,
         "timeframe": timeframe,
         "layer_1_rule_match": layer_1,
         "layer_2_empirical_stats": layer_2,
@@ -457,12 +437,7 @@ def pd_isna(value: Any) -> bool:
 
 
 def _series_id_for(db: Session, symbol: str, timeframe: str) -> int | None:
-    asset = db.scalar(select(Asset).where(Asset.symbol == symbol))
-    if asset is None:
+    try:
+        return resolve_series(db, symbol=symbol, timeframe=timeframe).id
+    except SeriesNotResolved:
         return None
-    series = db.scalar(
-        select(MarketDataSeries).where(
-            MarketDataSeries.asset_id == asset.id, MarketDataSeries.timeframe == timeframe
-        )
-    )
-    return series.id if series else None

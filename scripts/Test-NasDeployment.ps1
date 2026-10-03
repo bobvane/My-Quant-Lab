@@ -8,11 +8,13 @@
 #   pwsh -NoProfile -File scripts\Test-NasDeployment.ps1
 #   pwsh -NoProfile -File scripts\Test-NasDeployment.ps1 -Base http://192.168.2.2:8081
 #   pwsh -NoProfile -File scripts\Test-NasDeployment.ps1 -Token <api-token> -SkipMutations
+#   pwsh -NoProfile -File scripts\Test-NasDeployment.ps1 -ExpectVersion 1.5.10
 param(
     [string]$Base = 'http://192.168.2.2:8081',
     [string]$Token = '',
     [string]$Symbol = 'DEMO-AAPL',
     [string]$Provider = 'synthetic',
+    [string]$ExpectVersion = '',
     [switch]$SkipMutations
 )
 
@@ -33,6 +35,37 @@ function Step {
         $results.Add([pscustomobject]@{ Step = $Name; Ok = $false; Detail = $_.Exception.Message })
         Write-Output "   FAIL $($_.Exception.Message)"
     }
+}
+
+# Every step must be able to fail. A step that only prints what it received turns a
+# broken deployment into an "OK" line, which is how the /health step spent several
+# releases claiming to check the migration state while checking nothing (ADR-071).
+function Assert-Value {
+    param([string]$Label, $Value, [string]$Pattern = '')
+    if ($null -eq $Value) { throw "$Label 缺失（响应里没有这个字段）" }
+    $text = "$Value".Trim()
+    if ($text -eq '') { throw "$Label 为空" }
+    if ($Pattern -and $text -notmatch $Pattern) { throw "$Label='$text' 不符合 $Pattern" }
+    return $text
+}
+
+# Immutability is only proven by being refused, so "expect this to fail" needs its own
+# helper rather than a try/catch that swallows whatever it gets.
+function Assert-Rejected {
+    # The scriptblock parameter must NOT be named `Body`: a step body reads its own
+    # `$body` payload from inside this scriptblock, and `$body`/`$Body` are one and the
+    # same variable, so the probe posted this helper instead of the version — the run
+    # reported "An item with the same key has already been added" instead of looking for
+    # the 422 it was written to find.
+    param([string]$What, [scriptblock]$Action)
+    try {
+        & $Action | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -match '\b422\b|\b409\b|\b400\b') { return $_.Exception.Message }
+        throw "$What 被拒绝，但理由不是校验失败（期望 4xx 校验类错误）：$($_.Exception.Message)"
+    }
+    throw "$What 竟然成功了 —— 期望它被拒绝"
 }
 
 function Invoke-Api {
@@ -74,7 +107,14 @@ Write-Output "target: $Base   time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 # ---- 1. The web container serves the UI and proxies /healthz ---------------
 Step 'Web 容器 /healthz' {
     $r = Invoke-WebRequest -Uri "$Base/healthz" -TimeoutSec 20 -UseBasicParsing
-    "HTTP $($r.StatusCode)"
+    # nginx proxies this path to the API (docker/web.nginx.conf). A 200 on its own is
+    # not evidence of that: an nginx default page, a stale proxy target or a captive
+    # portal all answer 200 as well, so the body has to say what it is.
+    $body = "$($r.Content)"
+    if ($body -notmatch '"status"\s*:\s*"alive"') {
+        throw "HTTP $($r.StatusCode) 但响应体不是 API 存活探针：$($body.Substring(0, [Math]::Min(200, $body.Length)))"
+    }
+    "HTTP $($r.StatusCode), status=alive"
 }
 
 Step 'Web 容器首页 (/)' {
@@ -86,7 +126,12 @@ Step 'Web 容器首页 (/)' {
 # ---- 2. API liveness + readiness -----------------------------------------
 Step 'API /healthz (存活探针)' {
     $r = Invoke-Api -Path '/healthz'
-    if ($null -eq $r) { 'empty body' } else { ($r | ConvertTo-Json -Compress -Depth 5) }
+    # The step was called a liveness probe while accepting any 200, including one
+    # with no body: the old code printed a note and passed. It now reads the answer
+    # (ADR-072).
+    $status = Assert-Value -Label 'status' -Value $r.status
+    if ($status -ne 'alive') { throw "status='$status'（期望 alive）" }
+    ($r | ConvertTo-Json -Compress -Depth 5)
 }
 
 Step 'API /health (依赖 + 库结构版本)' {
@@ -105,7 +150,17 @@ Step 'API /health (依赖 + 库结构版本)' {
 
 Step 'API /system/info (运行时版本与模块)' {
     $r = Invoke-Api -Path '/system/info'
-    "version=$($r.version) env=$($r.environment) provider=$($r.market_data_provider) modules=$(@($r.modules).Count)"
+    # This step used to format whatever came back, so a response with no version and
+    # no modules printed "version= env= modules=0" and passed. It asserts now, and
+    # `-ExpectVersion` turns it into "the release I meant to deploy is the one
+    # answering" instead of "some version answered" (ADR-072).
+    $version = Assert-Value -Label 'version' -Value $r.version
+    $modules = @($r.modules)
+    if ($modules.Count -eq 0) { throw 'modules 为空：这个部署没有报告任何模块' }
+    if ($ExpectVersion -and $version -ne $ExpectVersion) {
+        throw "version=$version，期望 $ExpectVersion（用 -ExpectVersion 指定应该在线上的版本）"
+    }
+    "version=$version env=$($r.environment) provider=$($r.market_data_provider) modules=$($modules.Count)"
 }
 
 # ---- 3. Core domain: data -> strategy -> backtest -> signal --------------
@@ -123,8 +178,13 @@ else {
 
         # Syncing is idempotent (docs/12 + test_market_data_sync_and_series): a
         # second run legitimately inserts 0 rows. Demanding inserted > 0 would fail
-        # every repeat check, so assert the series actually holds data instead.
-        if ($r.inserted -lt 0) { throw "inserted=$($r.inserted)" }
+        # every repeat check, so assert the response carries the sync report and the
+        # series actually holds data instead. (The line that used to stand here
+        # compared rows inserted against zero — a count can never be negative, so it
+        # could not fail.)
+        if ($r.PSObject.Properties.Name -notcontains 'inserted') {
+            throw "响应里没有 inserted 字段：$($r | ConvertTo-Json -Compress)"
+        }
         if (-not $r.series_id) { throw "no series_id returned: $($r | ConvertTo-Json -Compress)" }
         $bars = Invoke-Api -Path "/market-data/series/$($r.series_id)/bars?limit=5"
         $count = @($bars).Count
@@ -135,8 +195,8 @@ else {
     $script:strategyId = $null
     Step '创建策略' {
         $r = Invoke-Api -Method POST -Path '/strategies' -Body @{ name = "NAS 检查 $(Get-Date -Format 'HHmmss')" }
-        $script:strategyId = $r.id
-        "id=$($r.id)"
+        $script:strategyId = Assert-Value -Label 'id' -Value $r.id -Pattern '^\d+$'
+        "id=$($script:strategyId)"
     }
 
     Step '创建策略版本（校验不可变触发器）' {
@@ -150,23 +210,48 @@ else {
             risk     = @{ stop_loss_atr_multiple = 2.0; take_profit_r_multiple = 2.0 }
             execution = @{ fill_model = 'next_bar_open'; fee_bps = 10; slippage_bps = 5; initial_capital = 10000 }
         }
-        $r = Invoke-Api -Method POST -Path "/strategies/$($script:strategyId)/versions" -Body @{ version = '1.0.0'; dsl = $dsl }
+        $body = @{ version = '1.0.0'; dsl = $dsl }
+        $r = Invoke-Api -Method POST -Path "/strategies/$($script:strategyId)/versions" -Body $body
         $script:versionId = $r.id
-        "version id=$($r.id) hash=$($r.immutable_hash)"
+        $hash = Assert-Value -Label 'immutable_hash' -Value $r.immutable_hash -Pattern '^[0-9a-f]{64}$'
+        # The step was called "校验不可变触发器" while it only created a version and
+        # printed its hash — the name promised a check nobody made (ADR-071's lesson,
+        # applied here). Two things make a version immutable: the stored hash still
+        # matches a recomputation, and the same version number cannot be written
+        # twice. Both are asserted now (ADR-072).
+        $verify = Invoke-Api -Path "/strategies/versions/$($r.id)/verify"
+        if ("$($verify.stored_hash)" -ne $hash -or "$($verify.recomputed_hash)" -ne $hash) {
+            throw "哈希对不上：created=$hash stored=$($verify.stored_hash) recomputed=$($verify.recomputed_hash)"
+        }
+        if (-not $verify.intact) { throw "verify 说这个版本已被改动：$($verify | ConvertTo-Json -Compress)" }
+        $refusal = Assert-Rejected -What "重复创建同一个版本号 '1.0.0'" -Action {
+            Invoke-Api -Method POST -Path "/strategies/$($script:strategyId)/versions" -Body $body
+        }
+        "version id=$($r.id) hash=$hash intact=$($verify.intact) 重复创建被拒（$($refusal.Substring(0, [Math]::Min(60, $refusal.Length)))）"
     }
 
-    Step '运行回测' {
+    Step '运行回测（result_hash 可复现）' {
         if (-not $script:versionId) { throw '上一步未拿到 version id' }
-        $r = Invoke-Api -Method POST -Path '/backtests' -Body @{
+        $body = @{
             strategy_version_id = $script:versionId; symbol = $Symbol; timeframe = '1d'
         }
-        if ($r.status -ne 'completed') { throw "status=$($r.status)" }
-        "status=$($r.status) trades=$(@($r.trades).Count)"
+        $first = Invoke-Api -Method POST -Path '/backtests' -Body $body
+        if ($first.status -ne 'completed') { throw "status=$($first.status)" }
+        $hash = Assert-Value -Label 'result_hash' -Value $first.result_hash -Pattern '^[0-9a-f]{64}$'
+        # "Backtests are reproducible" is one of this project's red lines, and a hash
+        # that merely exists does not show it: the same strategy version over the same
+        # series has to produce the same hash twice, on the deployed engine (ADR-072).
+        $second = Invoke-Api -Method POST -Path '/backtests' -Body $body
+        if ("$($second.result_hash)" -ne $hash) {
+            throw "同一个回测跑两次得到不同的 result_hash：$hash vs $($second.result_hash)"
+        }
+        "status=$($first.status) trades=$(@($first.trades).Count) hash=$hash (两次一致)"
     }
 
     Step '扫描信号' {
         $r = Invoke-Api -Method POST -Path '/signals/scan'
-        "evaluated=$($r.evaluated)"
+        $evaluated = Assert-Value -Label 'evaluated' -Value $r.evaluated
+        "evaluated=$evaluated"
     }
 
     Step 'AI 任务详情端点 (v0.9.9 修复的接口)' {
@@ -204,6 +289,7 @@ else {
 
     Step '模拟盘账户列表' {
         $r = Invoke-Api -Path '/paper/accounts'
+        if ($null -eq $r) { throw '账户列表返回了空响应（期望一个列表，空列表也算）' }
         "accounts=$(@($r).Count)"
     }
 }

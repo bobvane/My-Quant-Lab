@@ -1702,3 +1702,39 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
   - `backend/tests/test_health_probe.py`：`set(body)` 的九个键里含 `migration`；用临时 SQLite 分别造出「没有版本表」「版本表空」「版本表有 `0008_github_pending_review`」三种库，断言 `unknown` / `none` / 该版本号；参数化断言 `status` 只在结构版本说得出来时才是 `healthy`，`none`/`unknown` 时是 `degraded` 且 `database` 仍报 `connected`。
   - `.github/workflows/ci.yml` 的 `Health assertions`：在真实 compose 栈上 `sed` 出 `migration` 并拒绝 `''`/`unknown`/`none`/`null`。
   - `scripts/Test-NasDeployment.ps1`：把「依赖 + 库结构版本」这一步做成真正的断言（对 NAS 部署实跑时由用户执行）。
+
+## ADR-072：部署自检的每一步都必须能失败（`Test-NasDeployment.ps1` 的断言语义）
+
+- 背景：给 NAS 部署做体检时，把 `scripts/Test-NasDeployment.ps1` 的十二个步骤逐条读了一遍，发现 ADR-071 的同类缺陷在脚本里还有六处——步骤存在、名字可信、但**没有任何一条能让它失败**：
+  - `Web 容器 /healthz` 只要求 HTTP 200。nginx 默认页、失效的 upstream、门户劫持都会 200，所以这个步骤在「web 容器根本没在代理 API」时也报 OK。
+  - `API /healthz (存活探针)` 里写着 `if ($null -eq $r) { 'empty body' }` —— 打一行字就通过，从不看 `status`。
+  - `API /system/info` 把 version/modules 格式化出来就算过：一个没有 version、没有 modules 的响应会打印 `version= env= modules=0` 并记 OK。
+  - 行情同步那一步的断言是 `if ($r.inserted -lt 0)`：插入行数不可能为负，恒假。
+  - `创建策略版本（校验不可变触发器）` 的名字承诺了一次不可变校验，实际只创建版本并打印哈希。
+  - `运行回测` 只断言 `status == completed`，从不看 `result_hash`，而「回测可复现」是本项目的红线。
+  - `扫描信号` 与 `模拟盘账户列表` 只把收到的值打印出来。
+- 这不是理论问题：ADR-071 修掉的那个步骤，名字写着「API /health (含依赖与迁移状态)」，而 `/health` 的响应里压根没有迁移字段。它能连续几个版本报 OK，正是因为脚本不会失败——一个只打印的步骤把「我不知道」说成了「没问题」。
+- 决策：
+  1. 新增两个断言辅助函数。`Assert-Value -Label <string> -Value <obj> [-Pattern <regex>]`：缺失、空白或不匹配正则即 `throw`，匹配则返回去空白后的文本。`Assert-Rejected -What <string> -Action <scriptblock>`：只有调用**抛出的错误是 4xx 校验类拒绝**（消息里含 422/409/400）才算通过，成功的调用反而 `throw`。
+  2. `Web 容器 /healthz` 读响应体并要求其中出现 `"status":"alive"`：200 本身不是证据，响应体要说明自己是谁。
+  3. `API /healthz (存活探针)` 用 `Assert-Value` 读 `status` 并要求 `alive`。
+  4. `API /system/info` 断言 `version` 非空、`modules` 数量大于 0；新增可选参数 `-ExpectVersion`，提供时版本必须与它相等——这一步从此回答「我要部署的那个版本在答」而不是「有某个版本在答」。
+  5. 行情同步断言响应里带 `inserted` 与 `series_id`，并回读 `/market-data/series/{id}/bars` 确认这个序列真的有数据（同步是幂等的，第二次运行合法地插入 0 行，所以断言的对象是同步报告 + 回读，而不是 `inserted > 0`）。
+  6. `创建策略版本（校验不可变触发器）` 兑现名字里的承诺，用两件事证明不可变：`immutable_hash` 是 64 位十六进制且 `GET /strategies/versions/{id}/verify` 的 `stored_hash` 与 `recomputed_hash` 都等于它、`intact` 为真；以及**同一个版本号写第二次必须被拒绝**。
+  7. `运行回测（result_hash 可复现）` 对同一份请求跑两次，两次 `result_hash` 必须相同——红线只有在两次相同哈希里才算被看见。
+  8. 任何步骤失败，汇总都必须以 `exit 1` 结束（原有行为，现在有测试守着）。
+- 理由：
+  - 一个自检脚本的价值等于**它敢判定失败的次数**。只打印的步骤会把一次真实缺陷变成一行 OK，而 ADR-071 的教训正是这种步骤让缺陷藏了几个版本。
+  - 断言要看**这个名字承诺的东西**：叫「校验不可变触发器」就该证明不可变，叫「运行回测」就该证明可复现。名字与检查不对齐时，名字本身就是缺陷的一部分。
+  - 幂等性决定了不能要求 `inserted > 0`：重复检查时第二次合法地插入 0 行，要求 >0 会让每一次重复体检都误报失败。断言的是「响应带同步报告」加「序列回读有数据」。
+  - 版本比对交给调用方：脚本不可能知道线上应该是哪个版本，部署的人知道，所以 `-ExpectVersion` 是可选的，不传时行为与从前一致。
+  - `Assert-Rejected` 的 scriptblock 参数**不能叫 `Body`**，这是首次真栈运行咬到的：步骤体在传给它的 scriptblock 里读自己的 `$body` 载荷，而 PowerShell 变量名大小写不敏感，`$body` 于是解析到了辅助函数的 `$Body` 参数（也就是 scriptblock 本身），探针把辅助函数当请求体发了出去，报 `An item with the same key has already been added. Key: Value`，而被观察的 422 拒绝根本没发生。参数改名 `$Action`，并加了一条守卫测试钉住这个形状。
+  - 这些检查全部在**真实部署**上执行，因此验证的是行为而不是文本；仓库里的测试只能钉住形状（见测试段），这也是 CI 的 compose smoke 与 NAS 上的实跑不可省略的原因。
+- 影响与兼容：
+  - `Test-NasDeployment.ps1` 现在会在这些情况失败（以前记 OK）：web 边缘对 `/healthz` 回 HTML；存活探针的响应没有 `status`；`/system/info` 没有 version/modules，或版本与 `-ExpectVersion` 不符；同步报告缺 `inserted`/`series_id`，或序列回读为空；版本哈希不是 64 位十六进制、`/verify` 说哈希不符或版本已改动、同一个版本号能写第二次；两次回测的 `result_hash` 不同；`/signals/scan` 没有 `evaluated`；`/paper/accounts` 返回空响应。正常部署不受影响（本机真栈 12/12 通过，NAS 上由用户执行）。
+  - 新增可选参数 `-ExpectVersion <x.y.z>`，不传时与从前一致（只是不比对版本）。
+  - 不改变任何 API、数据库或前端；这是纯运维脚本的语义收紧。
+- 测试：
+  - `backend/tests/test_nas_deployment_script.py`：十四条守卫，读脚本原文，用正则 `^\s*Step\s+(?:'([^']*)'|"([^"]*)")\s*\{` 切出每个步骤体（到下一个 `Step` 为止）。核心一条是「每条步骤体里必须出现 `throw` 或 `Assert-`」——不允许存在只能打印的步骤；其余逐条钉住各步骤名字承诺的断言（web 存活读响应体、API 存活读 `status` 且不再有 `empty body` 文案、`/health` 拒绝 `unknown`/`none`、`/system/info` 断言 version/modules 且声明并使用 `$ExpectVersion`、版本步骤双重证明不可变、`Assert-Rejected` 不把任意错误当成功、回测要求两次同哈希、全文不得出现 `-lt 0`/`-ge 0` 恒真比较、同步步骤读 `inserted`/`series_id`、模拟盘步骤会 throw、汇总能 `exit 1`），最后一条钉住上面那个 `$Body` 遮蔽陷阱（`[scriptblock]$Action` 与 `& $Action | Out-Null`）。
+  - 行为证据（本机 Windows 没有容器运行时，所以用 `%TEMP%` 下一个 stdlib 边缘替身扮演 web 容器：`/` 回带 `<div id="app">` 的外壳，`/healthz` 与 `/api/*`、`/openapi.json` 按 `docker/web.nginx.conf` 的映射反代到 8080）：同一支脚本三次运行 —— ① 替身对 `/healthz` 回 nginx 默认页 → **11/12，exit 1**，唯一失败的正是 `Web 容器 /healthz`（`HTTP 200 但响应体不是 API 存活探针`）；② 正常替身 + `-ExpectVersion 1.5.9`（API 实际是 1.5.10）→ **11/12，exit 1**，唯一失败是 `/system/info`（`version=1.5.10，期望 1.5.9`）；③ 正常替身 + `-ExpectVersion 1.5.10` → **12/12，exit 0**。
+  - 第三次运行的逐步骤结果：`Web /healthz HTTP 200, status=alive`；`HTML 200 html=101B`；`API /healthz {"status":"alive"}`；`API /health status=healthy migration=0008_github_pending_review database=connected redis=unavailable workers=unknown`；`/system/info version=1.5.10 env=development provider=synthetic modules=8`；`行情同步 inserted=0 total=400 quality=valid readback=5 bars`；`创建策略版本 hash=50065a58… intact=True 重复创建被拒（422 Unprocessable Entity）`；`运行回测 status=completed trades=3 hash=c523d2ae… (两次一致)`；`扫描信号 evaluated=4`；`AI 任务详情端点 两个路由均已注册；unknown id -> 404`；`模拟盘账户列表 accounts=0`。

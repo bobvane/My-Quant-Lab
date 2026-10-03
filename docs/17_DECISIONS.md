@@ -1675,3 +1675,30 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 测试：
   - `backend/tests/test_audit_api.py`：`limit=2` 时 3 条记录仍然 `total == 3` 而 `events` 只有 2 条、`offset=2` 后 `total` 仍为 3；`/audit/logs/entity/signal/42` 在 `limit=1` 时 `total == 2`；`actor == "user"` 能被读回；`GET /settings/audit` 是 404。
   - `backend/tests/test_api.py::test_audit_log_records_events`：不再断言恒真的 `total >= 0`，而是断言至少一条 `strategy_version_created` 且每条事件都有 `actor`。
+
+## ADR-071：健康检查必须说出它跑在哪一版库结构上（`migration`，`healthy` 要有第二个条件）
+
+- 背景：给 NAS 部署做体检时，`scripts/Test-NasDeployment.ps1:92` 的步骤名叫「API /health (含依赖与迁移状态)」，而 `GET /health` 的响应里**根本没有库结构版本**——名字承诺了一个没人做过的检查，脚本本身也只断言了 `status == healthy`。同一次体检还暴露了更糟的一半：`status` 的判据只有 `database == "connected"`，所以一个「连上了库、但迁移从未运行」的 API 会报**和一次好部署完全一样**的 `healthy`。`docker/entrypoint.sh` 是在起服务前跑 `alembic upgrade head` 的（失败还会重试三次然后拒绝启动），可那保证的是**容器自己**做过迁移；一旦有人回滚、手工改过库、或把 API 指向另一个库，`/health` 仍旧说 healthy，而没有任何字段能让调用方发现这件事。
+- 决策：
+  1. `GET /health` 新增 `migration` 字段：**数据库自己报出的** alembic 版本号，取值来自 `SELECT version_num FROM alembic_version`，问库而不是问镜像——两者本就可能不一致，而部署方想知道的是库。
+  2. 读不到版本表（表不存在、权限或语句失败）报 `"unknown"`；版本表存在但没有行报 `"none"`。两者都是明确的词，不是空格也不是 500。
+  3. `status` 从「库能连上」升级为「库能连上**且结构版本说得出来**」：`database == "connected"` 与 `migration not in {"unknown", "none"}` 同时成立才是 `"healthy"`，否则 `"degraded"`。
+  4. 探测顺序是先 database 再 migration，两者共用同一个 session：库都连不上时不必假装能读版本表。
+  5. `/healthz` 依旧不碰任何依赖（容器 healthcheck 用的是它，见 `docker-compose.yml:153`），所以这次的语义收紧**不会**让容器被判死。
+  6. `scripts/Test-NasDeployment.ps1` 的步骤改名为「API /health (依赖 + 库结构版本)」，并且真的检查：`status` 必须是 `healthy`，`migration` 不能为空、`unknown`、`none`，失败时把整份 JSON 打出来。
+  7. CI 的 `Health assertions` 步骤在真实 compose 栈上取 `migration` 并断言它不是 `unknown`/`none`：单测只能证明代码路径，只有跑在「容器真的迁移过」的栈上，这个字段才算被验证。
+- 理由：
+  - 一个健康检查的价值在于**它敢说哪些情况不健康**。只说「连得上」的检查，对「连得上但结构不对」这种真实事故完全沉默。
+  - 用两个词（`unknown` / `none`）区分「问不到」和「问到了、答案是没有」，是因为这两种情况要做的处置完全不同：前者查权限/连接，后者去跑迁移。
+  - 从库里读而不是从镜像里读：镜像里的版本是意图，库里的版本是事实。部署检查要的是事实。
+  - 收紧 `status` 的代价是明确且有限的：CIS 与 NAS 上的 API 都会在 `alembic upgrade head` 成功后才对外服务，所以正常部署仍是 `healthy`；会变成 `degraded` 的正是那些本该被发现的情况。
+  - 不在 `/health` 里比对「镜像期望的 head」：那需要在每个请求里读迁移脚本目录或把 head 缓存进进程，而部署脚本与 CI 已经能在栈外做更可信的比对（CI 断言字段存在且不是空词，NAS 脚本在真实部署上做同样的事）。
+- 影响与兼容：
+  - 响应多一个键（8 → 9 个）。按整份 JSON 做等值断言的调用方要更新；前端仪表盘只读 `database` / `redis` / `status`，不受影响。
+  - `status` 可能在**没有依赖故障**的情况下变成 `degraded`（库连得上但没有迁移信息），这是这次改动的本意。
+  - 使用 `Base.metadata.create_all()` 建库的开发/测试环境没有 `alembic_version` 表，会看到 `migration: "unknown"` 与 `status: "degraded"`——这正是「这个库不是被迁移建起来的」的准确描述。
+  - 没有数据库迁移：只增加一次只读 `SELECT`。
+- 测试：
+  - `backend/tests/test_health_probe.py`：`set(body)` 的九个键里含 `migration`；用临时 SQLite 分别造出「没有版本表」「版本表空」「版本表有 `0008_github_pending_review`」三种库，断言 `unknown` / `none` / 该版本号；参数化断言 `status` 只在结构版本说得出来时才是 `healthy`，`none`/`unknown` 时是 `degraded` 且 `database` 仍报 `connected`。
+  - `.github/workflows/ci.yml` 的 `Health assertions`：在真实 compose 栈上 `sed` 出 `migration` 并拒绝 `''`/`unknown`/`none`/`null`。
+  - `scripts/Test-NasDeployment.ps1`：把「依赖 + 库结构版本」这一步做成真正的断言（对 NAS 部署实跑时由用户执行）。

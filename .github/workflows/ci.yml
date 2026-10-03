@@ -197,6 +197,15 @@ jobs:
           curl -fsS http://127.0.0.1:8080/api/v1/healthz
           curl -fsS http://127.0.0.1:8080/api/v1/health | tee /tmp/health.json
           grep -q '"status":"healthy"' /tmp/health.json || grep -q '"status": "healthy"' /tmp/health.json
+          # The container runs `alembic upgrade head` before it serves, so this stack
+          # must be able to name its schema revision — not "unknown", not "none"
+          # (ADR-071). This is the assertion that makes the field real on a live
+          # deployment rather than only in unit tests.
+          migration=$(sed -n 's/.*"migration": *"\([^"]*\)".*/\1/p' /tmp/health.json)
+          echo "migration=$migration"
+          case "$migration" in
+            ''|unknown|none|null) echo "the stack cannot name its schema revision"; exit 1 ;;
+          esac
           curl -fsS http://127.0.0.1:8081/healthz
           curl -fsS http://127.0.0.1:8081/ | head -c 200
 

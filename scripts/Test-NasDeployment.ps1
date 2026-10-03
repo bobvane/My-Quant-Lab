@@ -89,13 +89,18 @@ Step 'API /healthz (存活探针)' {
     if ($null -eq $r) { 'empty body' } else { ($r | ConvertTo-Json -Compress -Depth 5) }
 }
 
-Step 'API /health (含依赖与迁移状态)' {
+Step 'API /health (依赖 + 库结构版本)' {
     $r = Invoke-Api -Path '/health'
     $json = $r | ConvertTo-Json -Compress -Depth 6
-    if ($json -match '"status"\s*:\s*"(?<s>[^"]+)"' -and $Matches['s'] -ne 'healthy') {
-        throw "status=$($Matches['s']) (期望 healthy): $json"
+    $status = "$($r.status)"
+    $migration = "$($r.migration)"
+    if ($status -ne 'healthy') { throw "status=$status (期望 healthy): $json" }
+    # The step used to be called "含依赖与迁移状态" while /health reported no schema
+    # version at all: the name promised a check nobody made (ADR-071). It does now.
+    if (-not $migration -or $migration -eq 'unknown' -or $migration -eq 'none') {
+        throw "migration='$migration' —— 这个部署说不出自己跑在哪一版库结构上（unknown=读不到版本表，none=迁移从未运行）: $json"
     }
-    $json
+    "status=$status migration=$migration database=$($r.database) redis=$($r.redis) workers=$($r.workers)"
 }
 
 Step 'API /system/info (运行时版本与模块)' {

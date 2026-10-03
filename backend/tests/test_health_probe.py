@@ -1,11 +1,17 @@
-"""Guard: `/health` bounds every dependency probe it makes (ADR-069).
+"""Guard: `/health` bounds every dependency probe it makes (ADR-069), and names the
+schema revision it is running against (ADR-071).
 
-The defect these tests pin down: `celery_app.control.ping(timeout=1.0)` bounds how
-long we wait for *replies*, not how long reaching the broker may take, so with no
-broker running the worker probe sat for 9-12 seconds and held the whole response
-(and the dashboard's first paint) with it. The connection is now opened under an
-explicit deadline first; these tests assert that deadline is passed down, and that
-`unknown` is the answer whenever the broker cannot be reached or nobody replies.
+The defect ADR-069 fixes: `celery_app.control.ping(timeout=1.0)` bounds how long we
+wait for *replies*, not how long reaching the broker may take, so with no broker
+running the worker probe sat for 9-12 seconds and held the whole response (and the
+dashboard's first paint) with it. The connection is now opened under an explicit
+deadline first; these tests assert that deadline is passed down, and that `unknown`
+is the answer whenever the broker cannot be reached or nobody replies.
+
+The defect ADR-071 fixes: `/health` called a database "connected" and the whole
+service "healthy" without ever saying which schema it was serving — so an API that
+had come up against an unmigrated database reported exactly what a good deployment
+reports. `migration` now carries the revision, and `healthy` requires it.
 """
 
 from __future__ import annotations
@@ -13,6 +19,8 @@ from __future__ import annotations
 import importlib
 
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
 
 from app.api.routers import health
 
@@ -171,6 +179,7 @@ def test_health_still_publishes_the_same_keys(monkeypatch, client, workers, expe
         "status",
         "version",
         "database",
+        "migration",
         "redis",
         "workers",
         "environment",
@@ -178,6 +187,62 @@ def test_health_still_publishes_the_same_keys(monkeypatch, client, workers, expe
         "engine_version",
     }
     assert body["workers"] == expected
+
+
+def _scratch_db(tmp_path, revision: str | None, *, with_table: bool = True):
+    """A throwaway SQLite database standing in for the migrated one (ADR-071)."""
+
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'schema.sqlite3'}")
+    with engine.begin() as conn:
+        if with_table:
+            conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            if revision is not None:
+                conn.execute(
+                    text("INSERT INTO alembic_version (version_num) VALUES (:r)"), {"r": revision}
+                )
+    return Session(engine)
+
+
+def test_a_database_with_no_version_table_cannot_name_its_schema(tmp_path):
+    db = _scratch_db(tmp_path, None, with_table=False)
+
+    assert health._check_migration(db) == health.SCHEMA_REVISION_UNKNOWN
+
+
+def test_an_empty_version_table_means_migrations_never_ran(tmp_path):
+    db = _scratch_db(tmp_path, None)
+
+    assert health._check_migration(db) == health.SCHEMA_REVISION_NONE
+
+
+def test_a_stamped_version_table_reports_that_revision(tmp_path):
+    db = _scratch_db(tmp_path, "0008_github_pending_review")
+
+    assert health._check_migration(db) == "0008_github_pending_review"
+
+
+@pytest.mark.parametrize(
+    ("migration", "expected_status"),
+    [
+        ("0008_github_pending_review", "healthy"),
+        (health.SCHEMA_REVISION_NONE, "degraded"),
+        (health.SCHEMA_REVISION_UNKNOWN, "degraded"),
+    ],
+)
+def test_health_is_only_healthy_for_a_schema_it_can_name(
+    monkeypatch, client, migration, expected_status
+):
+    """A reachable database is not the same promise as a migrated one (ADR-071)."""
+
+    monkeypatch.setattr(health, "_check_redis", lambda: "connected")
+    monkeypatch.setattr(health, "_check_workers", lambda: "0 online")
+    monkeypatch.setattr(health, "_check_migration", lambda db: migration)
+
+    body = client.get("/api/v1/health").json()
+
+    assert body["migration"] == migration
+    assert body["status"] == expected_status
+    assert body["database"] == "connected"
 
 
 def test_the_dependency_probes_are_warmed_off_the_request_path(monkeypatch):

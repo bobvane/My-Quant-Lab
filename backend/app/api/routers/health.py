@@ -25,6 +25,15 @@ router = APIRouter(tags=["health"])
 #: one gets a deadline instead of the driver's default (ADR-069).
 PROBE_TIMEOUT_SECONDS = 1.0
 
+#: The database answered, but it could not tell us which schema it is on (no
+#: ``alembic_version`` table, or a statement that failed). We refuse to call that
+#: healthy: "connected" is not the same promise as "migrated" (ADR-071).
+SCHEMA_REVISION_UNKNOWN = "unknown"
+
+#: The version table exists and holds no row: migrations were never applied to
+#: this database, so the schema is whatever someone created by hand.
+SCHEMA_REVISION_NONE = "none"
+
 
 def _check_database(db: Session) -> str:
     try:
@@ -33,6 +42,25 @@ def _check_database(db: Session) -> str:
     except Exception:  # pragma: no cover - depends on runtime
         logger.warning("database health check failed", exc_info=True)
         return "unavailable"
+
+
+def _check_migration(db: Session) -> str:
+    """The schema revision the API is actually running against (ADR-071).
+
+    ``docker/entrypoint.sh`` runs ``alembic upgrade head`` before the app starts,
+    so this is the revision the container believes it migrated to — reported from
+    the database, not from the image, because those two can disagree after a
+    rollback or a hand-run migration.
+    """
+
+    try:
+        revision = db.scalar(text("SELECT version_num FROM alembic_version"))
+    except Exception:
+        logger.warning("schema revision check failed", exc_info=True)
+        return SCHEMA_REVISION_UNKNOWN
+    if revision is None:
+        return SCHEMA_REVISION_NONE
+    return str(revision)
 
 
 def _ensure_broker_reachable() -> None:
@@ -131,12 +159,18 @@ def liveness() -> dict:
 @router.get("/health", summary="Liveness and dependency health")
 def health(db: Session = Depends(get_db)) -> dict:
     database = _check_database(db)
+    migration = _check_migration(db)
     redis_state = _check_redis()
-    status = "healthy" if database == "connected" else "degraded"
+    # "healthy" is reserved for a database we can reach *and* whose schema we can
+    # name: an API serving against an unmigrated or unidentifiable database is
+    # degraded, however reachable that database is (ADR-071).
+    migrated = migration not in (SCHEMA_REVISION_UNKNOWN, SCHEMA_REVISION_NONE)
+    status = "healthy" if database == "connected" and migrated else "degraded"
     return {
         "status": status,
         "version": settings.app_version,
         "database": database,
+        "migration": migration,
         "redis": redis_state,
         "workers": _check_workers(),
         "environment": settings.environment,

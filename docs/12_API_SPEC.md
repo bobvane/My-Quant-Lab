@@ -6,9 +6,13 @@ API base: `/api/v1`
 
 `GET /health`
 
-返回：status、version、db、redis、workers。
+返回：status、version、database、migration、redis、workers、environment、feature_version、engine_version。
 
 每个依赖探针都有 1 秒上限（`PROBE_TIMEOUT_SECONDS`，ADR-069）：连不上时 `redis` 报 `unavailable`、`workers` 报 `unknown`，而不是让整个响应等十几秒。词表只有 `"N online"` / `"0 online"` / `"unknown"` 三种；`/healthz` 不碰任何依赖。
+
+`migration` 是**数据库自己报出的** alembic 版本号（ADR-071），不是镜像里写的那个：`docker/entrypoint.sh` 先跑 `alembic upgrade head` 再起服务，但回滚或手工迁移之后两者可能不一致，所以这里问的是库。取不到版本表（表不存在、语句失败）报 `"unknown"`，版本表存在但没有行（迁移从未运行）报 `"none"`。
+
+`status` 只有 `"healthy"` / `"degraded"` 两种，并且**要求 database 连得上且 migration 说得出名字**：库连得上但结构版本是 `unknown`/`none` 时报 `"degraded"` —— 能连上库不等于库结构是对的。
 
 ## Assets
 

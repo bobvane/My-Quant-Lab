@@ -11,7 +11,8 @@
 - **v1.9.8**：Phase 3（策略研究与形式化）**做到草案为止**——`backend/app/ai/research_schemas.py` 的四道门（ADR-154 provenance、ADR-155 草案不可执行、ADR-156 服务端能力裁决与不静默降级、ADR-157 结果是模型禁区）、`backend/app/ai/research.py` 的五步链（研究输入 → RESEARCHER → StrategyHypothesis → STRATEGY_ARCHITECT → StrategyDraft → Capability Validation）、四个端点、迁移 `0013_research_layer`、`/lab` 最小界面；角色契约 `RESEARCHER` / `STRATEGY_ARCHITECT` 升到 1.1.0。**未做**：Strategy Compiler、任何回测/风险/敏感性/Monte Carlo 的 AI 入口（本文档 §二 本就禁止）、统一研究来源抓取（Phase 4）、工具网关（Phase 5）、完整 `/lab`（Phase 8）。
 - 逐版的版本行、门禁读数与红证据在 `docs/15_ROADMAP_ACCEPTANCE.md`；落地细节与偏差在 `docs/06_AI_LAYER.md` 与 `docs/17_DECISIONS.md`；差距清单在 `docs/26_AI_QUANT_LAYER_GAP_ANALYSIS.md`。
 - **v1.9.8 的 tag 在 GitHub 上是红的**：`0013_research_layer.py` 的建表顺序违反外键依赖（先建 `research_artifacts`，后建它引用的 `ai_research_runs`），SQLite 容忍而 PostgreSQL 抛 `UndefinedTable`，API 容器因此 `migrations failed; refusing to start`，一次红了 CI 的 PostgreSQL 回归、docker compose 冒烟与 release 的镜像冒烟三处。**v1.9.9 只修顺序（ADR-158）**：`upgrade()` 按依赖顺序、`downgrade()` 严格逆序，并在 `backend/tests/test_migration_revisions.py` 加两条不连库的静态守卫；功能语义零改动，已发布的 v1.9.8 tag / 镜像保留不移动。
-- **版本号顺延**：按 ADR-079，v1.9.9 之后即 v2.0.0，所以 Phase 4（统一研究来源抓取）及其后各 Phase 的内容顺延到 **v2.0.0** 起步，不塞进 v1.9.9 这个补丁版。
+- **v2.0.0**：**v1.9.9 独立验收的修复版，不进入 Phase 4**——只做验收报告点名的四条（ADR-159 EXPLICIT 的引文在服务端逐字核对、ADR-160 `unknowns` 可以点名 `rule_id`、ADR-161 第三方默认 ≤500 字符而 `user_input` 整份保留且 `source_hash` 与 `text_hash` 分开记、ADR-162 模型调用只有 `run_task()` 一条路并有 AST 守卫看着）；迁移 `0014_artifact_source_hash`（纯加列，无结构变更）。**未做**：Strategy Compiler、Phase 4 来源抓取、Tool Gateway、完整 `/lab`、自动研究 / 自动优化、任何新 Agent 或新 Provider。
+- **版本号顺延**：按 ADR-079，v1.9.9 之后即 v2.0.0，所以 Phase 4（统一研究来源抓取）及其后各 Phase 的内容顺延到 **v2.1.0** 起步——v2.0.0 被 v1.9.9 的验收修复占用；v1.9.9 这个补丁版只修迁移顺序，也没有装任何 Phase 4 内容。
 
 ---
 # My Quant Lab AI Quant Research Layer

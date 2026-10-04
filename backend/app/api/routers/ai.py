@@ -481,6 +481,7 @@ def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) ->
             label=item.label,
             uri=item.uri,
             license_note=item.license_note,
+            retention=item.retention,
         )
         for item in payload.sources
     ]

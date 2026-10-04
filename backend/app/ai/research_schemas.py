@@ -30,6 +30,7 @@ said is worse than labelling it.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -55,8 +56,10 @@ __all__ = [
     "FORBIDDEN_METRIC_KEYS",
     "FORMALIZATION_SCHEMA",
     "FORMALIZE_TASK",
+    "MIN_QUOTE_CHARS",
     "ORIGINS",
     "ORIGIN_STRENGTH",
+    "QUOTE_REQUIRED_ORIGINS",
     "RESEARCHER_ROLE",
     "RESEARCH_SCHEMA",
     "RESEARCH_TASK",
@@ -107,6 +110,14 @@ ORIGIN_STRENGTH: dict[str, int] = {"EXPLICIT": 3, "INFERRED": 2, "ASSUMED": 1, "
 #: An EXPLICIT or INFERRED rule has to cite the source it read; an ASSUMED or
 #: UNKNOWN one does not (there is nothing to cite).
 EVIDENCE_REQUIRED_ORIGINS: tuple[str, ...] = ("EXPLICIT", "INFERRED")
+
+#: Naming a source is not the same as quoting it. Material the author really
+#: wrote is EXPLICIT, so an EXPLICIT rule has to carry the words it rests on —
+#: the same requirement as the material's own sentence (ADR-159).
+QUOTE_REQUIRED_ORIGINS: tuple[str, ...] = ("EXPLICIT",)
+
+#: A quote shorter than this cannot carry meaning; it is a token, not evidence.
+MIN_QUOTE_CHARS = 2
 
 Confidence = Literal["low", "medium", "high"]
 CONFIDENCES: tuple[str, ...] = get_args(Confidence)
@@ -208,13 +219,24 @@ _STRICT = ConfigDict(extra="forbid")
 # Hypothesis models (RESEARCHER)
 # --------------------------------------------------------------------------- #
 class Evidence(BaseModel):
-    """One citation: which source, and where inside it."""
+    """One citation: which source, and where inside it.
+
+    ``source_ref``, ``locator`` and ``quote`` are the model's; the ``verified``
+    block is the server's. The server overwrites it on every validation and the
+    schema handed to the model never mentions it, so a stored citation says
+    whether the words were really found in the text this run read (ADR-159).
+    """
 
     model_config = _STRICT
 
     source_ref: str
     locator: str | None = None
     quote: str | None = None
+    #: Server-owned verification result; never trusted when it arrives from a model.
+    verified: bool = False
+    char_start: int | None = None
+    char_end: int | None = None
+    verified_against: str | None = None
 
 
 class Rule(BaseModel):
@@ -254,13 +276,19 @@ class Ambiguity(BaseModel):
 
 
 class Unknown(BaseModel):
-    """Something the material does not say and the system needs."""
+    """Something the material does not say and the system needs.
+
+    ``rule_id`` pins the unknown to one hypothesis rule. A field-level entry is
+    only an answer when that field carries a single EXPLICIT rule; otherwise one
+    vague unknown could excuse several concrete rules (ADR-160).
+    """
 
     model_config = _STRICT
 
     field: str
     why: str
     needed_to_formalize: bool = True
+    rule_id: str | None = None
 
 
 class CapabilityRequest(BaseModel):
@@ -462,6 +490,7 @@ RESEARCH_SCHEMA: dict[str, Any] = {
                     "field": {"type": "string"},
                     "why": {"type": "string"},
                     "needed_to_formalize": {"type": "boolean"},
+                    "rule_id": {"type": "string"},
                 },
             },
         },
@@ -593,6 +622,7 @@ FORMALIZATION_SCHEMA: dict[str, Any] = {
                     "field": {"type": "string"},
                     "why": {"type": "string"},
                     "needed_to_formalize": {"type": "boolean"},
+                    "rule_id": {"type": "string"},
                 },
             },
         },
@@ -854,13 +884,70 @@ def _evidence_refs(evidence: list[Evidence]) -> list[str]:
     return [item.source_ref.strip() for item in evidence if item.source_ref.strip()]
 
 
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _normalise_whitespace(text: str) -> str:
+    """Collapse every whitespace run to a single space (ADR-159)."""
+
+    return _WHITESPACE.sub(" ", text).strip()
+
+
+def _digest_text(text: str) -> str:
+    """Hash of the text a citation was checked against.
+
+    Kept identical to ``app.ai.research._digest``: a run records the same value
+    as the artifact's ``text_hash``, which is what makes "the AI read this
+    version" a checkable statement rather than a note.
+    """
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _quote_span(text: str, quote: str) -> tuple[int, int] | None:
+    """Where ``quote`` sits inside ``text``, or ``None`` when it is not there.
+
+    Wrapping is not content: a model may re-flow a sentence across lines, so
+    whitespace runs are allowed to differ while every other character has to
+    match exactly, in order. The span points into the original text so a human
+    can open the material at it.
+    """
+
+    wanted = _normalise_whitespace(quote)
+    if not wanted:
+        return None
+    pattern = r"\s+".join(re.escape(token) for token in wanted.split(" "))
+    match = re.search(pattern, text)
+    if match is None:
+        return None
+    return match.start(), match.end()
+
+
+def _clear_verification(evidence: Evidence) -> None:
+    """A citation that did not verify must not be able to look verified."""
+
+    evidence.verified = False
+    evidence.char_start = None
+    evidence.char_end = None
+    evidence.verified_against = None
+
+
 def _check_evidence(
     *,
     where: str,
     origin: str,
     evidence: list[Evidence],
     sources: dict[str, str],
+    source_hashes: dict[str, str] | None = None,
 ) -> list[Violation]:
+    """Check a citation: does the source exist, and are the words really in it?
+
+    Every citation is checked whatever its origin, because a made-up quote is a
+    fabrication whether the rule is EXPLICIT or ASSUMED. What the origin decides
+    is whether a quote is *required*: material the author really wrote can be
+    quoted, so an EXPLICIT rule has to quote it (ADR-159).
+    """
+
     violations: list[Violation] = []
     refs = _evidence_refs(evidence)
     if origin in EVIDENCE_REQUIRED_ORIGINS and not refs:
@@ -874,19 +961,80 @@ def _check_evidence(
                 field_name=where,
             )
         )
-    for ref in refs:
-        if ref not in sources:
+    reported_sources: set[str] = set()
+    for item in evidence:
+        _clear_verification(item)
+        ref = item.source_ref.strip()
+        if not ref:
+            continue
+        text = sources.get(ref)
+        if text is None:
+            if ref not in reported_sources:
+                reported_sources.add(ref)
+                violations.append(
+                    Violation(
+                        code="evidence_unknown_source",
+                        message=(
+                            f"{where} cites '{ref}', which is not part of this run; evidence must "
+                            "point at material the system actually supplied"
+                        ),
+                        field_name=where,
+                    )
+                )
+            continue
+        quote = _normalise_whitespace(item.quote or "")
+        if not quote:
+            if origin in QUOTE_REQUIRED_ORIGINS:
+                violations.append(
+                    Violation(
+                        code="evidence_missing_quote",
+                        message=(
+                            f"{where} is labelled {origin} and names '{ref}' without quoting it; "
+                            "what the author actually wrote can be quoted, so quote it"
+                        ),
+                        field_name=where,
+                    )
+                )
+            continue
+        if len(quote) < MIN_QUOTE_CHARS:
             violations.append(
                 Violation(
-                    code="evidence_unknown_source",
+                    code="evidence_quote_too_short",
                     message=(
-                        f"{where} cites '{ref}', which is not part of this run; evidence must "
-                        "point at material the system actually supplied"
+                        f"{where} quotes '{quote}', which is shorter than {MIN_QUOTE_CHARS} "
+                        "characters; that is a token, not evidence"
                     ),
                     field_name=where,
                 )
             )
+            continue
+        span = _quote_span(text, quote)
+        if span is None:
+            violations.append(
+                Violation(
+                    code="evidence_mismatch",
+                    message=(
+                        f"{where} quotes '{quote}', which does not appear in '{ref}'; words the "
+                        "material does not contain are a fabrication, not evidence"
+                    ),
+                    field_name=where,
+                )
+            )
+            continue
+        item.verified = True
+        item.char_start, item.char_end = span
+        item.verified_against = (source_hashes or {}).get(ref) or _digest_text(text)
     return violations
+
+
+def _unknowns_cover(
+    *, rule_id: str, field: str, unknowns: list[Unknown], unknown_fields: set[str]
+) -> bool:
+    """Is an open rule answered — by name, or by an unambiguous field entry?"""
+
+    if any((unknown.rule_id or "").strip() == rule_id for unknown in unknowns):
+        return True
+    return field.strip().lower() in unknown_fields
 
 
 def _disclosure_violations(
@@ -910,15 +1058,42 @@ def _disclosure_violations(
                     field_name=rule.id,
                 )
             )
-        if rule.origin == "UNKNOWN" and rule.field.strip().lower() not in unknown_fields:
+        if rule.origin == "UNKNOWN" and not _unknowns_cover(
+            rule_id=rule.id,
+            field=rule.field,
+            unknowns=unknowns,
+            unknown_fields=unknown_fields,
+        ):
             violations.append(
                 Violation(
                     code="unknown_not_disclosed",
                     message=(
                         f"rule '{rule.id}' ({rule.field}) is UNKNOWN but the unknowns list does "
-                        "not mention that field"
+                        "not mention that field or that rule id"
                     ),
                     field_name=rule.id,
+                )
+            )
+    return violations
+
+
+def _unknown_rule_id_violations(
+    *, unknowns: list[Unknown], known_rule_ids: set[str]
+) -> list[Violation]:
+    """An unknown may pin itself to a rule; that rule has to exist."""
+
+    violations: list[Violation] = []
+    for unknown in unknowns:
+        named = (unknown.rule_id or "").strip()
+        if named and named not in known_rule_ids:
+            violations.append(
+                Violation(
+                    code="unknown_rule_unknown",
+                    message=(
+                        f"unknown for field '{unknown.field}' names rule '{named}', which is not "
+                        "a rule of this hypothesis"
+                    ),
+                    field_name=named,
                 )
             )
     return violations
@@ -945,7 +1120,10 @@ def _duplicate_rule_ids(rules: list[Any]) -> list[Violation]:
 # Domain gate
 # --------------------------------------------------------------------------- #
 def validate_hypothesis(
-    hypothesis: StrategyHypothesis, *, sources: dict[str, str]
+    hypothesis: StrategyHypothesis,
+    *,
+    sources: dict[str, str],
+    source_hashes: dict[str, str] | None = None,
 ) -> list[Violation]:
     """Everything the hypothesis must satisfy beyond its schema."""
 
@@ -976,6 +1154,7 @@ def validate_hypothesis(
                 origin=rule.origin,
                 evidence=rule.evidence,
                 sources=sources,
+                source_hashes=source_hashes,
             )
         )
     violations.extend(
@@ -983,6 +1162,12 @@ def validate_hypothesis(
             rules=hypothesis.rules,
             assumptions=hypothesis.assumptions,
             unknowns=hypothesis.unknowns,
+        )
+    )
+    violations.extend(
+        _unknown_rule_id_violations(
+            unknowns=hypothesis.unknowns,
+            known_rule_ids={rule.id for rule in hypothesis.rules},
         )
     )
     for ambiguity in hypothesis.ambiguities:
@@ -1005,6 +1190,7 @@ def validate_draft(
     *,
     hypothesis: StrategyHypothesis,
     sources: dict[str, str],
+    source_hashes: dict[str, str] | None = None,
 ) -> list[Violation]:
     """Everything the draft must satisfy beyond its schema."""
 
@@ -1038,6 +1224,7 @@ def validate_draft(
                 origin=rule.origin,
                 evidence=rule.evidence,
                 sources=sources,
+                source_hashes=source_hashes,
             )
         )
         if rule.derived_from is None:
@@ -1090,19 +1277,33 @@ def validate_draft(
 
     # An EXPLICIT rule of the hypothesis is the author's own intent. Dropping it
     # silently changes the strategy, so it has to be formalized or named missing.
+    # A field-level unknown only answers for a field that carries a single
+    # EXPLICIT rule: otherwise one vague entry would excuse several concrete
+    # rules, and the draft would read as complete when it is not (ADR-160).
     unknown_fields = {unknown.field.strip().lower() for unknown in draft.unknowns}
     derived = {rule.derived_from for rule in draft.rules}
+    explicit_per_field: dict[str, int] = {}
+    for rule in hypothesis.rules:
+        if rule.origin == "EXPLICIT":
+            key = rule.field.strip().lower()
+            explicit_per_field[key] = explicit_per_field.get(key, 0) + 1
     for rule in hypothesis.rules:
         if rule.origin != "EXPLICIT":
             continue
-        if rule.id in derived or rule.field.strip().lower() in unknown_fields:
+        if rule.id in derived:
+            continue
+        field = rule.field.strip().lower()
+        if any((unknown.rule_id or "").strip() == rule.id for unknown in draft.unknowns):
+            continue
+        if explicit_per_field.get(field, 0) == 1 and field in unknown_fields:
             continue
         violations.append(
             Violation(
                 code="dropped_explicit_rule",
                 message=(
                     f"hypothesis rule '{rule.id}' ({rule.field}) is EXPLICIT but the draft neither "
-                    "formalizes it nor lists it as unknown"
+                    "formalizes it, names it in unknowns[].rule_id, nor covers it with a "
+                    "field-level unknown (which only answers when the field carries one EXPLICIT)"
                 ),
                 field_name=rule.id,
             )
@@ -1113,18 +1314,27 @@ def validate_draft(
     for rule in hypothesis.rules:
         if rule.origin != "UNKNOWN":
             continue
-        if rule.field.strip().lower() in unknown_fields:
+        if _unknowns_cover(
+            rule_id=rule.id,
+            field=rule.field,
+            unknowns=draft.unknowns,
+            unknown_fields=unknown_fields,
+        ):
             continue
         violations.append(
             Violation(
                 code="dropped_unknown",
                 message=(
                     f"hypothesis rule '{rule.id}' ({rule.field}) is UNKNOWN but the draft's "
-                    "unknowns do not mention that field"
+                    "unknowns do not mention that field or that rule id"
                 ),
                 field_name=rule.id,
             )
         )
+
+    violations.extend(
+        _unknown_rule_id_violations(unknowns=draft.unknowns, known_rule_ids=set(by_id))
+    )
 
     for indicator in draft.indicators:
         violations.extend(
@@ -1133,6 +1343,7 @@ def validate_draft(
                 origin=indicator.origin,
                 evidence=indicator.evidence,
                 sources=sources,
+                source_hashes=source_hashes,
             )
         )
 

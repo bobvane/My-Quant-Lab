@@ -270,7 +270,7 @@ def draft_payload(source_ref: str = MARTIN) -> dict[str, Any]:
                 "origin": "EXPLICIT",
                 "confidence": "high",
                 "derived_from": "r-market",
-                "evidence": [{"source_ref": source_ref}],
+                "evidence": [{"source_ref": source_ref, "quote": "BTC"}],
             },
             {
                 "id": "d-intent",
@@ -279,7 +279,7 @@ def draft_payload(source_ref: str = MARTIN) -> dict[str, Any]:
                 "origin": "EXPLICIT",
                 "confidence": "medium",
                 "derived_from": "r-entry",
-                "evidence": [{"source_ref": source_ref}],
+                "evidence": [{"source_ref": source_ref, "quote": "超跌之后反弹的时候买入"}],
             },
             {
                 "id": "d-entry",
@@ -351,7 +351,7 @@ def momentum_hypothesis_payload(source_ref: str = MOMENTUM) -> dict[str, Any]:
                 "origin": "EXPLICIT",
                 "confidence": "high",
                 "required_capabilities": ["cross_sectional_universe", "portfolio_rules"],
-                "evidence": [{"source_ref": source_ref, "quote": "每月调仓买排名前 10%"}],
+                "evidence": [{"source_ref": source_ref, "quote": "每月调仓，买入排名前 10%"}],
             },
         ],
         "ambiguities": [
@@ -449,7 +449,7 @@ def momentum_draft_payload(
                 "origin": "EXPLICIT",
                 "confidence": "high",
                 "derived_from": "m-rebalance",
-                "evidence": [{"source_ref": source_ref}],
+                "evidence": [{"source_ref": source_ref, "quote": "每月调仓，买入排名前 10%"}],
             },
         ],
         "unknowns": [

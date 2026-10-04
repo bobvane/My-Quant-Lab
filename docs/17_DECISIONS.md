@@ -2995,6 +2995,54 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 - 测试：`backend/tests/test_migration_revisions.py`（6 例）——两条新守卫在修复前对 0013 各红一次（`{'0013_research_layer.py:research_artifacts': ['ai_research_runs']}`），修复后全绿；聚焦集 `test_migrations_sqlite or test_migration_revisions or test_ai_research or test_ai_strategy_draft` 65 passed。PostgreSQL 侧由 CI 的 `Run PostgreSQL regression tests` 与 docker 冒烟在 v1.9.9 上验证。
 
+## ADR-159：证据必须有原文——EXPLICIT 的引文在服务端逐字核对，找不到就是拒绝
+
+- 背景：v1.9.9 的独立验收发现，`backend/app/ai/research_schemas.py` 的 `_check_evidence()` 只做两件事：EXPLICIT/INFERRED 必须有 `source_ref`（`evidence_missing`）、每个 `source_ref` 必须在本次材料里（`evidence_unknown_source`）。`Evidence.quote` 从不参与校验，模型于是可以拿一个**真实**的 `source_ref` 配一句**自己编的** quote，照样拿到 EXPLICIT 的外观——「EXPLICIT = 原材料明确表达」这句语义就守不住了。
+
+- 决策：引文成为证据的一部分，且判断权在服务端。①`QUOTE_REQUIRED_ORIGINS = ("EXPLICIT",)`：EXPLICIT 至少一条 evidence 必须带 quote；②`MIN_QUOTE_CHARS = 2` 且引文按空白折叠后比对（多行复制导致的换行差异被宽容，大小写与标点严格）；③`_quote_span()` 在**读入的原文**里查找，返回原文偏移，找不到就 `evidence_mismatch`；缺引文 `evidence_missing_quote`、引文过短 `evidence_quote_too_short`；④通过后写回服务端自有字段 `verified` / `char_start` / `char_end` / `verified_against`（= 该来源 read 文本的 sha256），这些字段不出现在给模型的 JSON schema 里，每次校验前先清空；⑤INFERRED 仍只要求 `source_ref`，但给了 quote 就必须能验证；ASSUMED / UNKNOWN 不要求 quote，可一旦写了非空 quote 同样必须能验证——编造引文在任何 origin 下都不是「更弱的说法」，而是伪造。
+
+- 理由：只验 `source_ref` 等于只验「引用了某份材料」，无法区分转述与编造；而引文是「原文说了这句话」唯一可核对的凭据。宽容度只给空白：一旦放宽到模糊匹配或语义相似，判断权就又回到模型手里，等于把刚立起来的门再拆掉。
+
+- 影响与兼容：Hypothesis / Draft 的 evidence 项多出四个只读字段（响应可见、请求不接受）；错误码新增 `evidence_missing_quote`、`evidence_quote_too_short`、`evidence_mismatch`；两个角色的提示词要求 EXPLICIT 逐字引一句原文（并说明「一句话比一个词好」）。存量 run 不重跑就不复验，`strategy_hypothesis_rules` 里的旧 evidence 不会因此变红。契约版本仍 1.1.0（只增服务端字段与错误码，DSL 1.0 零改动）。
+
+- 测试：`backend/tests/test_ai_research.py` 新增 `test_an_invented_quote_is_refused`（编造引文 → violations 码集合恰为 `{"evidence_mismatch"}`、不留 hypothesis 行）、`test_an_explicit_rule_has_to_quote_the_material`（只有 `source_ref` → 恰为 `{"evidence_missing_quote"}`）、`test_a_verified_quote_records_where_it_was_found`（引文写成 `"BTC\n\n超跌之后反弹的时候买入"` 仍通过，`NOTE[char_start:char_end]` 恰为 `"BTC 超跌之后反弹的时候买入"`，`verified_against` 等于读入文本的 sha256）。本版的三条红证据之一就是把引文分支改成 `if False:` → 该组测试红。
+
+## ADR-160：一个未解问题只回答一条规则——unknowns 可以点名 rule_id
+
+- 背景：`validate_draft` 判断「假设里明说的规则有没有被交代」时用 `rule.field.strip().lower() in unknown_fields`：同一 field 下若有两条 EXPLICIT 规则，草案只要写一条 field 级 unknown，就**两条都算交代**，其中一条被静默丢掉也看不出来（验收 P2-01）。
+
+- 决策：把「交代」拆成两种明确的说法。①`Unknown.rule_id`（可选）：unknown 指名它到底在说哪一条规则；②`_unknowns_cover()` 先看 `rule_id` 精确命中，再看 field——field 级只在 `explicit_per_field[field] == 1`（这个 field 只有一条 EXPLICIT）时才算数；③点名了不存在的规则 → `unknown_rule_unknown`；④`dropped_explicit_rule` 的消息写清两条出路（形式化 / 点名 / 无歧义 field），hypothesis 侧的 `unknown_not_disclosed` 与 draft 侧的 `dropped_unknown` 共用同一个判定；⑤两个角色提示词同步说明。
+
+- 理由：field 级 unknown 的原意是「这个字段我还没定下来」，它对一个字段是完整的回答；当同一字段下有多条具体规则时，一条含糊的条目会掩盖丢掉的原文规则，草案读起来像完整而实际不是。
+
+- 影响与兼容：给模型的 JSON schema 两处 `unknowns.items.properties` 增加可选 `"rule_id": {"type": "string"}`；已有载荷不带 `rule_id` 时行为不变（field 级仍覆盖单条 EXPLICIT 的字段）；新错误码 `unknown_rule_unknown`。
+
+- 测试：`backend/tests/test_ai_strategy_draft.py::test_one_vague_unknown_cannot_excuse_two_concrete_rules`——同一 field 两条 EXPLICIT：含糊的 field 级 unknown → `dropped_explicit_rule`；把其中一条写进 `unknowns[].rule_id` → `completed`；写一个不存在的 rule id → `unknown_rule_unknown`。
+
+## ADR-161：别人的材料只留片段，自己的材料留全——两个 hash 分别回答「读了什么」和「交上来什么」
+
+- 背景：验收 P1-02 与 P2-03。其一，实现里第三方的保留量是 `MAX_FRAGMENTS_PER_ARTIFACT = 16` × `EXCERPT_CHARS = 240` = 3840 字符，与已冻结的「第三方材料默认只留 metadata + ≤500 字符 excerpt」不符，而且不区分第三方与用户自己的输入；其二，`text_hash` 是对**截断后**读入文本取的 hash，`size_bytes` 却是原文大小，将来回答「AI 读的是哪一版」时两个数字指向不同对象。
+
+- 决策：①`USER_OWNED_KINDS = ("user_input",)`——用户自己粘贴的材料按 `USER_OWNED_EXCERPT_CHARS = MAX_ARTIFACT_CHARS (20_000)`、`MAX_FRAGMENTS_PER_USER_ARTIFACT = 64` 保留；第三方默认 `THIRD_PARTY_EXCERPT_CHARS = 500` + `MAX_FRAGMENTS_PER_ARTIFACT = 16`；②`ResearchInput.retention`（`excerpt` / `full`，`None` 表示按 kind 决定）：`full` 只对非 `user_input` 有意义，且**必须**同时给 `license_note`（否则 `ValueError`），未知取值也 `ValueError`；③`research_artifacts` 加 `source_hash`（原文，迁移 `0014_artifact_source_hash`，纯加列、旧行为 NULL）与既有 `text_hash`（读入文本）并存；④「有没有少留」用 `_storable_chars()` 按去空白段落比较，不再拿 `len(text)` 比，片段本身改成段落原字符（`chunk = raw`，句末切点落在空格上也不再 strip 掉一个字符）；⑤少留时发 `excerpt_limited` 警告，并把 `retention` 计划写进 `sources_json`。
+
+- 理由：≤500 字符是产品层冻结的默认，不该被实现的常量默默改写；但用户粘贴自己的长笔记被截断同样是损失——那份材料本来就是用户的，收紧只应针对别人的东西。全文保留第三方材料需要一句「用户拥有它」的凭据，这是版权与隐私的边界，不是流程装饰。两个 hash 分开，是因为它们回答两个不同问题：材料被改过没有（原文），以及这一版竞猜/引文是拿哪一版文本对的（读入文本）。
+
+- 影响与兼容：`0014` 只加一列；`sources_json` 每条新增 `source_hash`、`stored_chars` 与 `retention{policy, excerpt_budget, stored_chars, full_text_stored}`；`warnings_json` 新增 `excerpt_limited`；`POST /ai/research` 的 sources 接受可选 `retention`；`/lab` 照旧显示来源与警告即可。
+
+- 测试：`backend/tests/test_ai_research.py` 新增 `test_material_from_elsewhere_is_kept_as_a_short_excerpt`（第三方 200 行：`source_hash` 是原文、`text_hash == source_hash`——读全了、只是没存全，片段合计 `0 < kept ≤ 500`，末行不在片段里，`excerpt_limited` 恰一条）、`test_the_users_own_material_is_kept_in_full`（`kept == len(own)`、无警告）、`test_material_the_user_is_licensed_to_keep_may_be_kept_in_full`、`test_a_retention_policy_has_to_be_one_this_version_knows`（非法取值与缺 license_note 各 `ValueError`，且不留 run 行），并在 `test_a_long_source_is_truncated_and_the_run_says_so` 上加两个 hash 的断言（被截断的材料两个 hash 必须不同）。
+
+## ADR-162：模型调用只有一条路——run_task()，并且有守卫看着这条路
+
+- 背景：验收 P2-04。研究层已经有「没有执行路径」的守卫（`backend/tests/test_ai_research_security.py::test_the_research_layer_has_no_execution_path`），但全仓没有一条断言在守「任何 AI provider 调用都必须经过 `run_task()`」。绕过它不会报错，只会静默丢掉缓存、预算、审计、角色契约与来源 hash——而这些恰好是前面几个版本一点点立起来的东西。
+
+- 决策：把边界写成 `backend/tests/test_ai_provider_boundary.py`，用 `ast` 扫 `backend/app/**/*.py`。①调用 `structured_output` / `explain_signal` / `chat`（属性调用）的模块只能是 `ai/provider.py` 与 `ai/runtime.py`；②`app/ai/` 下只有 `ai/provider.py` 可以出现 `httpx`；③AI 相关的 HTTP 例外只有 `ai/provider.py` 与 `data/ai_provider_service.py`（设置页测 key 靠 `GET /models`，这是全仓唯一一处「不经过 runtime 也能碰 provider」的地方，在测试里点名）；④`ai/explain.py` 与 `ai/research.py` 必须调 `run_task(`、不得调 provider、不得含 `httpx`；⑤`app/ai/*.py` 的模块清单固定，新增模块会让测试红一次，逼着在评审里说明它为什么存在。
+
+- 理由：这一层的缺陷在评审里几乎看不出来——一行 `provider.structured_output(...)` 读起来很正常，代价却是预算与审计整体失效。AST 断言不需要数据库、不需要 provider key、毫秒级，代价只有一个：以后有人在 `app/ai/` 里加模块会先看到一条红。
+
+- 影响与兼容：零运行时改动，只新增一个测试文件。写守卫时修正了两处误报，也因此收紧了判据：`api/routers/ai.py` 里的 `explain_signal(db, signal_id)` 是应用服务（裸名字调用），不是 router 方法——所以只把**属性调用**算作 provider 调用；`ai/explain.py` 为类型注解导入 provider 类，因此「只许 runtime import provider」这种写法会误伤，改为断言「谁在**调用**」。
+
+- 测试：`backend/tests/test_ai_provider_boundary.py`（6 例）全绿；其中 `test_the_ai_layer_is_still_the_same_small_set_of_modules` 是给新增模块准备的绊线。
+
 
 
 

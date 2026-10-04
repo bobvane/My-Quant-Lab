@@ -18,6 +18,7 @@ from research_payloads import (
     MOMENTUM,
     MOMENTUM_NOTE,
     MOMENTUM_QUESTION,
+    NOTE,
     QUESTION,
     draft_payload,
     hypothesis_payload,
@@ -197,6 +198,44 @@ def test_strategy_draft_provenance(db_session, provider):
     ]
     found = refused(db_session, provider, hypothesis_payload(), quiet, "把没确定的事情咽下去")
     assert "dropped_unknown" in found
+
+
+def test_one_vague_unknown_cannot_excuse_two_concrete_rules(db_session, provider):
+    """A field-level unknown answers for one EXPLICIT rule, not for a group (ADR-160)."""
+
+    # Two EXPLICIT rules share the field 'entry': the material said both.
+    two_rules = hypothesis_payload()
+    second = dict(two_rules["rules"][1])
+    second["id"] = "r-entry-2"
+    second["statement"] = "反弹的第二天也可以买。"
+    second["evidence"] = [{"source_ref": MARTIN, "quote": "就这一句"}]
+    two_rules["rules"].append(second)
+
+    # The draft formalizes one of them and answers the field with one vague entry.
+    vague = draft_payload()
+    vague["unknowns"] = [*vague["unknowns"], {"field": "entry", "why": "还有一条没有落下来。"}]
+    found = refused(db_session, provider, two_rules, vague, "一条含糊的 unknown 想顶两条明说规则")
+    assert "dropped_explicit_rule" in found
+
+    # Naming the rule it is about is the way to say it.
+    named = draft_payload()
+    named["unknowns"] = [
+        *named["unknowns"],
+        {"field": "entry", "why": "这一条没有形式化。", "rule_id": "r-entry-2"},
+    ]
+    run, _ = run_research(
+        db_session, provider, [two_rules, named], question=variant(QUESTION, "按规则名说明缺失")
+    )
+    assert run.status == "completed"
+
+    # A name that is not a rule of the hypothesis buys nothing.
+    bogus = draft_payload()
+    bogus["unknowns"] = [
+        *bogus["unknowns"],
+        {"field": "entry", "why": "顺手写了个名字。", "rule_id": "r-entry-9"},
+    ]
+    found = refused(db_session, provider, two_rules, bogus, "unknown 指了一个不存在的规则")
+    assert "unknown_rule_unknown" in found
 
 
 def test_strategy_draft_does_not_execute(db_session, provider):
@@ -415,9 +454,7 @@ def patch_pipeline(monkeypatch, outputs):
 def research_body(**overrides) -> dict:
     body = {
         "question": QUESTION,
-        "sources": [
-            {"kind": "user_input", "text": MOMENTUM_NOTE, "source_ref": MARTIN, "label": "Martin"}
-        ],
+        "sources": [{"kind": "user_input", "text": NOTE, "source_ref": MARTIN, "label": "Martin"}],
     }
     body.update(overrides)
     return body

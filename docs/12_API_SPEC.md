@@ -458,13 +458,17 @@ Deterministic, evidence-gated promotion/degradation. No AI is involved.
 
 v1.9.8 的研究层：研究输入 → RESEARCHER 的结构化理解（StrategyHypothesis）→ STRATEGY_ARCHITECT 的候选形式化（StrategyDraft）→ 服务端能力校验。草案**不可执行**，本层不跑回测、不编译 DSL、不下单（ADR-154/155/156/157）。
 
-`POST /ai/research` [已实现] —— 一次完整研究运行。请求 `{question, sources: [{label?, kind?, source_ref, text}], model?}`（`question` 3–4000 字；`sources` 1–8 条，每条 `text` 非空且 `source_ref` 唯一标识本次材料）。同步走完 RESEARCHER 与 STRATEGY_ARCHITECT 两步，返回 run payload：`run_id`、`question`、`status`（`pending`/`running`/`completed`/`rejected`/`failed`）、`current_step`、`capability_status`、`attempts`、`sources`、`warnings`、`violations`、`error_message`、`researcher_task_id`、`architect_task_id`、`created_at`、`completed_at`，以及 `hypothesis`（`hypothesis_id`/`status`/`confidence`/`role`/`prompt_version`/`provider`/`model`/`ai_task_id` + `content`）与 `draft`（`draft_id`/`version`/`status`/`capability_status`/`model_status`/`executable`/`compiled_strategy_version_id` + `content` + `capability_report`）。模型答得不合格时**仍返回 200**，`status = "rejected"` 且 `violations[]` 逐条给出违规码与原因（不自动修正，不做第二次语义尝试）；未配置 AI provider 时 503。
+v2.0.0 的验收修复把四件事收紧：EXPLICIT 规则的引文由服务端逐字核对（ADR-159）、未解问题可以点名 `rule_id`（ADR-160）、第三方材料与用户自有材料分开保留并各记两个 hash（ADR-161）、模型调用只有 `run_task()` 一条路并有静态守卫看着（ADR-162）。
+
+`POST /ai/research` [已实现] —— 一次完整研究运行。请求 `{question, sources: [{label?, kind?, source_ref, text, retention?}], model?}`（`question` 3–4000 字；`sources` 1–8 条，每条 `text` 非空且 `source_ref` 唯一标识本次材料；`retention` 取 `excerpt` / `full`，缺省按 `kind` 决定——`user_input` 是用户自己的材料，整份保留；其余按第三方处理，默认只留 metadata 与 ≤500 字符摘录，要整份保留必须同时给 `license_note`，取值不合法或缺 license_note 返回 400）。同步走完 RESEARCHER 与 STRATEGY_ARCHITECT 两步，返回 run payload：`run_id`、`question`、`status`（`pending`/`running`/`completed`/`rejected`/`failed`）、`current_step`、`capability_status`、`attempts`、`sources`、`warnings`、`violations`、`error_message`、`researcher_task_id`、`architect_task_id`、`created_at`、`completed_at`，以及 `hypothesis`（`hypothesis_id`/`status`/`confidence`/`role`/`prompt_version`/`provider`/`model`/`ai_task_id` + `content`）与 `draft`（`draft_id`/`version`/`status`/`capability_status`/`model_status`/`executable`/`compiled_strategy_version_id` + `content` + `capability_report`）。模型答得不合格时**仍返回 200**，`status = "rejected"` 且 `violations[]` 逐条给出违规码与原因（不自动修正，不做第二次语义尝试）；未配置 AI provider 时 503。
 
 `GET /ai/research` [已实现] —— 最近研究运行的摘要列表（query `limit` 默认 20、上限 100）：`run_id`/`question`/`status`/`current_step`/`capability_status`/`attempts`/`violation_count`/`warning_count`/`created_at`/`completed_at`，不含假设与草案正文。
 
 `GET /ai/research/{run_id}` [已实现] —— 单次运行的完整 payload（字段同 `POST /ai/research`）；未知 id 返回 404。
 
 `POST /ai/strategy/formalize` [已实现] —— 单独让 STRATEGY_ARCHITECT 再形式化一次：请求 `{run_id}` 或 `{hypothesis_id}` → `{"draft": {...}}`（字段同 run payload 里的 `draft`）。回答不是草案时 422，detail 带 `step` 与 violations；两个 id 都没给返回 400；id 未知返回 404。本端点是研究层内部的重跑入口，五步主链路已包含该步。
+
+**证据的核对结果与新增违规码** [已实现] —— 假设与草案正文里每条规则的 `evidence[]` 会被服务端补上四个**只读**字段：`verified`（布尔，是否在材料里逐字找到）、`char_start` / `char_end`（在读入文本里的字符区间，从 0 起）、`verified_against`（被核对的那份读入文本的 sha256）。请求不接受这四个字段，语义就是「这句话在原文的哪一段被找到了」（ADR-159）。违规码新增四个：`evidence_missing_quote`（EXPLICIT 规则没给引文）、`evidence_quote_too_short`（引文规范化后不足 2 字符）、`evidence_mismatch`（引文在读入材料里找不到——编造引文在这里被拒）、`unknown_rule_unknown`（unknown 点名了本次假设里不存在的 `rule_id`）。研究运行的 `sources[]` 每条带 `source_hash`（原文 hash）、`text_hash`（读入文本 hash）、`stored_chars` 与 `retention{policy, excerpt_budget, stored_chars, full_text_stored}`；材料没被存全时 `warnings[]` 出现 `excerpt_limited`（ADR-161）。
 
 ## GitHub Sources
 

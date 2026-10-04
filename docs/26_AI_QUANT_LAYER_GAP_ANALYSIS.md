@@ -599,5 +599,20 @@ CI 必须失败的三类情形：
 - 根因：`backend/alembic/versions/0013_research_layer.py` 先建 `research_artifacts`，而它外键指向的 `ai_research_runs` 在同一文件里更晚才建。SQLite 接受「外键指向一张还不存在的表」（所以本地 1069 例全绿），PostgreSQL 抛 `psycopg.errors.UndefinedTable: relation "ai_research_runs" does not exist`；API 容器 entrypoint 重试三次后 `migrations failed; refusing to start`。
 - 修复（ADR-158）：`upgrade()` 改成依赖顺序（`ai_research_runs` → `research_artifacts` → `research_artifact_fragments` → `strategy_hypotheses` → `strategy_hypothesis_rules` → `strategy_drafts`），`downgrade()` 改成严格逆序（先删引用者，否则 PostgreSQL 报 `DependentObjectsStillExist`）；表结构、列名、约束名与功能语义零改动。
 - 兜底：`backend/tests/test_migration_revisions.py` 新增两条**不连数据库**的静态守卫（`ast` 读迁移源码顺序与外键目标），修复前对 0013 各红一次，修复后该文件 6 passed；聚焦集 65 passed。
-- 版本策略：已发布的 v1.9.8 commit / tag / GHCR 镜像保留不移动，只向前发 v1.9.9 补丁（ADR-086 补丁版不部署 NAS）；按 ADR-079，v1.9.9 之后即 v2.0.0，故本文件 §22 里标注为「v1.9.9 项」的内容（`ai_tool_calls`、工具滥用防护、SSRF / 来源体积、Compiler）顺延到 **v2.0.0**。
+- 版本策略：已发布的 v1.9.8 commit / tag / GHCR 镜像保留不移动，只向前发 v1.9.9 补丁（ADR-086 补丁版不部署 NAS）；按 ADR-079，v1.9.9 之后即 v2.0.0，故本文件 §22 里标注为「v1.9.9 项」的内容（`ai_tool_calls`、工具滥用防护、SSRF / 来源体积、Compiler）顺延到 **v2.1.0**（v2.0.0 被 §24 的验收修复占用）。
 - 本轮没有新增任何研究层能力：`docs/26` §22 的「已关闭 / 仍未关闭」清单在功能层面保持不变。
+
+## 24. v2.0.0 验收修复状态（滚动更新）
+
+本节对应 v1.9.9 的独立验收报告（用户 2026-10-05 给出，结论「有条件通过，暂缓进入 v2.0.0」）。v2.0.0 **只修报告点名的 P1/P2，不进入 Phase 4**，因此本文件的功能层清单同样不变。
+
+| 报告编号 | 问题 | 本版处置 |
+| --- | --- | --- |
+| P1-01 | 证据的 `quote` 从不参与校验，编造引文也能拿到 EXPLICIT 外观 | 已修（ADR-159）：`QUOTE_REQUIRED_ORIGINS = ("EXPLICIT",)`，引文按空白折叠在读入材料里逐字查找，服务端写回 `verified` / `char_start` / `char_end` / `verified_against`；新码 `evidence_missing_quote` / `evidence_quote_too_short` / `evidence_mismatch` |
+| P1-02 | 第三方材料实际最多存 16 × 240 = 3840 字符，与冻结的「≤500 字符」不一致，且不分来源种类 | 已修（ADR-161）：第三方默认 `THIRD_PARTY_EXCERPT_CHARS = 500` + 16 片段；`user_input` 按 `USER_OWNED_EXCERPT_CHARS = MAX_ARTIFACT_CHARS` + 64 片段整份保留；`retention = full` 需 `license_note`；少留时发 `excerpt_limited` |
+| P2-01 | 一条 field 级 `unknown` 可以掩盖同字段的多条 EXPLICIT 规则 | 已修（ADR-160）：`Unknown.rule_id` + `_unknowns_cover()`，field 级只在 `explicit_per_field[field] == 1` 时免罪；新码 `unknown_rule_unknown` |
+| P2-02 | 单项能力 SUPPORTED ≠ 整条策略可执行，Compiler 阶段要组合验证 | 不改代码（属 Compiler 阶段）：写进 `docs/06` §19 与 `docs/25` 实施状态，作为 Phase 4 / v2.1.0 的前置条件 |
+| P2-03 | `text_hash` 是对截断后文本取的 hash，`size_bytes` 却是原文大小 | 已修（ADR-161）：迁移 `0014_artifact_source_hash` 给 `research_artifacts` 加 `source_hash`（原文），与既有 `text_hash`（读入文本）并存 |
+| P2-04 | 只有研究层有「无执行路径」守卫，没有「任何 provider 调用必须经 `run_task()`」的全仓守卫 | 已修（ADR-162）：`backend/tests/test_ai_provider_boundary.py` 用 AST 扫全仓（provider 调用者、`app/ai/` 内的 httpx、AI 层的模块清单、两个角色模块必须走 `run_task`） |
+
+仍未关闭（顺延 v2.1.0，即 Phase 4 起）：`docs/26` §12 的工具网关与 `ai_tool_calls`、§13 的四个 AI 面板门控与完整 `/lab`、§17 的 Compiler 与 StrategySpec 1.0、Phase 4 的统一研究来源抓取（含 `ai_source_snapshots`）、以及 §22 里标注为 v1.9.9 项的那批（工具滥用防护、SSRF / 来源体积）。

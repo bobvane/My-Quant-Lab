@@ -8,6 +8,8 @@ offline, and the Martin scenario from the plan is the reference case.
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from research_payloads import (
     MARTIN,
@@ -115,6 +117,112 @@ def test_the_material_is_kept_as_artifacts_and_excerpts_not_a_copy(db_session, p
     assert run.sources_json[0]["characters_read"] == len(NOTE)
 
 
+def test_material_from_elsewhere_is_kept_as_a_short_excerpt(db_session, provider):
+    """Someone else's text: metadata, hashes, and at most 500 characters (ADR-161)."""
+
+    paper = "\n".join(f"第 {index} 行：外部资料的一段说明。" for index in range(200))
+    run, _ = run_research(
+        db_session,
+        provider,
+        [hypothesis_payload(), draft_payload()],
+        inputs=[
+            service.ResearchInput(text=NOTE, source_ref=MARTIN),
+            service.ResearchInput(
+                text=paper, source_ref="paper", kind="text", uri="https://example.com/paper"
+            ),
+        ],
+    )
+
+    assert run.status == "completed"
+    artifact = db_session.scalars(
+        select(ResearchArtifact).where(ResearchArtifact.source_ref == "paper")
+    ).one()
+    assert artifact.source_hash == hashlib.sha256(paper.encode("utf-8")).hexdigest()
+    # The run read all of it; it is the *keeping* that is bounded.
+    assert artifact.text_hash == artifact.source_hash
+    excerpts = db_session.scalars(
+        select(ResearchArtifactFragment).where(ResearchArtifactFragment.artifact_id == artifact.id)
+    ).all()
+    kept = sum(len(fragment.text_excerpt) for fragment in excerpts)
+    assert 0 < kept <= service.THIRD_PARTY_EXCERPT_CHARS
+    assert kept < len(paper)
+    assert "第 199 行" not in "".join(fragment.text_excerpt for fragment in excerpts)
+
+    limited = [warning for warning in run.warnings_json if warning["kind"] == "excerpt_limited"]
+    assert [warning["source_ref"] for warning in limited] == ["paper"]
+    assert limited[0]["policy"] == "excerpt"
+    assert limited[0]["retention_chars"] == service.THIRD_PARTY_EXCERPT_CHARS
+    assert limited[0]["read_chars"] == len(paper)
+
+    meta = next(entry for entry in run.sources_json if entry["source_ref"] == "paper")
+    assert meta["retention"] == {
+        "policy": "excerpt",
+        "excerpt_budget": service.THIRD_PARTY_EXCERPT_CHARS,
+        "stored_chars": kept,
+        "full_text_stored": False,
+    }
+
+
+def test_the_users_own_material_is_kept_in_full(db_session, provider):
+    """The user's own note is not third-party material, so it is not trimmed."""
+
+    own = NOTE + "".join(f"我的补充第 {index} 行。" for index in range(60))
+    run, _ = run_research(
+        db_session,
+        provider,
+        [hypothesis_payload(), draft_payload()],
+        inputs=[service.ResearchInput(text=own, source_ref=MARTIN)],
+        question=variant(QUESTION, "自己的长笔记"),
+    )
+
+    assert run.status == "completed"
+    artifact = db_session.scalars(select(ResearchArtifact)).one()
+    assert artifact.source_hash == artifact.text_hash
+    assert artifact.size_bytes == len(own)
+    excerpts = db_session.scalars(select(ResearchArtifactFragment)).all()
+    kept = sum(len(fragment.text_excerpt) for fragment in excerpts)
+    joined = "".join(fragment.text_excerpt for fragment in excerpts)
+    assert "我的补充第 59 行。" in joined  # the end of the note was kept too
+    assert kept == len(own)
+    assert [warning for warning in run.warnings_json if warning["kind"] == "excerpt_limited"] == []
+
+
+def test_material_the_user_is_licensed_to_keep_may_be_kept_in_full(db_session, provider):
+    """Third-party material may be kept whole, but only with a licence note."""
+
+    paper = "".join(f"第 {index} 行：我方拥有的资料。\n" for index in range(60))
+    run, _ = run_research(
+        db_session,
+        provider,
+        [hypothesis_payload(), draft_payload()],
+        inputs=[
+            service.ResearchInput(text=NOTE, source_ref=MARTIN),
+            service.ResearchInput(
+                text=paper,
+                kind="text",
+                source_ref="paper",
+                retention="full",
+                license_note="the user pasted it and owns it",
+            ),
+        ],
+        question=variant(QUESTION, "自有资料全文"),
+    )
+
+    assert run.status == "completed"
+    artifact = db_session.scalars(
+        select(ResearchArtifact).where(ResearchArtifact.source_ref == "paper")
+    ).one()
+    assert artifact.license_note == "the user pasted it and owns it"
+    excerpts = db_session.scalars(
+        select(ResearchArtifactFragment).where(ResearchArtifactFragment.artifact_id == artifact.id)
+    ).all()
+    kept = sum(len(fragment.text_excerpt) for fragment in excerpts)
+    assert kept > service.THIRD_PARTY_EXCERPT_CHARS
+    assert [warning for warning in run.warnings_json if warning["kind"] == "excerpt_limited"] == []
+    meta = next(entry for entry in run.sources_json if entry["source_ref"] == "paper")
+    assert meta["retention"]["policy"] == "full"
+
+
 # ------------------------------------------------------------------- provenance
 
 
@@ -142,6 +250,57 @@ def test_researcher_provenance(db_session, provider):
     assert "evidence_unknown_source" in {
         violation["code"] for violation in other_run.violations_json
     }
+
+
+def test_an_invented_quote_is_refused(db_session, provider):
+    """A real ``source_ref`` with a made-up sentence is not evidence (ADR-159).
+
+    Before this the server only checked that the citation pointed at material the
+    run supplied; the words themselves were never looked up, so a model could
+    label its own invention EXPLICIT by attaching a plausible-sounding quote.
+    """
+
+    invented = hypothesis_payload()
+    invented["rules"][1]["evidence"] = [
+        {"source_ref": MARTIN, "quote": "超跌之后立刻满仓买入，不要止损"}
+    ]
+    run, _ = run_research(db_session, provider, [invented, invented])
+
+    assert run.status == "rejected"
+    assert {violation["code"] for violation in run.violations_json} == {"evidence_mismatch"}
+    assert db_session.scalar(select(func.count()).select_from(StrategyHypothesisRow)) == 0
+
+
+def test_an_explicit_rule_has_to_quote_the_material(db_session, provider):
+    """A citation with no words in it is not a citation."""
+
+    silent = hypothesis_payload()
+    silent["rules"][1]["evidence"] = [{"source_ref": MARTIN}]
+    run, _ = run_research(
+        db_session, provider, [silent, silent], question=variant(QUESTION, "没有引文")
+    )
+
+    assert run.status == "rejected"
+    assert {violation["code"] for violation in run.violations_json} == {"evidence_missing_quote"}
+
+
+def test_a_verified_quote_records_where_it_was_found(db_session, provider):
+    """Line breaks in a copied quote are forgiven; the span and the version are kept."""
+
+    spaced = hypothesis_payload()
+    spaced["rules"][1]["evidence"] = [
+        {"source_ref": MARTIN, "quote": "BTC\n\n超跌之后反弹的时候买入"}
+    ]
+    run, _ = run_research(
+        db_session, provider, [spaced, draft_payload()], question=variant(QUESTION, "引文换行")
+    )
+
+    assert run.status == "completed"
+    content = service.run_payload(db_session, run)["hypothesis"]["content"]
+    evidence = content["rules"][1]["evidence"][0]
+    assert evidence["verified"] is True
+    assert evidence["verified_against"] == hashlib.sha256(NOTE.encode("utf-8")).hexdigest()
+    assert NOTE[evidence["char_start"] : evidence["char_end"]] == "BTC 超跌之后反弹的时候买入"
 
 
 def test_an_assumed_rule_cannot_hide_in_the_assumptions_list(db_session, provider):
@@ -308,6 +467,29 @@ def test_a_source_this_version_cannot_read_is_named(db_session, provider):
         )
 
 
+def test_a_retention_policy_has_to_be_one_this_version_knows(db_session, provider):
+    """Keeping someone else's material whole needs a reason and a licence note."""
+
+    _router, factory = script([])
+    with pytest.raises(ValueError, match="unknown retention policy 'forever'"):
+        service.start_research(
+            db_session,
+            question=QUESTION,
+            inputs=[service.ResearchInput(text="x", source_ref="paper", retention="forever")],
+            router_factory=factory,
+        )
+    with pytest.raises(ValueError, match="needs a license note"):
+        service.start_research(
+            db_session,
+            question=QUESTION,
+            inputs=[
+                service.ResearchInput(text="x", kind="text", source_ref="paper", retention="full")
+            ],
+            router_factory=factory,
+        )
+    assert db_session.scalar(select(func.count()).select_from(AIResearchRun)) == 0
+
+
 def test_a_long_source_is_truncated_and_the_run_says_so(db_session, provider):
     long_text = "x" * (service.MAX_ARTIFACT_CHARS + 500)
     run, _ = run_research(
@@ -328,6 +510,18 @@ def test_a_long_source_is_truncated_and_the_run_says_so(db_session, provider):
     big = next(entry for entry in run.sources_json if entry["source_ref"] == "big")
     assert big["size_bytes"] == len(long_text)
     assert big["characters_read"] == service.MAX_ARTIFACT_CHARS
+
+    # Two hashes, two questions: what the caller handed over, and what was read
+    # (citations are checked against the second one) — ADR-161.
+    artifact = db_session.scalars(
+        select(ResearchArtifact).where(ResearchArtifact.source_ref == "big")
+    ).one()
+    assert artifact.source_hash == hashlib.sha256(long_text.encode("utf-8")).hexdigest()
+    assert (
+        artifact.text_hash
+        == hashlib.sha256(long_text[: service.MAX_ARTIFACT_CHARS].encode("utf-8")).hexdigest()
+    )
+    assert artifact.source_hash != artifact.text_hash
 
 
 def test_a_run_without_a_provider_is_recorded_not_raised(db_session):

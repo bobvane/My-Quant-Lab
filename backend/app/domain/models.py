@@ -733,9 +733,15 @@ class AIUsage(Base):
 class ResearchArtifact(Base, TimestampMixin):
     """One piece of material a research run may read.
 
-    The text is *not* stored: a run keeps the hash of what it read and a few
+    The text is *not* stored: a run keeps the hashes of what it read and a few
     short excerpts, so the audit trail can say which bytes produced an answer
     without becoming a second copy of somebody else's document (ADR-153).
+
+    Two hashes on purpose: ``source_hash`` is the material the caller handed
+    over and ``text_hash`` is the version this run actually read. They differ
+    whenever a source was truncated, and citations are verified against the
+    second one — "the AI read this text" is a checkable claim, not a note
+    (ADR-161).
     """
 
     __tablename__ = "research_artifacts"
@@ -749,6 +755,7 @@ class ResearchArtifact(Base, TimestampMixin):
     parse_status: Mapped[str] = mapped_column(String(16), default="ok", nullable=False)
     parse_error: Mapped[str | None] = mapped_column(Text)
     text_hash: Mapped[str | None] = mapped_column(String(64))
+    source_hash: Mapped[str | None] = mapped_column(String(64))
     size_bytes: Mapped[int | None] = mapped_column(Integer)
     license_note: Mapped[str | None] = mapped_column(Text)
 

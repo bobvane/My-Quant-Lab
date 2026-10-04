@@ -745,6 +745,11 @@ class ResearchSourceIn(BaseModel):
 
     ``url`` and ``pdf`` are deliberately absent: this version does not fetch or
     parse anything, and accepting a URL it cannot read would suggest otherwise.
+
+    ``retention`` decides how much of the material is kept as excerpt: the
+    user's own words are kept, material from elsewhere keeps 500 characters
+    unless the caller states the user owns it (``retention="full"`` plus a
+    ``license_note``).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -755,6 +760,7 @@ class ResearchSourceIn(BaseModel):
     label: str | None = Field(default=None, max_length=255)
     uri: str | None = Field(default=None, max_length=1024)
     license_note: str | None = Field(default=None, max_length=2000)
+    retention: Literal["excerpt", "full"] | None = None
 
 
 class ResearchRunIn(BaseModel):

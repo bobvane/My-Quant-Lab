@@ -118,6 +118,18 @@ AI 层改动另加（v1.9.7 起，ADR-150 至 ADR-153）：
 [ ] 表名/约束名不超过 PostgreSQL 的 63 字节限制，revision id 不超过 32 字符（0008 的老教训）
 ```
 
+研究层证据与材料改动另加（v2.0.0 起，ADR-159 至 ADR-162）：
+
+```text
+[ ] EXPLICIT 规则的 evidence 必须带 quote，且 quote 规范化空白后能在读入材料里逐字找到
+    （找不到是 evidence_mismatch → REJECT，不是警告；缺引文 evidence_missing_quote）
+[ ] 引文核对结果由服务端写回 verified / char_start / char_end / verified_against，不进给模型的 schema
+[ ] hypothesis 与 draft 的 unknowns 要指名到 rule_id；field 级说法只在「该字段只有一条 EXPLICIT」时免罪
+[ ] 材料保留按种类：user_input 整份留，其余默认 ≤500 字符摘录；要整份留必须带 license_note
+[ ] source_hash（用户交上来的原文）与 text_hash（模型读到的文本）分开记；少留时发 excerpt_limited
+[ ] 任何新的 AI provider 调用都只能经 run_task()：加完模块跑 backend/tests/test_ai_provider_boundary.py
+```
+
 ## 5.1 推送与网络（Windows 上的两个坑，v1.9.7 实测）
 
 - **`git push` 报 schannel `CRYPT_E_REVOCATION_OFFLINE`**：Windows 的 schannel 在离线或代理环境下拿不到吊销列表，握手直接失败；同一个远端用 OpenSSL 后端就通。给这一条命令加参数即可，不要改全局配置：
@@ -133,6 +145,8 @@ v1.9.8 的 tag 推上去之后，GitHub 上一次红了三处：CI 的 `Run Post
 - **本地为什么全绿**：`backend/alembic/versions/0013_research_layer.py` 先建 `research_artifacts`，而它外键指向的 `ai_research_runs` 更晚才建。**SQLite 接受指向尚不存在表的外键，PostgreSQL 不接受**（`psycopg.errors.UndefinedTable: relation "ai_research_runs" does not exist`）。本机没有 docker，所以 PostgreSQL 侧只能靠 CI——凡是「SQLite 能过、PostgreSQL 才炸」的东西（外键前向引用、表名/约束名超长、revision id 超长），都要按 ADR-158 的静态守卫在本地兜住。
 - **不要移动已发布的 tag**：commit、tag、GHCR 镜像都留着，**只向前发一版补丁**（v1.9.8 → v1.9.9）；已发布的东西被改写比留一个红 tag 更糟。修好之后顺手把上一版的 release 说明补一句「这一版的迁移在 PostgreSQL 上失败，请用 vX.Y.Z」。
 - **补丁版的版本递增**：按 ADR-079 的规则递增；v1.9.9 之后就是 v2.0.0，所以被这一版挤掉的功能顺延到下一个版本号，别塞进补丁版。
+- **红版处理纪律（v1.9.9 独立验收后立的准则）**：已经 commit / 发布的版本，如果因为 CI、Release、迁移、启动这类**发布门禁**失败而不成立，可以发下一个**最小修复版**把发布契约恢复回来——但修复版只准解决阻断问题，不得借机进入下一 Phase；一旦修复涉及新功能、架构扩展、范围扩大或下一 Phase 的内容，必须先停下来问，不能自己往前推。本仓库的两次红版（v1.9.8 → v1.9.9 只改迁移顺序、v1.9.9 → v2.0.0 只做验收报告点名的 P1/P2）都是这条纪律的例子：向前修，不回滚、不移动 tag。
+- **验收报告先复核再动手**：收到外部验收/评审报告时，逐条回到代码里确认（行号、常量、测试函数），把「确认 / 部分成立 / 不成立」分开写，再决定改什么。v1.9.9 报告里的 P1-01（引文不校验）、P2-01（`unknowns` 按 field 掩盖多条规则）、P2-03（`text_hash` 与 `size_bytes` 指向不同对象）与 P2-04（只有研究层守卫）都复核成立；P2-02（单项能力支持 ≠ 组合可执行）确认为事实但属于 Compiler 阶段，只写进文档、不改代码。
 
 ## 6. 未来扩展策略
 

@@ -324,3 +324,14 @@ UI：`/lab`「AI 研究实验室」（`frontend/src/views/LabView.vue`）——�
 - 统一 Explanation API（Phase 6）、策略实验与版本迭代（Phase 7）、完整 `/lab`（Phase 8）
 
 v1.9.9 没有新增 AI 层能力，只修了一件事：迁移 `0013_research_layer` 的建表顺序（先建被引用的 `ai_research_runs`，`downgrade()` 反向删），因为 SQLite 容忍外键前向引用、PostgreSQL 不容忍，v1.9.8 的 tag 因此在 CI 与 release 上红了三处（ADR-158）。研究层的实现范围与上面两份清单完全一致。
+
+## 19. AI 研究层的验收修复（v2.0.0）
+
+v1.9.9 的独立验收给出「有条件通过」：架构、无执行路径、结果禁区、迁移、UI 与 Runtime 全绿，但 `Provenance` 与产品规范一致性各留一个 P1，另有 P2 三条（验收报告 §二十）。v2.0.0 只处理这几条，**不进入 Phase 4**（Compiler / 抓取 / 工具网关 / 完整 `/lab` 都不做，Phase 4 里程碑顺延为 v2.1.0），改动集中在四处（ADR-159…ADR-162）：
+
+1. **证据必须有原文（ADR-159）**——`QUOTE_REQUIRED_ORIGINS = ("EXPLICIT",)`：EXPLICIT 规则至少一条 evidence 必须带 `quote`，缺了是 `evidence_missing_quote`，规范化后不足 `MIN_QUOTE_CHARS = 2` 是 `evidence_quote_too_short`；引文按空白折叠后在**读入的**材料里逐字查找，找不到是 `evidence_mismatch`（编造引文从此不是「弱证据」而是伪造）。找到就在服务端写回四个只读字段：`verified` / `char_start` / `char_end` / `verified_against`（该来源读入文本的 sha256），它们不出现在给模型的 schema 里。INFERRED 仍只要求 `source_ref`，但给了引文就必须能验证；ASSUMED / UNKNOWN 不要求引文，可一旦写了非空引文同样必须能验证。
+2. **一个未解问题只回答一条规则（ADR-160）**——`Unknown.rule_id`：unknown 可以点名它说的是哪一条规则；field 级说法只在 `explicit_per_field[field] == 1`（该字段只有一条 EXPLICIT）时才算「交代」，否则 `dropped_explicit_rule`。点名了不存在的规则是 `unknown_rule_unknown`；草案里其它按 id 指路的地方同样要真的存在（`required_capabilities[].affected_rule` → `unknown_affected_rule`）。
+3. **别人的材料只留片段，自己的材料留全（ADR-161）**——`USER_OWNED_KINDS = ("user_input",)`：用户自己粘贴的材料按 `USER_OWNED_EXCERPT_CHARS = MAX_ARTIFACT_CHARS (20_000)` 与 `MAX_FRAGMENTS_PER_USER_ARTIFACT = 64` 保留；第三方默认 `THIRD_PARTY_EXCERPT_CHARS = 500` + `MAX_FRAGMENTS_PER_ARTIFACT = 16`。请求可用 `retention`（`excerpt` / `full`）覆盖默认，`full` 只对非 `user_input` 有意义且必须同时给 `license_note`（否则 400）。`research_artifacts` 加一列 `source_hash`（迁移 `0014_artifact_source_hash`）：`source_hash` 是用户交上来的原文、`text_hash` 是模型真正读到的文本——被 `MAX_ARTIFACT_CHARS` 截断时两者不同，将来才能回答「AI 读的是哪一版」。材料没存全时 `warnings_json` 出现 `excerpt_limited`，「有没有少留」按去空白段落比较（`_storable_chars()`），片段本身保留段落原字符。
+4. **模型调用只有一条路（ADR-162）**——`backend/tests/test_ai_provider_boundary.py` 用 AST 扫全仓：调 `structured_output` / `explain_signal` / `chat` 的模块只能是 `ai/provider.py` 与 `ai/runtime.py`；`app/ai/` 下只有 `ai/provider.py` 能出现 `httpx`；AI 相关的 HTTP 例外只有设置页的 `data/ai_provider_service.py`（`GET /models` 测 key）；`ai/explain.py` 与 `ai/research.py` 必须走 `run_task(`；`app/ai/*.py` 的模块清单被钉住，新增模块会让测试红一次。
+
+v2.0.0 明确不做（验收报告 §二十二）：Strategy Compiler、任何让 AI 触发回测 / 风险 / 敏感性 / Monte Carlo 的入口、RAG、URL / PDF / GitHub 抓取、Tool Gateway、MCP、自动研究、自动优化、新 Agent、新 Provider。研究层的四道门、五步链、四个端点、`/lab` 与「草案不可执行」的边界与 v1.9.9 一致。

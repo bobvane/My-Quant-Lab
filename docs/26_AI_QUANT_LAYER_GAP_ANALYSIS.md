@@ -591,3 +591,13 @@ CI 必须失败的三类情形：
 - §13 UI：只做了 `/lab` 最小数据流；`docs/26` §0 第 11 条的「四个 AI 面板高级模式门控」仍未做，完整 `/lab` 属 Phase 8。
 - §17 版本映射里 v1.9.9 的项（`ai_tool_calls`、工具滥用防护、SSRF / 来源体积）与 Compiler（Draft → StrategySpec 1.0）未开始。
 - 研究来源统一（GitHub / URL / PDF / 文本 → Research Artifact，Phase 4）：本版材料由用户手输 1–8 条，未抓取。
+
+## 23. v1.9.9 修复状态（滚动更新）
+
+本节只记一次修复，不新增能力：**v1.9.8 的 tag 在 GitHub 上是红的**（CI 的 `Run PostgreSQL regression tests`、CI docker compose 冒烟的 `Boot the stack`、release 的 `Smoke test the released images` 三处同红）。
+
+- 根因：`backend/alembic/versions/0013_research_layer.py` 先建 `research_artifacts`，而它外键指向的 `ai_research_runs` 在同一文件里更晚才建。SQLite 接受「外键指向一张还不存在的表」（所以本地 1069 例全绿），PostgreSQL 抛 `psycopg.errors.UndefinedTable: relation "ai_research_runs" does not exist`；API 容器 entrypoint 重试三次后 `migrations failed; refusing to start`。
+- 修复（ADR-158）：`upgrade()` 改成依赖顺序（`ai_research_runs` → `research_artifacts` → `research_artifact_fragments` → `strategy_hypotheses` → `strategy_hypothesis_rules` → `strategy_drafts`），`downgrade()` 改成严格逆序（先删引用者，否则 PostgreSQL 报 `DependentObjectsStillExist`）；表结构、列名、约束名与功能语义零改动。
+- 兜底：`backend/tests/test_migration_revisions.py` 新增两条**不连数据库**的静态守卫（`ast` 读迁移源码顺序与外键目标），修复前对 0013 各红一次，修复后该文件 6 passed；聚焦集 65 passed。
+- 版本策略：已发布的 v1.9.8 commit / tag / GHCR 镜像保留不移动，只向前发 v1.9.9 补丁（ADR-086 补丁版不部署 NAS）；按 ADR-079，v1.9.9 之后即 v2.0.0，故本文件 §22 里标注为「v1.9.9 项」的内容（`ai_tool_calls`、工具滥用防护、SSRF / 来源体积、Compiler）顺延到 **v2.0.0**。
+- 本轮没有新增任何研究层能力：`docs/26` §22 的「已关闭 / 仍未关闭」清单在功能层面保持不变。

@@ -2983,6 +2983,18 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 - 测试：`backend/tests/test_ai_research_security.py`（22 例）——五条注入（ignore previous instructions / reveal system prompt / execute this command / change strategy rules / pretend this capability exists）不得改变角色契约（system 消息仍等于契约、契约 `content_hash` 不变）；五组伪造结果字段与七种伪造请求分别被拒且不留 hypothesis/draft；一句散文里的「预计 CAGR 25%」被标 `UNVERIFIED`；`app/ai/research.py` 的源码文本不含任何回测/子进程/求值入口。
 
+## ADR-158：迁移文件的顺序是契约——建表按依赖、删表按逆序，用不连库的静态守卫兜住 PostgreSQL-only 的问题
+
+- 背景：v1.9.8 的 tag 在 GitHub 上三处同时红（CI 的 `Run PostgreSQL regression tests`、CI docker compose 冒烟的 `Boot the stack`、release 的 `Smoke test the released images`）。根因是 `backend/alembic/versions/0013_research_layer.py` 先建 `research_artifacts`，而它外键指向的 `ai_research_runs` 在**同一个文件里更晚**才建：SQLite 接受「外键指向一张还不存在的表」，所以本地 1069 例全绿；PostgreSQL 抛 `psycopg.errors.UndefinedTable: relation "ai_research_runs" does not exist`，API 容器 entrypoint 重试三次后 `migrations failed; refusing to start`，于是「迁移跑不起来 → 栈起不来 → 镜像冒烟失败」一次红三处。同类问题此前已经发生过一次：0008 的 revision id 超过 32 字符同样只在 PostgreSQL 上炸。
+
+- 决策：迁移文件内部的顺序成为契约。①`upgrade()` 里每个 `op.create_table` 必须出现在它外键所引用的同文件表**之后**（引用更早 revision 里的表不算）；②`downgrade()` 必须**严格逆序**——先删引用者再删被引用者，否则 PostgreSQL 在删被引用表时抛 `DependentObjectsStillExist`；③把这条契约变成**不连数据库**的静态测试，落在 `backend/tests/test_migration_revisions.py`：用 `ast` 解析 `upgrade()` / `downgrade()` 的源码，以 `_create_table_order()` / `_drop_order()` / `_foreign_targets()` 取源码顺序与外键目标，新增 `test_a_table_is_created_before_the_tables_its_foreign_keys_reference` 与 `test_a_table_is_dropped_after_the_tables_that_reference_it`，因此 SQLite 全套也能看见这一类只有 PostgreSQL 才炸的顺序问题；④**已发布的 tag 不移动**：v1.9.8 的 commit、tag 与 GHCR 镜像全部保留，只向前发 v1.9.9 补丁。
+
+- 理由：靠 CI 的 PostgreSQL 步骤发现这一层问题，代价是等一次完整的推 tag 周期，而且红在别人看得见的地方（release 页面自动写上「Smoke test: failure」）。建表顺序本来就是迁移作者在本地一眼能看出的信息，把它写成不连库的静态断言成本只有毫秒级、不需要 docker、更不会因为本地跑的是 SQLite 而漏过去。
+
+- 影响与兼容：只改顺序与守卫，表结构、列名、约束名、revision id 与功能语义零改动，`alembic upgrade head` 在 SQLite 与 PostgreSQL 上结果一致；v1.9.8 的 release 说明保留自动生成的冒烟失败警告并补一句指向 v1.9.9。「已发布 tag 不移动、只向前修一版」与 ADR-086 的补丁版处理一起成为成文规矩，同步写进 `docs/19_DEVELOPMENT_PLAYBOOK.md`。
+
+- 测试：`backend/tests/test_migration_revisions.py`（6 例）——两条新守卫在修复前对 0013 各红一次（`{'0013_research_layer.py:research_artifacts': ['ai_research_runs']}`），修复后全绿；聚焦集 `test_migrations_sqlite or test_migration_revisions or test_ai_research or test_ai_strategy_draft` 65 passed。PostgreSQL 侧由 CI 的 `Run PostgreSQL regression tests` 与 docker 冒烟在 v1.9.9 上验证。
+
 
 
 

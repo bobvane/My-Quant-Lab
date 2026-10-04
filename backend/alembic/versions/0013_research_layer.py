@@ -38,6 +38,34 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Creation order is dependency order: PostgreSQL refuses a foreign key that
+    # points at a table which does not exist yet, while SQLite accepts it happily
+    # (which is why the bug this file once had reached a tag). The static guard in
+    # backend/tests/test_migration_revisions.py checks every migration for it.
+    op.create_table(
+        "ai_research_runs",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("question", sa.Text(), nullable=False),
+        sa.Column("status", sa.String(length=16), nullable=False, server_default="pending"),
+        sa.Column("current_step", sa.String(length=24), nullable=False, server_default="queued"),
+        sa.Column("hypothesis_id", sa.Integer(), nullable=True),
+        sa.Column("draft_id", sa.Integer(), nullable=True),
+        sa.Column("capability_status", sa.String(length=24), nullable=True),
+        sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("sources_json", sa.JSON(), nullable=True),
+        sa.Column("warnings_json", sa.JSON(), nullable=True),
+        sa.Column("violations_json", sa.JSON(), nullable=True),
+        sa.Column("researcher_task_id", sa.Integer(), nullable=True),
+        sa.Column("architect_task_id", sa.Integer(), nullable=True),
+        sa.Column("error_message", sa.Text(), nullable=True),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["researcher_task_id"], ["ai_tasks.id"]),
+        sa.ForeignKeyConstraint(["architect_task_id"], ["ai_tasks.id"]),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index("ix_ai_research_runs_status", "ai_research_runs", ["status", "created_at"])
     op.create_table(
         "research_artifacts",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -71,30 +99,6 @@ def upgrade() -> None:
     op.create_index(
         "ix_research_fragment_artifact", "research_artifact_fragments", ["artifact_id"]
     )
-    op.create_table(
-        "ai_research_runs",
-        sa.Column("id", sa.Integer(), nullable=False),
-        sa.Column("question", sa.Text(), nullable=False),
-        sa.Column("status", sa.String(length=16), nullable=False, server_default="pending"),
-        sa.Column("current_step", sa.String(length=24), nullable=False, server_default="queued"),
-        sa.Column("hypothesis_id", sa.Integer(), nullable=True),
-        sa.Column("draft_id", sa.Integer(), nullable=True),
-        sa.Column("capability_status", sa.String(length=24), nullable=True),
-        sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("sources_json", sa.JSON(), nullable=True),
-        sa.Column("warnings_json", sa.JSON(), nullable=True),
-        sa.Column("violations_json", sa.JSON(), nullable=True),
-        sa.Column("researcher_task_id", sa.Integer(), nullable=True),
-        sa.Column("architect_task_id", sa.Integer(), nullable=True),
-        sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["researcher_task_id"], ["ai_tasks.id"]),
-        sa.ForeignKeyConstraint(["architect_task_id"], ["ai_tasks.id"]),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_ai_research_runs_status", "ai_research_runs", ["status", "created_at"])
     op.create_table(
         "strategy_hypotheses",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -164,13 +168,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Reverse of the order above: a table that something points at is dropped last.
     op.drop_index("ix_strategy_drafts_run", table_name="strategy_drafts")
     op.drop_table("strategy_drafts")
     op.drop_table("strategy_hypothesis_rules")
     op.drop_index("ix_strategy_hypotheses_run", table_name="strategy_hypotheses")
     op.drop_table("strategy_hypotheses")
-    op.drop_index("ix_ai_research_runs_status", table_name="ai_research_runs")
-    op.drop_table("ai_research_runs")
     op.drop_index("ix_research_fragment_artifact", table_name="research_artifact_fragments")
     op.drop_table("research_artifact_fragments")
     op.drop_table("research_artifacts")
+    op.drop_index("ix_ai_research_runs_status", table_name="ai_research_runs")
+    op.drop_table("ai_research_runs")

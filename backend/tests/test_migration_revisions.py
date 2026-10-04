@@ -89,3 +89,151 @@ def test_the_chain_has_exactly_one_head() -> None:
     }
     heads = sorted(set(chain) - referenced)
     assert len(heads) == 1, f"expected exactly one head, found {heads}"
+
+
+def _table_of(node: ast.AST) -> str:
+    """``"ai_research_runs.id"`` -> ``"ai_research_runs"``; anything else -> ``""``."""
+
+    try:
+        literal = ast.literal_eval(node)
+    except (ValueError, SyntaxError):
+        return ""
+    if isinstance(literal, str) and "." in literal:
+        return literal.split(".", 1)[0]
+    return ""
+
+
+def _foreign_targets(node: ast.AST) -> set[str]:
+    """The tables a ``create_table`` call points at through its foreign keys."""
+
+    targets: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        attr = getattr(child.func, "attr", None)
+        if attr == "ForeignKey" and child.args:
+            targets.add(_table_of(child.args[0]))
+        elif attr == "ForeignKeyConstraint" and len(child.args) >= 2:
+            for element in getattr(child.args[1], "elts", []):
+                targets.add(_table_of(element))
+    targets.discard("")
+    return targets
+
+
+def _create_table_order(path: Path) -> list[tuple[str, set[str]]]:
+    """Every ``op.create_table`` in ``upgrade()``, in source order, with its FK targets."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    upgrade = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "upgrade"
+        ),
+        None,
+    )
+    if upgrade is None:
+        return []
+    created: list[tuple[str, set[str]]] = []
+    for statement in upgrade.body:
+        call = getattr(statement, "value", None)
+        if not isinstance(call, ast.Call) or not call.args:
+            continue
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "create_table"):
+            continue
+        try:
+            name = ast.literal_eval(call.args[0])
+        except (ValueError, SyntaxError):  # a computed table name: nothing to check here
+            continue
+        assert isinstance(name, str), f"{path.name} has a create_table call without a name"
+        created.append((name, _foreign_targets(call)))
+    return created
+
+
+def test_a_table_is_created_before_the_tables_its_foreign_keys_reference() -> None:
+    """SQLite accepts a foreign key to a table that does not exist yet; PostgreSQL does not.
+
+    Background: ``0013_research_layer`` created ``research_artifacts`` -- whose
+    ``run_id`` foreign key points at ``ai_research_runs`` -- *before*
+    ``ai_research_runs`` itself. SQLite created the table anyway, so the whole
+    local suite was green, and only PostgreSQL refused:
+
+        psycopg.errors.UndefinedTable: relation "ai_research_runs" does not exist
+
+    The API container runs the migration chain at boot, so the CI smoke test and
+    the release smoke test went red too -- which is how the ordering bug reached a
+    tag. This test reads the chain itself, so it sees the ordering without a
+    database. A reference to a table an *earlier* revision creates is fine and is
+    not reported.
+    """
+
+    violations: dict[str, list[str]] = {}
+    for path in sorted(VERSIONS_DIR.glob("*.py")):
+        created = _create_table_order(path)
+        order = [name for name, _ in created]
+        for index, (name, targets) in enumerate(created):
+            later = sorted(target for target in targets if target in order[index + 1 :])
+            if later:
+                violations[f"{path.name}:{name}"] = later
+    assert not violations, (
+        "a migration creates a table before the table its foreign key references; "
+        "SQLite tolerates that, PostgreSQL raises UndefinedTable and the API container "
+        f"refuses to start: {violations}"
+    )
+
+
+def _drop_order(path: Path) -> list[str]:
+    """Every ``op.drop_table`` in ``downgrade()``, in source order."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    downgrade = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "downgrade"
+        ),
+        None,
+    )
+    if downgrade is None:
+        return []
+    dropped: list[str] = []
+    for statement in downgrade.body:
+        call = getattr(statement, "value", None)
+        if not isinstance(call, ast.Call) or not call.args:
+            continue
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "drop_table"):
+            continue
+        try:
+            name = ast.literal_eval(call.args[0])
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(name, str):
+            dropped.append(name)
+    return dropped
+
+
+def test_a_table_is_dropped_after_the_tables_that_reference_it() -> None:
+    """The same ordering rule in reverse: PostgreSQL refuses to drop a referenced table.
+
+    ``DROP TABLE ai_research_runs`` with ``research_artifacts.run_id`` still
+    pointing at it raises ``DependentObjectsStillExist``, so a downgrade has to
+    drop the referencing table first. SQLite does not care, so this is checked by
+    reading the chain.
+    """
+
+    violations: dict[str, list[str]] = {}
+    for path in sorted(VERSIONS_DIR.glob("*.py")):
+        targets = dict(_create_table_order(path))
+        dropped = _drop_order(path)
+        for index, name in enumerate(dropped):
+            earlier = sorted(
+                target for target in targets.get(name, set()) if target in dropped[:index]
+            )
+            if earlier:
+                violations[f"{path.name}:{name}"] = earlier
+    assert not violations, (
+        "a migration drops a table before the table that references it; SQLite tolerates "
+        f"that, PostgreSQL raises DependentObjectsStillExist: {violations}"
+    )

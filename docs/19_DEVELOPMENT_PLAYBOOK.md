@@ -109,12 +109,30 @@ AI 层改动另加（v1.9.7 起，ADR-150 至 ADR-153）：
 [ ] 研究层调用全部经 run_task()，AITask.research_run_id 串起来，tool_calls 保持 []
 ```
 
+迁移改动另加（v1.9.9 起，ADR-158）：
+
+```text
+[ ] upgrade() 里每个 op.create_table 都在它外键引用的同文件表之后（引用早期 revision 的表不算）
+[ ] downgrade() 严格逆序：先删引用者、再删被引用者（PostgreSQL 会报 DependentObjectsStillExist）
+[ ] 改过迁移文件就跑 backend/tests/test_migration_revisions.py（静态守卫，不连库、秒级）
+[ ] 表名/约束名不超过 PostgreSQL 的 63 字节限制，revision id 不超过 32 字符（0008 的老教训）
+```
+
 ## 5.1 推送与网络（Windows 上的两个坑，v1.9.7 实测）
 
 - **`git push` 报 schannel `CRYPT_E_REVOCATION_OFFLINE`**：Windows 的 schannel 在离线或代理环境下拿不到吊销列表，握手直接失败；同一个远端用 OpenSSL 后端就通。给这一条命令加参数即可，不要改全局配置：
   `git -c http.sslBackend=openssl -c http.proxy=http://192.168.2.5:7893 push <url> main refs/tags/vX.Y.Z`。
 - **代理与 token 都只在命令行上给**：`http.proxy` 按需写在 `-c` 里；远端用临时 token URL 推送时可以改用 https 而不是 ssh，但**推完必须用 `git ls-remote` 核实**远端真的有了那个 commit 与 tag（本地 `origin/main` 在临时 URL 方案下不会更新，`git status` 说明不了任何事）。
 - **`Z:` 映射盘不保证存在**：会话重启后 `Set-Location Z:\...` 可能报 `Cannot find drive`。文件工具走 UNC 路径没问题，但 `npm` / `cmd` 这类必须在真实盘符下运行的工具要改用 `scripts\Invoke-FrontendChecks.ps1`（它会镜像到 `%LOCALAPPDATA%\mql-fe-build` 再构建）。
+
+## 5.2 已经推上去的 tag 红了怎么办（v1.9.8 事故，v1.9.9 修好）
+
+v1.9.8 的 tag 推上去之后，GitHub 上一次红了三处：CI 的 `Run PostgreSQL regression tests`（4 条 PostgreSQL 回归全部 setup ERROR）、CI docker compose 冒烟的 `Boot the stack`、release 的 `Smoke test the released images`。release 是**照发**的，正文里被自动写上「**Smoke test: failure.** … consider the previous tag.」——别人看到的就是一个红着的版本。
+
+- **先分清「谁红、为什么红」**：三处红如果指向同一件事（栈起不来），根因通常只有一个。这次是 API 容器 entrypoint 的迁移链跑不过：`[entrypoint] migration attempt 3 failed` → `[entrypoint] ERROR: migrations failed; refusing to start`，所以「迁移 → 栈 → 镜像冒烟」连锁红。
+- **本地为什么全绿**：`backend/alembic/versions/0013_research_layer.py` 先建 `research_artifacts`，而它外键指向的 `ai_research_runs` 更晚才建。**SQLite 接受指向尚不存在表的外键，PostgreSQL 不接受**（`psycopg.errors.UndefinedTable: relation "ai_research_runs" does not exist`）。本机没有 docker，所以 PostgreSQL 侧只能靠 CI——凡是「SQLite 能过、PostgreSQL 才炸」的东西（外键前向引用、表名/约束名超长、revision id 超长），都要按 ADR-158 的静态守卫在本地兜住。
+- **不要移动已发布的 tag**：commit、tag、GHCR 镜像都留着，**只向前发一版补丁**（v1.9.8 → v1.9.9）；已发布的东西被改写比留一个红 tag 更糟。修好之后顺手把上一版的 release 说明补一句「这一版的迁移在 PostgreSQL 上失败，请用 vX.Y.Z」。
+- **补丁版的版本递增**：按 ADR-079 的规则递增；v1.9.9 之后就是 v2.0.0，所以被这一版挤掉的功能顺延到下一个版本号，别塞进补丁版。
 
 ## 6. 未来扩展策略
 

@@ -307,7 +307,7 @@ API：四个端点（`POST /ai/research`、`GET /ai/research`、`GET /ai/researc
 
 UI：`/lab`「AI 研究实验室」（`frontend/src/views/LabView.vue`）——普通模式只给人话（AI 怎么理解、规则是什么、还缺什么、系统能不能做），高级模式才显示 provenance 徽标、能力 token、违规码与运行元数据；`origin = ASSUMED` 的规则在**两种模式**下都标注「AI 提出的假设，不是你的原话」，草案卡片常驻说明「不能直接运行、这一版没有跑过任何回测」。
 
-## 18. 已实现 / 未实现一览（截至 v1.9.8）
+## 18. 已实现 / 未实现一览（截至 v1.9.9）
 
 已实现（在 §16 那一版之上新增）：
 
@@ -322,3 +322,5 @@ UI：`/lab`「AI 研究实验室」（`frontend/src/views/LabView.vue`）——�
 - 研究来源统一（GitHub / URL / PDF / 文本 → Research Artifact，Phase 4）
 - Tool Gateway 与受控工具调用（Phase 5）——因此 `audit_payload()` 的 `tool_calls` 恒为 `[]`
 - 统一 Explanation API（Phase 6）、策略实验与版本迭代（Phase 7）、完整 `/lab`（Phase 8）
+
+v1.9.9 没有新增 AI 层能力，只修了一件事：迁移 `0013_research_layer` 的建表顺序（先建被引用的 `ai_research_runs`，`downgrade()` 反向删），因为 SQLite 容忍外键前向引用、PostgreSQL 不容忍，v1.9.8 的 tag 因此在 CI 与 release 上红了三处（ADR-158）。研究层的实现范围与上面两份清单完全一致。

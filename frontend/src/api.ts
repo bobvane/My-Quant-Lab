@@ -657,6 +657,251 @@ export interface PaperExecution {
   cash: number
 }
 
+/* ------------------------------------------------------------------ *
+ * AI 研究实验室（§17）
+ *
+ * 研究输入 → AI 理解 → 策略假设 → 策略草案 → 能力检查。这里的类型只描述
+ * 服务端真正返回的形状：`run` 是运行本身，`hypothesis` 与 `draft` 各有一层
+ * 包装（数据库行 + `content` 正文），能力结论在 `draft.capability_report`。
+ * 草案恒为 `executable: false`：这一版没有任何东西可以执行，也没有回测结果。
+ * ------------------------------------------------------------------ */
+
+/** 一条规则/指标的来源（ADR-154 的来源门禁）。 */
+export type AIResearchOrigin = 'EXPLICIT' | 'INFERRED' | 'ASSUMED' | 'UNKNOWN'
+
+export interface AIResearchEvidence {
+  source_ref: string
+  locator?: string | null
+  quote?: string | null
+}
+
+/** 假设里的规则与草案里的规则共用这一形状（草案多一个 `derived_from`）。 */
+export interface AIResearchRule {
+  id: string
+  field: string
+  statement: string
+  origin: AIResearchOrigin
+  confidence?: string
+  evidence?: AIResearchEvidence[]
+  parameters?: Record<string, any>
+  required_capabilities?: string[]
+  note?: string | null
+  /** 草案规则：它来自假设里的哪一条规则；null 表示架构师自己加的。 */
+  derived_from?: string | null
+}
+
+export interface AIResearchUnknown {
+  field: string
+  why: string
+  needed_to_formalize?: boolean
+}
+
+export interface AIResearchAmbiguity {
+  phrase: string
+  readings?: string[]
+  needs_decision?: boolean
+}
+
+export interface AIResearchAssumption {
+  statement: string
+  applies_to?: string[]
+  reason?: string | null
+}
+
+export interface AIResearchCapabilityRequest {
+  capability: string
+  statement?: string | null
+  reason?: string | null
+  /** 模型自己的判断，只是记录：服务端从不采信（ADR-151）。 */
+  claimed_supported?: boolean
+}
+
+export interface AIResearchHypothesisContent {
+  strategy_name: string
+  understanding: string
+  rules: AIResearchRule[]
+  ambiguities: AIResearchAmbiguity[]
+  unknowns: AIResearchUnknown[]
+  capability_requests: AIResearchCapabilityRequest[]
+  assumptions: AIResearchAssumption[]
+  objective?: string | null
+  market?: string[]
+  asset_class?: string | null
+  universe?: string | null
+  timeframe?: string | null
+  limitations?: string[]
+  confidence?: string
+}
+
+/** 一行假设：`content` 才是模型的正文。 */
+export interface AIResearchHypothesis {
+  hypothesis_id: number
+  run_id: number
+  strategy_name: string
+  status: string
+  confidence: string
+  role?: string
+  prompt_version?: string | null
+  provider?: string | null
+  model?: string | null
+  ai_task_id?: number | null
+  content: AIResearchHypothesisContent
+}
+
+export interface AIResearchMarket {
+  markets?: string[]
+  asset_classes?: string[]
+  timeframes?: string[]
+  universe?: string | null
+}
+
+export interface AIResearchIndicator {
+  name: string
+  origin: AIResearchOrigin
+  parameters?: Record<string, any>
+  note?: string | null
+}
+
+/** 草案需要、而系统目前没有的能力，也带着模型建议的替代做法。 */
+export interface AIResearchNeed {
+  capability: string
+  affected_rule: string
+  reason: string
+  suggested_alternative?: string | null
+  alternative_is_experimental?: boolean
+}
+
+export interface AIResearchAlternative {
+  label: string
+  statement: string
+  what_it_gives_up?: string[]
+  differs_from_original?: boolean
+}
+
+export interface AIResearchDraftContent {
+  strategy_name: string
+  /** 模型自报的能力结论；页面上只用服务端判定的那一份。 */
+  status: string
+  market: AIResearchMarket
+  rules: AIResearchRule[]
+  unknowns: AIResearchUnknown[]
+  required_capabilities: AIResearchNeed[]
+  experimental_alternatives: AIResearchAlternative[]
+  indicators: AIResearchIndicator[]
+  assumptions: AIResearchAssumption[]
+  parameters?: Record<string, any>
+  notes?: string[]
+  understanding_of_original?: string | null
+  /** 恒为 false：草案是给人读的，不可执行。 */
+  executable: boolean
+}
+
+export interface AIResearchCapabilityItem {
+  capability: string
+  status: string
+  reason?: string
+  /** hypothesis / hypothesis_rule / indicator / draft_rule / draft */
+  required_by?: string
+  affected_rule?: string | null
+  claimed_supported?: boolean
+  overclaimed?: boolean
+  suggested_alternative?: string | null
+  alternative_is_experimental?: boolean
+}
+
+/** 服务端算出来的能力报告（不采信模型的自报结论）。 */
+export interface AIResearchCapabilityReport {
+  verdict: string
+  requested: string[]
+  supported: string[]
+  partial: string[]
+  missing: string[]
+  model_capabilities: string[]
+  reasons?: Record<string, string>
+  items: AIResearchCapabilityItem[]
+}
+
+/** 一行草案：`content` 与 `capability_report` 分开返回。 */
+export interface AIResearchDraft {
+  draft_id: number
+  run_id: number
+  hypothesis_id?: number | null
+  version?: number
+  status: string
+  capability_status?: string | null
+  model_status?: string | null
+  executable: boolean
+  model?: string | null
+  ai_task_id?: number | null
+  content: AIResearchDraftContent
+  capability_report: AIResearchCapabilityReport
+}
+
+export interface AIResearchViolation {
+  code: string
+  message: string
+  severity?: string
+  field?: string | null
+}
+
+/** 警告不是拒绝：材料被截断、或模型写了没算过的结果数字。 */
+export interface AIResearchWarning {
+  kind?: string
+  source_ref?: string
+  kept_chars?: number
+  original_chars?: number
+  metric?: string
+  text?: string
+  note?: string
+}
+
+export interface AIResearchSourceMeta {
+  source_ref: string
+  kind?: string
+  label?: string | null
+  uri?: string | null
+  parse_status?: string
+  text_hash?: string
+  size_bytes?: number
+  characters_read?: number
+  fragment_count?: number
+  license_note?: string | null
+}
+
+/** 一次研究运行的完整载荷（含假设、草案与能力报告）。 */
+export interface AIResearchRun {
+  run_id: number
+  question: string
+  status: string
+  current_step: string
+  capability_status?: string | null
+  attempts?: number
+  sources?: AIResearchSourceMeta[]
+  warnings?: AIResearchWarning[]
+  violations?: AIResearchViolation[]
+  error_message?: string | null
+  researcher_task_id?: number | null
+  architect_task_id?: number | null
+  created_at?: string | null
+  completed_at?: string | null
+  hypothesis?: AIResearchHypothesis | null
+  draft?: AIResearchDraft | null
+}
+
+/** 列表投影：没有假设与草案正文。 */
+export interface AIResearchRunSummary {
+  run_id: number
+  question: string
+  status: string
+  current_step: string
+  capability_status?: string | null
+  attempts?: number
+  violation_count?: number
+  warning_count?: number
+  created_at?: string | null
+  completed_at?: string | null
+}
+
 export const api = {
   health: () => request<HealthResponse>('/health'),
   systemInfo: () => request<SystemInfo>('/system/info'),
@@ -1053,6 +1298,26 @@ export const api = {
   // error. Secrets are never echoed back by the API.
   aiTask: (taskId: number) => request<Record<string, any>>(`/ai/tasks/${taskId}`),
   aiUsage: (limit = 100) => request<{ usage: Array<Record<string, any>> }>(`/ai/usage?limit=${limit}`),
+  // AI 研究实验室（§17）：研究输入 → AI 理解 → 策略假设 → 策略草案 → 能力检查。
+  // 一次 POST 就返回整条链路的结果；没有配置 AI 提供方时后端回答 503。
+  aiResearchStart: (payload: {
+    question: string
+    sources: Array<{
+      text: string
+      kind?: string
+      source_ref?: string
+      label?: string
+    }>
+    model?: string
+  }) => request<AIResearchRun>('/ai/research', { method: 'POST', body: JSON.stringify(payload) }),
+  aiResearchRuns: (limit = 20) => request<{ runs: AIResearchRunSummary[] }>(`/ai/research?limit=${limit}`),
+  aiResearchRun: (runId: number) => request<AIResearchRun>(`/ai/research/${runId}`),
+  // 只重跑架构师那一步，给已经存下来的假设再要一份草案。
+  aiStrategyFormalize: (payload: { run_id?: number; hypothesis_id?: number; model?: string }) =>
+    request<{ draft: AIResearchDraft }>('/ai/strategy/formalize', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   auditForEntity: (entityType: string, entityId: string) =>
     request<{ total: number; events: Array<Record<string, unknown>> }>(
       `/audit/logs/entity/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`,

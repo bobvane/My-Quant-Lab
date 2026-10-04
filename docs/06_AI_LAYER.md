@@ -276,3 +276,49 @@ global(已耗尽) → provider(已耗尽) → task(本次估算 > 单任务上�
 - 统一 Explanation API（Phase 6）
 - 策略实验与版本迭代、迁移分析（Phase 7）
 - `/lab` 研究界面（Phase 8）
+
+## 17. AI 研究层：Research → Hypothesis → Draft → Capability（v1.9.8）
+
+本节的规格来源是 v1.9.8 的二十节需求（Phase 3：策略研究与形式化）。**本版停在草案**：不做 Strategy Compiler，不跑回测 / 风险 / 敏感性 / Monte Carlo，不做 AI 回测分析师，不做完整 `/lab`，不做自动实验循环。
+
+链路（ADR-154…ADR-157）：
+
+```text
+研究输入（question + 1–8 条材料）
+  → RESEARCHER（契约 1.1.0）         → StrategyHypothesis（每条规则带 provenance）
+  → STRATEGY_ARCHITECT（契约 1.1.0） → StrategyDraft（executable = false）
+  → 服务端能力校验                   → SUPPORTED / PARTIALLY_SUPPORTED / NEEDS_CAPABILITY
+```
+
+四道门（全部集中在 `backend/app/ai/research_schemas.py`，测试直接对着这四道门写）：
+
+1. **Schema 门**——pydantic 模型全部 `extra="forbid"`；缺键/多键被分类成 `schema_invalid` / `fabricated_metric` / `forbidden_content`。
+2. **Domain 门**——`validate_hypothesis()` / `validate_draft()`：`EXPLICIT`/`INFERRED` 规则的 evidence 必须指向本次材料（`evidence_missing` / `evidence_unknown_source`）；`ASSUMED` 规则必须被假设覆盖（`assumed_not_disclosed`）；`UNKNOWN` 规则必须被 unknowns 覆盖（`unknown_not_disclosed`）；派生规则的 provenance 只准减弱（`provenance_stronger_than_hypothesis` / `new_rule_must_be_assumed`）；hypothesis 的 `EXPLICIT` 规则不得凭空消失（`dropped_explicit_rule`）。
+3. **Capability 门**——`assess_draft_capabilities()` 在服务端裁决三态；模型自报更强记 `capability_overclaim`；替代方案必须标 `alternative_is_experimental`，且 `Experimental Alternative ≠ 用户原策略`。
+4. **结果门**——递归扫描禁字段（`FORBIDDEN_METRIC_KEYS` / `FORBIDDEN_CONTENT_KEYS`），散文里的「预计 CAGR 25%」被标成 `UNVERIFIED` 而不是事实。
+
+失败语义：任一失败＝`ResearchRejected` → run 状态 `rejected` 且 `violations_json` 逐条记录（`POST /ai/research` 仍返回 200：一份答得不合格的模型回答是资源，不是服务器错误）；`POST /ai/strategy/formalize` 用 422 让人看到 `step` 与违规码。允许**一次**受控重试，走同一套门；传输/供应商失败让 run `failed`。拒绝时不写 hypothesis / draft，只留 run 与失败的 `AITask`。
+
+数据面（迁移 `0013_research_layer`）：`research_artifacts`、`research_artifact_fragments`、`ai_research_runs`、`strategy_hypotheses`、`strategy_hypothesis_rules`、`strategy_drafts`。本版材料由用户手输（1–8 条），还没有 GitHub / URL / PDF 的统一抓取（Phase 4）。
+
+运行与审计：研究层的每一次模型调用都经 `run_task()`，v1.9.7 的预算、缓存身份与审计**一行都没有重写**（ADR-152/153）；`AITask.research_run_id` 把 run 与调用串起来；`audit_payload()` 的 `strategy_draft_version` 指向本次 run 产出的草案版本，`tool_calls` 恒为 `[]`——本版没有任何工具调用，空列表是记录而不是遗漏（规格 §15）。
+
+API：四个端点（`POST /ai/research`、`GET /ai/research`、`GET /ai/research/{run_id}`、`POST /ai/strategy/formalize`），登记在 `docs/12_API_SPEC.md` 的 AI Research 一节。
+
+UI：`/lab`「AI 研究实验室」（`frontend/src/views/LabView.vue`）——普通模式只给人话（AI 怎么理解、规则是什么、还缺什么、系统能不能做），高级模式才显示 provenance 徽标、能力 token、违规码与运行元数据；`origin = ASSUMED` 的规则在**两种模式**下都标注「AI 提出的假设，不是你的原话」，草案卡片常驻说明「不能直接运行、这一版没有跑过任何回测」。
+
+## 18. 已实现 / 未实现一览（截至 v1.9.8）
+
+已实现（在 §16 那一版之上新增）：
+
+- 研究层四道门、五步数据流与两个新角色契约（`RESEARCHER` / `STRATEGY_ARCHITECT` 1.1.0）
+- 四个端点：`POST /ai/research`、`GET /ai/research`、`GET /ai/research/{run_id}`、`POST /ai/strategy/formalize`
+- 能力三态裁决、`capability_overclaim` 与「不静默降级」
+- `/lab` 最小界面（研究输入 → AI 理解 → 策略假设 → 策略草案 → 能力检查）
+
+仍未实现（按 `docs/25` §八十的顺序推进）：
+
+- Strategy Compiler（Draft → StrategySpec 1.0），以及任何让 AI 触发回测 / 风险 / 敏感性 / Monte Carlo 的入口（规格 §2 明令禁止，测试与源码守卫一起钉住）
+- 研究来源统一（GitHub / URL / PDF / 文本 → Research Artifact，Phase 4）
+- Tool Gateway 与受控工具调用（Phase 5）——因此 `audit_payload()` 的 `tool_calls` 恒为 `[]`
+- 统一 Explanation API（Phase 6）、策略实验与版本迭代（Phase 7）、完整 `/lab`（Phase 8）

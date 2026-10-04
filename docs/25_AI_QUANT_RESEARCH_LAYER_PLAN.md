@@ -5,6 +5,12 @@
 > 本文件是「用户输入」，不是本项目既有规格的替代：落地后的规格、偏差与决策分别记录在 `docs/04_STRATEGY_DSL.md`、`docs/06_AI_LAYER.md`、`docs/13_UI_UX.md`、`docs/17_DECISIONS.md`、`docs/15_ROADMAP_ACCEPTANCE.md`。
 > 下面正文为逐字副本（未改写、未删节），仅本头部为新增。
 
+## 实施状态（滚动更新）
+
+- **v1.9.7**：Phase 1–2 的地基——`backend/app/ai/contracts/*.md` 角色契约层（ADR-150）、`backend/app/capabilities.py` 能力注册表（ADR-151）、三层预算（ADR-152）、`backend/app/ai/runtime.py` 缓存身份 / 信任边界 / 审计（ADR-153）；迁移 `0012_ai_role_contracts`。
+- **v1.9.8**：Phase 3（策略研究与形式化）**做到草案为止**——`backend/app/ai/research_schemas.py` 的四道门（ADR-154 provenance、ADR-155 草案不可执行、ADR-156 服务端能力裁决与不静默降级、ADR-157 结果是模型禁区）、`backend/app/ai/research.py` 的五步链（研究输入 → RESEARCHER → StrategyHypothesis → STRATEGY_ARCHITECT → StrategyDraft → Capability Validation）、四个端点、迁移 `0013_research_layer`、`/lab` 最小界面；角色契约 `RESEARCHER` / `STRATEGY_ARCHITECT` 升到 1.1.0。**未做**：Strategy Compiler、任何回测/风险/敏感性/Monte Carlo 的 AI 入口（本文档 §二 本就禁止）、统一研究来源抓取（Phase 4）、工具网关（Phase 5）、完整 `/lab`（Phase 8）。
+- 逐版的版本行、门禁读数与红证据在 `docs/15_ROADMAP_ACCEPTANCE.md`；落地细节与偏差在 `docs/06_AI_LAYER.md` 与 `docs/17_DECISIONS.md`；差距清单在 `docs/26_AI_QUANT_LAYER_GAP_ANALYSIS.md`。
+
 ---
 # My Quant Lab AI Quant Research Layer
 

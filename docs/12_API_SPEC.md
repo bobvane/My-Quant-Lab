@@ -454,6 +454,18 @@ Deterministic, evidence-gated promotion/degradation. No AI is involved.
 
 `GET /ai/audit/{task_id}` [已实现] —— 一次 AI 调用的可追溯记录：provider/model/role/prompt 版本与哈希、输入/输出哈希、token 与成本、使用的来源（`source_ids`）、关联的策略版本（ADR-153）。
 
+## AI Research
+
+v1.9.8 的研究层：研究输入 → RESEARCHER 的结构化理解（StrategyHypothesis）→ STRATEGY_ARCHITECT 的候选形式化（StrategyDraft）→ 服务端能力校验。草案**不可执行**，本层不跑回测、不编译 DSL、不下单（ADR-154/155/156/157）。
+
+`POST /ai/research` [已实现] —— 一次完整研究运行。请求 `{question, sources: [{label?, kind?, source_ref, text}], model?}`（`question` 3–4000 字；`sources` 1–8 条，每条 `text` 非空且 `source_ref` 唯一标识本次材料）。同步走完 RESEARCHER 与 STRATEGY_ARCHITECT 两步，返回 run payload：`run_id`、`question`、`status`（`pending`/`running`/`completed`/`rejected`/`failed`）、`current_step`、`capability_status`、`attempts`、`sources`、`warnings`、`violations`、`error_message`、`researcher_task_id`、`architect_task_id`、`created_at`、`completed_at`，以及 `hypothesis`（`hypothesis_id`/`status`/`confidence`/`role`/`prompt_version`/`provider`/`model`/`ai_task_id` + `content`）与 `draft`（`draft_id`/`version`/`status`/`capability_status`/`model_status`/`executable`/`compiled_strategy_version_id` + `content` + `capability_report`）。模型答得不合格时**仍返回 200**，`status = "rejected"` 且 `violations[]` 逐条给出违规码与原因（不自动修正，不做第二次语义尝试）；未配置 AI provider 时 503。
+
+`GET /ai/research` [已实现] —— 最近研究运行的摘要列表（query `limit` 默认 20、上限 100）：`run_id`/`question`/`status`/`current_step`/`capability_status`/`attempts`/`violation_count`/`warning_count`/`created_at`/`completed_at`，不含假设与草案正文。
+
+`GET /ai/research/{run_id}` [已实现] —— 单次运行的完整 payload（字段同 `POST /ai/research`）；未知 id 返回 404。
+
+`POST /ai/strategy/formalize` [已实现] —— 单独让 STRATEGY_ARCHITECT 再形式化一次：请求 `{run_id}` 或 `{hypothesis_id}` → `{"draft": {...}}`（字段同 run payload 里的 `draft`）。回答不是草案时 422，detail 带 `step` 与 violations；两个 id 都没给返回 400；id 未知返回 404。本端点是研究层内部的重跑入口，五步主链路已包含该步。
+
 ## GitHub Sources
 
 Implemented under `/importer/github/sources` (persisted on import; watched and

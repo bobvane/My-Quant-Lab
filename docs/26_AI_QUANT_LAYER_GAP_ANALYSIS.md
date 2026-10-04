@@ -568,3 +568,26 @@ CI 必须失败的三类情形：
   3. `.gitignore`（新增 `.scratch/`，用于用户要求"仓库内临时文件"的落点）。
 - 下一步：等你回答 §20 的开放问题，再进入 v1.9.7（Role Contract + Runtime + Capability Registry 骨架）。
 - 在此之前不写任何实现代码。
+
+## 22. v1.9.8 落地状态（滚动更新）
+
+本节的读数与 `docs/15_ROADMAP_ACCEPTANCE.md` 的 v1.9.8 版本行一致。
+
+**已关闭的差距**（编号沿用本文件前文）：
+
+- §6 研究层实体：`research_artifacts`、`research_artifact_fragments`、`ai_research_runs`、`strategy_hypotheses`、`strategy_hypothesis_rules`、`strategy_drafts` 六张表已建（迁移 `backend/alembic/versions/0013_research_layer.py`，`down_revision = "0012_ai_role_contracts"`）；`ai_source_snapshots` 未建（没有统一抓取，见下）。
+- §7 迁移：`0013_research_layer` 已提供 upgrade/downgrade。
+- §8 API：`POST /ai/research`、`GET /ai/research`、`GET /ai/research/{run_id}`、`POST /ai/strategy/formalize` 已实现并登记进 `docs/12_API_SPEC.md`（`test_api_spec_truth.py` 双向绑定）。
+- §9 AI Runtime：本版**不重写** runtime——所有研究层调用都经 `run_task()`，复用 v1.9.7 的缓存身份、三层预算与审计；`AITask.research_run_id` 把 run 与调用串起来；`audit_payload()` 的 `strategy_draft_version` 指向本次产出的草案、`tool_calls` 恒为 `[]`。
+- §10 角色契约：`RESEARCHER` 与 `STRATEGY_ARCHITECT` 升到 1.1.0，`task_output_schemas()` 提供两个新 JSON schema。
+- §11 能力注册表：三态裁决落到草案上（`assess_draft_capabilities()`），模型自报更强记 `capability_overclaim`，替代方案必须标 experimental（不静默降级）。
+- §14 安全控制（部分）：五条注入语料、伪造指标/伪造请求的拒绝、「模型不得产生结果数字」三类守卫见 `backend/tests/test_ai_research_security.py`（22 例）。
+- §15 测试：Researcher / Architect / Capability / Security / AI output integrity 五族共 55 例（`backend/tests/test_ai_research.py` 16、`backend/tests/test_ai_strategy_draft.py` 17、`backend/tests/test_ai_research_security.py` 22），另有 `backend/tests/research_payloads.py` 集中放演示答案与脚手架。
+- §16 文档：`docs/06`（新增 §17/§18）、`docs/12`（AI Research 一节）、`docs/13`（导航树 10 条）、`docs/17`（ADR-154…157）、`docs/19`（TLS 教训）、`docs/25`（实施状态）、本文件与 `docs/My_Quant_Lab_Development_Spec_V1.1.md` 同步。
+
+**仍未关闭的差距**：
+
+- §12 Tool Gateway：本版没有工具调用（`tool_calls` 恒为 `[]`），Phase 5。
+- §13 UI：只做了 `/lab` 最小数据流；`docs/26` §0 第 11 条的「四个 AI 面板高级模式门控」仍未做，完整 `/lab` 属 Phase 8。
+- §17 版本映射里 v1.9.9 的项（`ai_tool_calls`、工具滥用防护、SSRF / 来源体积）与 Compiler（Draft → StrategySpec 1.0）未开始。
+- 研究来源统一（GitHub / URL / PDF / 文本 → Research Artifact，Phase 4）：本版材料由用户手输 1–8 条，未抓取。

@@ -723,6 +723,161 @@ class AIUsage(Base):
 
 
 # --------------------------------------------------------------------------- #
+# 7b. Research layer (Phase 3: material in, hypothesis and draft out)
+# --------------------------------------------------------------------------- #
+#: The research tables are a chain, not a graph: a run reads artifacts, a
+#: hypothesis is read off those artifacts, and a draft formalizes one
+#: hypothesis. The links back from ``ai_research_runs`` to its hypothesis and
+#: draft are stored as plain integers on purpose — a database-level cycle would
+#: make the migration order-dependent for no gain (ADR-154).
+class ResearchArtifact(Base, TimestampMixin):
+    """One piece of material a research run may read.
+
+    The text is *not* stored: a run keeps the hash of what it read and a few
+    short excerpts, so the audit trail can say which bytes produced an answer
+    without becoming a second copy of somebody else's document (ADR-153).
+    """
+
+    __tablename__ = "research_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("ai_research_runs.id"))
+    source_ref: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(255))
+    uri: Mapped[str | None] = mapped_column(String(1024))
+    parse_status: Mapped[str] = mapped_column(String(16), default="ok", nullable=False)
+    parse_error: Mapped[str | None] = mapped_column(Text)
+    text_hash: Mapped[str | None] = mapped_column(String(64))
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    license_note: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (UniqueConstraint("run_id", "source_ref", name="uq_research_artifact_ref"),)
+
+
+class ResearchArtifactFragment(Base):
+    """A quotable piece of one artifact, with where inside it the piece sits."""
+
+    __tablename__ = "research_artifact_fragments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    artifact_id: Mapped[int] = mapped_column(
+        ForeignKey("research_artifacts.id", ondelete="CASCADE"), nullable=False
+    )
+    locator_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    text_excerpt: Mapped[str] = mapped_column(Text, nullable=False)
+    fragment_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (Index("ix_research_fragment_artifact", "artifact_id"),)
+
+
+class AIResearchRun(Base, TimestampMixin):
+    """One research request: question, material, steps and outcome."""
+
+    __tablename__ = "ai_research_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    current_step: Mapped[str] = mapped_column(String(24), default="queued", nullable=False)
+    hypothesis_id: Mapped[int | None] = mapped_column(Integer)
+    draft_id: Mapped[int | None] = mapped_column(Integer)
+    capability_status: Mapped[str | None] = mapped_column(String(24))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sources_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    warnings_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    violations_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    researcher_task_id: Mapped[int | None] = mapped_column(ForeignKey("ai_tasks.id"))
+    architect_task_id: Mapped[int | None] = mapped_column(ForeignKey("ai_tasks.id"))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_ai_research_runs_status", "status", "created_at"),)
+
+
+class StrategyHypothesis(Base, TimestampMixin):
+    """What the researcher understood, stored before anything was formalized."""
+
+    __tablename__ = "strategy_hypotheses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("ai_research_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    strategy_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="DRAFT", nullable=False)
+    understanding: Mapped[str | None] = mapped_column(Text)
+    confidence_self_reported: Mapped[str | None] = mapped_column(String(16))
+    role: Mapped[str | None] = mapped_column(String(48))
+    prompt_version: Mapped[str | None] = mapped_column(String(16))
+    provider_name: Mapped[str | None] = mapped_column(String(64))
+    model_name: Mapped[str | None] = mapped_column(String(128))
+    ai_task_id: Mapped[int | None] = mapped_column(ForeignKey("ai_tasks.id"))
+    hypothesis_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    __table_args__ = (Index("ix_strategy_hypotheses_run", "run_id"),)
+
+
+class StrategyHypothesisRule(Base):
+    """One rule of a hypothesis, kept per row so its origin stays queryable."""
+
+    __tablename__ = "strategy_hypothesis_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    hypothesis_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_hypotheses.id", ondelete="CASCADE"), nullable=False
+    )
+    rule_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    field: Mapped[str] = mapped_column(String(24), nullable=False)
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[str] = mapped_column(String(16), nullable=False)
+    confidence: Mapped[str | None] = mapped_column(String(16))
+    capability_status: Mapped[str | None] = mapped_column(String(24))
+    required_capabilities_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    evidence_fragment_ids_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    parameters_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("hypothesis_id", "rule_key", name="uq_strategy_hypothesis_rule"),
+    )
+
+
+class StrategyDraft(Base, TimestampMixin):
+    """A formalized strategy: richer than the DSL, and not executable."""
+
+    __tablename__ = "strategy_drafts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("ai_research_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    hypothesis_id: Mapped[int] = mapped_column(ForeignKey("strategy_hypotheses.id"), nullable=False)
+    version: Mapped[str] = mapped_column(String(16), default="1.0", nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    capability_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    #: What the model claimed about its own support, kept next to the server's
+    #: verdict so an overclaim attempt is visible in the trail.
+    model_status: Mapped[str | None] = mapped_column(String(24))
+    executable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_experimental_of: Mapped[int | None] = mapped_column(Integer)
+    compiled_strategy_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("strategy_versions.id")
+    )
+    ai_task_id: Mapped[int | None] = mapped_column(ForeignKey("ai_tasks.id"))
+    model_name: Mapped[str | None] = mapped_column(String(128))
+    draft_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    capability_report_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    __table_args__ = (Index("ix_strategy_drafts_run", "run_id"),)
+
+
+# --------------------------------------------------------------------------- #
 # 8. Audit and settings
 # --------------------------------------------------------------------------- #
 class AuditLog(Base):

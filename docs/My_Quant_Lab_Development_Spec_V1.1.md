@@ -10,7 +10,7 @@
 - **V1.0 = Original Development Specification**。文件 `My_Quant_Lab_Development_Spec_V1.0.docx` 在仓库根与 `docs/` 各一份，63,081 字节、1,289 段、248 个 Title/Heading、0 个表格，sha256 前 16 位 `062c454aea795117`，两份逐字节相同（`docs/26_AI_QUANT_LAYER_GAP_ANALYSIS.md` §0 第 12 条）。**V1.0 永久保留：不删除、不改写、不覆盖。**本文件生成过程中未对 V1.0 做任何字节级修改。
 - **V1.1 = AI Quant Research Architecture Update**。它是 V1.0 的**架构更新版，不是替代版**：V1.0 的章节号仍然可以被引用，V1.1 回答的是三个问题——V1.0 写了什么、今天实现到哪一步、AI Quant Research Layer 增加了什么。
 - 产出依据：`docs/25_AI_QUANT_RESEARCH_LAYER_PLAN.md` §七十四（文档同步要求）、§七十五（修改原始开发计划）、§七十六（不要伪造 DOCX 修改结果），以及 `docs/26_AI_QUANT_LAYER_GAP_ANALYSIS.md` §20 的 Q9 约定——「V1.1 在 v1.9.7 完成时同步完成；V1.0 原件永久保留、不修改；V1.1 必须反映 Gap Analysis 的真实结论，不得复制 V1.0」。
-- 事实基线：`version.txt` = `v1.9.7`。**本文件生成于 v1.9.7 提交之前**：那时 v1.9.7 的全部改动仍在 git 工作树中未提交（`docs/06_AI_LAYER.md`、`docs/12_API_SPEC.md`、`docs/15_ROADMAP_ACCEPTANCE.md`、`docs/17_DECISIONS.md` 等已在工作树中更新）；本文件与这批改动一起在同一个 v1.9.7 提交中入库，提交与打 tag 由主流程完成，本文件本身不做 commit / tag / push。
+- 事实基线：`version.txt` = `v1.9.8`。**本文件最初生成于 v1.9.7 提交之前，本次为 v1.9.8 刷新**：v1.9.7 生成时，那一版全部改动仍在 git 工作树中未提交（`docs/06_AI_LAYER.md`、`docs/12_API_SPEC.md`、`docs/15_ROADMAP_ACCEPTANCE.md`、`docs/17_DECISIONS.md` 等已在工作树中更新），本文件与那批改动一起在同一个 v1.9.7 提交中入库；本次 v1.9.8 刷新同理发生在 v1.9.8 提交之前，v1.9.8 的改动同样尚未提交。提交与打 tag 由主流程完成，本文件本身不做 commit / tag / push。v1.9.8 是补丁版本（ADR-086）：**不部署 NAS**，但仍按流程走 tests / CI / docs / release / tag。
 - 「不要伪造 DOCX 修改结果」（§七十六）的落地方式：保留 V1.0 原件，**新建** V1.1 文档，并同时交付 Markdown 镜像作为唯一内容源，由 `scripts/build_dev_spec_docx.py` 确定性生成 DOCX。
 
 ### 0.2 怎么读这份文档
@@ -109,18 +109,18 @@ Research Source
 | 03 功能模块规范 | 已完成 | `docs/03_MODULES.md`；M01–M13 均有实现 | M05 GitHub Importer 见 ADR-060/061/062；M09 AI 在 v1.9.7 扩展（Role Contract / Runtime / Registry）；M09 的完整研究能力见 §H |
 | 04 统一策略 DSL | 已完成（契约保持不变） | `docs/04_STRATEGY_DSL.md`；`backend/app/strategies/dsl.py:255` 的 `StrategySpec`，`schema_version` 1.0，全仓 104 处引用 | **DSL 1.0 不动**（用户决策 C1 = A 方案）；计划中的扩展字段落在研究层实体上，不进入 DSL（§D） |
 | 05 GitHub 导入 | 已完成 | Phase 6 DONE；ADR-060（用 commit 命名修订）、ADR-061（版本账本由服务分配）、ADR-062（不合格草案转 `review_required`） | provenance / coverage / incomplete detection / parsing failure / license handling / watcher 全部保留（`docs/25` §五十）；V1.1 把它定位为 `ResearchSource` 的第一个实现 |
-| 06 AI Layer | 进行中 | 已实现：`backend/app/ai/provider.py`（Provider 抽象与 `AIRouter`）、`backend/app/ai/runtime.py`、`backend/app/ai/budget.py`、`backend/app/ai/role_contracts.py`、`backend/app/capabilities.py`、`backend/app/ai/contracts/{SYSTEM,RESEARCHER,STRATEGY_ARCHITECT,EXPLAINER}.md` | 角色现状（`docs/06_AI_LAYER.md` §3）：R3 Signal Explainer = 已完成（`EXPLAINER.md` + `POST /signals/{id}/explain`）；回测分析 = 已完成（`EXPLAINER.md` 的 `## Task: backtest_analysis`）；**R1 Strategy Researcher = 待开发（契约文件 `RESEARCHER.md` 已就位）**；**R2 Quant Tutor = 待开发（无契约文件）**；**R4 Research Assistant = 待开发（契约文件 `STRATEGY_ARCHITECT.md` 已就位）**；**R5 Daily Analyst = 待开发（无契约文件；`daily_summary` 枚举在实现前不得对外承诺）** |
+| 06 AI Layer | 进行中 | 已实现：`backend/app/ai/provider.py`（Provider 抽象与 `AIRouter`）、`backend/app/ai/runtime.py`、`backend/app/ai/budget.py`、`backend/app/ai/role_contracts.py`、`backend/app/capabilities.py`、`backend/app/ai/research_schemas.py`、`backend/app/ai/research.py`、`backend/app/ai/contracts/{SYSTEM,RESEARCHER,STRATEGY_ARCHITECT,EXPLAINER}.md` | 角色现状（`docs/06_AI_LAYER.md` §3）：R3 Signal Explainer = 已完成（`EXPLAINER.md` + `POST /signals/{id}/explain`）；回测分析 = 已完成（`EXPLAINER.md` 的 `## Task: backtest_analysis`）；**R1 Strategy Researcher = 已完成（v1.9.8：`RESEARCHER.md` 1.1.0 承担 `backend/app/ai/research.py` 五步链的理解步骤）**；**R2 Quant Tutor = 待开发（无契约文件）**；**R4 Research Assistant = 已完成（v1.9.8：`STRATEGY_ARCHITECT.md` 1.1.0 产出不可执行 `StrategyDraft` 并过能力裁决）**；**R5 Daily Analyst = 待开发（无契约文件；`daily_summary` 枚举在实现前不得对外承诺）** |
 | 07 回测引擎 | 已完成 | Phase 2 DONE（engine / costs / metrics / walk-forward / OOS / comparison）；ADR-054（警告随结果落库）、ADR-055（`warmup_unmet` 点不参与排名） | 新增指标（Calmar / Recovery / VaR / CVaR）在定义与测试规范落地前不实现（§A.4） |
 | 08 模拟盘 | 已完成 | Phase 4 DONE（执行引擎、持仓、入金、生命周期、重置审计）；ADR-066（提现不是亏损，基准改为净入金） | 与真实持仓（Ghostfolio）严格隔离的红线不变 |
 | 09 信号引擎 | 已完成 | Phase 7 DONE（调度、扫描、去重、结果跟踪、通知、降噪）；ADR-065（胜率必须与分母一起发布） | 信号解释是 AI 已完成的两条链之一；信号的 BUY/SELL/WAIT 决定权属于 Signal Engine，不属于 AI（`docs/25` §三十） |
 | 10 Ghostfolio | 已完成 | Phase 3 DONE（只读适配器、持仓、组合上下文、代码别名） | ADR-001 不变：走 REST，不直连数据库 |
-| 11 数据模型 | 进行中 | 既有实体见 V1.0 `11 数据模型` 与 `docs/11_DATA_MODEL.md`；v1.9.7 新增 `ai_role_contracts` 表与 `ai_tasks` 五个可空列，迁移 `backend/alembic/versions/0012_ai_role_contracts.py` | 研究层表（`research_artifacts`、`research_artifact_fragments`、`strategy_hypotheses`、`strategy_hypothesis_rules`、`strategy_drafts`、`ai_source_snapshots`）设计已定稿（`docs/26` §6），**v1.9.8 待开发** |
-| 12 API | 进行中 | `docs/12_API_SPEC.md` 逐端点真相，第 5 行的 `[已实现]` / `[计划]` / `[取消]` 标记由 `backend/tests/test_api_spec_truth.py` 与真实路由表双向绑定 | v1.9.7 新增三条只读端点（§E.4）；研究层端点尚未登记（§E.4 的登记纪律） |
-| 13 UI/UX | 进行中 | `docs/13_UI_UX.md`（211 行，§14 欠账表为「无」）；v1.9.3 `/research` 四步向导、v1.9.4 版式主次、v1.9.5/§v1.9.6 的真实渲染修复（ADR-126…ADR-149） | 欠账：`docs/26` §0 第 11 条——Dashboard / Signals / StrategyDetail / Backtest 四个 AI 面板尚未做高级模式门控（只有 `frontend/src/views/SettingsView.vue:723,727` 是对的）；`/lab` 待开发 |
+| 11 数据模型 | 进行中 | 既有实体见 V1.0 `11 数据模型` 与 `docs/11_DATA_MODEL.md`；v1.9.7 新增 `ai_role_contracts` 表与 `ai_tasks` 五个可空列（迁移 `backend/alembic/versions/0012_ai_role_contracts.py`）；v1.9.8 新增迁移 `backend/alembic/versions/0013_research_layer.py`（`down_revision = "0012_ai_role_contracts"`）与六张研究层表（`research_artifacts`、`research_artifact_fragments`、`ai_research_runs`、`strategy_hypotheses`、`strategy_hypothesis_rules`、`strategy_drafts`） | 研究层六表已建；`ai_source_snapshots`（统一来源，Phase 4）、`strategy_experiments`（Phase 7）、`ai_tool_calls`（Tool Gateway，Phase 5）设计已定稿（`docs/26` §6）但**尚未建**，待 v1.9.9 |
+| 12 API | 进行中 | `docs/12_API_SPEC.md` 逐端点真相，第 5 行的 `[已实现]` / `[计划]` / `[取消]` 标记由 `backend/tests/test_api_spec_truth.py` 与真实路由表双向绑定 | v1.9.7 新增三条只读端点；v1.9.8 新增四条研究层端点（`POST /ai/research`、`GET /ai/research`、`GET /ai/research/{run_id}`、`POST /ai/strategy/formalize`）并已在 `docs/12_API_SPEC.md` 的 AI Research 一节登记为 `[已实现]`（§E.4） |
+| 13 UI/UX | 进行中 | `docs/13_UI_UX.md`（导航树已增至 10 行，含 `/lab`）；v1.9.3 `/research` 四步向导、v1.9.4 版式主次、v1.9.5/§v1.9.6 的真实渲染修复（ADR-126…ADR-149）；v1.9.8 `/lab` 只读第一版（`frontend/src/views/LabView.vue`，「AI 研究实验室」是 `frontend/src/App.vue` 的第 5 个导航项，普通与高级模式都可见） | 欠账：`docs/26` §0 第 11 条——Dashboard / Signals / StrategyDetail / Backtest 四个 AI 面板尚未做高级模式门控（只有 `frontend/src/views/SettingsView.vue:723,727` 是对的）；完整 `/lab`（状态机与溯源视图）待 v1.9.9 / v2.0.0 |
 | 14 安全与许可 | 已完成（研究层部分进行中） | `docs/14_SECURITY_LICENSE.md`；ADR-153 的 `UntrustedSource` / `wrap_untrusted()` / `assemble_messages()` 把来源渲染成最后一条 user 消息 | 待开发：URL 摄取的 SSRF / 大小 / 超时约束、来源体积与清洗、工具滥用防护（`docs/26` §14） |
-| 15 Roadmap | 进行中 | 已写入 v1.9.7 版本行与读数段（工作树 27 改 + 15 新增、整仓 1014 passed + 4 skipped、`ruff` 180 files、前端 620 modules、五条红证据） | 逐版继续加行与读数；v1.9.8 起按 `docs/26` §16 附真实渲染读数 |
+| 15 Roadmap | 进行中 | 已写入 v1.9.7 与 v1.9.8 版本行与读数段（v1.9.7 读数：工作树 27 改 + 15 新增、整仓 1014 passed + 4 skipped、`ruff` 180 files、前端 620 modules、五条红证据；v1.9.8 的版本行与真实读数见该文件） | 逐版继续加行与读数；按 `docs/26` §16 附真实渲染读数 |
 | AGENTS.md（`docs/16`） | 已完成 | `docs/16_AGENTS.md`；Phase 0–8 按该契约执行 | V1.1 新增的契约约定（角色契约文件、审计、信任边界）需要补入该文件（`docs/26` §16 列为 v1.9.7） |
-| 17 ADR | 进行中 | `docs/17_DECISIONS.md`（约 2,940 行）已写至 **ADR-153**：ADR-150 角色契约是 markdown 文件、ADR-151 能力注册表由代码派生并被测试绑定、ADR-152 预算决策链、ADR-153 AI runtime 与不可信来源边界 | 研究层与 DSL 分层、工具三档、Registry 漂移守卫、`/lab` 路由、confidence 边界等 ADR 待后续版本补（`docs/26` §16） |
+| 17 ADR | 进行中 | `docs/17_DECISIONS.md` 已写至 **ADR-157**：ADR-150 角色契约是 markdown 文件、ADR-151 能力注册表由代码派生并被测试绑定、ADR-152 预算决策链、ADR-153 AI runtime 与不可信来源边界、ADR-154 StrategyHypothesis 的理解必须携带 provenance、ADR-155 StrategyDraft 不可执行且 DSL 1.0 不变、ADR-156 能力裁决在服务端三态且无静默降级、ADR-157 结果是禁区（禁用指标键、UNVERIFIED 文字声明、七步校验链、一次受控重试） | 工具三档、`/lab` 路由、confidence 边界等 ADR 待后续版本补（`docs/26` §16） |
 | 18 示例策略 | 已完成 | V1.0 `18 Sample Strategy — PA Breakout V1`；ADR-040 修复 `period_ref`（两个示例原先引用不存在的列 `ema20`，实际被当作常量 20） | 示例策略仍可作为回归基线；AI 生成的策略一律走新版本，不覆盖示例 |
 | 19 AI 实施手册 | 已完成 | `docs/19_DEVELOPMENT_PLAYBOOK.md` | v1.9.7 起的施工依据是 `docs/26`，实施手册需要同步「契约文件 + 审计」约定（`docs/26` §16） |
 
@@ -157,8 +157,8 @@ External Sources (GitHub / PDF / Web / Paper / Idea / Code)
 
 | 角色 | 职责 | 计划章节 | 契约文件 | 状态 |
 | --- | --- | --- | --- | --- |
-| Strategy Researcher | 阅读研究资料（GitHub / PDF / 网页 / 策略说明），识别交易逻辑、指标、市场、时间周期、入场、出场、风险管理、仓位、执行假设；提取证据、识别未知项 | §十五 | `RESEARCHER.md` | 待开发（契约已就位） |
-| Strategy Architect | 研究思想 → 策略假设 → Universe → Signals → Entry → Exit → Risk → Position Sizing → Execution，输出 `StrategyDraft` | §十六 | `STRATEGY_ARCHITECT.md` | 待开发（契约已就位） |
+| Strategy Researcher | 阅读研究资料（GitHub / PDF / 网页 / 策略说明），识别交易逻辑、指标、市场、时间周期、入场、出场、风险管理、仓位、执行假设；提取证据、识别未知项 | §十五 | `RESEARCHER.md` | **已完成**（v1.9.8：契约升到 1.1.0，是 `backend/app/ai/research.py` 五步链的第一步） |
+| Strategy Architect | 研究思想 → 策略假设 → Universe → Signals → Entry → Exit → Risk → Position Sizing → Execution，输出 `StrategyDraft` | §十六 | `STRATEGY_ARCHITECT.md` | **已完成**（v1.9.8：契约升到 1.1.0，产出**不可执行**的 `StrategyDraft` 并交服务端能力裁决；编译成 StrategySpec 待 v1.9.9） |
 | Strategy Compiler | 把 Draft 编译为合法 StrategySpec；**禁止 AI → 任意 Python → 执行** | §十七 | `STRATEGY_COMPILER.md` | 待开发（契约未落盘） |
 | Backtest Analyst | 分析收益、回撤、风险、稳定性、交易频率、盈亏结构、参数敏感性、异常、潜在过拟合与下一步研究方向；**不能修改原始结果** | §二十六 | `BACKTEST_ANALYST.md` | 部分：回测分析链已完成，由 `EXPLAINER.md` 的 `## Task: backtest_analysis` 承担；独立契约待落盘 |
 | Risk Analyst | Max Drawdown / Drawdown Duration / Recovery / Sharpe / Sortino / Calmar / Volatility / VaR / CVaR / Monte Carlo / 持仓集中度 / Exposure / Turnover → 专业分析 + 通俗解释 + 风险提醒 + 要盯什么 | §二十七 | `RISK_ANALYST.md` | 待开发（契约未落盘） |
@@ -354,7 +354,7 @@ global(已耗尽) → provider(已耗尽) → task(本次估算 > 单任务上�
 
 - 必须能回答：AI 做了什么 → 读取了什么 → 得出了什么 → 哪些是原文 → 哪些是推断 → 哪些是假设 → 最终形成什么策略。
 - **不要只显示「AI 已生成策略」**。中间层（Artifact → Hypothesis → Draft → StrategySpec）都要有落点与审计。
-- 计划中的落点（`docs/26` §6）：`ai_research_runs`（一次研究、多阶段、可暂停）、`research_artifacts`、`research_artifact_fragments`（证据绑定）、`strategy_hypotheses`、`strategy_hypothesis_rules`（逐条规则的三态与能力状态）、`strategy_drafts`、`strategy_experiments`。
+- 已落点（v1.9.8，`docs/26` §6）：`ai_research_runs`（一次研究、多阶段）、`research_artifacts`、`research_artifact_fragments`（证据绑定）、`strategy_hypotheses`、`strategy_hypothesis_rules`（逐条规则的三态与能力状态）、`strategy_drafts`；`ai_research_runs` 的「可暂停」异步工作流与人工确认、以及 `strategy_experiments` 仍待 v1.9.9。
 - 研究状态机（`docs/25` §六十）：`DRAFT` / `NEEDS_INPUT` / `NEEDS_REVIEW` / `READY` / `VALIDATED` / `BACKTESTED` / `EXPERIMENTAL` / `REJECTED`。
 - 失败不是错误，而是研究结果（`docs/25` §六十一）：`Strategy cannot be formalized` 必须显示无法形式化的原因，并给出需要用户确认的候选选项（例：1. EMA20 2. 固定止损 3. ATR Stop 4. 自定义规则）。
 - 唯一「模型不能自己跨过」的点是人工确认（用户决策 C10、`docs/25` §十二、§六十）。
@@ -395,27 +395,29 @@ global(已耗尽) → provider(已耗尽) → task(本次估算 > 单任务上�
 
 ## §E 数据模型与 API 增量
 
-### E.1 v1.9.7 已落地（事实）
+### E.1 v1.9.7 / v1.9.8 已落地（事实）
 
 - 新表 `ai_role_contracts`：角色契约的运行时索引（源仍是 `backend/app/ai/contracts/*.md`）。
 - `ai_tasks` 新增五个可空列：`role`、`output_hash`、`source_ids_json`、`research_run_id`、`strategy_version_id`。
 - 迁移：`backend/alembic/versions/0012_ai_role_contracts.py`。约束：只加列、不删不改既有列；同时支持 SQLite 与 PostgreSQL 16。
-- 迁移链现状：`0001_initial → 0002_immutability → 0003_fix_triggers_json → 0004_resource_monitor → 0005_signal_outcome_times → 0006_resource_pk_sqlite → 0007_backtest_result_warnings → 0008_github_pending_review → 0009_drop_dead_schema → 0010_immutability → 0011_signal_closes_direction → 0012_ai_role_contracts`。
-- 计划中的后续迁移：`0013_research_layer`（v1.9.8）、`0014_ai_workflow_audit`（v1.9.9）、（条件）`0015_metrics_*`（Future，必须先有指标定义与测试规范）。
+- v1.9.8 迁移 `0013_research_layer` 已落地：`backend/alembic/versions/0013_research_layer.py`（`down_revision = "0012_ai_role_contracts"`）。
+- v1.9.8 新表（6）：`research_artifacts`、`research_artifact_fragments`、`ai_research_runs`、`strategy_hypotheses`、`strategy_hypothesis_rules`、`strategy_drafts`；`ai_source_snapshots` **未建**。
+- 迁移链现状：`0001_initial → 0002_immutability → 0003_fix_triggers_json → 0004_resource_monitor → 0005_signal_outcome_times → 0006_resource_pk_sqlite → 0007_backtest_result_warnings → 0008_github_pending_review → 0009_drop_dead_schema → 0010_immutability → 0011_signal_closes_direction → 0012_ai_role_contracts → 0013_research_layer`。
+- 计划中的后续迁移：`0014_ai_workflow_audit`（v1.9.9）、（条件）`0015_metrics_*`（Future，必须先有指标定义与测试规范）。
 
-### E.2 计划中的表（设计已定稿，未实现）
+### E.2 研究层表（六张已建，其余设计已定稿、未实现）
 
 | 模型 | 用途 | 版本 |
 | --- | --- | --- |
-| `ai_research_runs` | 一次研究（多阶段、可暂停、可追溯） | v1.9.9（表先建于 v1.9.8 亦可） |
-| `research_artifacts` | 原始研究材料（Layer A） | v1.9.8 |
-| `research_artifact_fragments` | 引用片段（证据绑定的落点） | v1.9.8 |
-| `strategy_hypotheses` | AI 对材料的理解（Layer B） | v1.9.8 |
-| `strategy_hypothesis_rules` | 逐条规则的来源与能力状态 | v1.9.8 |
-| `strategy_drafts` | 可编译但不可执行的中间结构 | v1.9.8 |
-| `strategy_experiments` | V1 → 实验 → V2 的迭代记录 | v1.9.9 |
-| `ai_tool_calls` | 工具调用审计 | v1.9.9 |
-| `ai_source_snapshots` | URL / PDF 抓取快照（对标 `github_snapshots`） | v1.9.8 |
+| `ai_research_runs` | 一次研究（多阶段、可追溯） | **v1.9.8 已建**（异步工作流与人工确认待 v1.9.9） |
+| `research_artifacts` | 原始研究材料（Layer A） | **v1.9.8 已建** |
+| `research_artifact_fragments` | 引用片段（证据绑定的落点） | **v1.9.8 已建** |
+| `strategy_hypotheses` | AI 对材料的理解（Layer B） | **v1.9.8 已建** |
+| `strategy_hypothesis_rules` | 逐条规则的来源与能力状态 | **v1.9.8 已建** |
+| `strategy_drafts` | 可编译但不可执行的中间结构 | **v1.9.8 已建** |
+| `strategy_experiments` | V1 → 实验 → V2 的迭代记录 | v1.9.9（未建） |
+| `ai_tool_calls` | 工具调用审计 | v1.9.9（未建） |
+| `ai_source_snapshots` | URL / PDF 抓取快照（对标 `github_snapshots`） | **未建**（原计划 v1.9.8，随统一来源推迟到 v1.9.9） |
 
 **明确不新增**：Capability Registry 不建表。
 
@@ -435,13 +437,21 @@ global(已耗尽) → provider(已耗尽) → task(本次估算 > 单任务上�
 | `GET /ai/roles` | 解析 `backend/app/ai/contracts/*.md`，返回 `name` / `role` / `version` / `task_types` / `prompt_names` / `required_capabilities` / `output_language` / `content_hash` / `source_path` + `indexed` 标记（ADR-150） |
 | `GET /ai/audit/{task_id}` | provider / model / role / prompt 版本与哈希、输入输出哈希、token 与成本、`source_ids`、关联策略版本（ADR-153） |
 
-**规划中（尚未在 `docs/12_API_SPEC.md` 登记）**，按 `docs/26` §8：
+**v1.9.8 已实现（`docs/12_API_SPEC.md` 的 AI Research 一节已登记为 `[已实现]`）**：
+
+| 端点 | 用途 |
+| --- | --- |
+| `POST /ai/research` | 研究输入 → RESEARCHER → StrategyHypothesis → STRATEGY_ARCHITECT → StrategyDraft → 能力裁决（不生成可执行策略、不跑回测）；body `{question, sources:[{label?,kind?,source_ref,text}], model?}`，`question` 3–4000 字符、`sources` 1–8；答案不合规仍返回 200 且 `status="rejected"`；未配置 provider 返回 503 |
+| `GET /ai/research` | 研究运行摘要列表（`limit` 默认 20、上限 100） |
+| `GET /ai/research/{run_id}` | 单次研究详情；未知 `run_id` 返回 404 |
+| `POST /ai/strategy/formalize` | body `{run_id}` 或 `{hypothesis_id}` → `{"draft": …}`；两者都缺返回 400、id 未知返回 404、答案不是草案返回 422 |
+
+**规划中（尚未在 `docs/12_API_SPEC.md` 登记，均为 v1.9.9）**，按 `docs/26` §8：
 
 | 端点 | 版本 |
 | --- | --- |
-| `POST /ai/sources/text`、`POST /ai/sources/url`、`POST /ai/sources/pdf` | v1.9.8 |
-| `POST /ai/strategy/formalize` | v1.9.8 |
-| `POST /ai/research`、`GET /ai/research/{run_id}`、`GET /ai/research/{run_id}/artifacts`、`/hypothesis`、`/draft`、`POST /ai/research/{run_id}/confirm` | v1.9.9 |
+| `POST /ai/sources/text`、`POST /ai/sources/url`、`POST /ai/sources/pdf` | v1.9.9 |
+| `GET /ai/research/{run_id}/artifacts`、`GET /ai/research/{run_id}/hypothesis`、`GET /ai/research/{run_id}/draft`、`POST /ai/research/{run_id}/confirm` | v1.9.9 |
 | `POST /ai/strategy/drafts/{id}/compile`（**需人工批准**） | v1.9.9 |
 | `POST /ai/backtests/{run_id}/analyze` | v1.9.9 |
 | `POST /ai/explain`（统一解释入口） | v1.9.9 |
@@ -449,7 +459,7 @@ global(已耗尽) → provider(已耗尽) → task(本次估算 > 单任务上�
 
 **登记纪律（必须遵守）**：`docs/12_API_SPEC.md` 第 5 行规定每行端点声明带且只带一个标记（`[已实现]` / `[计划]` / `[取消]`），并由 `backend/tests/test_api_spec_truth.py` 与 `create_app().openapi()` 的真实路由表**双向绑定**——写了却没服务的 `[已实现]` 会失败，服务了却没写的路由也会失败。因此：
 
-- 截至本文件生成时，`docs/12` 的 `[计划]` 只有两条：`GET /backtests/comparisons/{comparison_id}`（第 84 行）与 `POST /ai/tasks/{task_id}/cancel`（第 625 行）。
+- `docs/12` 的 `[计划]` 在 v1.9.7 生成时有两条：`GET /backtests/comparisons/{comparison_id}`（第 84 行）与 `POST /ai/tasks/{task_id}/cancel`（第 625 行）；v1.9.8 的四条研究层端点已在实现后登记为 `[已实现]`。
 - 上表「规划中」的端点**必须先在 `docs/12` 加 `[计划]` 行**，实现后再改为 `[已实现]`；在此之前仓库里不应存在这些路由。
 
 **明确不改动**：`/api/v1/research/*`（量化研究）、前端 `/research`、既有 AI 解释端点（向后兼容，用户决策 C9）。命名空间统一为 `/api/v1/ai/*`。
@@ -460,10 +470,12 @@ global(已耗尽) → provider(已耗尽) → task(本次估算 > 单任务上�
 
 - 新路由 `/lab`，面向**普通用户开放**，**不进高级模式**（用户决策 Q2）：AI 研究台是核心产品能力，不是开发者功能。
 - 用户看到的名字是「**AI 研究实验室**」；内部技术名仍是 **AI Quant Research Layer**。
+- **已交付（v1.9.8，只读第一版）**：`frontend/src/views/LabView.vue`，在 `frontend/src/main.ts` 注册为 `{ path: '/lab', name: 'lab', component: LabView }`，并在 `frontend/src/App.vue` 作为第 5 个导航项（普通与高级模式都可见）。第一版覆盖 `研究输入 → StrategyHypothesis → StrategyDraft → 能力裁决`：普通模式只显示人话结论与下一步；`origin` 徽标、能力 token、run id、attempts、当前步骤与 JSON 只在高级模式显示。例外：`origin === 'ASSUMED'` 的规则在**两种模式下都**标注「⚠️ AI 提出的假设，不是你的原话」；草案卡片始终说明它不可运行、从未回测、没有收益 / 回撤 / Sharpe 数字。
+- **第一版刻意不做**：不编译成 StrategySpec、不触发回测、不产出任何绩效数字、没有人工确认与异步状态机、没有来源摄取（text / url / pdf / github）、没有完整溯源视图。
 - 计划中的页面结构（`docs/25` §四十、`docs/26` §13）：研究资料 → AI 分析 → 策略假设 → 形式化 → 能力检查 → 确认 → 编译 → 回测 → 分析 → 迭代。
 - 计划中的阶段可视化：`Researching → Extracting → Checking capabilities → Building draft → Validating → Waiting for approval → Backtesting → Analyzing → Completed`；可复用既有 `/ai/tasks/{id}/status` 轮询模式。
 - 溯源视图（Martin 场景）：原始资料 → AI 理解 → EXPLICIT / INFERRED / ASSUMED / UNKNOWN → Draft → DSL → 回测结果。
-- 版本：`/lab` 的只读第一版 v1.9.8，完整状态机 v1.9.9，完整研究 UI 与溯源视图 v2.0.0。
+- 版本：`/lab` 的只读第一版 v1.9.8 **已完成**，完整状态机 v1.9.9，完整研究 UI 与溯源视图 v2.0.0。
 
 ### F.2 普通模式 vs 高级模式的可见性边界
 
@@ -521,10 +533,10 @@ SYSTEM / ROLE CONTRACT  →  TRUSTED TASK  →  UNTRUSTED SOURCE
 | Provider | OpenAI-compatible 接入、结构化输出、无效 JSON、超时、重试、预算；**换模型必须 miss 缓存** | `backend/tests/test_ai_providers.py`、`backend/tests/test_ai_router.py:18-62` |
 | Role Contract | 角色加载、prompt 版本、内容 hash、`required_capabilities` 匹配、缺失能力拒绝、六类 `ContractError` | `backend/tests/test_ai_role_contracts.py`（v1.9.7 新增） |
 | Capability Registry | drift test（声称支持但代码没有 / 代码新增但 Registry 未收录 / 资产类别与周期集合与行情源不一致）、`UNSUPPORTED` 不静默降级 | `backend/tests/test_capabilities.py`（v1.9.7 新增） |
-| Research | source → hypothesis、证据绑定、unknowns、confidence、三态区分 | 新建（v1.9.8） |
+| Research | source → hypothesis、证据绑定、unknowns、confidence、三态区分；五族共 55 例 | `backend/tests/test_ai_research.py`（16 例）、`backend/tests/test_ai_strategy_draft.py`（17 例）、`backend/tests/test_ai_research_security.py`（22 例），共享脚手架与演示答案在 `backend/tests/research_payloads.py`（v1.9.8 新增）；族名：Researcher（`test_researcher_*`）、Architect（`test_strategy_architect` / `test_strategy_draft_schema` / `test_strategy_draft_provenance` / `test_strategy_draft_does_not_execute`）、Capability（`test_supported_capability` / `test_partially_supported_capability` / `test_needs_capability` / `test_no_silent_downgrade`） |
 | Compiler | 合法/非法 StrategySpec、unsupported capability、缺 exit、歧义规则；**不存在 AI → Python 执行路径** | `backend/tests/test_strategies.py:39-90`、`backend/tests/test_dsl_indicators.py` |
 | 回测不可篡改 | AI 不能修改结果、AI 只能读取 structured facts、分析只 echo 库中数字、facts 函数不含统计量 | `backend/tests/test_ai_explain.py:295-304`、`:278-281` |
-| 安全 | AI 不能直接 SQL、不能执行任意代码、GitHub malicious repository、prompt injection（3 类注入样本）、超大来源、工具滥用、SSRF 黑名单 | 新建（v1.9.9；注入先例 `backend/tests/test_ai_runtime.py`） |
+| 安全 | v1.9.8 已建：五类注入样本（"Ignore previous instructions" / "Reveal system prompt" / "Execute this command" / "Change strategy rules" / "Pretend this capability exists"）作为 ResearchArtifact 内容，断言不能改变 Role Contract；AI 输出完整性（伪造 CAGR / 伪造 Sharpe / 伪造回测结果 / 不支持的指标一律拒绝或标为非事实）；工具守卫：`backend/app/ai/research.py` 不含 `run_backtest` / `BacktestEngine` / `walk_forward` / `run_monte_carlo` / `run_sensitivity` / `StrategyVersion(` / `BacktestRun(` / `subprocess` / `os.system` / `eval(` / `exec(` / `import httpx` 或直接 `structured_output(` 调用，且必须含 `run_task(`。仍待 v1.9.9：GitHub malicious repository、超大来源、工具滥用、SSRF 黑名单 | `backend/tests/test_ai_research_security.py`（22 例，v1.9.8 新增）；注入先例 `backend/tests/test_ai_runtime.py` |
 | AI Runtime / 审计 | provider / model / role / prompt_version / hash / source_ids / tool_calls 完整；无密钥、无全文 | `backend/tests/test_ai_runtime.py`、`backend/tests/test_ai_providers.py:156` |
 | 前端契约 | 普通模式不出现新专业词；阶段状态文案；中文提示 | `backend/tests/test_frontend_contracts.py:519-541,960-970`、`backend/tests/test_ui_promises.py:408-473` |
 | 规模纪律 | 整仓时长可控（v1.9.6 读数：955 passed / 4 skipped / 约 180s） | `scripts/Invoke-Tests.ps1` |
@@ -537,24 +549,24 @@ SYSTEM / ROLE CONTRACT  →  TRUSTED TASK  →  UNTRUSTED SOURCE
 | --- | --- | --- | --- | --- |
 | Phase 0 | 现状审计 + Gap Analysis | — | **已完成** | `docs/26_AI_QUANT_LAYER_GAP_ANALYSIS.md`（570 行；只读审计、未改动任何产品代码，仅新增 `docs/25`、`docs/26` 与 `.gitignore` 的 `.scratch/`） |
 | Phase 1 | AI Role Contract + AI Runtime 基础 | v1.9.7 | **已完成** | `backend/app/ai/contracts/*.md`、`backend/app/ai/role_contracts.py`、`backend/app/ai/runtime.py`、`backend/app/ai/budget.py`、`backend/app/capabilities.py`、迁移 `0012_ai_role_contracts`、ADR-150…153 |
-| Phase 2 | Capability Registry + StrategySpec 扩展 | v1.9.7 / v1.9.8 | **部分完成**：Registry 骨架已完成（14 组 + 不支持清单 + 三态评估 + drift test）；**StrategySpec 扩展待开发**（按 C1 = A 方案，DSL 1.0 不动，扩展落在研究层实体） | `backend/app/capabilities.py`、`backend/tests/test_capabilities.py`；`docs/26` §5.1/§5.2 的裁决 |
-| Phase 3 | AI Strategy Research + Strategy Formalization | v1.9.8 | **待开发** | 计划端点 `POST /ai/strategy/formalize`；角色契约 `RESEARCHER.md` / `STRATEGY_ARCHITECT.md` 已就位 |
-| Phase 4 | GitHub / Web / PDF Research Source 统一 | v1.9.8–v1.9.9 | **待开发** | `ResearchSource` 抽象与 `POST /ai/sources/*`；GitHub 侧复用既有 importer（ADR-060/061/062） |
+| Phase 2 | Capability Registry + StrategySpec 扩展 | v1.9.7 起 | **部分完成**：Registry 骨架已完成（14 组 + 不支持清单 + 三态评估 + drift test），并在 v1.9.8 用于 StrategyDraft 的服务端能力裁决；**StrategySpec 扩展不实现**（按 C1 = A 方案，DSL 1.0 不动，扩展落在研究层实体） | `backend/app/capabilities.py`、`backend/tests/test_capabilities.py`；`docs/26` §5.1/§5.2 的裁决 |
+| Phase 3 | AI Strategy Research + Strategy Formalization | v1.9.8 | **已完成（v1.9.8，停在草案 + 能力裁决）** | `backend/app/ai/research_schemas.py`、`backend/app/ai/research.py`、迁移 `0013_research_layer` + 六表、四条端点（§E.4）、ADR-154…157；`RESEARCHER.md` / `STRATEGY_ARCHITECT.md` 已升到 1.1.0；**不做** Strategy Compiler 与任何回测入口 |
+| Phase 4 | GitHub / Web / PDF Research Source 统一 | v1.9.9 | **待开发** | `ResearchSource` 抽象与 `POST /ai/sources/text\|url\|pdf`、`ai_source_snapshots`；GitHub 侧复用既有 importer（ADR-060/061/062） |
 | Phase 5 | Tool Gateway + Backtest / Risk / Research 工具 | v1.9.9 | **待开发** | `ai_tool_calls`、读/重/写三档、重任务需确认或配额（用户决策 C6） |
 | Phase 6 | AI Explanation + Plain Language | v1.0 起 / v1.9.9 | **部分完成**：信号解释与回测分析已完成（中文输出、schema 校验、429/503 错误映射）；统一 `/ai/explain` 入口待开发 | `docs/06_AI_LAYER.md` §16「已实现」 |
 | Phase 7 | Strategy Experiment + Version Iteration | v1.9.9–v2.0.0 | **待开发** | `strategy_experiments`、`POST /ai/experiments`；策略版本不可变（§D.4） |
-| Phase 8 | UI/UX 统一（`/lab`、普通/高级分层） | v1.9.9–v2.0.0 | **待开发** | `/lab` 只读第一版 v1.9.8；四视图 AI 面板门控欠账见 §F.2 |
+| Phase 8 | UI/UX 统一（`/lab`、普通/高级分层） | v1.9.9–v2.0.0 | **待开发** | `/lab` **只读第一版 v1.9.8 已完成**（§F.1）；完整状态机与溯源视图、四视图 AI 面板门控欠账见 §F.2 |
 | Phase 9 | Security + Prompt Injection + Audit | v1.9.7 起 | **部分完成**：信任边界（ADR-153）+ 审计列 + `GET /ai/audit/{task_id}` 已完成；SSRF / 来源体积 / 工具滥用待开发 | `backend/tests/test_ai_runtime.py` 注入用例 |
-| Phase 10 | 完整测试 | 每版 | **进行中**：v1.9.7 新增 Role Contract / Runtime / Capability 三个测试族；端到端验收场景 1–7 + Martin 场景属 v2.0.0 | `docs/26` §15 |
-| Phase 11 | 文档同步 | 每版 | **进行中**：`docs/06` 已重写、`docs/12` / `docs/15`（v1.9.7 版本行与读数已写入）/ `docs/17` 已更新；`docs/02` / `docs/03` / `docs/11` / `docs/16` / `docs/19` / `docs/00` 已按 §16 同步 | §J |
-| Phase 12 | 更新原始 Development Specification | v1.9.7 | **已完成（本文件）** | `docs/My_Quant_Lab_Development_Spec_V1.1.md` + `.docx` + 根目录副本 + `scripts/build_dev_spec_docx.py`；V1.0 原件未动 |
+| Phase 10 | 完整测试 | 每版 | **进行中**：v1.9.7 新增 Role Contract / Runtime / Capability 三个测试族；v1.9.8 新增研究层五族 55 例（§G.5）；端到端验收场景 1–7 + Martin 场景属 v2.0.0 | `docs/26` §15 |
+| Phase 11 | 文档同步 | 每版 | **进行中**：v1.9.7 已重写 / 更新 `docs/06`、`docs/12`、`docs/15`、`docs/17` 与 `docs/02` / `docs/03` / `docs/11` / `docs/16` / `docs/19` / `docs/00`；v1.9.8 已同步 `docs/06`（§17/§18）、`docs/12`（AI Research）、`docs/13`、`docs/15`、`docs/17`（ADR-154…157）、`docs/19`、`docs/25`、`docs/26`（§22）与本文件 | §J |
+| Phase 12 | 更新原始 Development Specification | v1.9.7 起（v1.9.8 刷新） | **已完成（本文件）** | `docs/My_Quant_Lab_Development_Spec_V1.1.md` + `.docx` + 根目录副本 + `scripts/build_dev_spec_docx.py`；V1.0 原件未动；本文件已按 v1.9.8 事实刷新（§0.1） |
 
 ### H.2 版本里程碑（`docs/26` §17）
 
 | 版本 | 范围 | 关键交付物 | 迁移 | 部署 |
 | --- | --- | --- | --- | --- |
 | **v1.9.7** 基础 Role Contract + Runtime | §四、§五、§六、§三十二、§三十六、§三十七、§三十八、§十九（Registry 骨架）、§三十三、§三十五 | 契约文件、Contract Loader/Registry、Capability Registry 骨架 + drift test、缓存 key 修正、审计列、预算分层、`ai_role_contracts` | `0012` | 补丁版：不部署 NAS（ADR-086） |
-| **v1.9.8** Research Layer + Hypothesis + Draft + Registry 完整 | §七、§九、§十、§十一、§十二、§十八、§二十、§二十三、§五十、§五十一、§五十二、§六十一 | `ResearchSource`（text/url/pdf/github）、`ResearchArtifact` + 片段、`StrategyHypothesis` + 逐条规则三态、`StrategyDraft`、能力判定、`POST /ai/sources/*`、`POST /ai/strategy/formalize` | `0013` | 补丁版 |
+| **v1.9.8** Research Layer + Hypothesis + Draft + Capability Verdict（停在草案 + 能力裁决） | §七、§九、§十、§十一、§十二、§十八、§二十、§二十三、§五十、§五十一、§五十二、§六十一 | **已交付**：`backend/app/ai/research_schemas.py`（领域模型 + 四个门 + `assess_draft_capabilities()` + `find_unverified_result_claims()`）、`backend/app/ai/research.py`（五步链，复用 v1.9.7 的 `run_task()`）、迁移 `0013_research_layer` + 六表、四条端点（`POST /ai/research`、`GET /ai/research`、`GET /ai/research/{run_id}`、`POST /ai/strategy/formalize`）、`origin` 三态 provenance（EXPLICIT / INFERRED / ASSUMED / UNKNOWN）、非可执行 `StrategyDraft`、服务端能力三态裁决、`RESEARCHER.md` / `STRATEGY_ARCHITECT.md` 升到 1.1.0、`/lab` 只读第一版、ADR-154…157、研究层五族 55 例测试。**未交付**：Strategy Compiler（Draft → StrategySpec 1.0）、任何 AI 触发的回测 / 风险 / 敏感性 / Monte Carlo 入口、Tool Gateway（`ai_tool_calls`）、统一研究来源（text / url / pdf / github、`ai_source_snapshots`）、`ai_research_runs` 的异步工作流与人工确认、`strategy_experiments`、四个 UI AI 面板门控、完整 `/lab`、`REVIEWER.md` | `0013` | 补丁版：不部署 NAS（ADR-086） |
 | **v1.9.9** Compiler + Tool Gateway + Audit + Security + Workflow | §十七、§二十四、§二十五、§五十七、§五十八、§五十九、§六十、§六十二、§六十三、§六十四、§六十五、§五十三–§五十六、§四十三 | `StrategyCompiler`（Draft → DSL 1.0）、Tool Gateway（三档 + 配额 + 审计）、`ai_research_runs` / `ai_tool_calls` / `strategy_experiments`、异步研究工作流 + 人工确认、统一解释入口 | `0014` | 补丁版 |
 | **v2.0.0** AI Quant Research Layer 里程碑 | §四十、§四十一、§四十二、§四十四、§四十五–§四十八、§四十九、§六十六、§六十九、§七十、§七十七、§七十八、§八十二 | 完整研究 UI + 溯源视图、实验与版本迭代闭环、验收场景全部可演示、文档同步、V1.1 docx + markdown 镜像 | — | **部署 NAS 并验收**（ADR-086） |
 | **Future** | Calmar / Recovery / VaR / CVaR；Portfolio / Universe / Rebalance；Vision；RAG | 先定义后实现 | 视需要 | — |
@@ -574,18 +586,18 @@ SYSTEM / ROLE CONTRACT  →  TRUSTED TASK  →  UNTRUSTED SOURCE
 | --- | --- | --- | --- |
 | A | Model Independence | 统一 Provider 接入 OpenAI-compatible，核心代码不依赖具体模型品牌 | **已完成**：`OpenAICompatibleProvider`（`backend/app/ai/provider.py`）；契约只声明能力不绑模型（ADR-150）；本期只实现 OpenAI-Compatible（用户决策 Q5） |
 | B | Role Contract | 能按 Role 加载对应 AI 工作规范 | **部分完成**：4 份契约已就位并可解析（`SYSTEM.md` / `RESEARCHER.md` / `STRATEGY_ARCHITECT.md` / `EXPLAINER.md`）；`STRATEGY_COMPILER.md` / `BACKTEST_ANALYST.md` / `RISK_ANALYST.md` / `REVIEWER.md` 待开发 |
-| C | Research | 用户可提交研究资料让 AI 分析策略 | **待开发**：`POST /ai/research` 等计划 v1.9.9；`POST /ai/sources/*` 计划 v1.9.8 |
-| D | Formalization | AI 能把策略思想转换为 StrategySpec | **待开发**：`POST /ai/strategy/formalize`（v1.9.8）与 `POST /ai/strategy/drafts/{id}/compile`（v1.9.9） |
-| E | Evidence | 每条重要规则尽可能有 provenance | **部分完成**：GitHub 导入已有 `source_commit` / `evidence_json` / provenance；逐规则证据绑定（`strategy_hypothesis_rules` + fragments）待 v1.9.8 |
-| F | Uncertainty | 能区分 EXPLICIT / INFERRED / ASSUMED / UNKNOWN | **待开发**：三态定义见 `docs/25` §十，落点 `strategy_hypothesis_rules.origin` 待 v1.9.8 |
-| G | Capability | AI 知道当前系统支持什么；不支持时明确报告而不是静默生成 | **已完成**（v1.9.7）：14 组能力 + `UNSUPPORTED_CAPABILITIES` + 三态 `assess()` + `GET /ai/capabilities`（ADR-151） |
-| H | Validation | 任何 AI StrategySpec 必须过 schema + domain + capability validation | **部分完成**：schema（`validate_structured_output()`）与 domain（`validate_strategy`）已有；capability / safety 两级待 v1.9.9 |
+| C | Research | 用户可提交研究资料让 AI 分析策略 | **部分完成**（v1.9.8）：`POST /ai/research`、`GET /ai/research`、`GET /ai/research/{run_id}` 已实现并登记为 `[已实现]`；来源摄取 `POST /ai/sources/text\|url\|pdf` 与 GitHub / URL / PDF 统一仍是 v1.9.9 |
+| D | Formalization | AI 能把策略思想转换为 StrategySpec | **部分完成**（v1.9.8）：`POST /ai/strategy/formalize` 已实现（`{run_id}` 或 `{hypothesis_id}` → `{"draft": …}`），但只产出**不可执行**的 `StrategyDraft`；编译成 StrategySpec 的 `POST /ai/strategy/drafts/{id}/compile` 仍是 v1.9.9 |
+| E | Evidence | 每条重要规则尽可能有 provenance | **部分完成**（v1.9.8）：GitHub 导入已有 `source_commit` / `evidence_json` / provenance；研究层的逐规则证据绑定已落地（`research_artifact_fragments` + `strategy_hypothesis_rules.evidence_fragment_ids`），EXPLICIT / INFERRED 必须来自本次运行输入的证据 |
+| F | Uncertainty | 能区分 EXPLICIT / INFERRED / ASSUMED / UNKNOWN | **已完成**（v1.9.8）：`strategy_hypothesis_rules.origin` ∈ EXPLICIT / INFERRED / ASSUMED / UNKNOWN；EXPLICIT / INFERRED 必须带本次输入证据，ASSUMED 必须被 `assumptions[].applies_to` 覆盖，UNKNOWN 必须被 `unknowns[].field` 覆盖，任何缺口即 REJECT（ADR-154） |
+| G | Capability | AI 知道当前系统支持什么；不支持时明确报告而不是静默生成 | **已完成**（v1.9.7 Registry + v1.9.8 服务端裁决）：14 组能力 + `UNSUPPORTED_CAPABILITIES` + 三态 `assess()` + `GET /ai/capabilities`（ADR-151）；v1.9.8 起 StrategyDraft 的能力裁决由服务端按草案实际用到的能力计算（不采信模型自报），`SUPPORTED` / `PARTIALLY_SUPPORTED` / `NEEDS_CAPABILITY` 三态且无静默降级（ADR-156） |
+| H | Validation | 任何 AI StrategySpec 必须过 schema + domain + capability validation | **部分完成**（v1.9.8）：研究层已有七步校验链（Model → Raw → JSON/Schema → Domain → Capability → Provenance → StrategyDraft，任一失败即 REJECT，最多一次受控重试，ADR-157）；可执行策略侧的 schema（`validate_structured_output()`）与 domain（`validate_strategy`）已有，capability / safety 两级待 v1.9.9 |
 | I | Backtest | AI 不能伪造回测数字 | **已完成**：数字只由 `build_signal_facts()` / `build_backtest_facts()` 注入；`backend/tests/test_ai_explain.py:295-304` 断言 facts 不含统计量、分析只 echo 库中数字 |
 | J | Explanation | 用户可获得专业分析 + 通俗解释 | **已完成**：信号解释 + 回测分析两条链（中文输出、`plain_language` 字段、429/503 映射）；统一入口待 v1.9.9 |
 | K | Iteration | V1 → AI 分析 → 实验 → V2 | **待开发**：`strategy_experiments` 与 `POST /ai/experiments` 计划 v1.9.9 |
-| L | Security | 外部 GitHub / Web / PDF 内容不能覆盖 AI System Contract | **部分完成**：信任边界（ADR-153）与注入守卫已完成；URL/PDF 摄取、SSRF、来源体积待 v1.9.8 / v1.9.9 |
-| M | Audit | AI 调用能追踪 model / provider / role / prompt / source / tool / result | **部分完成**：`ai_tasks` 五个新列 + `GET /ai/audit/{task_id}`（v1.9.7）；`tool_calls` 待 v1.9.9 的 `ai_tool_calls` |
-| N | Documentation | 开发计划、架构、DSL、AI、API、UI、Roadmap 与实际实现一致 | **进行中**：`docs/06` 已重写，`docs/12` / `docs/15`（v1.9.7 版本行与读数已写入）/ `docs/17` 已更新；本 V1.1 即 Phase 12 的交付物 |
+| L | Security | 外部 GitHub / Web / PDF 内容不能覆盖 AI System Contract | **部分完成**（v1.9.8）：信任边界（ADR-153）与注入守卫已完成；v1.9.8 新增 `backend/tests/test_ai_research_security.py`（22 例，五类注入样本作为 ResearchArtifact 内容，断言不能改变 Role Contract）；URL / PDF 摄取、SSRF、来源体积待 v1.9.9 |
+| M | Audit | AI 调用能追踪 model / provider / role / prompt / source / tool / result | **部分完成**（v1.9.8）：`ai_tasks` 五个新列 + `GET /ai/audit/{task_id}`（v1.9.7）；v1.9.8 的 `research_run_id` 参数与 `audit_payload()` 新增 `source_snapshot_hash` / `strategy_draft_version` / `tool_calls: []`（本版不发起工具调用，空列表本身是记录的一部分）；真实 `tool_calls` 待 v1.9.9 的 `ai_tool_calls` |
+| N | Documentation | 开发计划、架构、DSL、AI、API、UI、Roadmap 与实际实现一致 | **进行中**：`docs/06` 已重写，`docs/12` / `docs/15`（v1.9.7 版本行与读数已写入）/ `docs/17` 已更新；v1.9.8 已完成一轮同步（`docs/06` / `docs/12` / `docs/13` / `docs/15` / `docs/17` / `docs/19` / `docs/25` / `docs/26`，见 §J）；本 V1.1 即 Phase 12 的交付物 |
 
 ## §J 文档同步与维护规则
 
@@ -595,31 +607,31 @@ SYSTEM / ROLE CONTRACT  →  TRUSTED TASK  →  UNTRUSTED SOURCE
 | --- | --- | --- |
 | `docs/00_README.md` | 文档包入口与项目定位 | 已补「AI 量化研究智能层（进行中）」一节与定位升级（v1.9.7） |
 | `docs/01_PRODUCT_SPEC.md` | 01 产品规格（PRD） | 已完成 |
-| `docs/02_ARCHITECTURE.md` | 02 系统架构（6 层） | 已补四层 AI 架构图与三条不许越过的线（v1.9.7）；Research Layer 的实体层随 v1.9.8 |
+| `docs/02_ARCHITECTURE.md` | 02 系统架构（6 层） | 已补四层 AI 架构图与三条不许越过的线（v1.9.7）；Research Layer 的实体层同步待 v1.9.9 |
 | `docs/03_MODULES.md` | 03 功能模块规范（M01–M13） | 已补 M09 AI 的四层职责与 `app/capabilities.py`（v1.9.7） |
 | `docs/04_STRATEGY_DSL.md` | 04 统一策略规范；DSL 是核心稳定契约 | **只加**「研究层产出 DSL 1.0」的分层说明；契约本身不改（v1.9.8） |
-| `docs/05_GITHUB_STRATEGY_IMPORT.md` | 05 GitHub 导入流水线、安全与许可证 | 待补「GitHub 是 `ResearchSource` 的第一个实现」，安全约束不变（v1.9.8） |
-| `docs/06_AI_LAYER.md` | 06 AI 智能层：Provider、角色、契约、Runtime、Registry、预算、审计 | **已重写**（278 行，含 v1.9.7 已实现/未实现清单） |
+| `docs/05_GITHUB_STRATEGY_IMPORT.md` | 05 GitHub 导入流水线、安全与许可证 | 待补「GitHub 是 `ResearchSource` 的第一个实现」，安全约束不变（v1.9.9） |
+| `docs/06_AI_LAYER.md` | 06 AI 智能层：Provider、角色、契约、Runtime、Registry、预算、审计 | **已更新**（v1.9.7 重写；v1.9.8 新增 §17 研究层、§18 已实现 / 未实现清单） |
 | `docs/07_BACKTEST_ENGINE.md` | 07 回测引擎口径与红线 | 新指标（Calmar / Recovery / VaR / CVaR）的定义与口径属 Future |
 | `docs/08_PAPER_TRADING.md` | 08 模拟盘与账户隔离 | 已完成 |
 | `docs/09_SIGNAL_ENGINE.md` | 09 信号生成、证据与生命周期 | 已完成 |
 | `docs/10_GHOSTFOLIO_INTEGRATION.md` | 10 Ghostfolio 只读集成 | 已完成 |
-| `docs/11_DATA_MODEL.md` | 11 数据模型与完整性规则 | 待补研究层新表（v1.9.8） |
-| `docs/12_API_SPEC.md` | 12 逐端点真相 + `[已实现]`/`[计划]`/`[取消]` 标记（由测试双向绑定） | **每版必更**；v1.9.7 已加三条端点 |
-| `docs/13_UI_UX.md` | 13 界面按现状记录 + §10 普通/高级门控 + §14 欠账表 | 待补 `/lab` 新节；§10 隐藏清单扩充新专业词（v1.9.9） |
-| `docs/14_SECURITY_LICENSE.md` | 14 密钥、沙箱、注入、审计、许可、不自动交易边界 | 待补 URL/PDF 摄取与注入边界（v1.9.8） |
-| `docs/15_ROADMAP_ACCEPTANCE.md` | 15 版本表 + 每版真实读数 | 每版加行与读数；v1.9.7 版本行与读数已写入（工作树、门禁与红证据数字见该文件） |
+| `docs/11_DATA_MODEL.md` | 11 数据模型与完整性规则 | 待补研究层新表（六表 v1.9.8 已建，文档同步待 v1.9.9） |
+| `docs/12_API_SPEC.md` | 12 逐端点真相 + `[已实现]`/`[计划]`/`[取消]` 标记（由测试双向绑定） | **每版必更**；v1.9.7 已加三条端点，v1.9.8 已加 AI Research 一节与四条研究层 `[已实现]` 端点 |
+| `docs/13_UI_UX.md` | 13 界面按现状记录 + §10 普通/高级门控 + §14 欠账表 | 已补 `/lab`：导航树 10 行含 `/lab`（v1.9.8）；§10 隐藏清单扩充新专业词仍待 v1.9.9 |
+| `docs/14_SECURITY_LICENSE.md` | 14 密钥、沙箱、注入、审计、许可、不自动交易边界 | 待补 URL/PDF 摄取与注入边界（v1.9.9） |
+| `docs/15_ROADMAP_ACCEPTANCE.md` | 15 版本表 + 每版真实读数 | 每版加行与读数；v1.9.7 与 v1.9.8 版本行与读数均已写入（工作树、门禁与红证据数字见该文件） |
 | `docs/16_AGENTS.md` | 16 AI 编程契约（不可协商规则、开发顺序、测试底线） | 已补五条 AI 层代码位置约束与 AI 测试底线（v1.9.7） |
-| `docs/17_DECISIONS.md` | 架构决策记录（ADR），当前至 ADR-153 | 新 ADR：研究层与 DSL 分层、工具三档、confidence 边界等（v1.9.7 起） |
+| `docs/17_DECISIONS.md` | 架构决策记录（ADR），当前至 ADR-157 | v1.9.8 新增 ADR-154…157（provenance、不可执行草案、服务端能力裁决、结果禁区）；工具三档、confidence 边界等 ADR 待后续版本（v1.9.7 起） |
 | `docs/18_SAMPLE_STRATEGY.md` | 示例策略 PA Breakout V1 | 已完成 |
-| `docs/19_DEVELOPMENT_PLAYBOOK.md` | AI 编程实施手册 | 已补 AI 层施工勾选项与「写文件必须 LF」教训（v1.9.7） |
+| `docs/19_DEVELOPMENT_PLAYBOOK.md` | AI 编程实施手册 | 已补 AI 层施工勾选项与「写文件必须 LF」教训（v1.9.7）、研究层勾选项与 §5.1 push / network 教训（v1.9.8） |
 | `docs/20_RESOURCE_MONITOR.md` | 系统资源监控规格 | 已完成；与 Tool Gateway 的资源上限对齐（§G.4） |
 | `docs/21_PARAMETER_SENSITIVITY.md` | 参数敏感性分析规格 | 已完成；是 AI 防过拟合提醒的证据来源 |
 | `docs/22_MONTE_CARLO.md` | Monte Carlo 重采样规格 | 已完成；Risk Analyst 的输入之一 |
 | `docs/23_POSITION_SIZING.md` | 仓位管理规格 | 已完成；`sizing_modes` 进入 Capability Registry |
 | `docs/24_ENSEMBLE.md` | 策略集成规格 | 已完成；`compare_strategies` 工具的基础 |
-| `docs/25_AI_QUANT_RESEARCH_LAYER_PLAN.md` | 用户提供的升级计划逐字副本，**权威输入** | 保持原样，作为长期引用锚点（用户决策 Q10） |
-| `docs/26_AI_QUANT_LAYER_GAP_ANALYSIS.md` | 现状审计与差距分析，v1.9.7 起的施工依据 | 已完成 |
+| `docs/25_AI_QUANT_RESEARCH_LAYER_PLAN.md` | 用户提供的升级计划逐字副本，**权威输入** | 逐字内容保持原样，另附滚动实现状态（v1.9.8 已更新），作为长期引用锚点（用户决策 Q10） |
+| `docs/26_AI_QUANT_LAYER_GAP_ANALYSIS.md` | 现状审计与差距分析，v1.9.7 起的施工依据 | 已完成；v1.9.8 新增 §22 落地状态 |
 | `docs/README.md` | 开发文档包索引 | 新文档落盘后同步索引 |
 | `docs/My_Quant_Lab_Development_Spec_V1.0.docx` | 原始开发规格 | **永久保留、不修改** |
 | `docs/My_Quant_Lab_Development_Spec_V1.1.md` / `.docx` | 本文件与其 DOCX 镜像 | 唯一内容源是 `.md`，`.docx` 由脚本生成 |
@@ -636,3 +648,35 @@ SYSTEM / ROLE CONTRACT  →  TRUSTED TASK  →  UNTRUSTED SOURCE
 2. **不要为「完整」而臃肿**：文档要写现状与可核查的证据，而不是把将来时写成既有事实。
 3. **DOCX 纪律**（`docs/25` §七十六）：永远不删除、不覆盖历史版本的 DOCX；新版本新建文件并标注 `V1.0 = Original Development Specification` / `V1.1 = AI Quant Research Architecture Update`。
 4. **生成器纪律**：`docs/My_Quant_Lab_Development_Spec_V1.1.md` 是唯一内容源；`.docx` 一律由 `scripts/build_dev_spec_docx.py` 生成，脚本必须可重复运行且确定性（无时间戳、无随机），只依赖 python-docx 与标准库。
+
+## §K v1.9.8 落地状态（滚动更新）
+
+`version.txt` = `v1.9.8`（补丁版本；按 ADR-086 补丁版**不部署 NAS**，但仍按流程走 tests / CI / docs / release / tag）。本版把 Phase 3（AI Strategy Research + Strategy Formalization）推进到**「草案 + 能力裁决」为止，并刻意停在这里**：系统能读懂材料、形成带 provenance 的 StrategyHypothesis、产出**不可执行**的 StrategyDraft 并给出服务端能力裁决，但**不会**生成可执行策略、**不会**触发回测、**不产出任何绩效数字**。v1.9.9 尚未开始。
+
+**本版已交付**
+
+- 后端模块：`backend/app/ai/research_schemas.py`（领域模型 + 四个门 + `assess_draft_capabilities()` + `find_unverified_result_claims()`）、`backend/app/ai/research.py`（五步链：研究输入 → RESEARCHER → StrategyHypothesis → STRATEGY_ARCHITECT → StrategyDraft → 能力裁决）。
+- 迁移 `backend/alembic/versions/0013_research_layer.py`（`down_revision = "0012_ai_role_contracts"`），建六张表：`research_artifacts`、`research_artifact_fragments`、`ai_research_runs`、`strategy_hypotheses`、`strategy_hypothesis_rules`、`strategy_drafts`；`ai_source_snapshots` **未建**。
+- 四条端点（`docs/12_API_SPEC.md` 已登记 `[已实现]`）：`POST /ai/research`、`GET /ai/research`、`GET /ai/research/{run_id}`、`POST /ai/strategy/formalize`。
+- provenance：每条规则带 `origin` ∈ EXPLICIT / INFERRED / ASSUMED / UNKNOWN；EXPLICIT / INFERRED 必须来自**本次运行**的输入证据，ASSUMED 必须被 `assumptions[].applies_to` 覆盖，UNKNOWN 必须被 `unknowns[].field` 覆盖，任何缺口即 REJECT。Martin 场景「BTC 超跌后反弹时买入」必须给出 BTC / oversold / rebound / buy 为 EXPLICIT，定义 / 时间周期 / 出场 / 止损 / 仓位为 UNKNOWN；AI 提出的 `RSI(14) < 30` 再上穿 30 只允许标为 `ASSUMED`，并注明是 AI 提出的定义、不是用户原话。
+- `StrategyDraft` 不可执行：`executable` 是服务端计算字段且恒为 false，`compiled_strategy_version_id` 保持 NULL，DSL 1.0（`backend/app/strategies/dsl.py`）**未改**；弱化或隐藏 EXPLICIT 规则会记录 `dropped_explicit_rule`。
+- 能力裁决在服务端按草案实际用到的能力计算（不采信模型自报，强于实际的自报记录 `capability_overclaim` 并降级）；`NEEDS_CAPABILITY` 只在完全无可建项时给出，否则缺项为 `PARTIALLY_SUPPORTED`，全支持为 `SUPPORTED`，无静默降级。"20-day momentum + cross-sectional ranking + monthly rebalance top 10%" 必须读作 `PARTIALLY_SUPPORTED`（支持：20 日动量；缺能力：横截面排名 / 组合构建 / 月度再平衡），AI 的「只做单资产 20 日动量」建议必须显式标为 `Experimental Alternative` 并说明它与用户意图是**不同的策略**。
+- 结果是模型禁区：研究 schemas 里没有 CAGR / Sharpe / Max Drawdown / 胜率字段，像「预计 CAGR 25%」这样的文字声明一律标 UNVERIFIED 且不落库；校验链为 Model → Raw → JSON/Schema → Domain → Capability → Provenance → StrategyDraft，任一失败即 REJECT，最多一次同门重试，被拒的运行不落 hypothesis / draft 行。
+- Runtime 复用（不重写）：全部经 `run_task()`；`backend/app/ai/runtime.py` 新增 `research_run_id` 参数（记录在 `AITask` 上，不影响路由与缓存），`audit_payload()` 另返回 `source_snapshot_hash` / `strategy_draft_version` / `tool_calls: []`（本版不发起工具调用，空列表本身是记录的一部分）；`RESEARCHER.md` / `STRATEGY_ARCHITECT.md` 升到 1.1.0 并提供两份新的输出 JSON schema。
+- ADR-154…ADR-157（`docs/17_DECISIONS.md`）：ADR-154 理解必须携带 provenance、ADR-155 StrategyDraft 不可执行且 DSL 1.0 不变、ADR-156 能力裁决在服务端三态且无静默降级、ADR-157 结果是禁区。
+- UI：`/lab` 只读第一版（`frontend/src/views/LabView.vue`，在 `frontend/src/main.ts` 注册，并在 `frontend/src/App.vue` 作为第 5 个导航项「AI 研究实验室」，普通与高级模式都可见）；普通模式只显示人话结论与下一步，`origin` 徽标 / 能力 token / run id / attempts / 当前步骤 / JSON 仅高级模式；`ASSUMED` 规则在**两种模式下都**标注「⚠️ AI 提出的假设，不是你的原话」，草案卡片始终声明不可运行、从未回测、没有收益 / 回撤 / Sharpe 数字。
+- 测试：五族 55 例——`backend/tests/test_ai_research.py`（16）、`backend/tests/test_ai_strategy_draft.py`（17）、`backend/tests/test_ai_research_security.py`（22），共享脚手架与演示答案在 `backend/tests/research_payloads.py`。
+
+**本版未交付（下一步）**
+
+- Strategy Compiler（Draft → StrategySpec 1.0）。
+- 任何 AI 触发的回测 / 风险 / 敏感性 / Monte Carlo 入口。
+- Tool Gateway（Phase 5，`ai_tool_calls`）。
+- 统一研究来源（Phase 4：text / url / pdf / github 摄取、`ai_source_snapshots`）。
+- `ai_research_runs` 的异步工作流与人工确认。
+- `strategy_experiments`（Phase 7）。
+- 四个 UI AI 面板（Dashboard / Signals / StrategyDetail / Backtest）的高级模式门控。
+- 完整 `/lab`（Phase 8，含状态机与溯源视图）与 `REVIEWER.md`。
+- v1.9.9 尚未开始。
+
+权威的逐版读数在 `docs/15_ROADMAP_ACCEPTANCE.md`；细节见 `docs/06_AI_LAYER.md`、`docs/17_DECISIONS.md` 与 `docs/26_AI_QUANT_LAYER_GAP_ANALYSIS.md` §22。

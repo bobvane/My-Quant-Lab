@@ -2935,6 +2935,54 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 - 测试：`backend/tests/test_ai_runtime.py` 覆盖八个缓存分量互不相同、同一请求二次命中缓存且不重复计费、换模型不命中、预算顺序与耗尽时不留 `AITask` 行、审计字段（含 `role_contract` 哈希）、来源进 `source_ids` 且改变来源文本即失效、`GET /ai/audit/{task_id}` 的 200/404，以及注入串只出现在 user 消息里而 system 消息只含契约。
 
+## ADR-154：StrategyHypothesis——理解必须带来源，AI 补的必须自认是假设
+
+- 背景：`docs/25_AI_QUANT_RESEARCH_LAYER_PLAN.md` 要求 RESEARCHER 把「用户的研究输入」变成结构化策略假设；现实输入往往只有一句话（「Martin 说这个策略在 BTC 超跌之后反弹的时候买入」）。若模型直接输出一份看起来完整的策略，用户无法分辨哪一条是他说的、哪一条是模型补的。v1.9.8 规格 §4/§5/§6 因此把 provenance 定为数据结构而不是标签。
+
+- 决策：新增 `backend/app/ai/research_schemas.py`，用 pydantic（全部 `extra="forbid"`）定义 `Evidence` / `Rule` / `Assumption` / `Ambiguity` / `Unknown` / `CapabilityRequest` / `StrategyHypothesis`。每条规则带一个 `origin`（`EXPLICIT` / `INFERRED` / `ASSUMED` / `UNKNOWN`，强度 3/2/1/0）：`EXPLICIT`/`INFERRED` 必须给 `evidence[].source_ref`，且该 ref 必须属于本次 run 的材料（否则 `evidence_missing` / `evidence_unknown_source`）；`ASSUMED` 规则必须被某条 `assumptions[].applies_to` 覆盖（否则 `assumed_not_disclosed`）；`UNKNOWN` 规则必须被某条 `unknowns[].field` 覆盖（否则 `unknown_not_disclosed`）。`capability_requests[]` 允许模型声明「这需要什么能力」，但裁决权不在它（见 ADR-156）。落库为 `strategy_hypotheses` 与 `strategy_hypothesis_rules`（一条规则一行，行上带 `capability_status` 与 `evidence_fragment_ids_json`）；角色契约 `RESEARCHER` 升到 1.1.0。
+
+- 理由：把来源放在**规则**粒度，才可能让界面在「AI 形式化：RSI(14) < 30」旁边写出「这是 AI 为形成可测试假设提出的定义，不是 Martin 原文明确规则」；整份策略一个 `AI_GENERATED` 标签做不到这件事。要求 evidence 指向本次材料，则让「引用一篇不存在的研究」变成可拒绝的错误而不是可信的装饰。
+
+- 影响与兼容：数据面纯新增（迁移 `0013_research_layer`），不触碰 DSL、策略版本、回测与既有 AI 解释链路；不引入向量数据库、Elasticsearch、LangChain/LangGraph 或独立 Agent 框架（规格 §12）。`StrategyHypothesis` 的 ORM 类与 pydantic 模型同名，服务层用模块别名导入区分。
+
+- 测试：`backend/tests/test_ai_research.py` 覆盖角色契约、结构化输出、provenance 两种缺失、unknowns、ambiguities，以及 Martin 场景（`EXPLICIT`：BTC / 超跌 / 反弹 / 买入；`ASSUMED`：`RSI(14) < 30` 的定义；`UNKNOWN`：timeframe / exit / stop loss / position sizing）。
+
+## ADR-155：StrategyDraft 是不可执行的候选形式化，DSL 1.0 本版零改动
+
+- 背景：`backend/app/strategies/dsl.py` 的 DSL 1.0 是严格、确定性、可验证、可执行的；AI 的理解却更丰富也更不确定（含 provenance、evidence、assumptions）。规格 §9 要求两者本版不要合并。
+
+- 决策：新增 `FORMALIZATION_SCHEMA` 与 `StrategyDraft`（字段含 `status`、`market`、`rules[]`（带 `derived_from`）、`unknowns`、`required_capabilities`、`experimental_alternatives[]`、`indicators[]`、`understanding_of_original`，且 `executable` 默认 False）。派生规则必须指向 hypothesis 里存在的规则 id 且 `field` 相同（`unknown_derivation` / `derivation_field_mismatch`）；provenance 只准减弱不准增强（`provenance_stronger_than_hypothesis` / `new_rule_must_be_assumed`）；hypothesis 的 `EXPLICIT` 规则若既未被派生也未被列入 `unknowns`，报 `dropped_explicit_rule`（防静默改意图）。草案只落 `strategy_drafts`，`compiled_strategy_version_id` 保持 NULL，`backend/app/strategies/dsl.py` 与 `backend/app/strategies/` 其它文件本版**零改动**。
+
+- 理由：草案一旦可执行，系统就会被诱导绕过 Compiler 直接把模型输出喂给回测——那正是规格 §2 禁止的「AI 产生量化事实」。把「可执行」留给未来的 Compiler + StrategySpec 1.0，草案只承担「把理解固定下来给人看、并暴露缺口」的职责。
+
+- 影响与兼容：`strategy_drafts` 表纯新增，可 downgrade；既有 DSL / 策略版本 / 回测契约不变；未来的 Compiler 只需回填 `compiled_strategy_version_id`。
+
+- 测试：`backend/tests/test_ai_strategy_draft.py`（架构师契约、draft schema 的 forbidden/required、六种 provenance 违规、`test_strategy_draft_does_not_execute`：`executable: True` → `not_executable`、无 `StrategyVersion`/`BacktestRun` 行、源码文本不含 `run_backtest`/`BacktestEngine`/`walk_forward`/`monte_carlo`/`run_sensitivity`/`StrategyVersion(`/`BacktestRun(`）。
+
+## ADR-156：能力校验由服务端计算，模型只能声明不能裁决；禁止静默降级
+
+- 背景：规格 §7/§8。反例是「20 日动量 + 横截面排名 + 每月调仓前 10%」——本系统有均线/RSI 这类逐标的能力，没有横截面排名与组合构建；若 AI 把它悄悄改成单标的动量，用户会以为自己的策略被实现了。
+
+- 决策：`assess_draft_capabilities(draft, hypothesis)` 收集 token（hypothesis 的 `capability_requests` + 规则 `required_capabilities` + draft 指标（经 `normalise_indicator_type` 折叠别名）+ draft 规则 `required_capabilities` + draft `required_capabilities`，剔除 `MODEL_CAPABILITIES`）后与 `backend/app/capabilities.py` 的注册表比对，裁决三态：`NEEDS_CAPABILITY`（一样都做不了）／`PARTIALLY_SUPPORTED`（一部分能做）／`SUPPORTED`；模型自报的 `draft.status` 比服务端裁决更强时记 `capability_overclaim`（逐条能力还会在报告里留下 `claimed_supported` ↔ `status` 的对照）；提替代方案必须 `alternative_is_experimental`，否则 `alternative_not_marked_experimental`；`affected_rule` 必须是草案里真实存在的规则（`unknown_affected_rule`）。
+
+- 理由：§8 的静默降级是这一版最危险的失败模式：它不会报错，只会让用户拿到一个「不是他要的、但看起来跑得通」的策略。把裁决放在服务端纯函数里，才可能用测试钉住「模型说 SUPPORTED、系统说 PARTIALLY_SUPPORTED」这类分歧。
+
+- 影响与兼容：`strategy_drafts.status` 的语义明确为**服务端裁决结果**；模型自己的说法另存于 capability report，两者都进审计。注册表本身的 14 组来源不变（ADR-151）。
+
+- 测试：`test_supported_capability` / `test_partially_supported_capability`（`short_selling` → PARTIALLY_SUPPORTED，`report["partial"] == ["short_selling"]`）/ `test_needs_capability` / `test_the_verdict_is_computed_on_the_server` / `test_no_silent_downgrade`（静默降级 → rejected + `capability_overclaim` + 不落草案；诚实版 → 落草案且三项状态都是 PARTIALLY_SUPPORTED、替代方案带 `differs_from_original`）。
+
+## ADR-157：结果是模型的禁区——schema 禁字段、文本标 UNVERIFIED、拒绝不留痕、一次受控重试
+
+- 背景：规格 §10/§11/§13。模型最容易越界的一步，是把没跑过的回测写得像跑过（「预计 CAGR 25%、Sharpe 1.8」）。
+
+- 决策：四道门集中在 `backend/app/ai/research_schemas.py`。①结构层：pydantic `extra="forbid"` 之外，`find_forbidden_keys()` 递归扫描任意深度，命中 `FORBIDDEN_METRIC_KEYS`（cagr / annual_return / sharpe(_ratio) / sortino / calmar / max_drawdown / win_rate / profit_factor / expectancy / var / cvar / equity_curve / backtest_result(s) …）记 `fabricated_metric`，命中 `FORBIDDEN_CONTENT_KEYS`（dsl / strategy_spec / strategy_version_id / compiled(_strategy) / python / shell / command(s) / sql / execute / execution_plan / run_backtest / backtest_run_id / broker / order(s) / api_key / secret(s) / system_prompt / role_contract）记 `forbidden_content`。②文本层：`find_unverified_result_claims()` 把「预计 CAGR 25%」这类句子标成 `UNVERIFIED`（不是事实、也不是错误），中文计量词表与 ASCII 规则并存，必须含数字才算。③校验链：Model → Raw → JSON/Schema → Domain → Capability → Provenance → StrategyDraft，任一失败＝`ResearchRejected`，不自动修正到「看起来能跑」。④重试：`_call()` 把 `run_task()` 的 `ValueError`（模型输出不合格，经 `exc.__cause__` 分辨）翻译成 `ResearchRejected` 后只允许**一次**受控重试，走同一套校验；传输/供应商失败仍然让 run `failed`。拒绝时只留 `AIResearchRun`（`rejected` + `violations_json`）与失败的 `AITask`，不写 hypothesis / draft。
+
+- 理由：与其事后向用户解释「这个数字不是真的」，不如让它在 schema 层根本无处安放、在文本层被显式标注，并在拒绝时不留下任何可被误读的产物。一次受控重试是给模型改正格式的机会，不是给它第二次改变语义的机会。
+
+- 影响与兼容：`POST /ai/research` 对「模型答得不合格」仍返回 200（状态 `rejected`，属资源而非错误）；`POST /ai/strategy/formalize` 在回答不是草案时返回 422，detail 带 `step` 与 violation code。runtime / 预算 / 缓存 / 审计全部复用 v1.9.7（ADR-152/153），本版不重写；`audit_payload()` 的 `tool_calls` 恒为空列表、`strategy_draft_version` 指向本次 run 产出的草案版本（规格 §15）。
+
+- 测试：`backend/tests/test_ai_research_security.py`（22 例）——五条注入（ignore previous instructions / reveal system prompt / execute this command / change strategy rules / pretend this capability exists）不得改变角色契约（system 消息仍等于契约、契约 `content_hash` 不变）；五组伪造结果字段与七种伪造请求分别被拒且不留 hypothesis/draft；一句散文里的「预计 CAGR 25%」被标 `UNVERIFIED`；`app/ai/research.py` 的源码文本不含任何回测/子进程/求值入口。
+
 
 
 

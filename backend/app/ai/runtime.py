@@ -139,10 +139,21 @@ def audit_payload(db: Session, task: AITask) -> dict[str, Any]:
     """Everything needed to explain later how one AI result came to exist."""
 
     from app.ai.role_contracts import load_contracts
+    from app.domain.models import AIResearchRun, StrategyDraft
 
     provider = db.get(AIProvider, task.provider_id) if task.provider_id else None
     model = db.get(AIModel, task.model_id) if task.model_id else None
     contract = load_contracts().get(task.role) if task.role else None
+    #: A research task records which draft it produced, so the answer and the
+    #: artifact it became can be read together (docs/26 C17). This version makes
+    #: no tool calls at all; the empty list is part of the record rather than an
+    #: omission, so a later version that does call tools is visibly different.
+    draft_version = None
+    if task.research_run_id:
+        run = db.get(AIResearchRun, task.research_run_id)
+        if run is not None and run.draft_id:
+            draft = db.get(StrategyDraft, run.draft_id)
+            draft_version = draft.version if draft is not None else None
     return {
         "task_id": task.id,
         "task_type": task.task_type,
@@ -157,8 +168,11 @@ def audit_payload(db: Session, task: AITask) -> dict[str, Any]:
         "input_hash": task.input_hash,
         "output_hash": task.output_hash,
         "source_ids": list(task.source_ids_json or []),
+        "source_snapshot_hash": (task.input_json or {}).get("source_snapshot_hash"),
         "strategy_version_id": task.strategy_version_id,
         "research_run_id": task.research_run_id,
+        "strategy_draft_version": draft_version,
+        "tool_calls": [],
         "cost_usd": float(task.cost_usd) if task.cost_usd is not None else None,
         "token_usage": dict(task.token_usage_json or {}),
         "error_message": task.error_message,
@@ -220,8 +234,14 @@ def run_task(
     providers: list[tuple[AIProvider, str, list[AIModel]]],
     router_factory: Callable[[dict[str, OpenAICompatibleProvider], float], AIRouter] | None = None,
     prompt_hash: str = "",
+    research_run_id: int | None = None,
 ) -> dict[str, Any]:
-    """Execute one structured AI task: cache → budget → call → validate → audit."""
+    """Execute one structured AI task: cache → budget → call → validate → audit.
+
+    ``research_run_id`` only records which research run asked for the task; it
+    changes neither routing nor caching, so an explanation and a research step
+    go through exactly the same path (ADR-154).
+    """
 
     if not providers:
         raise RuntimeError("ai_not_configured")
@@ -298,11 +318,17 @@ def run_task(
         prompt_version=request.prompt_version,
         role=request.role or None,
         input_hash=key,
-        input_json={"facts": request.structured_facts},
+        input_json={
+            "facts": request.structured_facts,
+            #: Stored so an audit row can state the exact value the cache key used,
+            #: instead of a lookalike recomputed from what is left on file.
+            "source_snapshot_hash": source_snapshot_hash(request),
+        },
         source_ids_json=[
             {"kind": source.kind, "ref": source.ref} for source in request.untrusted_sources
         ]
         or None,
+        research_run_id=research_run_id,
         status="running",
     )
     db.add(task)

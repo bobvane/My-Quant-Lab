@@ -98,6 +98,24 @@ AI 层改动另加（v1.9.7 起，ADR-150 至 ADR-153）：
 
 写文件时用 LF：本仓库的 diff 与 CI 都以 LF 为准，PowerShell 的 `Set-Content` 会带进 CRLF，写完要数一遍 CR 字节（`[IO.File]::ReadAllBytes()` 里不等于 10 的 13 就是 CR）。
 
+研究层改动另加（v1.9.8 起，ADR-154 至 ADR-157）：
+
+```text
+[ ] 模型输出先过 backend/app/ai/research_schemas.py 的四道门，任何失败都是 REJECT，不自动修正
+[ ] 每条规则的 provenance 与证据都落在规则粒度上，AI 补的规则标 ASSUMED 并在界面上说出来
+[ ] 能力裁决在服务端算（assess_draft_capabilities()），模型自报更强只记 capability_overclaim
+[ ] 不产生任何结果指标（CAGR / Sharpe / 回撤…）：schema 里没有这些字段，散文里的数字标 UNVERIFIED
+[ ] 草案 executable = false，不落 strategy_versions，不触发回测，不调用工具
+[ ] 研究层调用全部经 run_task()，AITask.research_run_id 串起来，tool_calls 保持 []
+```
+
+## 5.1 推送与网络（Windows 上的两个坑，v1.9.7 实测）
+
+- **`git push` 报 schannel `CRYPT_E_REVOCATION_OFFLINE`**：Windows 的 schannel 在离线或代理环境下拿不到吊销列表，握手直接失败；同一个远端用 OpenSSL 后端就通。给这一条命令加参数即可，不要改全局配置：
+  `git -c http.sslBackend=openssl -c http.proxy=http://192.168.2.5:7893 push <url> main refs/tags/vX.Y.Z`。
+- **代理与 token 都只在命令行上给**：`http.proxy` 按需写在 `-c` 里；远端用临时 token URL 推送时可以改用 https 而不是 ssh，但**推完必须用 `git ls-remote` 核实**远端真的有了那个 commit 与 tag（本地 `origin/main` 在临时 URL 方案下不会更新，`git status` 说明不了任何事）。
+- **`Z:` 映射盘不保证存在**：会话重启后 `Set-Location Z:\...` 可能报 `Cannot find drive`。文件工具走 UNC 路径没问题，但 `npm` / `cmd` 这类必须在真实盘符下运行的工具要改用 `scripts\Invoke-FrontendChecks.ps1`（它会镜像到 `%LOCALAPPDATA%\mql-fe-build` 再构建）。
+
 ## 6. 未来扩展策略
 
 当新增策略时，优先：

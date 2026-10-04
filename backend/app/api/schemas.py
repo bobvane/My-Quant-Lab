@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -738,6 +738,62 @@ class AITaskOut(BaseModel):
     created_at: dt.datetime
     completed_at: dt.datetime | None = None
     error_message: str | None = None
+
+
+class ResearchSourceIn(BaseModel):
+    """One piece of research material, supplied as text.
+
+    ``url`` and ``pdf`` are deliberately absent: this version does not fetch or
+    parse anything, and accepting a URL it cannot read would suggest otherwise.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["user_input", "text", "github_file"] = "user_input"
+    text: str = Field(min_length=1, max_length=40_000)
+    source_ref: str | None = Field(default=None, max_length=32)
+    label: str | None = Field(default=None, max_length=255)
+    uri: str | None = Field(default=None, max_length=1024)
+    license_note: str | None = Field(default=None, max_length=2000)
+
+
+class ResearchRunIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=3, max_length=4000)
+    sources: list[ResearchSourceIn] = Field(min_length=1, max_length=8)
+    model: str | None = Field(default=None, max_length=128)
+
+
+class FormalizeIn(BaseModel):
+    """Re-run only the architect, for a hypothesis that is already stored."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hypothesis_id: int | None = Field(default=None, ge=1)
+    run_id: int | None = Field(default=None, ge=1)
+    model: str | None = Field(default=None, max_length=128)
+
+
+class ResearchRunOut(BaseModel):
+    """A research run and whatever it produced, including its refusals."""
+
+    run_id: int
+    question: str
+    status: str
+    current_step: str
+    capability_status: str | None = None
+    attempts: int = 0
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
+    violations: list[dict[str, Any]] = Field(default_factory=list)
+    error_message: str | None = None
+    researcher_task_id: int | None = None
+    architect_task_id: int | None = None
+    created_at: str | None = None
+    completed_at: str | None = None
+    hypothesis: dict[str, Any] | None = None
+    draft: dict[str, Any] | None = None
 
 
 class NotificationConfigOut(BaseModel):

@@ -75,6 +75,7 @@ onMounted(async () => {
         <RouterLink to="/paper">模拟验证</RouterLink>
         <RouterLink to="/signals">信号</RouterLink>
         <RouterLink to="/data">数据</RouterLink>
+        <RouterLink to="/lab">AI 研究实验室</RouterLink>
         <template v-if="isAdvanced">
           <div class="nav-group">高级</div>
           <RouterLink to="/resources">系统资源</RouterLink>

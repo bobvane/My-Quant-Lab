@@ -24,7 +24,14 @@ from app.ai.explain import (
     spent_today_usd,
 )
 from app.ai.provider import BudgetExceeded
-from app.api.schemas import AIStatusOut, AITaskOut, ExplainOut
+from app.api.schemas import (
+    AIStatusOut,
+    AITaskOut,
+    ExplainOut,
+    FormalizeIn,
+    ResearchRunIn,
+    ResearchRunOut,
+)
 from app.core.db import get_db
 from app.domain.models import AITask
 
@@ -446,3 +453,110 @@ def ai_audit(task_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     if task is None:
         raise HTTPException(status_code=404, detail=f"AI task {task_id} not found")
     return audit_payload(db, task)
+
+
+# --------------------------------------------------------------------------- #
+# Research layer (v1.9.8): material in, hypothesis and draft out
+# --------------------------------------------------------------------------- #
+@router.post(
+    "/ai/research",
+    response_model=ResearchRunOut,
+    summary="Research a strategy idea: sources in, hypothesis and draft out",
+)
+def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) -> ResearchRunOut:
+    """Read material, form a hypothesis, formalize a draft, check capabilities.
+
+    A refusal is a result, not an error: the run is returned with
+    ``status="rejected"`` and the violations that caused it. The draft is never
+    executable, and nothing here reaches the backtest engine.
+    """
+
+    from app.ai import research as research_service
+
+    inputs = [
+        research_service.ResearchInput(
+            text=item.text,
+            kind=item.kind,
+            source_ref=item.source_ref,
+            label=item.label,
+            uri=item.uri,
+            license_note=item.license_note,
+        )
+        for item in payload.sources
+    ]
+    try:
+        run = research_service.start_research(
+            db, question=payload.question, inputs=inputs, model=payload.model
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    if run.status == "failed" and run.error_message == AI_UNCONFIGURED:
+        # The run row stays: it records that the request was made and why it
+        # could not be answered.
+        raise HTTPException(status_code=503, detail=NOT_CONFIGURED_DETAIL)
+    return ResearchRunOut(**research_service.run_payload(db, run))
+
+
+@router.get("/ai/research", summary="Recent research runs")
+def list_research_runs(
+    limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    from app.ai import research as research_service
+
+    runs = research_service.recent_runs(db, limit=limit)
+    return {"runs": [research_service.run_summary(run) for run in runs]}
+
+
+@router.get("/ai/research/{run_id}", response_model=ResearchRunOut, summary="One research run")
+def get_research_run(run_id: int, db: Session = Depends(get_db)) -> ResearchRunOut:
+    from app.ai import research as research_service
+    from app.domain.models import AIResearchRun
+
+    run = db.get(AIResearchRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"research run {run_id} not found")
+    return ResearchRunOut(**research_service.run_payload(db, run))
+
+
+@router.post(
+    "/ai/strategy/formalize",
+    summary="Formalize a stored hypothesis into a new draft",
+)
+def formalize_hypothesis_endpoint(
+    payload: FormalizeIn, db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """Run only the architect, for a hypothesis that already passed its gates.
+
+    Returns the created draft. A refusal is 422 with the violations, because the
+    request was well formed but the model's answer was not acceptable.
+    """
+
+    from app.ai import research as research_service
+    from app.ai.research_schemas import ResearchRejected
+
+    try:
+        draft = research_service.formalize_hypothesis(
+            db,
+            hypothesis_id=payload.hypothesis_id,
+            run_id=payload.run_id,
+            model=payload.model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except BudgetExceeded as exc:
+        db.commit()
+        raise HTTPException(status_code=429, detail=f"AI budget exhausted: {exc}") from exc
+    except ResearchRejected as rejected:
+        db.commit()
+        raise HTTPException(status_code=422, detail=rejected.as_dict()) from rejected
+    except RuntimeError as exc:
+        db.commit()
+        if str(exc) == AI_UNCONFIGURED:
+            raise HTTPException(status_code=503, detail=NOT_CONFIGURED_DETAIL) from exc
+        logger.warning("AI formalization failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"AI provider call failed: {exc}") from exc
+    db.commit()
+    return {"draft": research_service.draft_payload(draft)}

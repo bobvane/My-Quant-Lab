@@ -115,3 +115,9 @@ Strategy Re-evaluation
 - 用 LLM 直接决定成交价格或统计结果
 - 用 AI 胜率文案当作真实概率
 - 允许任意 GitHub Python 代码无沙箱执行
+
+## 7. AI 量化研究智能层（进行中）
+
+2026-10 起，项目按用户与 ChatGPT 一起定下的方向（八十二节计划，落在 `docs/25_AI_QUANT_RESEARCH_LAYER_PLAN.md`）把定位从「AI 辅助」推进到 **AI-Powered Quantitative Research Lab**：用户可以投喂投资想法、GitHub 项目、PDF、论文、网页与文章，AI 负责**理解、研究、形式化、解释**，确定性引擎继续负责**数据、指标、信号、回测、风险、参数敏感性、Monte Carlo、仓位与模拟盘**。铁律不变：**AI 负责研究，程序负责计算**——「历史年化 23%」这类数字只能来自 Backtest Engine。
+
+`docs/26_AI_QUANT_LAYER_GAP_ANALYSIS.md` 是 Phase 0 的差异清单（现有能力 / 新增 / 可复用 / 需扩展 / 需重构 / 冲突 / 迁移 / API / UI / 测试，以及用户对 10 个开放问题的决定）。v1.9.7 已经立起地基：角色契约（`backend/app/ai/contracts/`）、AI Runtime（`backend/app/ai/runtime.py`）、能力注册表（`backend/app/capabilities.py`）与三层预算（`backend/app/ai/budget.py`）；后续版本按计划的 Phase 3–12 依次交付，每个 Phase 单独测试、单独发版。

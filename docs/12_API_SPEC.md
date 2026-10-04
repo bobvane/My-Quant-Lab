@@ -442,6 +442,18 @@ Deterministic, evidence-gated promotion/degradation. No AI is involved.
 
 `GET /ai/prompts` [已实现] —— AI 提示词模板。
 
+## AI Capabilities
+
+`GET /ai/capabilities` [已实现] —— 能力注册表：系统真正能算什么（指标/特征/算子/成交模型/风控模型/仓位模式/指标口径/数据源/分析引擎），以及明确不支持的能力与原因（ADR-151）。AI 生成前必须先读它。
+
+## AI Roles
+
+`GET /ai/roles` [已实现] —— 磁盘上的角色契约（`backend/app/ai/contracts/*.md`）解析结果：name/role/version/task_types/prompt_names/required_capabilities/output_language/content_hash/source_path，以及被登记进 `ai_role_contracts` 的 `indexed` 标记（ADR-150）。
+
+## AI Audit
+
+`GET /ai/audit/{task_id}` [已实现] —— 一次 AI 调用的可追溯记录：provider/model/role/prompt 版本与哈希、输入/输出哈希、token 与成本、使用的来源（`source_ids`）、关联的策略版本（ADR-153）。
+
 ## GitHub Sources
 
 Implemented under `/importer/github/sources` (persisted on import; watched and

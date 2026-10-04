@@ -15,10 +15,23 @@ def test_feature_catalogue_and_ai_registries(client) -> None:
     assert all(f["feature_version"] for f in features)
 
     assert client.get("/api/v1/ai/models").json()["models"] == []
-    # Built-in prompt definitions are registered on first read (docs/06).
+    # Built-in prompt definitions are registered on first read (docs/06) and come
+    # from the role contract files (ADR-150): the catalogue is exactly the
+    # contracts' tasks, with nothing spelled out in Python and nothing missing.
+    from app.ai.role_contracts import role_contracts
+
     prompts = client.get("/api/v1/ai/prompts").json()["prompts"]
-    assert {p["name"] for p in prompts} == {"signal_explain", "backtest_explain"}
-    assert all(p["version"] == "1.0.0" for p in prompts)
+    expected = {
+        (contract.prompt_name_for(task_type), contract.version)
+        for contract in role_contracts()
+        for task_type in contract.task_types
+    }
+    assert {(p["name"], p["version"]) for p in prompts} == expected
+    # The two explanation prompts keep the names the rest of the code calls them by.
+    assert {p["name"] for p in prompts if p["name"].endswith("_explain")} == {
+        "signal_explain",
+        "backtest_explain",
+    }
 
 
 def test_backtest_metrics_endpoint_404(client) -> None:

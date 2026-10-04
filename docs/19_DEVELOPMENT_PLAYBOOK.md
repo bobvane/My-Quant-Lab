@@ -85,6 +85,19 @@ my-quant-lab/
 [ ] Docker healthchecks pass
 ```
 
+AI 层改动另加（v1.9.7 起，ADR-150 至 ADR-153）：
+
+```text
+[ ] 新角色的提示词写进 backend/app/ai/contracts/*.md，而不是 Python 常量
+[ ] 能力清单仍从代码派生（backend/app/capabilities.py），没有手抄的表
+[ ] AI 调用走 backend/app/ai/runtime.py 的 run_task()，没有绕过预算与审计
+[ ] 外部资料走 UntrustedSource / assemble_messages()，注入样本有测试
+[ ] 新设置真的被消费（backend/tests/test_no_dead_settings.py），并同步 .env.example 与 docker-compose.yml
+[ ] 补丁版按 ADR-086 不部署 NAS
+```
+
+写文件时用 LF：本仓库的 diff 与 CI 都以 LF 为准，PowerShell 的 `Set-Content` 会带进 CRLF，写完要数一遍 CR 字节（`[IO.File]::ReadAllBytes()` 里不等于 10 的 13 就是 CR）。
+
 ## 6. 未来扩展策略
 
 当新增策略时，优先：

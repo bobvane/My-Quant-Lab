@@ -7,34 +7,36 @@ Hard rules, enforced by construction:
   The model receives them as *input* and may only restate them in words.
 * The output schema contains no numeric fact fields, so there is nowhere for
   an invented number to hide.
-* Every call is hashed (``AIRequest.input_hash``): identical facts reuse the
-  stored explanation without spending budget.
-* Token counts from the minimal client are character-based *estimates* and are
-  labeled as such everywhere they appear; budget enforcement uses the same
-  estimate consistently.
+* The prompt is no longer a string in this module: it is assembled from the
+  System Contract and the EXPLAINER role contract shipped under
+  ``backend/app/ai/contracts/`` (ADR-150), which is also where the prompt version
+  comes from.
+* The call itself runs through ``app.ai.runtime`` (ADR-153), so the cache key,
+  the three-level budget guard and the audit trail are shared with every other
+  AI task instead of being re-implemented here. Identical facts still reuse the
+  stored explanation for free; switching provider, model or contract no longer
+  reuses an older answer.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import logging
 from collections.abc import Callable
-from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.ai.budget import record_usage, spent_today_usd
 from app.ai.provider import (
     SIGNAL_EXPLANATION_SCHEMA,
     AIRequest,
     AIRouter,
-    BudgetExceeded,
-    ModelOption,
     OpenAICompatibleProvider,
-    validate_structured_dict,
 )
-from app.domain.models import AIModel, AIProvider, AITask, AIUsage, BacktestRun, Signal
+from app.ai.role_contracts import contract_for_role, system_contract
+from app.ai.runtime import estimate_tokens, run_task
+from app.domain.models import AIModel, AIProvider, BacktestRun, Signal
 from app.infrastructure.secrets import decrypt_secret
 
 logger = logging.getLogger(__name__)
@@ -42,17 +44,23 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "AI_UNCONFIGURED",
     "BACKTEST_EXPLANATION_SCHEMA",
+    "EXPLAINER_ROLE",
+    "SIGNAL_EXPLANATION_SCHEMA",
     "build_backtest_facts",
     "build_signal_facts",
     "estimate_tokens",
     "explain_backtest",
     "explain_signal",
     "explain_signal_facts",
+    "explainer_prompt",
     "get_active_provider",
+    "record_usage",
     "spent_today_usd",
 ]
 
 AI_UNCONFIGURED = "ai_not_configured"
+
+EXPLAINER_ROLE = "EXPLAINER"
 
 BACKTEST_EXPLANATION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -72,28 +80,24 @@ BACKTEST_EXPLANATION_SCHEMA: dict[str, Any] = {
     },
 }
 
-SIGNAL_SYSTEM_PROMPT = (
-    "You are a patient tutor explaining a trading signal to a non-programmer. "
-    "You receive authoritative facts already computed by a quantitative engine. "
-    "RULES: never invent, recompute or round any number — restate the given "
-    "figures exactly or say a figure is unavailable. Never promise profit. "
-    "Never output a BUY/SELL recommendation of your own; explain the one given. "
-    "Keep it short and plain."
-)
 
-BACKTEST_SYSTEM_PROMPT = (
-    "You are a patient tutor explaining backtest results to a non-programmer. "
-    "You receive authoritative statistics already computed by a backtest engine. "
-    "RULES: never invent, recompute or round any number — restate the given "
-    "figures exactly or say a figure is unavailable. Past results do not "
-    "predict future returns; say so. Keep it short and plain."
-)
+def explainer_prompt(task_type: str) -> tuple[str, str, str, str]:
+    """Prompt material for one explainer task, read from the contract files.
 
+    Returns ``(system_prompt, prompt_name, prompt_version, prompt_hash)``. The
+    system prompt is the *System Contract* followed by this role's section for
+    the task, in that order, so the rules that treat outside text as data cannot
+    be displaced by a role file.
+    """
 
-def estimate_tokens(text: str) -> int:
-    """Rough token estimate (chars/4), always labeled as estimated downstream."""
-
-    return max(1, len(text or "") // 4)
+    system = system_contract()
+    contract = contract_for_role(EXPLAINER_ROLE)
+    return (
+        f"{system.body}\n\n{contract.system_prompt_for(task_type)}",
+        contract.prompt_name_for(task_type),
+        contract.version,
+        f"{system.content_hash}:{contract.content_hash}",
+    )
 
 
 def get_active_provider(
@@ -153,51 +157,6 @@ def get_active_providers(db: Session) -> list[tuple[AIProvider, str, list[AIMode
         )
         out.append((provider, api_key, models))
     return out
-
-
-def spent_today_usd(db: Session, provider_id: int) -> tuple[float, int]:
-    """Return ``(cost, calls)`` recorded for this provider since UTC midnight."""
-
-    today = dt.datetime.now(tz=dt.UTC).date()
-    rows = db.scalars(
-        select(AIUsage).where(AIUsage.provider_id == provider_id, AIUsage.usage_date == today)
-    ).all()
-    return (
-        sum(float(r.total_cost_usd or 0) for r in rows),
-        sum(int(r.call_count or 0) for r in rows),
-    )
-
-
-def record_usage(
-    db: Session,
-    *,
-    provider_id: int,
-    model_id: int | None,
-    task_type: str,
-    in_tokens: int,
-    out_tokens: int,
-    cost_usd: float,
-) -> None:
-    today = dt.datetime.now(tz=dt.UTC).date()
-    row = db.scalar(
-        select(AIUsage).where(
-            AIUsage.usage_date == today,
-            AIUsage.provider_id == provider_id,
-            AIUsage.model_id == model_id,
-            AIUsage.task_type == task_type,
-        )
-    )
-    if row is None:
-        row = AIUsage(
-            usage_date=today,
-            provider_id=provider_id,
-            model_id=model_id,
-            task_type=task_type,
-        )
-        db.add(row)
-    row.call_count = int(row.call_count or 0) + 1
-    row.total_tokens = int(row.total_tokens or 0) + in_tokens + out_tokens
-    row.total_cost_usd = Decimal(str(float(row.total_cost_usd or 0) + cost_usd))
 
 
 def build_signal_facts(db: Session, signal: Signal) -> dict[str, Any]:
@@ -287,17 +246,25 @@ def explain_signal_facts(
     if not providers:
         raise RuntimeError(AI_UNCONFIGURED)
 
+    system_prompt, prompt_name, prompt_version, prompt_hash = explainer_prompt("signal_explanation")
     request = AIRequest(
         task_type="signal_explanation",
-        prompt_name="signal_explain",
-        prompt_version="1.0.0",
-        system_prompt=SIGNAL_SYSTEM_PROMPT,
+        prompt_name=prompt_name,
+        prompt_version=prompt_version,
+        role=EXPLAINER_ROLE,
+        system_prompt=system_prompt,
         user_prompt=f"Explain this {state} signal in plain language.",
         structured_facts=facts,
         schema=SIGNAL_EXPLANATION_SCHEMA,
         model=None,  # the router picks provider/model by capability + cost
     )
-    return _run_explain(db, request, providers, router_factory=router_factory)
+    return run_task(
+        db,
+        request,
+        providers=providers,
+        router_factory=router_factory,
+        prompt_hash=prompt_hash,
+    )
 
 
 def explain_backtest(
@@ -318,165 +285,26 @@ def explain_backtest(
     if not providers:
         raise RuntimeError(AI_UNCONFIGURED)
 
+    system_prompt, prompt_name, prompt_version, prompt_hash = explainer_prompt("backtest_analysis")
     facts = build_backtest_facts(db, run)
     request = AIRequest(
         task_type="backtest_analysis",
-        prompt_name="backtest_explain",
-        prompt_version="1.0.0",
-        system_prompt=BACKTEST_SYSTEM_PROMPT,
+        prompt_name=prompt_name,
+        prompt_version=prompt_version,
+        role=EXPLAINER_ROLE,
+        system_prompt=system_prompt,
         user_prompt="Explain these backtest results in plain language.",
         structured_facts=facts,
         schema=BACKTEST_EXPLANATION_SCHEMA,
         model=None,  # the router picks provider/model by capability + cost
     )
-    return _run_explain(db, request, providers, router_factory=router_factory)
-
-
-def _run_explain(
-    db: Session,
-    request: AIRequest,
-    providers: list[tuple[AIProvider, str, list[AIModel]]],
-    *,
-    router_factory: Callable[[dict[str, OpenAICompatibleProvider], float], AIRouter] | None,
-) -> dict[str, Any]:
-    if not providers:
-        raise RuntimeError(AI_UNCONFIGURED)
-
-    live: dict[str, OpenAICompatibleProvider] = {}
-    by_name: dict[str, AIProvider] = {}
-    provider_models: dict[str, list[AIModel]] = {}
-    models: list[ModelOption] = []
-    budgets: dict[str, float] = {}
-    total_budget = 0.0
-    for provider, api_key, pmodels in providers:
-        live[provider.name] = OpenAICompatibleProvider(
-            base_url=provider.base_url, api_key=api_key, name=provider.name
-        )
-        by_name[provider.name] = provider
-        provider_models[provider.name] = pmodels
-        spent, _ = spent_today_usd(db, provider.id)
-        total_budget += float(provider.daily_budget_usd or 0)
-        budgets[provider.name] = max(0.0, float(provider.daily_budget_usd or 0) - spent)
-        for model in pmodels:
-            if not model.model_name:
-                continue
-            models.append(
-                ModelOption(
-                    provider.name,
-                    model.model_name,
-                    model.capability_tier or "standard",
-                    float(model.input_cost_per_mtok or 0),
-                    float(model.output_cost_per_mtok or 0),
-                )
-            )
-        if not pmodels:
-            models.append(
-                ModelOption(
-                    provider.name, provider.default_model or "default", "standard", 0.0, 0.0
-                )
-            )
-
-    if router_factory is not None:
-        # Test seam: the injected factory only receives the live-provider map
-        # and the budget, keeping its contract unchanged.
-        router = router_factory(live, total_budget)
-    else:
-        router = AIRouter(live, total_budget, models=models, budgets=budgets)
-
-    pick = getattr(router, "pick", None)
-    if callable(pick):
-        provider_name, model_name = pick(request.task_type, request.model)
-    else:
-        # A fake router (tests) has no pick(): fall back to the first provider.
-        provider_name = next(iter(by_name))
-        model_name = request.model or "default"
-    provider = by_name[provider_name]
-    chosen_models = provider_models.get(provider_name, [])
-    model = next((m for m in chosen_models if m.model_name == model_name), None)
-
-    input_hash = request.input_hash()
-    cached = db.scalar(
-        select(AITask).where(
-            AITask.input_hash == input_hash,
-            AITask.status == "completed",
-            AITask.output_json.is_not(None),
-        )
-    )
-    if cached is not None and cached.output_json:
-        return {
-            "explanation": dict(cached.output_json),
-            "cached": True,
-            "task_id": cached.id,
-            "model": model_name,
-            "cost_usd_estimated": 0.0,
-        }
-
-    spent, _ = spent_today_usd(db, provider.id)
-    if spent >= float(provider.daily_budget_usd or 0):
-        raise BudgetExceeded(
-            f"daily AI budget exhausted ({spent:.4f}/{provider.daily_budget_usd:.2f} USD); "
-            "quantitative features keep working"
-        )
-
-    task = AITask(
-        task_type=request.task_type,
-        provider_id=provider.id,
-        model_id=model.id if model else None,
-        prompt_name=request.prompt_name,
-        prompt_version=request.prompt_version,
-        input_hash=input_hash,
-        input_json={"facts": request.structured_facts},
-        status="running",
-    )
-    db.add(task)
-    db.flush()
-
-    try:
-        output = router.explain_signal(request, spent_today_usd=spent)
-        validated = validate_structured_dict(output, request.schema or {})
-    except BudgetExceeded:
-        task.status = "failed"
-        task.error_message = "budget exceeded during call"
-        db.commit()
-        raise
-    except Exception as exc:
-        task.status = "failed"
-        task.error_message = f"{type(exc).__name__}: {exc}"[:500]
-        db.commit()
-        raise RuntimeError(f"AI provider call failed: {exc}") from exc
-
-    in_tokens = estimate_tokens(request.system_prompt + request.user_prompt)
-    out_tokens = estimate_tokens(str(validated))
-    in_price = float(model.input_cost_per_mtok) if model else 0.0
-    out_price = float(model.output_cost_per_mtok) if model else 0.0
-    cost = (in_tokens / 1_000_000) * in_price + (out_tokens / 1_000_000) * out_price
-
-    task.output_json = dict(validated)
-    task.token_usage_json = {
-        "input_tokens_estimated": in_tokens,
-        "output_tokens_estimated": out_tokens,
-        "estimated": True,
-    }
-    task.cost_usd = Decimal(str(cost))
-    task.status = "completed"
-    task.completed_at = dt.datetime.now(tz=dt.UTC)
-    record_usage(
+    return run_task(
         db,
-        provider_id=provider.id,
-        model_id=model.id if model else None,
-        task_type=request.task_type,
-        in_tokens=in_tokens,
-        out_tokens=out_tokens,
-        cost_usd=cost,
+        request,
+        providers=providers,
+        router_factory=router_factory,
+        prompt_hash=prompt_hash,
     )
-    db.commit()
-    return {
-        "explanation": dict(validated),
-        "cached": False,
-        "task_id": task.id,
-        "model": model_name,
-        "cost_usd_estimated": cost,
-    }
 
 
 def _num(value: Any) -> float | None:

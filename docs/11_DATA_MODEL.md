@@ -181,6 +181,25 @@ unique(strategy_id, version)
 - status
 - created_at
 
+## AIRoleContract（表名 `ai_role_contracts`，v1.9.7 / ADR-150）
+
+磁盘上的角色契约（`backend/app/ai/contracts/*.md`）在数据库里的索引；契约文件是事实来源，这一行只是「这个版本加载过、内容哈希是多少、用哪份输出 schema」的账本。
+
+- id
+- name
+- version
+- role
+- task_types_json
+- required_capabilities_json
+- output_language
+- content_hash
+- output_schema_json
+- source_path
+- is_active
+- created_at / updated_at
+
+`(name, version)` 唯一。`AITask` 同时新增五列，把一次 AI 调用绑回它读过的来源与产出的策略：`role`、`output_hash`、`source_ids_json`、`research_run_id`、`strategy_version_id`（见 ADR-153）。
+
 ## GitHubSource
 
 - id

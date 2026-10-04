@@ -318,41 +318,40 @@ def ai_usage(
 
 
 def _seed_builtin_prompts(db: Session) -> None:
-    """Idempotently register the built-in prompt definitions (docs/06 §prompt 版本化)."""
+    """Idempotently register the built-in prompt definitions (docs/06 §prompt 版本化).
 
-    from app.ai.explain import BACKTEST_SYSTEM_PROMPT, SIGNAL_SYSTEM_PROMPT
-    from app.ai.provider import SIGNAL_EXPLANATION_SCHEMA
+    The definitions are read from the role contract files instead of being spelled
+    out here (ADR-150): the file that the model actually receives is the file that
+    gets registered, and the same file's hash travels with every call.
+    """
+
+    from app.ai.role_contracts import role_contracts, sync_role_contracts, task_output_schemas
     from app.domain.models import AIPrompt
 
-    builtins = [
-        (
-            "signal_explain",
-            "1.0.0",
-            "signal_explanation",
-            SIGNAL_SYSTEM_PROMPT,
-            SIGNAL_EXPLANATION_SCHEMA,
-        ),
-        ("backtest_explain", "1.0.0", "backtest_analysis", BACKTEST_SYSTEM_PROMPT, None),
-    ]
+    schemas = task_output_schemas()
     changed = False
-    for name, version, task_type, system_prompt, schema in builtins:
-        exists = db.scalar(
-            select(AIPrompt).where(AIPrompt.name == name, AIPrompt.version == version)
-        )
-        if exists is None:
+    for contract in sorted(role_contracts(), key=lambda c: (c.name, c.version)):
+        for task_type in contract.task_types:
+            name = contract.prompt_name_for(task_type)
+            exists = db.scalar(
+                select(AIPrompt).where(AIPrompt.name == name, AIPrompt.version == contract.version)
+            )
+            if exists is not None:
+                continue
             db.add(
                 AIPrompt(
                     name=name,
-                    version=version,
+                    version=contract.version,
                     task_type=task_type,
-                    system_prompt=system_prompt,
+                    system_prompt=contract.system_prompt_for(task_type),
                     user_template="",
-                    output_schema_json=schema,
+                    output_schema_json=schemas.get(task_type),
                 )
             )
             changed = True
     if changed:
         db.commit()
+    sync_role_contracts(db)
 
 
 @router.get("/ai/prompts", summary="AI prompt templates")
@@ -374,3 +373,76 @@ def list_prompts(db: Session = Depends(get_db)) -> dict[str, Any]:
             for p in rows
         ]
     }
+
+
+@router.get("/ai/capabilities", summary="What the quantitative engine can express")
+def ai_capabilities() -> dict[str, Any]:
+    """The AI's knowledge boundary, generated from the code (ADR-151).
+
+    Everything listed here is derived from the DSL types, the feature engine, the
+    metrics dataclass and the market-data providers, so a capability cannot be
+    advertised here without existing there. The ``unsupported`` list is the
+    counterpart: the things a model must refuse to quietly invent.
+    """
+
+    from app.capabilities import capability_payload
+
+    return capability_payload()
+
+
+@router.get("/ai/roles", summary="Role contracts shipped with this build")
+def ai_roles(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """The role contracts as parsed from disk, plus the indexed rows behind them.
+
+    Reading this endpoint also refreshes ``ai_role_contracts`` (the same
+    idempotent sync ``/ai/prompts`` performs for prompt rows), so the audit trail
+    always has a row for a contract that was actually used.
+    """
+
+    from app.ai.role_contracts import (
+        CONTRACTS_DIR,
+        role_contracts,
+        sync_role_contracts,
+        system_contract,
+    )
+
+    rows = sync_role_contracts(db)
+    indexed = {row.name: row for row in rows}
+    contracts = sorted(role_contracts(), key=lambda c: (c.name, c.version))
+    system = system_contract()
+    return {
+        "contracts_dir": str(CONTRACTS_DIR),
+        "system": {
+            "ref": system.ref,
+            "content_hash": system.content_hash,
+            "source_path": system.path,
+        },
+        "roles": [
+            {
+                "name": contract.name,
+                "role": contract.role,
+                "version": contract.version,
+                "ref": contract.ref,
+                "task_types": list(contract.task_types),
+                "prompt_names": dict(contract.prompt_names),
+                "required_capabilities": list(contract.required_capabilities),
+                "output_language": contract.output_language,
+                "content_hash": contract.content_hash,
+                "source_path": contract.path,
+                "indexed": contract.name in indexed,
+            }
+            for contract in contracts
+        ],
+    }
+
+
+@router.get("/ai/audit/{task_id}", summary="Trace one AI task back to its inputs")
+def ai_audit(task_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Provider, model, role contract, prompt version, hashes and sources of one task."""
+
+    from app.ai.runtime import audit_payload
+
+    task = db.get(AITask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"AI task {task_id} not found")
+    return audit_payload(db, task)

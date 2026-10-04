@@ -648,6 +648,32 @@ class AIPrompt(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("name", "version", name="uq_ai_prompt"),)
 
 
+class AIRoleContract(Base, TimestampMixin):
+    """Runtime index of the role contract files shipped with the backend.
+
+    The files under ``backend/app/ai/contracts/`` are the source of truth; this
+    table records which versions were indexed, their content hash and the output
+    schema that was in force, so an old ``ai_tasks`` row can still be explained
+    after a contract changed (ADR-150).
+    """
+
+    __tablename__ = "ai_role_contracts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[str] = mapped_column(String(16), nullable=False)
+    role: Mapped[str] = mapped_column(String(48), nullable=False)
+    task_types_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    required_capabilities_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    output_language: Mapped[str | None] = mapped_column(String(16))
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_schema_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    source_path: Mapped[str | None] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_ai_role_contract"),)
+
+
 class AITask(Base):
     __tablename__ = "ai_tasks"
 
@@ -657,10 +683,15 @@ class AITask(Base):
     model_id: Mapped[int | None] = mapped_column(ForeignKey("ai_models.id"))
     prompt_name: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    role: Mapped[str | None] = mapped_column(String(48))
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_hash: Mapped[str | None] = mapped_column(String(64))
     input_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     output_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     token_usage_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    source_ids_json: Mapped[list[Any] | None] = mapped_column(JSON)
+    research_run_id: Mapped[int | None] = mapped_column(Integer)
+    strategy_version_id: Mapped[int | None] = mapped_column(ForeignKey("strategy_versions.id"))
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"))
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)

@@ -75,6 +75,17 @@
 
 见《06_AI_LAYER.md》。
 
+v1.9.7 起这一模块被拆成四层，边界按「谁能改事实」划：
+
+| 层 | 文件 | 职责 |
+| --- | --- | --- |
+| 角色契约 | `backend/app/ai/contracts/*.md`、`backend/app/ai/role_contracts.py` | 每个角色的职责、最低能力要求与输出语言；加载、解析、按 `(name, version)` 入库（ADR-150） |
+| 能力注册表 | `backend/app/capabilities.py` | 系统到底支持哪些指标/算子/风控/执行/分析引擎，以及不支持时给什么理由（ADR-151） |
+| 预算 | `backend/app/ai/budget.py` | global → provider → 单次研究 → 本请求成本 → 每日调用数，一条决策链（ADR-152） |
+| Runtime | `backend/app/ai/runtime.py`、`backend/app/ai/provider.py` | 缓存身份、信任边界（外部资料永远不是指令）、`AITask` 审计与用量（ADR-153） |
+
+外部资料（GitHub 源码、网页、PDF）只能通过 `UntrustedSource` 进入，永远排在 SYSTEM/ROLE 契约与任务说明之后；AI 不能直连数据库、不能执行任意代码、不能自己发明一个指标实现。
+
 ## M10 Ghostfolio Adapter
 
 见《10_GHOSTFOLIO_INTEGRATION.md》。
@@ -126,7 +137,8 @@ quantlab-api (FastAPI + Celery Worker)
 ├── strategies/      # 策略执行和DSL解析
 ├── research/        # 回测、OOS和Walk-Forward分析
 ├── simulation/     # 模拟交易引擎和持仓管理
-├── ai/             # AI 提供者适配器和解释引擎
+├── ai/             # 角色契约、AI 提供者适配器、runtime 与解释引擎
+├── capabilities.py  # 能力注册表（AI 的知识边界）
 └── infrastructure/ # 通用工具和支持服务
 ```
 
@@ -163,9 +175,14 @@ quantlab-api (FastAPI + Celery Worker)
 - 交易记录和结算
 
 **ai/**
-- AI提供者适配器
-- 解释和分析引擎
+- 角色契约（`contracts/` 的 markdown + `role_contracts.py` 的加载与入库）
+- AI提供者适配器（`provider.py`，含不可信来源的数据边界）
+- 解释和分析引擎（`explain.py`）
+- Runtime：缓存身份、预算闸门、审计（`runtime.py`、`budget.py`）
 - 提示模板管理和缓存
+
+**capabilities.py**
+- 能力注册表：系统支持什么、不支持什么（含理由），以及 `assess()` 三态
 
 **infrastructure/**
 - 日志和监控

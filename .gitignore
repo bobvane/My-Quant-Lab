@@ -44,3 +44,8 @@ redis_data/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local scratch: throwaway notes, drafts and one-off scripts that belong to the
+# project directory but must never reach a commit or CI (m21997).  Anything worth
+# keeping is written as a real document under docs/ instead.
+.scratch/

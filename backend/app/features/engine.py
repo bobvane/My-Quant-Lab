@@ -17,13 +17,32 @@ if TYPE_CHECKING:  # avoids a features -> strategies runtime import
 __all__ = [
     "FEATURE_VERSION",
     "FeatureFrame",
+    "INDICATOR_ALIASES",
+    "SUPPORTED_INDICATOR_TYPES",
     "build_features",
     "feature_input_hash",
+    "normalise_indicator_type",
 ]
 
 FEATURE_VERSION = f"ind{INDICATOR_VERSION}+pa{PA_FEATURE_VERSION}"
 
 OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
+
+#: The DSL indicator types this engine materialises. A capability listing is
+#: checked against this tuple *and* against ``_materialize_indicator`` itself
+#: (``backend/tests/test_capabilities.py``), so the list a research role reads
+#: cannot drift away from the code that implements it (ADR-151).
+SUPPORTED_INDICATOR_TYPES: tuple[str, ...] = ("EMA", "SMA", "RSI", "ATR", "MACD", "BOLLINGER")
+
+#: Accepted spellings that are not separate capabilities.
+INDICATOR_ALIASES: dict[str, str] = {"BB": "BOLLINGER", "BOLLINGER_BANDS": "BOLLINGER"}
+
+
+def normalise_indicator_type(kind: str) -> str:
+    """Upper-case a DSL indicator type and fold its aliases onto one name."""
+
+    upper = str(kind).upper()
+    return INDICATOR_ALIASES.get(upper, upper)
 
 
 @dataclass(frozen=True)
@@ -139,7 +158,7 @@ def _indicator_period(indicator: Any, parameters: dict[str, Any]) -> int:
 def _materialize_indicator(frame: pd.DataFrame, indicator: Any, parameters: dict[str, Any]) -> int:
     """Write one declared indicator into ``frame``; return its warm-up period."""
 
-    kind = str(indicator.type).upper()
+    kind = normalise_indicator_type(indicator.type)
     column = indicator.id
     source = indicator.input or "close"
     params = dict(indicator.params or {})

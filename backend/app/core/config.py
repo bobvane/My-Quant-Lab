@@ -144,7 +144,19 @@ class Settings(BaseSettings):
     # active provider declares", which avoids hard-coding DEMO-* tickers that
     # only exist for the synthetic provider.
     market_data_watchlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # System-wide AI ceiling for one UTC day, in USD. The single source of the
+    # global level of the budget chain (ADR-152); running out pauses AI tasks
+    # only — every quantitative feature keeps working.
     ai_daily_budget_usd: float = 2.0
+    # Ceiling for one AI task, so a mis-sized research request cannot eat the
+    # day's budget in a single call. 0 refuses every AI call.
+    ai_task_budget_usd: float = 1.0
+    # How many AI calls the deployment will pay for in one UTC day. 0 refuses
+    # every AI call.
+    ai_daily_task_limit: int = 20
+    # Hard ceiling for one provider call, in seconds: a research task may think
+    # for minutes, but it may not hang a worker for ever.
+    ai_task_timeout_seconds: int = 600
 
     default_currency: str = "USD"
     default_timezone: str = "UTC"

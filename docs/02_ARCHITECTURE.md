@@ -58,6 +58,27 @@
 ### Layer 6：AI / Presentation
 负责解释、策略导入辅助、报告生成和用户自然语言交互。
 
+v1.9.7 起这一层内部按「谁能改事实」分成四块（ADR-150 至 ADR-153），边界比调用关系更重要：
+
+```text
+外部资料（GitHub 源码 / 网页 / PDF / 用户输入）  ← 不可信输入
+        │  只作为 UntrustedSource 进入，永远排在契约与任务说明之后
+        ▼
+AI Runtime（runtime.py：缓存身份 / 预算闸门 / 审计 / 用量）
+        │  读
+        ├── 角色契约（ai/contracts/*.md + role_contracts.py）：「你是什么角色、最低能力、输出语言」
+        ├── 能力注册表（capabilities.py）：「系统支持什么、不支持什么、为什么」
+        └── 预算（budget.py）：global → provider → 单次研究 → 成本 → 调用数
+        │  调用
+        ▼
+Provider 适配器（provider.py：OpenAI-compatible，超时可配）
+        │  只能产出结构化文本或 StrategySpec 草稿
+        ▼
+Validator → 确定性引擎（指标 / 信号 / 回测 / 风险）→ 数字只能来自这里
+```
+
+三条不许越过的线：AI 不能直连数据库（只能走工具与 API）、不能执行任意代码（外部策略必须变成声明式 StrategySpec 过 Validator）、不能自己发明一个系统不支持的指标实现（不支持就报 `NEEDS_CAPABILITY`，由系统先扩 `capabilities.py` 与引擎）。
+
 ## 3. AI 与量化引擎边界
 
 允许 AI：

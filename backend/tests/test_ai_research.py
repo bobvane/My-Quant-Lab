@@ -430,13 +430,22 @@ def test_a_run_needs_a_question_and_a_source(db_session, provider):
     assert db_session.scalar(select(func.count()).select_from(AIResearchRun)) == 0
 
 
-def test_a_source_this_version_cannot_read_is_named(db_session, provider):
+def test_a_source_with_nothing_to_read_is_named(db_session, provider):
     _router, factory = script([])
-    with pytest.raises(ValueError, match="cannot read a 'pdf' source"):
+    # A fetched kind needs a uri, a snapshot, or the text itself: a bare pdf says
+    # nothing about what should be read, so it is refused by name.
+    with pytest.raises(ValueError, match="a 'pdf' source needs a uri, a snapshot_id"):
         service.start_research(
             db_session,
             question=QUESTION,
-            inputs=[service.ResearchInput(text="x", kind="pdf", source_ref="paper")],
+            inputs=[service.ResearchInput(kind="pdf", source_ref="paper")],
+            router_factory=factory,
+        )
+    with pytest.raises(ValueError, match="a 'url' source needs a uri, a snapshot_id"):
+        service.start_research(
+            db_session,
+            question=QUESTION,
+            inputs=[service.ResearchInput(kind="url", source_ref="page")],
             router_factory=factory,
         )
     with pytest.raises(ValueError, match="unknown source kind"):

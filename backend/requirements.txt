@@ -10,6 +10,10 @@ celery>=5.4
 numpy>=2.1
 pandas>=2.2
 httpx>=0.27
+# The source ingestion layer talks to httpcore directly (httpx's transport layer) to
+# pin the address the SSRF guard validated; PDF parsing is text-only, no OCR.
+httpcore>=1.0
+pypdf>=5.1
 python-dotenv>=1.0
 cryptography>=43.0
 # Real market data (stocks / ETFs / crypto via Yahoo Finance). Included in the

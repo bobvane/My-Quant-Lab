@@ -49,6 +49,7 @@ from app.domain.models import (
 __all__ = [
     "ARTIFACT_KINDS",
     "EXCERPT_CHARS",
+    "FETCHED_KINDS",
     "INGESTIBLE_KINDS",
     "MAX_ARTIFACTS",
     "MAX_ARTIFACT_CHARS",
@@ -59,6 +60,8 @@ __all__ = [
     "THIRD_PARTY_EXCERPT_CHARS",
     "USER_OWNED_EXCERPT_CHARS",
     "ResearchInput",
+    "SourceRejected",
+    "SourceUnavailable",
     "draft_payload",
     "formalize_hypothesis",
     "hypothesis_payload",
@@ -68,13 +71,18 @@ __all__ = [
     "start_research",
 ]
 
-#: Kinds a caller may label material with. ``url`` and ``pdf`` are named so the
-#: API can refuse them with a reason instead of pretending to read them: fetching
-#: and parsing belong to Phase 4 (docs/26 §17, decision C5).
+#: Kinds a caller may label material with. ``url`` and ``pdf`` are read by the
+#: platform itself since Phase 4: either the caller hands the text over, or the
+#: run fetches it through the injected ingester (docs/27 §5.2).
 ARTIFACT_KINDS: tuple[str, ...] = ("user_input", "text", "github_file", "url", "pdf")
 
 #: Kinds this version can actually read, because the caller hands over the text.
 INGESTIBLE_KINDS: tuple[str, ...] = ("user_input", "text", "github_file")
+
+#: Kinds the platform fetches for itself (v2.1.0 / Phase 4). Text handed over with
+#: one of these kinds is still accepted and still wins — the caller is trusted to
+#: say where material came from, and a warning records that nothing was fetched.
+FETCHED_KINDS: tuple[str, ...] = ("url", "pdf")
 
 #: Kinds whose text the user handed over themselves, so it is theirs to keep.
 USER_OWNED_KINDS: tuple[str, ...] = ("user_input",)
@@ -112,7 +120,7 @@ _SENTENCE_CUTS = ("。", "！", "？", ". ", "；", "; ", " ")
 class ResearchInput:
     """One piece of material, as the caller supplied it."""
 
-    text: str
+    text: str = ""
     kind: str = "user_input"
     source_ref: str | None = None
     label: str | None = None
@@ -121,6 +129,74 @@ class ResearchInput:
     #: ``excerpt`` or ``full``; ``None`` means "decide from the kind" — the user's
     #: own words are kept, material from elsewhere is excerpted (ADR-161).
     retention: str | None = None
+    #: A snapshot the platform already took (``POST /ai/sources/url``): the run reads
+    #: what that observation kept instead of fetching the URI again (docs/27 §8).
+    snapshot_id: int | None = None
+
+
+class SourceRejected(Exception):
+    """A source was refused on policy grounds, so the whole run is refused.
+
+    Blocked material is not quietly dropped from the run: a research question
+    answered from the sources that happened to be reachable is a different answer
+    from the one that was asked for (docs/27 §5.2).
+    """
+
+    def __init__(
+        self,
+        source_ref: str,
+        code: str | None,
+        message: str,
+        *,
+        snapshot_id: int | None = None,
+        uri: str | None = None,
+    ) -> None:
+        super().__init__(message or code or "the source was refused")
+        self.source_ref = source_ref
+        self.code = code
+        self.message = message
+        self.snapshot_id = snapshot_id
+        self.uri = uri
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "source_blocked",
+            "source_ref": self.source_ref,
+            "code": self.code,
+            "message": self.message,
+            "snapshot_id": self.snapshot_id,
+            "uri": self.uri,
+        }
+
+
+class SourceUnavailable(Exception):
+    """A source could not be fetched or read, so the run cannot be answered."""
+
+    def __init__(
+        self,
+        source_ref: str,
+        code: str | None,
+        message: str,
+        *,
+        snapshot_id: int | None = None,
+        uri: str | None = None,
+    ) -> None:
+        super().__init__(message or code or "the source could not be read")
+        self.source_ref = source_ref
+        self.code = code
+        self.message = message
+        self.snapshot_id = snapshot_id
+        self.uri = uri
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "source_unavailable",
+            "source_ref": self.source_ref,
+            "code": self.code,
+            "message": self.message,
+            "snapshot_id": self.snapshot_id,
+            "uri": self.uri,
+        }
 
 
 @dataclass
@@ -225,12 +301,14 @@ def _check_inputs(inputs: list[ResearchInput]) -> None:
     for item in inputs:
         if item.kind not in ARTIFACT_KINDS:
             raise ValueError(f"unknown source kind '{item.kind}'")
-        if item.kind not in INGESTIBLE_KINDS:
-            raise ValueError(
-                f"this version cannot read a '{item.kind}' source: the caller has to "
-                "supply the text (fetching and parsing arrive in a later phase)"
-            )
-        if not item.text.strip():
+        if item.kind in FETCHED_KINDS:
+            # A fetched source may be named by uri, by an existing snapshot, or by the
+            # text itself; only a source that offers none of the three is unusable.
+            if not item.text.strip() and not (item.uri or "").strip() and item.snapshot_id is None:
+                raise ValueError(
+                    f"a '{item.kind}' source needs a uri, a snapshot_id, or the text itself"
+                )
+        elif not item.text.strip():
             raise ValueError("a source cannot be empty")
         if item.retention is not None and item.retention not in RETENTION_POLICIES:
             raise ValueError(
@@ -248,8 +326,66 @@ def _check_inputs(inputs: list[ResearchInput]) -> None:
             )
 
 
+def _material_for(item: ResearchInput, source_ref: str, *, ingest: Any) -> Any | None:
+    """Read a ``url``/``pdf`` source, or explain why the run cannot go on.
+
+    Returns ``None`` when the caller handed the text over themselves: then nothing
+    is fetched and the run reads exactly what it was given. The ingester is injected
+    by the caller (the API wires the snapshot service in), which keeps this module
+    free of any network code and keeps the dependency pointing one way (docs/27 §5.2).
+    """
+
+    if item.kind not in FETCHED_KINDS or item.text.strip():
+        return None
+    if ingest is None:
+        raise ValueError(
+            f"this deployment cannot fetch a '{item.kind}' source: pass the text itself, "
+            "or enable source ingestion"
+        )
+    material = ingest(item)
+    # Duck-typed on purpose: the ingester is whatever the caller injected, and the
+    # only contract is the three statuses plus a text. No import from app.sources here.
+    if material.status == "blocked":
+        raise SourceRejected(
+            source_ref,
+            material.code,
+            material.message,
+            snapshot_id=material.snapshot_id,
+            uri=material.uri,
+        )
+    if material.status != "retained" or not material.text.strip():
+        code = material.code or material.parse_status
+        raise SourceUnavailable(
+            source_ref,
+            code,
+            material.message or f"no text could be read from this source ({code})",
+            snapshot_id=material.snapshot_id,
+            uri=material.uri,
+        )
+    return material
+
+
+def _snapshot_meta(material: Any) -> dict[str, Any]:
+    """The observation facts a fetched source adds to the run's source summary."""
+
+    if material is None:
+        return {}
+    return {
+        "final_uri": material.final_uri,
+        "status_code": material.http_status,
+        "content_type": material.content_type,
+        "bytes_read": material.size_bytes,
+        "chars_read": material.chars_read,
+        "retained_chars": material.retained_chars,
+        "truncated": bool(material.truncated),
+        "parser": material.parser,
+        "parser_version": material.parser_version,
+        "robots_ok": getattr(material, "robots_ok", None),
+    }
+
+
 def _ingest(
-    db: Session, run: AIResearchRun, inputs: list[ResearchInput]
+    db: Session, run: AIResearchRun, inputs: list[ResearchInput], ingest: Any = None
 ) -> tuple[dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
     """Store the material as hashes plus excerpts, and return what to read."""
 
@@ -261,7 +397,25 @@ def _ingest(
         source_ref = (item.source_ref or f"source_{index}").strip()
         if source_ref in sources:
             raise ValueError(f"duplicate source_ref '{source_ref}'")
-        original = item.text.strip()
+        material = _material_for(item, source_ref, ingest=ingest)
+        if material is not None:
+            original = material.text.strip()
+        else:
+            original = item.text.strip()
+            if (
+                item.kind in FETCHED_KINDS
+                and original
+                and (item.uri or item.snapshot_id is not None)
+            ):
+                # The caller's own copy of the material is never second-guessed by a
+                # fetch, but the run says so, because nothing was observed (docs/27 §5.2).
+                warnings.append(
+                    {
+                        "kind": "text_preferred",
+                        "source_ref": source_ref,
+                        "note": "the caller supplied text, so nothing was fetched for this source",
+                    }
+                )
         text = original
         if len(text) > MAX_ARTIFACT_CHARS:
             text = text[:MAX_ARTIFACT_CHARS]
@@ -279,18 +433,30 @@ def _ingest(
         # is the material the caller handed over, text_hash is the version this
         # run actually read. They differ whenever the source was truncated, and
         # every citation is verified against the version that was read (ADR-161).
-        source_hash = _digest(original)
-        text_hash = _digest(text)
+        # A fetched source keeps the hashes its snapshot recorded, so a run can be
+        # traced back to the exact observation it read (docs/27 §8).
+        if material is not None and material.source_hash:
+            source_hash = material.source_hash
+            text_hash = material.text_hash or _digest(text)
+            if len(text) < len(original):
+                text_hash = _digest(text)
+        else:
+            source_hash = _digest(original)
+            text_hash = _digest(text)
+        parse_status = material.parse_status if material is not None else "ok"
         artifact = ResearchArtifact(
             run_id=run.id,
             source_ref=source_ref,
             kind=item.kind,
             label=item.label,
-            uri=item.uri,
-            parse_status="ok",
+            uri=(material.final_uri or material.uri) if material is not None else item.uri,
+            snapshot_id=material.snapshot_id if material is not None else None,
+            parse_status=parse_status,
             text_hash=text_hash,
             source_hash=source_hash,
-            size_bytes=len(original),
+            size_bytes=(material.size_bytes or len(original))
+            if material is not None
+            else len(original),
             license_note=item.license_note,
         )
         db.add(artifact)
@@ -324,11 +490,13 @@ def _ingest(
                 "source_ref": source_ref,
                 "kind": item.kind,
                 "label": item.label,
-                "uri": item.uri,
-                "parse_status": "ok",
+                "uri": (material.final_uri or material.uri) if material is not None else item.uri,
+                "original_uri": material.uri if material is not None else None,
+                "snapshot_id": material.snapshot_id if material is not None else None,
+                "parse_status": parse_status,
                 "source_hash": source_hash,
                 "text_hash": text_hash,
-                "size_bytes": len(original),
+                "size_bytes": artifact.size_bytes,
                 "characters_read": len(text),
                 "fragment_count": len(pieces),
                 "stored_chars": stored_chars,
@@ -339,6 +507,7 @@ def _ingest(
                     "full_text_stored": False,
                 },
                 "license_note": item.license_note,
+                **_snapshot_meta(material),
             }
         )
     db.flush()
@@ -767,6 +936,7 @@ def start_research(
     model: str | None = None,
     providers: Any = None,
     router_factory: Any = None,
+    ingest: Any = None,
 ) -> AIResearchRun:
     """Run the researcher and the architect once, and store what survived."""
 
@@ -774,6 +944,16 @@ def start_research(
     if not question:
         raise ValueError("a research run needs a question")
     _check_inputs(inputs)
+    # Refused before the run row exists, so a request the deployment cannot serve
+    # leaves nothing behind but the error (the API turns it into a 400).
+    unfetchable = next(
+        (item for item in inputs if item.kind in FETCHED_KINDS and not item.text.strip()), None
+    )
+    if ingest is None and unfetchable is not None:
+        raise ValueError(
+            f"this deployment cannot fetch a '{unfetchable.kind}' source: pass the text "
+            "itself, or enable source ingestion"
+        )
 
     run = AIResearchRun(
         question=question,
@@ -786,7 +966,19 @@ def start_research(
     db.add(run)
     db.flush()
 
-    sources, warnings, meta = _ingest(db, run, inputs)
+    try:
+        sources, warnings, meta = _ingest(db, run, inputs, ingest=ingest)
+    except SourceRejected as refused:
+        # A blocked source is not dropped from the run: an answer built from whatever
+        # happened to be reachable is not the answer that was asked for (docs/27 §5.2).
+        run.sources_json = []
+        run.warnings_json = []
+        run.violations_json = [refused.as_dict()]
+        return _finish(db, run, "rejected", "ingest", error=str(refused))
+    except SourceUnavailable as unavailable:
+        run.sources_json = []
+        run.warnings_json = []
+        return _finish(db, run, "failed", "ingest", error=f"{unavailable.code}: {unavailable}")
     kinds = _source_kinds(meta)
     source_hashes = _source_hashes(meta)
     run.sources_json = meta

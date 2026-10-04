@@ -130,6 +130,20 @@ AI 层改动另加（v1.9.7 起，ADR-150 至 ADR-153）：
 [ ] 任何新的 AI provider 调用都只能经 run_task()：加完模块跑 backend/tests/test_ai_provider_boundary.py
 ```
 
+来源摄取改动另加（v2.1.0 起，ADR-163 至 ADR-166）：
+
+```text
+[ ] 任何新的出站读取都先过 app/sources/guard.py 的 check_url()：判解析出来的地址，不判 hostname 字符串
+[ ] 实际 TCP 连接必须用已验证的 IP（fetch.py 的 PinnedBackend.connect_tcp），Host 头与 TLS SNI 仍用原 hostname
+[ ] redirect 每一跳重跑完整 guard；robots.txt 与正文同等受管（同一 guard / 超时 / 大小 / 逐跳重新校验）
+[ ] app/sources/ 里不许 import httpx、不许读 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY（trust_env=False 的等价物是根本没有那层）
+[ ] 新增一种危险地址就往 backend/tests/test_source_ssrf.py 补一例；改了抓取逻辑就跑 test_source_fetch.py
+[ ] 解析只做减法：不执行 JS、不做 OCR、不加关键词/正则 injection detector（test_source_injection.py 会拦）
+[ ] 快照只追加、不覆盖；不新增任何第三方全文列（full_text / content / body / raw_text / raw / blob / payload）
+[ ] 摄取端点不调用模型、不建 AITask、不花 AI 预算；policy=full 且 truncated=true 必须如实回报
+[ ] 材料进入研究者时仍然是 UntrustedSource：text 与 uri 同给时 text 优先并记 text_preferred，绝不偷偷联网
+```
+
 ## 5.1 推送与网络（Windows 上的两个坑，v1.9.7 实测）
 
 - **`git push` 报 schannel `CRYPT_E_REVOCATION_OFFLINE`**：Windows 的 schannel 在离线或代理环境下拿不到吊销列表，握手直接失败；同一个远端用 OpenSSL 后端就通。给这一条命令加参数即可，不要改全局配置：
@@ -147,6 +161,26 @@ v1.9.8 的 tag 推上去之后，GitHub 上一次红了三处：CI 的 `Run Post
 - **补丁版的版本递增**：按 ADR-079 的规则递增；v1.9.9 之后就是 v2.0.0，所以被这一版挤掉的功能顺延到下一个版本号，别塞进补丁版。
 - **红版处理纪律（v1.9.9 独立验收后立的准则）**：已经 commit / 发布的版本，如果因为 CI、Release、迁移、启动这类**发布门禁**失败而不成立，可以发下一个**最小修复版**把发布契约恢复回来——但修复版只准解决阻断问题，不得借机进入下一 Phase；一旦修复涉及新功能、架构扩展、范围扩大或下一 Phase 的内容，必须先停下来问，不能自己往前推。本仓库的两次红版（v1.9.8 → v1.9.9 只改迁移顺序、v1.9.9 → v2.0.0 只做验收报告点名的 P1/P2）都是这条纪律的例子：向前修，不回滚、不移动 tag。
 - **验收报告先复核再动手**：收到外部验收/评审报告时，逐条回到代码里确认（行号、常量、测试函数），把「确认 / 部分成立 / 不成立」分开写，再决定改什么。v1.9.9 报告里的 P1-01（引文不校验）、P2-01（`unknowns` 按 field 掩盖多条规则）、P2-03（`text_hash` 与 `size_bytes` 指向不同对象）与 P2-04（只有研究层守卫）都复核成立；P2-02（单项能力支持 ≠ 组合可执行）确认为事实但属于 Compiler 阶段，只写进文档、不改代码。
+
+## 5.3 来源抓取的 SSRF 回归要求（v2.1.0 起，ADR-164）
+
+只要动到 `backend/app/sources/`、`backend/app/api/routers/sources.py`、`backend/app/data/source_snapshot_service.py`，或 `/ai/research` 的来源解析，提交前必须跑：
+
+```text
+[ ] backend/tests/test_source_ssrf.py       （76 例：scheme / credentials / host / port / 地址分类 / 多地址 / redirect / rebinding）
+[ ] backend/tests/test_source_fetch.py      （37 例：redirect 逐跳复核、大小、超时、代理环境变量无效、robots 受管）
+[ ] backend/tests/test_source_parse.py      （33 例：HTML / PDF 的诚实失败与「不做检测器」）
+[ ] backend/tests/test_source_snapshot.py + test_source_snapshot_migration.py（19 + 11 例：append-only、列名黑名单、downgrade 逆序）
+[ ] backend/tests/test_source_research.py + test_source_injection.py（12 + 8 例：接入研究层、隔离证明）
+```
+
+几条不写进代码也必须遵守的纪律：
+
+- **测试不联网**：`check_url(url, resolver=…)` 注入解析器，`retrieve_document(..., retrieve=…)` 注入取回函数，PDF 用手工构造的夹具；任何需要真实 DNS 或真实站点才能通过的断言都不许进仓库。
+- **新发现一种危险地址/协议，先补一例再改代码**：SSRF 矩阵是清单式的，删断言或放宽 `_address_problem()` 的判定等于把边界往后挪——`docs/14` §4.1 里的表格是这份矩阵的对外说明，两边必须同时改。
+- **不许为了让测试变绿而声称"完全防止 DNS rebinding"**：本版采用 `docs/27` §6.2 的方案 A（连已验证 IP + 原 hostname 的 SNI/Host），因此可以声称没有 TOCTOU 窗口；如果将来退回方案 B（先解析检查、再交给普通客户端），必须同时改 `docs/14` 的安全声明、在这里加回残余 TOCTOU 风险说明，并让测试只证明实际达到的边界。
+- **抓取失败不许伪装成 AI 拒绝**：策略拒绝是 422（`detail.error == "source_blocked"`，被拒的源仍落库），抓取/解析失败是 502（`detail.error == "source_unavailable"`）；研究入口里任一源被拒绝 ⇒ 整跑 `rejected`，不静默降级。
+- **摄取与 AI 预算分开**：`/ai/sources/*` 不建 `AITask`；如果哪天它开始调模型，那必须是一次新的架构决定，而不是顺手加一行。
 
 ## 6. 未来扩展策略
 

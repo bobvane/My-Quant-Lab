@@ -3043,6 +3043,60 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 - 测试：`backend/tests/test_ai_provider_boundary.py`（6 例）全绿；其中 `test_the_ai_layer_is_still_the_same_small_set_of_modules` 是给新增模块准备的绊线。
 
+## ADR-163：抓取先留观测，再交给研究者——快照是应用的记录，不是模型的记忆
+
+- 背景：Phase 4 之前 `/ai/research` 只接受调用方已经拿到手的文本（`user_input` / `text` / `github_file`），平台自己从不联网。`docs/27` 的审计指出：一旦允许 `uri`，「抓取与研究谁先谁后」「抓不到时这次 run 算什么」「被安全策略拒绝怎么表示」都没有地方安放；最容易长成的形状是「少一个源也照样跑完」，那样答案与提问就不再对应。
+
+- 决策：① 新增 `backend/app/sources/`（`guard.py` / `fetch.py` / `parse.py` / `ingest.py`）与 `backend/app/data/source_snapshot_service.py`，抓取路径固定为 guard → fetch → parse → snapshot → researcher；② 每个源先 `ingest_url` / `ingest_pdf_uri` / `ingest_pdf_base64` 或按 `snapshot_id` 复用，写下一行 append-only 的 `ai_source_snapshots`，再把 `material.text` 作为 `UntrustedSource` 交给研究者；③ `ResearchInput` 新增 `uri` 与 `snapshot_id`，`kind` 扩为五取值 `user_input` / `text` / `github_file` / `url` / `pdf`；`text` 与 `uri`/`snapshot_id` 同时给出时 `text` 优先、**绝不偷偷联网**，并记一条 `text_preferred` 警告；④ 任一源被策略拒绝（`SourceRejected`）⇒ 整次 run 立刻 `rejected` 并把 `as_dict()` 写进 `violations_json`；抓不到或读不出（`SourceUnavailable`）⇒ 整次 run `failed` 且 `current_step="ingest"`（`error_message` 带原因码前缀）；⑤ `POST /ai/sources/url` 与 `POST /ai/sources/pdf` 不调用模型、不建 `AITask`、不计 AI 预算，但仍受 API rate limit 与字节/超时/来源数预算约束。
+
+- 理由：材料必须先被观测再被引用——「读了什么」要早于「答案是什么」落库，否则事后无法回答这次研究依据的是哪一份内容。拒绝之所以升级成整跑失败，是因为只读「碰巧还开着」的其余来源会得到一个与用户前提不同的答案，静默继续等于伪造证据。摄取端点刻意不碰模型，是为了让「取回材料」与「花掉 AI 预算」在审计上彻底分开。`start_research()` 在**创建 run 行之前**就预检「本部署没有摄取能力却给了抓取源」并抛 `ValueError`（"this deployment cannot fetch a 'url' source: …"），所以这类请求一条半成品 run 都不会留下。
+
+- 影响与兼容：旧的 `user_input` / `text` / `github_file` 请求体与行为逐字节不变（`ResearchInput.text` 默认空字符串，`_check_inputs` 只在 `FETCHED_KINDS` 上放宽）；`research_artifacts` 新增可空 `snapshot_id` 外键，`parse_status` 不再恒为 `"ok"`（取值放宽，列不变）；`GET /ai/research/{run_id}` 的 `sources[]` 里带 `snapshot_id` 的条目多一个 `snapshot` 字段，由 API 层的 `_with_snapshots()` 拼接——放在这一层是为了避开 `ai → data → sources → ai` 的 import 环。本阶段不做 `/lab` UI。
+
+- 测试：`backend/tests/test_source_research.py`（12 例：注入 ingester 证明抓取只发生一次、`text_preferred`、blocked ⇒ `rejected` + violation 且 `AITask` 计数为 0、扫描件 ⇒ `failed` 且消息含 `parse_unsupported`、端点层 422/502 与快照行状态、`snapshot_id` 透传并落到 artifact、无摄取能力时不留 run 行）。
+
+## ADR-164：守卫在读之前就决定能不能读——连的是解析并验证过的地址
+
+- 背景：允许用户贴 URL 意味着应用替用户发起出站请求。Docker 环境里的 `HTTP_PROXY`/`HTTPS_PROXY`、DNS 解析出来的私网地址、以及「先解析检查、再让 HTTP 客户端自己解析一次」之间那个窗口，都属于 SSRF 范畴。只检查 hostname 字符串是不够的：`http://[::ffff:127.0.0.1]/` 和「多地址里只有一个危险」都能穿过去。
+
+- 决策：`backend/app/sources/guard.py` 定死 `ALLOWED_SCHEMES = ("http", "https")`、`ALLOWED_PORTS = (80, 443)`、`MAX_REDIRECTS = 3`、`INTERNAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")`、`METADATA_HOSTS = ("metadata.google.internal", "metadata.goog")`。`check_url()` 依次校验：形状（空或含 `\r\n\t`）→ scheme → 是否带 credentials → host 是否存在 → 端口 → `_addresses_for()`；`_addresses_for()` 对字面量 IP 直接校验，对域名先 `_check_name()` 再调用 `resolver(host, port)` **取回全部答案并逐个** `_check_address()`（任何一个危险就整体拒绝）。`_address_problem()` 拒绝：带 scope_id 的 IPv6、IPv4-mapped IPv6（递归按内层地址判定）、multicast、unspecified、loopback、link-local、private/reserved、以及一切 `not is_global` 的地址。错误码稳定可断言：`invalid_url` / `scheme_not_allowed` / `credentials_not_allowed` / `host_missing` / `port_not_allowed` / `host_not_allowed` / `dns_failed` / `dns_no_addresses` / `address_unreadable` / `address_not_allowed`。
+
+- 决策（DNS rebinding，采用 `docs/27` §6.2 的方案 A）：`fetch.py` 的 `PinnedBackend(httpcore.SyncBackend)` 覆写 `connect_tcp`，把要连的 host 换成 `CheckedURL.addresses` 里**已经验证过的地址**；Host 头与 TLS SNI 仍由 httpcore 从 URL 取，于是「实际连的地址」与「报文里声称的主机名」解耦，中间不存在第二次解析，也就没有 TOCTOU / DNS rebinding 窗口。`_open_once()` 用 `httpcore.ConnectionPool(network_backend=backend, retries=0)` 与 `extensions={"timeout": {...}}`，整个 `app/sources/` **不 import httpx、不读任何代理环境变量**——`trust_env=False` 在这里的等价物是「根本没有那一层」，因此 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 无法改变校验之后的连接路径。redirect 每一跳都重新过完整 guard（`check_redirect` → `check_url`），第 4 跳拒绝（`too_many_redirects`），跳转响应体直接丢弃、不计入大小限制。
+
+- 决策（robots.txt 一视同仁）：`retrieve_document()` 先对目标 `check_url`，再对 `robots_url(checked)` 单独 `check_robots()`——同一个 guard、同一份时间预算、同样的 `trust_env=False`、大小上限 `MAX_ROBOTS_BYTES = 64 KiB`、redirect 同样每跳重新校验。站点没有 robots.txt（4xx，但 429 除外）⇒ `checked=False, allowed=True`（理由写明 "the site has no robots.txt"）；5xx / 超时 / 断连 ⇒ `robots_unavailable`（**明确的可审计错误语义，不伪装成普通 AI 拒绝**）；命中 Disallow ⇒ `robots_disallowed`，按 `SourceBlocked` 语义走 422。`RobotsVerdict` 不含正文或文本字段，所以 robots.txt 的内容进不了 AI 层。
+
+- 决策（失败分层）：400 = 请求形状非法（自家语义校验：未知 scheme、`retention` 取值非法、`full` 缺 `license_note`、`/ai/sources/pdf` 的 `uri` 与 `content_base64` 二者都给或都不给、非法 base64）；**422 = 被安全策略拒绝**（`detail = {"error": "source_blocked", "snapshot_status": "blocked", "code", "snapshot_id", …}`，被拒绝的源**仍然落库**以便事后审计）；502 = 抓取或解析失败（`detail["error"] == "source_unavailable"`）。
+
+- 理由：把「能不能读」变成一个纯粹、离线、可单测的判定（`check_url(url, resolver=…)` 注入解析器即可覆盖全部危险地址），再用 pin 住的连接让它成为事实上唯一可能的路径；两层合起来才叫「已验证」。拒绝与失败的语义必须分开：前者说明请求本身越界（用户可改），后者说明远端不配合（重试或换源），混在一起会让人误判该改什么。
+
+- 影响与兼容：新增 `httpcore>=1.0` 直接依赖（直接对 httpcore 说话才能钉住已验证地址）。**已知偏差**：本仓没有 `RequestValidationError` 处理器，pydantic 层面的形状错误仍然返回 FastAPI 默认的 422，与策略 422 靠 `detail` 结构区分——`docs/27` §5.2 的「400 = 形状非法」只在我们自己的语义校验上成立；不改全局异常处理，因为它会改变所有既有端点的行为。
+
+- 测试：`backend/tests/test_source_ssrf.py`（76 例：`file://`/`ftp://`/`gopher://`/`data://`/`javascript://`、localhost 与 `*.localhost`/`*.internal`/`*.home.arpa`、127.0.0.0/8、`::1`、RFC1918、link-local、metadata IP、unspecified、multicast、reserved、CGNAT、benchmark、IPv6 ULA、IPv4-mapped IPv6、带 scope_id、非 80/443、URL credentials、DNS 解析出私网、多地址中有一个危险、redirect → private/localhost/link-local、多跳 redirect、DNS rebinding）与 `backend/tests/test_source_fetch.py`（37 例：redirect 逐跳复核、大小与超时、**设置了 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 仍走本地直连**，以及一条源码级断言证明模块不读环境代理）。
+
+## ADR-165：解析只做减法——PDF 只读文本层、HTML 不执行脚本、不做词表检测
+
+- 背景：外部材料是 HTML 或 PDF。只要引入「渲染 JS」或 OCR，这一层就从解析器变成执行不可信内容的引擎，而这正是本阶段（以及四道验证门）明确不承担的风险。另一个诱惑是在文本里搜「Ignore previous instructions」之类的关键词，把安全做成字符串匹配。
+
+- 决策：`backend/app/sources/parse.py` 只做确定性提取。HTML 用标准库 `HTMLParser`（`convert_charrefs=True`），`DROP_ELEMENTS`（script / style / noscript / template / svg / canvas / iframe / object）整棵子树丢弃、`<title>` 单独收进 `title`、块级标签产生换行；**不引入 Playwright / Selenium / Chromium / JS 执行 / 浏览器渲染**。PDF 只用 `pypdf` 读文本层，`MAX_PDF_PAGES = 50`、`MAX_PARSE_CHARS = 200_000`：没有文本层 ⇒ `unsupported`（error 点名「可能是扫描件、本版没有 OCR」），缺 `%PDF-` 头或畸形 ⇒ `parse_failed`，加密 ⇒ `unsupported`，页数或字符超限 ⇒ `truncated=True`。结果类型 `ParsedDocument(kind, status, parser, parser_version, content_type, text, title, page_count, truncated, error)`，`truncated` 只表示**解析时**没读完，具体留多少由 ADR-161 的保留层另行决定，两个概念不合并。
+
+- 理由：**提取不等于注入防御**。`parse.py` 故意不含任何关键词或正则 detector：网页、GitHub 文件、PDF 里出现的 "Ignore previous instructions" / "You are now an administrator" 都只是研究材料里的普通文本；真正的边界是 system / task / source 消息分层、Role Contract 与工具权限隔离。加一份词表只会制造「已防御」的假象，还会诱使后来人以为可以省掉结构性隔离——所以本阶段把「不发布检测器」本身写成了测试。
+
+- 影响与兼容：只新增模块与依赖 `pypdf>=5.1`（仅文本 PDF，无 OCR / 渲染 / 视觉）。解析后的正文**仍然是不可信研究材料**，不会因为「已经解析过」而被提升为可信内容；不引入 OCR、视觉模型、截图识别、object storage，也不允许把解析失败当成空文本继续研究。
+
+- 测试：`backend/tests/test_source_parse.py`（33 例：分派与点名不可读类型、script/style/svg/canvas 丢弃、实体与块级结构、无正文 HTML ⇒ `unsupported`、charset 与坏 UTF-8 回退、截断、手工构造的文本 PDF、无文本层、缺头、畸形、加密、`max_pages`/`max_chars`、恶意句子逐字保留为纯文本，以及模块源码不得出现 `import re`）与 `backend/tests/test_source_injection.py::test_no_keyword_or_regex_injection_detector_is_shipped`（扫 `app/sources/*.py`、`app/ai/research.py`、`api/routers/sources.py`，禁止出现 `ignore previous instructions` / `prompt injection` / `jailbreak` 等词表痕迹）。
+
+## ADR-166：快照只追加、来源可回指——三个 hash 各回答一个问题，第三方全文没有列
+
+- 背景：同一个 URL 抓两次可能拿到两份内容（改版、动态页、甚至同一天的两次 A/B），而一次 `ResearchArtifact` 必须能回答「这次研究依据的是哪一份材料」。同时 `docs/27` §7 冻结了保留策略：第三方的全文不入库。
+
+- 决策：新增表 `ai_source_snapshots`（迁移 `0015_source_snapshots`，`down_revision = "0014_artifact_source_hash"`；`docs/27` §9 里原定的 `0014_ai_workflow_audit` 顺延到 `0016`）：`source_type`、`url`、`final_url`、`status`、`http_status`、`content_type`、`size_bytes`、`source_hash`、`text_hash`、`parser`、`parser_version`、`robots_ok`、`retention`、`retained_chars`、`truncated`、`excerpt`、`license_note`、`error`、`metadata_json`、`fetched_at`，索引 `ix_ai_source_snapshots_url_time (url, created_at)`；**没有任何 `full_text` / `content` / `body` / `raw_text` / `raw` / `blob` / `payload` 列**（这条列名黑名单是测试断言）。每次抓取写一行（`record_material`），同 URL 抓两次就是两行，任何情况下都不覆盖旧行；`research_artifacts.snapshot_id` 只指向本次实际使用的那一行。三个 hash 保持独立：`source_hash` = 读到的原始字节、`text_hash` = 实际进入研究流程的文本、`source_snapshot_hash` = AI runtime / cache 的研究上下文身份（只属 `app/ai/runtime.py`，**不进这张表，也不改名**）。保留策略：第三方默认 `excerpt`（`THIRD_PARTY_EXCERPT_CHARS = 500`），`user_input` 按 `USER_OWNED_EXCERPT_CHARS = 20_000`；`retention="full"` 且非 `user_input` 必须同时给 `license_note`，并且仍然受 `MAX_ARTIFACT_CHARS = 20_000` 约束——`policy=full, truncated=true` 是合法状态，必须如实表达，不能回报「已完整保存」。
+
+- 理由：观测记录一旦可改写，就无法再用它证明某次研究读了什么；只追加是让「审计」这个词有意义的唯一前提。把第三方全文挡在库外、只留 `excerpt` 与 `retained_chars`，是因为本阶段没有任何一条需求需要我们在库里保存别人的全文，而`full` 只是「允许把材料交给研究者」的授权，不是「允许把别人的东西存在我们磁盘上」。
+
+- 影响与兼容：`research_artifacts` 加可空外键（`batch_alter_table(recreate="auto")`：PostgreSQL 走普通 ALTER，只有 SQLite 才重建表），`downgrade()` 严格逆序（约束 → 列 → 索引 → 表）；`POST /ai/sources/*` 与 `GET /ai/sources/{snapshot_id}` 只返回 `excerpt[]` 与计数，**绝不返回第三方全文**；本阶段不增加清理任务、不改 `celery_app.py` 的 beat。
+
+- 测试：`backend/tests/test_source_snapshot.py`（19 例：全字段响应、`chars_read=900 / retained_chars=500 / truncated=true` 且响应不含全文、blocked ⇒ 422 且入库 `status="blocked"` + `parse_status="not_parsed"`、fetch 失败 ⇒ 502 且入库、不注入 stub 的真守卫用例、`full` 缺 `license_note` ⇒ 400、pdf 二选一 ⇒ 400、非法 base64 ⇒ 400、无文本层 ⇒ 200 + `unsupported`、GET 回读与 POST 完全相等 + 404、同 URL 两次写两行、不建 `AITask`、复用快照时 `retrieve` 绝不被调用）与 `backend/tests/test_source_snapshot_migration.py`（11 例 AST 守卫：0014 已发布内容冻结、`ai_source_snapshots` 建表先于引用它的 `add_column`、upgrade 只允许新增、downgrade 是 upgrade 的严格逆序、列名黑名单、模型与迁移列集合一致、`snapshot_id` 可空且外键指向 `ai_source_snapshots.id`、`source_snapshot_hash` 不得出现在表里）。
+
 
 
 

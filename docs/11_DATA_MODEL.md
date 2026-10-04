@@ -218,6 +218,44 @@ unique(strategy_id, version)
 - manifest_json
 - content_hash
 
+## AISourceSnapshot（表名 `ai_source_snapshots`，v2.1.0 / ADR-166）
+
+平台自己读一份外部材料（网页 / PDF）时留下的**只追加**观测记录：每一次抓取写一行，同一个 URL 抓两次就是两行，永不覆盖。它回答的是「这次研究依据的是哪一份材料」，而不回答「AI 看到了多少」——给模型看的永远是 `excerpt` 里的片段。
+
+- id
+- source_type（`url` / `pdf`）
+- url（请求的原始地址）
+- final_url（跟随 redirect 之后的地址）
+- status（`requested` / `blocked` / `fetch_failed` / `not_fetched` / `retained`）
+- http_status
+- content_type
+- size_bytes
+- source_hash（读到的**原始字节**的 sha256）
+- text_hash（实际进入研究流程的**文本**的 sha256）
+- parser / parser_version（`stdlib.html.parser` / `stdlib.text` / `pypdf`）
+- robots_ok
+- retention（`excerpt` / `full`）
+- retained_chars
+- truncated
+- excerpt（第三方默认 ≤ 500 字符，见 ADR-161）
+- license_note
+- error
+- metadata_json（`source_ref`、`label`、`warnings`）
+- fetched_at
+- created_at / updated_at
+
+索引 `ix_ai_source_snapshots_url_time (url, created_at)`。**没有全文列**（不存在 `full_text` / `content` / `body` / `raw_text` / `raw` / `blob` / `payload`），这条黑名单由 `backend/tests/test_source_snapshot_migration.py` 断言。
+
+`parse_status` 与 `status` 是两个维度：`status` 说抓取走到哪一步，`parse_status`（`ok` / `unsupported` / `parse_failed` / `not_parsed`）说解析结果；`status = blocked` 时 `parse_status = not_parsed`。`status = retained` 可以配 `parse_status = unsupported`（例如扫描件——留了观测，但没交给研究者）。
+
+三个 hash 各回答一个问题，**不合并**：
+
+- `source_hash`：材料被改过没有（原始字节）；
+- `text_hash`：这一版引文是拿哪一版文本对的（读入文本）；
+- `source_snapshot_hash`：AI runtime / cache 的研究上下文身份——它只属于 `backend/app/ai/runtime.py`，**不在这张表里，也不得改名成 `source_hash`**。
+
+`research_artifacts` 新增可空外键 `snapshot_id` → `ai_source_snapshots.id`（迁移 `0015_source_snapshots`），指向**本次实际使用**的那一行；调用方自己提供文本（`user_input` / `text` / `github_file`）的来源没有抓过，因此可为 NULL。
+
 ## AuditEvent
 
 - id
@@ -236,3 +274,4 @@ unique(strategy_id, version)
 4. Ghostfolio data is read-only mirror。
 5. Paper data cannot alter real portfolio data。
 6. All timestamps stored UTC; UI converts to user timezone.
+7. Source snapshots are append-only observations：同一 URL 抓两次写两行，不覆盖旧行；`research_artifacts.snapshot_id` 只指向本次实际使用的那一行，且第三方全文没有可写的列（ADR-166）。

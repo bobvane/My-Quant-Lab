@@ -63,6 +63,9 @@ from app.api.routers import (
     signals as signals_router,
 )
 from app.api.routers import (
+    sources as sources_router,
+)
+from app.api.routers import (
     strategies as strategies_router,
 )
 from app.api.routers import (
@@ -265,6 +268,7 @@ def create_app() -> FastAPI:
         temporary_access_router.router,
         importer_router.router,
         ai_router.router,
+        sources_router.router,
         audit_router.router,
     ):
         app.include_router(router, prefix=settings.api_prefix)

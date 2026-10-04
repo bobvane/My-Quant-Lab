@@ -469,25 +469,35 @@ def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) ->
     A refusal is a result, not an error: the run is returned with
     ``status="rejected"`` and the violations that caused it. The draft is never
     executable, and nothing here reaches the backtest engine.
+
+    A source the platform had to fetch itself can fail before any model is called:
+    a source blocked on policy grounds refuses the whole run (422), and a source
+    that could not be fetched or read fails it (502) — neither is dressed up as an
+    AI rejection (docs/27 §5.2).
     """
 
     from app.ai import research as research_service
 
     inputs = [
         research_service.ResearchInput(
-            text=item.text,
+            text=item.text or "",
             kind=item.kind,
             source_ref=item.source_ref,
             label=item.label,
             uri=item.uri,
             license_note=item.license_note,
             retention=item.retention,
+            snapshot_id=item.snapshot_id,
         )
         for item in payload.sources
     ]
     try:
         run = research_service.start_research(
-            db, question=payload.question, inputs=inputs, model=payload.model
+            db,
+            question=payload.question,
+            inputs=inputs,
+            model=payload.model,
+            ingest=_research_ingester(db),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -496,7 +506,65 @@ def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) ->
         # The run row stays: it records that the request was made and why it
         # could not be answered.
         raise HTTPException(status_code=503, detail=NOT_CONFIGURED_DETAIL)
+    if run.status == "rejected" and run.current_step == "ingest":
+        raise HTTPException(status_code=422, detail=_refused_run_detail(run))
+    if run.status == "failed" and run.current_step == "ingest":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "source_unavailable",
+                "run_id": run.id,
+                "message": run.error_message or "a source could not be read",
+            },
+        )
     return ResearchRunOut(**research_service.run_payload(db, run))
+
+
+def _research_ingester(db: Session) -> Any:
+    """The fetcher the research service uses, or ``None`` when it cannot fetch.
+
+    Injected rather than imported by ``app.ai.research`` so the AI layer stays free
+    of network code (docs/27 §5.2).
+    """
+
+    from app.data import source_snapshot_service as snapshots
+
+    return snapshots.snapshot_ingester(db)
+
+
+def _refused_run_detail(run: Any) -> dict[str, Any]:
+    violations = list(run.violations_json or [])
+    first = violations[0] if violations else {}
+    return {
+        "error": "source_blocked",
+        "run_id": run.id,
+        "snapshot_id": first.get("snapshot_id"),
+        "source_ref": first.get("source_ref"),
+        "code": first.get("code"),
+        "message": run.error_message or first.get("message") or "a source was refused",
+        "violations": violations,
+    }
+
+
+def _with_snapshots(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach each source's stored snapshot summary, when the run observed one.
+
+    The run records which snapshot it used; the snapshot record is what makes the
+    provenance auditable, so one GET answers "which material was this based on"
+    without a second round trip (docs/27 §5.2, §8).
+    """
+
+    from app.data import source_snapshot_service as snapshots
+
+    sources = []
+    for source in payload.get("sources") or []:
+        entry = dict(source)
+        snapshot_id = entry.get("snapshot_id")
+        row = snapshots.get_snapshot(db, snapshot_id) if snapshot_id else None
+        entry["snapshot"] = snapshots.snapshot_payload(row) if row is not None else None
+        sources.append(entry)
+    payload["sources"] = sources
+    return payload
 
 
 @router.get("/ai/research", summary="Recent research runs")
@@ -517,7 +585,8 @@ def get_research_run(run_id: int, db: Session = Depends(get_db)) -> ResearchRunO
     run = db.get(AIResearchRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"research run {run_id} not found")
-    return ResearchRunOut(**research_service.run_payload(db, run))
+    payload = _with_snapshots(db, research_service.run_payload(db, run))
+    return ResearchRunOut(**payload)
 
 
 @router.post(

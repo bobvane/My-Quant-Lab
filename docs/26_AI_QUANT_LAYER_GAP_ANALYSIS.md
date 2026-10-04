@@ -616,3 +616,19 @@ CI 必须失败的三类情形：
 | P2-04 | 只有研究层有「无执行路径」守卫，没有「任何 provider 调用必须经 `run_task()`」的全仓守卫 | 已修（ADR-162）：`backend/tests/test_ai_provider_boundary.py` 用 AST 扫全仓（provider 调用者、`app/ai/` 内的 httpx、AI 层的模块清单、两个角色模块必须走 `run_task`） |
 
 仍未关闭（顺延 v2.1.0，即 Phase 4 起）：`docs/26` §12 的工具网关与 `ai_tool_calls`、§13 的四个 AI 面板门控与完整 `/lab`、§17 的 Compiler 与 StrategySpec 1.0、Phase 4 的统一研究来源抓取（含 `ai_source_snapshots`）、以及 §22 里标注为 v1.9.9 项的那批（工具滥用防护、SSRF / 来源体积）。
+
+## 25. v2.1.0 来源摄取状态（滚动更新）
+
+v2.1.0 是 **Phase 4 的第一步**，只关掉上面那条里的「统一研究来源抓取（含 `ai_source_snapshots`）」与 §22 里「SSRF / 来源体积」两项；工具网关、四个 AI 面板门控与完整 `/lab`、Compiler 与 StrategySpec 1.0 **仍然开放**，本文件的功能层清单其余部分不变。
+
+| 本文件条目 | 状态 | 落点 |
+| --- | --- | --- |
+| Phase 4 统一研究来源抓取（`ai_source_snapshots`） | **已关闭** | `backend/app/sources/guard.py` / `fetch.py` / `parse.py` / `ingest.py`；`backend/app/data/source_snapshot_service.py`；迁移 `0015_source_snapshots`；端点 `POST /ai/sources/url`、`POST /ai/sources/pdf`、`GET /ai/sources/{snapshot_id}`；ADR-163…ADR-166；设计见 `docs/27` §17 |
+| 研究层接入（`uri` / `snapshot_id` / `kind=url｜pdf`） | **已关闭** | `backend/app/ai/research.py`（`FETCHED_KINDS`、`SourceRejected` / `SourceUnavailable`、`_material_for`、`_snapshot_meta`）、`backend/app/api/routers/ai.py`（422 / 502 分层、`_with_snapshots`）、`docs/12` 的 `### AI Sources（v2.1.0）` |
+| SSRF（§22 的 v1.9.9 顺延项） | **已关闭** | `check_url()` 判解析出的**全部**地址（scheme / credentials / host / port / loopback / RFC1918 / link-local / metadata / unspecified / multicast / reserved / CGNAT / benchmark / ULA / IPv4-mapped / scope_id / 非 80-443）；`PinnedBackend` 用已验证 IP 连接而 Host 与 SNI 用原 hostname（方案 A，无 TOCTOU）；redirect 与 robots 逐跳复核；不读代理环境变量。矩阵 `backend/tests/test_source_ssrf.py`（76 例） |
+| 来源体积（§22 的 v1.9.9 顺延项） | **已关闭** | 正文 `MAX_DOCUMENT_BYTES = 2 MiB`、robots `64 KiB`、`MAX_PDF_PAGES = 50`、`MAX_PARSE_CHARS = 200_000`、connect/read/pool 5/15/5 秒 + 30 秒总预算、单次最多 8 个来源；解析/抓取失败绝不伪装成空文本 |
+| 工具网关 / `ai_tool_calls` | 仍未关闭 | 属 Phase 5 |
+| 四个 AI 面板门控与完整 `/lab` | 仍未关闭 | 属 Phase 8；本阶段明令不改 UI |
+| Compiler 与 StrategySpec 1.0 | 仍未关闭 | 属后续 Phase；`docs/06` §20 重申本版不做 |
+
+本阶段**没有**新增任何 LLM 调用路径：`app/sources/` 不 import `app.ai`，摄取端点不建 `AITask`（`backend/tests/test_source_snapshot.py` 有一条断言），`POST /ai/research` 的四道验证门语义未改——`research_artifacts.parse_status` 只是不再恒为 `"ok"`（取值放宽，列不变）。

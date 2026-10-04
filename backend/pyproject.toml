@@ -1,6 +1,6 @@
 [project]
 name = "my-quant-lab"
-version = "2.0.0"
+version = "2.1.0"
 description = "Personal quantitative research laboratory (NAS self-hosted, no auto trading)"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -17,6 +17,12 @@ dependencies = [
     "numpy>=2.1",
     "pandas>=2.2",
     "httpx>=0.27",
+    # The source ingestion layer speaks to httpcore directly (httpx's own transport
+    # layer) so it can pin the address the SSRF guard validated (ADR-163).
+    "httpcore>=1.0",
+    # Text PDFs only, for the source ingestion layer: no OCR, no rendering, no
+    # vision. A PDF without a text layer is reported as unsupported (ADR-163).
+    "pypdf>=5.1",
     "python-dotenv>=1.0",
     "cryptography>=43.0",
 ]

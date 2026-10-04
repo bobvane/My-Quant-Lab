@@ -758,8 +758,66 @@ class ResearchArtifact(Base, TimestampMixin):
     source_hash: Mapped[str | None] = mapped_column(String(64))
     size_bytes: Mapped[int | None] = mapped_column(Integer)
     license_note: Mapped[str | None] = mapped_column(Text)
+    #: The observation this material came out of, when it arrived over the network.
+    #: Nullable on purpose: a caller-supplied text source never fetched anything.
+    snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("ai_source_snapshots.id"))
 
     __table_args__ = (UniqueConstraint("run_id", "source_ref", name="uq_research_artifact_ref"),)
+
+
+class AISourceSnapshot(Base, TimestampMixin):
+    """One observation of an external source, appended and never overwritten.
+
+    A snapshot records what the platform actually saw at one moment: the URL it was
+    asked for and the URL it ended on, the HTTP metadata, the hash of the bytes that
+    came back, the hash of the text read out of them, which parser produced that text
+    and which retention decision followed (ADR-163). Fetching the same URL twice
+    writes two rows, so ``ResearchArtifact.snapshot_id`` can later answer "which
+    material did this run read?" instead of "which URL did it name?".
+
+    The third-party full text has no column here on purpose, and the excerpt is
+    capped by the retention policy in ``app/ai/research.py`` (ADR-161) — a snapshot
+    is an observation, not a second copy of somebody else's document.
+    """
+
+    __tablename__ = "ai_source_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: ``url`` for a fetched page, ``pdf`` for a PDF handed over by a caller.
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    #: Where the fetch ended after redirects; differs from ``url`` when it followed one.
+    final_url: Mapped[str | None] = mapped_column(String(2048))
+    #: ``retained`` | ``blocked`` | ``fetch_failed``. What happened to the fetch
+    #: as a whole; ``parse_status`` below answers the separate question of whether
+    #: the bytes could be read at all (docs/27 §8).
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: ``ok`` | ``unsupported`` | ``parse_failed`` | ``not_parsed``.
+    parse_status: Mapped[str] = mapped_column(String(16), default="not_parsed", nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    content_type: Mapped[str | None] = mapped_column(String(255))
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    #: Characters the parser produced before the excerpt cap was applied, so a
+    #: reader can see "read 200 KB, parsed 40 K chars, kept 500" at a glance.
+    chars_read: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Identity of the bytes as they arrived (ADR-161). Never the AI cache identity.
+    source_hash: Mapped[str | None] = mapped_column(String(64))
+    #: Identity of the text this platform read out of those bytes.
+    text_hash: Mapped[str | None] = mapped_column(String(64))
+    parser: Mapped[str | None] = mapped_column(String(64))
+    parser_version: Mapped[str | None] = mapped_column(String(32))
+    robots_ok: Mapped[bool | None] = mapped_column(Boolean)
+    retention: Mapped[str] = mapped_column(String(16), default="excerpt", nullable=False)
+    retained_chars: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    excerpt: Mapped[str | None] = mapped_column(Text)
+    license_note: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    #: Redirect chain, page count, title, dropped headers — whatever the fetch learned.
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    fetched_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_ai_source_snapshots_url_time", "url", "created_at"),)
 
 
 class ResearchArtifactFragment(Base):

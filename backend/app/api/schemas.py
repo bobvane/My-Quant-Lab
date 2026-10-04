@@ -740,11 +740,88 @@ class AITaskOut(BaseModel):
     error_message: str | None = None
 
 
-class ResearchSourceIn(BaseModel):
-    """One piece of research material, supplied as text.
+class SourceIngestIn(BaseModel):
+    """Fetch and read one web page. Nothing here calls a model or spends AI budget.
 
-    ``url`` and ``pdf`` are deliberately absent: this version does not fetch or
-    parse anything, and accepting a URL it cannot read would suggest otherwise.
+    ``retention`` works exactly as it does for research material: the excerpt is
+    capped at 500 characters unless the caller states the user owns the material
+    (``retention="full"`` plus a ``license_note``), and even then the stored copy
+    stays bounded — ``truncated`` tells the truth when it is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    uri: str = Field(min_length=1, max_length=2048)
+    source_ref: str | None = Field(default=None, max_length=32)
+    label: str | None = Field(default=None, max_length=255)
+    retention: Literal["excerpt", "full"] | None = None
+    license_note: str | None = Field(default=None, max_length=2000)
+
+
+class SourcePdfIn(BaseModel):
+    """Read one PDF, either by URL or handed over inline as base64.
+
+    This build has no multipart upload and no object storage, so an inline payload
+    is the only way to read a PDF the platform cannot fetch — and it faces the same
+    byte cap as a fetched one. Exactly one of ``uri`` / ``content_base64`` is
+    required; supplying both or neither is a 400.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    uri: str | None = Field(default=None, max_length=2048)
+    content_base64: str | None = Field(default=None, max_length=3_000_000)
+    filename: str | None = Field(default=None, max_length=255)
+    source_ref: str | None = Field(default=None, max_length=32)
+    label: str | None = Field(default=None, max_length=255)
+    retention: Literal["excerpt", "full"] | None = None
+    license_note: str | None = Field(default=None, max_length=2000)
+
+
+class SourceSnapshotOut(BaseModel):
+    """One stored observation: hashes, metadata and a bounded excerpt.
+
+    The full text of a third-party document is deliberately absent, in the response
+    as in the database (ADR-161): what came in is described by its hashes and read
+    limits, and only the retained excerpt is echoed back.
+    """
+
+    snapshot_id: int
+    source_kind: str
+    snapshot_status: str
+    parse_status: str
+    source_ref: str | None = None
+    label: str | None = None
+    original_uri: str | None = None
+    final_uri: str | None = None
+    status_code: int | None = None
+    content_type: str | None = None
+    bytes_read: int = 0
+    chars_read: int = 0
+    source_hash: str | None = None
+    text_hash: str | None = None
+    parser: str | None = None
+    parser_version: str | None = None
+    robots_ok: bool | None = None
+    retention: dict[str, Any] = Field(default_factory=dict)
+    excerpt: list[str] = Field(default_factory=list)
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
+    redirects: list[str] = Field(default_factory=list)
+    error_code: str | None = None
+    error_message: str | None = None
+    fetched_at: str | None = None
+    created_at: str | None = None
+
+
+class ResearchSourceIn(BaseModel):
+    """One piece of research material.
+
+    ``text`` is how the caller hands material over. Since v2.1.0 a ``url`` or
+    ``pdf`` source may instead be named by ``uri`` (the platform fetches and parses
+    it) or by ``snapshot_id`` (the platform already observed it through
+    ``POST /ai/sources/url`` or ``POST /ai/sources/pdf``). If both ``text`` and a
+    ``uri``/``snapshot_id`` are given, the text wins and the run records a warning:
+    the caller's own copy of the material is never second-guessed by a fetch.
 
     ``retention`` decides how much of the material is kept as excerpt: the
     user's own words are kept, material from elsewhere keeps 500 characters
@@ -754,11 +831,12 @@ class ResearchSourceIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["user_input", "text", "github_file"] = "user_input"
-    text: str = Field(min_length=1, max_length=40_000)
+    kind: Literal["user_input", "text", "github_file", "url", "pdf"] = "user_input"
+    text: str | None = Field(default=None, min_length=1, max_length=40_000)
     source_ref: str | None = Field(default=None, max_length=32)
     label: str | None = Field(default=None, max_length=255)
-    uri: str | None = Field(default=None, max_length=1024)
+    uri: str | None = Field(default=None, max_length=2048)
+    snapshot_id: int | None = Field(default=None, ge=1)
     license_note: str | None = Field(default=None, max_length=2000)
     retention: Literal["excerpt", "full"] | None = None
 

@@ -144,6 +144,18 @@ AI 层改动另加（v1.9.7 起，ADR-150 至 ADR-153）：
 [ ] 材料进入研究者时仍然是 UntrustedSource：text 与 uri 同给时 text 优先并记 text_preferred，绝不偷偷联网
 ```
 
+编译器契约改动另加（v2.2.0 起，ADR-167）：
+
+```text
+[ ] 先改 docs/29 的契约，再改代码：契约是规范、代码是它的实现；不一致时改代码或改契约并补 ADR，不许「实现说了算」
+[ ] 编译器必须是纯函数：只读 draft.draft_json + capability_report_json，不读 AITask.output_json、不读模型响应原文、不联网、不调模型
+[ ] 不许创建 Strategy 行、不许分配版本号、不许落库：落库只经 POST /ai/strategy/drafts/{draft_id}/compile 走 strategy_service.create_strategy_version()
+[ ] 拒绝不许做成 warning：三态与 15 个拒绝码由 docs/29 冻结；缺槽位 / 歧义 / 表达不了 / 能力缺失都必须拒绝，不许替用户决定
+[ ] 不许把 pydantic 默认值当取值来源：max_position_pct → 1.0、fee_bps → 0.0、sizing.mode → fixed_fraction 都是「没说」，不是「已定」
+[ ] COMPILER_VERSION 与 dsl.SCHEMA_VERSION 独立，且不得写进 dsl_json；不改 StrategySpec 1.0（ADR-155 继续有效）
+[ ] 动到契约就同步 docs/29 + backend/tests/test_compiler_contract.py，并跑 ruff format --check app tests
+```
+
 ## 5.1 推送与网络（Windows 上的两个坑，v1.9.7 实测）
 
 - **`git push` 报 schannel `CRYPT_E_REVOCATION_OFFLINE`**：Windows 的 schannel 在离线或代理环境下拿不到吊销列表，握手直接失败；同一个远端用 OpenSSL 后端就通。给这一条命令加参数即可，不要改全局配置：
@@ -181,6 +193,17 @@ v1.9.8 的 tag 推上去之后，GitHub 上一次红了三处：CI 的 `Run Post
 - **不许为了让测试变绿而声称"完全防止 DNS rebinding"**：本版采用 `docs/27` §6.2 的方案 A（连已验证 IP + 原 hostname 的 SNI/Host），因此可以声称没有 TOCTOU 窗口；如果将来退回方案 B（先解析检查、再交给普通客户端），必须同时改 `docs/14` 的安全声明、在这里加回残余 TOCTOU 风险说明，并让测试只证明实际达到的边界。
 - **抓取失败不许伪装成 AI 拒绝**：策略拒绝是 422（`detail.error == "source_blocked"`，被拒的源仍落库），抓取/解析失败是 502（`detail.error == "source_unavailable"`）；研究入口里任一源被拒绝 ⇒ 整跑 `rejected`，不静默降级。
 - **摄取与 AI 预算分开**：`/ai/sources/*` 不建 `AITask`；如果哪天它开始调模型，那必须是一次新的架构决定，而不是顺手加一行。
+
+## 5.4 编译器契约先于编译器（v2.2.0 起，ADR-167）
+
+`StrategyDraft → StrategySpec 1.0` 这件事在本仓库里是**先冻结契约、再写实现**，不是反过来：
+
+- **契约是规范，代码是它的实现**：`docs/29_STRATEGY_COMPILER_CONTRACT.md` 冻结输入 / 输出、`decided_by` 四个值（含显式拒绝 `ENGINE_DERIVED`）、`COMPILED` / `NEEDS_USER_DECISION` / `REJECTED` 三态、15 个拒绝码、canonical 参数形状、两个 hash 的口径与落库位置。实现与文档不一致时先问「哪一个错了」——改代码，或者改契约并补一条 ADR，**不许让「已经写成的代码」默认成为规范**。这条纪律的来源就是 `docs/28` 的只读审计：契约缺失时写实现，等于让实现顺便定规范（能力注册表按 schema 派生、`fill_model` 被回显成 SUPPORTED、`max_position_pct=1.0` 这类默认值把「没说」变成「已决定」）。
+- **编译器是纯函数，且不创造策略行**：它只读草案，输出 `spec` 或拒绝；`Strategy` 行、版本号与账本由既有的 `strategy_service` 拥有。想「顺手把策略建出来」时停下来问——那会多出第四条创建路径，并留下半成品。
+- **拒绝是主产物之一**：缺槽位、歧义、表达不了、能力缺失都必须变成明确的拒绝码，不许降级成 warning、不许替用户补默认值、不许把模型的措辞当成规则来源。Martin 场景（`backend/tests/research_payloads.py`）就是这条纪律的验收样本：它必须被拒绝（`NEEDS_USER_DECISION`、`spec = null`），**不是**被编译。
+- **守卫怎么写**：契约的文字与常量由 `backend/tests/test_compiler_contract.py` 与 `docs/29` 双向钉住；前向守卫（`importlib.util.find_spec` / 目录判断）在实现出现后自动升级为真断言，不许用「包还不存在」当断言（`docs/29` §18）。
+
+**这套顺序的落地状态（v2.2.0 编译器切片，工作区）**：Step 2A（契约冻结）、Step 2B（`backend/app/compiler/` 的 Compiler Core）、Step 2C（`POST /api/v1/ai/strategy/drafts/{draft_id}/compile` 与草案 → 版本绑定）、Step 2D（409 走项目 `error` 信封 = ADR-169；capability 报告按落库的 `CapabilityDecision.verdict` 读 = ADR-170）**已全部落地**，三份守卫共 **80 例**（`test_compiler_contract.py` 16 + `test_compiler_core.py` 49 + `test_compiler_api.py` 15），全仓 1361 passed / 4 skipped。工作区六处版本镜像已置为 **v2.2.0**，**尚未 commit / tag / push / release / deploy**——所以上面每一条纪律仍是**进行中的约束**，不是「做完就作废」的检查表。**`is_current` 激活路径不检查 `validation_status` 这件事没有在 Step 2D 里修**：它已登记为独立的 P0 级契约缺口（`docs/28` §7.3、G8/G9/G11；`docs/26` §26），要动它必须另立切片，并把 `backend/app/data/strategy_service.py`、`backend/app/api/routers/strategy_versions.py` 与信号扫描路径（`backend/app/simulation/signal_engine.py`）一起纳入范围。
 
 ## 6. 未来扩展策略
 

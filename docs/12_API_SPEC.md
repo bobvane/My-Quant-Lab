@@ -478,6 +478,8 @@ v2.1.0 起平台可以自己读一份材料：抓取（guard → fetch → parse
 
 `POST /ai/strategy/formalize` [已实现] —— 单独让 STRATEGY_ARCHITECT 再形式化一次：请求 `{run_id}` 或 `{hypothesis_id}` → `{"draft": {...}}`（字段同 run payload 里的 `draft`）。回答不是草案时 422，detail 带 `step` 与 violations；两个 id 都没给返回 400；id 未知返回 404。本端点是研究层内部的重跑入口，五步主链路已包含该步。
 
+`POST /ai/strategy/drafts/{draft_id}/compile` [已实现] —— 把已存草案编译成策略版本：请求 `{strategy_id}`（只有目标，不接受 spec / `compile_hash` / `compiler_version`）→ 201 `{result, strategy_id, strategy_version_id, version, compile_hash, report}`，其中 `report` 就是编译器返回的那一份；`NEEDS_USER_DECISION` / `REJECTED` 返回 422 且不创建任何行；draft 或 strategy 未知返回 404；草案已绑定、版本号不可自增、目标版本号已被占用返回 409（docs/29 §16.7）。
+
 **证据的核对结果与新增违规码** [已实现] —— 假设与草案正文里每条规则的 `evidence[]` 会被服务端补上四个**只读**字段：`verified`（布尔，是否在材料里逐字找到）、`char_start` / `char_end`（在读入文本里的字符区间，从 0 起）、`verified_against`（被核对的那份读入文本的 sha256）。请求不接受这四个字段，语义就是「这句话在原文的哪一段被找到了」（ADR-159）。违规码新增四个：`evidence_missing_quote`（EXPLICIT 规则没给引文）、`evidence_quote_too_short`（引文规范化后不足 2 字符）、`evidence_mismatch`（引文在读入材料里找不到——编造引文在这里被拒）、`unknown_rule_unknown`（unknown 点名了本次假设里不存在的 `rule_id`）。研究运行的 `sources[]` 每条带 `source_hash`（原文 hash）、`text_hash`（读入文本 hash）、`stored_chars` 与 `retention{policy, excerpt_budget, stored_chars, full_text_stored}`；材料没被存全时 `warnings[]` 出现 `excerpt_limited`（ADR-161）。
 
 ## GitHub Sources

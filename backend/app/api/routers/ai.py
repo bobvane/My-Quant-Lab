@@ -13,7 +13,9 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ai.explain import (
@@ -27,6 +29,7 @@ from app.ai.provider import BudgetExceeded
 from app.api.schemas import (
     AIStatusOut,
     AITaskOut,
+    CompileDraftIn,
     ExplainOut,
     FormalizeIn,
     ResearchRunIn,
@@ -41,6 +44,23 @@ router = APIRouter(tags=["ai"])
 NOT_CONFIGURED_DETAIL = (
     "AI provider not configured; configure one under Settings to enable explanations"
 )
+
+
+def _compile_error(
+    status_code: int, code: str, message: str, details: dict[str, Any] | None = None
+) -> JSONResponse:
+    """A refusal of the compile endpoint, in the shape the app already uses.
+
+    ``{"error": {"code", "message", "details"}}`` is the envelope ``create_app``
+    answers with before a handler runs at all (the 401, the 429 and the 500), and
+    docs/29 §16.7 fixes the same keys for a missing draft or strategy. Answering
+    in that envelope keeps one shape per outcome instead of a second dialect.
+    """
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code, "message": message, "details": details or {}}},
+    )
 
 
 @router.get("/ai/status", response_model=AIStatusOut, summary="AI configuration and budget")
@@ -630,3 +650,121 @@ def formalize_hypothesis_endpoint(
         raise HTTPException(status_code=502, detail=f"AI provider call failed: {exc}") from exc
     db.commit()
     return {"draft": research_service.draft_payload(draft)}
+
+
+@router.post(
+    "/ai/strategy/drafts/{draft_id}/compile",
+    summary="Compile a stored draft into a strategy version",
+    # 201 is the "a row was created" answer docs/29 §16.7 freezes for COMPILED; the
+    # refusal paths return their own JSONResponse, so this route is not one model.
+    status_code=201,
+    response_model=None,
+)
+def compile_draft_endpoint(
+    draft_id: int, payload: CompileDraftIn, db: Session = Depends(get_db)
+) -> JSONResponse | dict[str, Any]:
+    """Run the deterministic compiler for one stored draft (docs/29 §16.7).
+
+    The compiler decides, and this endpoint only carries the decision into the
+    database: ``COMPILED`` creates exactly one ``StrategyVersion`` whose
+    ``evidence_json.compile_report`` is the report the compiler returned, and
+    points the draft at it; ``NEEDS_USER_DECISION`` and ``REJECTED`` create
+    nothing, so a draft the contract refuses cannot leave a half-built strategy
+    version behind. The request names a target and nothing else -- no spec, no
+    hash, no compiler version -- because the compiler is the only way in.
+    """
+
+    from app.compiler import compile_strategy_draft
+    from app.data import strategy_service
+    from app.domain.models import Strategy, StrategyVersion
+    from app.domain.models import StrategyDraft as StrategyDraftRow
+
+    draft = db.get(StrategyDraftRow, draft_id)
+    if draft is None:
+        return _compile_error(404, "draft_not_found", f"strategy draft {draft_id} not found")
+
+    strategy = db.get(Strategy, payload.strategy_id)
+    if strategy is None:
+        return _compile_error(
+            404, "strategy_not_found", f"strategy {payload.strategy_id} not found"
+        )
+
+    # One draft describes one strategy version. Compiling it twice would create a
+    # second row for the same draft, so the second attempt is a conflict that says
+    # what the draft is already bound to.
+    if draft.compiled_strategy_version_id is not None:
+        bound = db.get(StrategyVersion, draft.compiled_strategy_version_id)
+        return _compile_error(
+            409,
+            "draft_already_compiled",
+            f"strategy draft {draft_id} is already compiled into strategy version "
+            f"{draft.compiled_strategy_version_id}",
+            {
+                "strategy_version_id": draft.compiled_strategy_version_id,
+                "version": bound.version if bound is not None else None,
+            },
+        )
+
+    # The version comes from the project's own rule (ADR-061), not from a new one
+    # invented here. A history that cannot be incremented has no answer, because
+    # this request may not name a version itself.
+    try:
+        version = strategy_service.next_version([row.version for row in strategy.versions])
+    except ValueError as exc:
+        return _compile_error(
+            409,
+            "version_unassignable",
+            str(exc),
+            {
+                "strategy_id": strategy.id,
+                "versions": [row.version for row in strategy.versions],
+            },
+        )
+
+    result = compile_strategy_draft(draft, strategy.id, version)
+    if not result.is_compiled:
+        # The request was well formed and the draft was not compilable: 422 with
+        # the compiler's own report, and nothing written.
+        return JSONResponse(
+            status_code=422,
+            content={"result": result.result, "report": result.report},
+        )
+
+    try:
+        strategy_version = strategy_service.create_strategy_version(
+            db,
+            strategy,
+            version=version,
+            dsl=result.as_dsl(),
+            evidence={"compile_report": result.report},
+            commit=False,
+        )
+    except ValueError as exc:
+        db.rollback()
+        return _compile_error(
+            409, "version_conflict", str(exc), {"strategy_id": strategy.id, "version": version}
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        logger.warning("strategy version %s could not be created: %s", version, exc)
+        return _compile_error(
+            409,
+            "version_conflict",
+            f"version '{version}' already exists for this strategy",
+            {"strategy_id": strategy.id, "version": version},
+        )
+
+    # The version row, its parameters, its audit event and the draft's
+    # back-reference commit as one transaction: a failure here rolls the version
+    # back too, so the draft is never bound to a version that does not exist.
+    draft.compiled_strategy_version_id = strategy_version.id
+    db.commit()
+
+    return {
+        "result": result.result,
+        "strategy_id": strategy.id,
+        "strategy_version_id": strategy_version.id,
+        "version": strategy_version.version,
+        "compile_hash": result.compile_hash,
+        "report": result.report,
+    }

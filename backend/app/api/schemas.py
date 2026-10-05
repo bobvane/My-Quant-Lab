@@ -859,6 +859,19 @@ class FormalizeIn(BaseModel):
     model: str | None = Field(default=None, max_length=128)
 
 
+class CompileDraftIn(BaseModel):
+    """The only input a compile request may carry (docs/29 §16.7).
+
+    A draft is compiled by *naming its target*, never by handing the server a
+    spec: no ``dsl``, no ``compile_hash``, no ``compiler_version``. ``extra="forbid"``
+    is what makes that a refusal instead of a silently ignored field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_id: int = Field(ge=1)
+
+
 class ResearchRunOut(BaseModel):
     """A research run and whatever it produced, including its refusals."""
 

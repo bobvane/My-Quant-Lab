@@ -166,11 +166,17 @@ def create_strategy_version(
     evidence: dict[str, Any] | None = None,
     parameters: dict[str, Any] | None = None,
     make_current: bool = True,
+    commit: bool = True,
 ) -> StrategyVersion:
     """Insert a new immutable strategy version.
 
     Existing versions are never touched: this is the mechanism that keeps old
     backtest results reproducible.
+
+    ``commit=False`` leaves the new row flushed but uncommitted, so a caller that
+    has to write something *else* in the same transaction (the compiler binds the
+    draft to the version it just created) can commit -- or roll back -- both
+    together instead of leaving half a change behind.
     """
 
     duplicate = db.scalar(
@@ -237,8 +243,11 @@ def create_strategy_version(
             "validation_status": status,
         },
     )
-    db.commit()
-    db.refresh(strategy_version)
+    if commit:
+        db.commit()
+        db.refresh(strategy_version)
+    else:
+        db.flush()
     return strategy_version
 
 

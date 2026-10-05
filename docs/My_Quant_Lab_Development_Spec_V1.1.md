@@ -581,6 +581,8 @@ SYSTEM / ROLE CONTRACT  →  TRUSTED TASK  →  UNTRUSTED SOURCE
 
 说明：不创建 `v1.10.x`（用户决策 C2）；v1.9.7 / v1.9.8 / v1.9.9 / v2.0.0 都正常发 GHCR 镜像但**不自动部署 NAS**（ADR-086），其中 v1.9.9 是**迁移建表 / 删表顺序**的补丁：只修 PostgreSQL 才能暴露的 `0013` 顺序问题，不顺带加任何功能；v2.0.0 是 **v1.9.9 独立验收的修复版**：只做验收报告点名的两条 P1 与三条 P2（ADR-159 至 ADR-162），**不进入 Phase 4**。按 ADR-079，v1.9.9 之后即 v2.0.0，而 v2.0.0 被验收修复占用，因此原先排在 v1.9.9 的 Phase 4+ 范围（Strategy Compiler、Tool Gateway、统一研究来源、异步研究工作流 + 人工确认、`strategy_experiments`、四个 AI 面板门控、完整 `/lab`）顺延到 **v2.1.0** 起步；**v2.1.0 实际交付的是其中的「统一来源抓取与快照」这一段**（ADR-163 至 ADR-166，Phase 4 的第一步），其余内容（Compiler / Tool Gateway / 异步工作流 / 完整 `/lab` / RAG）因此再顺延一版，编号为 **v2.2.0**——同样按 ADR-079 递增，不回填、不改写已发布的 tag。`v2.1.0` 是 Phase 4 的第一步，按 ADR-086 **不部署 NAS**；`v2.2.0`（AI Quant Research Layer 里程碑）才是 GHCR + 正式 NAS 部署候选（用户决策 Q8；部署须用户明确授权）。每个版本仍必须有 tests / CI / docs / release / tag。
 
+**编译器契约已先于实现冻结（后续追加的归属说明）**：`docs/29_STRATEGY_COMPILER_CONTRACT.md` 是 `StrategyDraft → StrategySpec 1.0` 的**唯一正式契约**，**ADR-167**（`docs/17_DECISIONS.md`）把编译器的版本归属正式收口为 **v2.2.0 = Strategy Compiler（Phase 5）**；历史上把 Compiler 记在 **v1.9.9 / v2.0.0 / v2.1.0** 的说法一律是**旧规划目标版本、均未实际交付**（v1.9.9 只修迁移建表顺序，v2.0.0 只做 v1.9.9 的验收修复，v2.1.0 只做统一来源抓取与 append-only 快照），不得再被读成承诺。现状审计见 `docs/28_STRATEGY_COMPILER_GAP_ANALYSIS.md`，契约守卫见 `backend/tests/test_compiler_contract.py`。本文件与 `docs/17_DECISIONS.md` 的 ADR-167 一并构成该归属的正式表述。
+
 ### H.3 交付节奏（用户决策，`docs/26` §20.1）
 
 - 开发顺序：Role Contract → AI Runtime 基础 → 统一 Budget → Audit 基础 → Capability Registry 基础 → 测试 → 文档 → CI → Tag。

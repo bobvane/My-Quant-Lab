@@ -12,6 +12,10 @@
 >
 > 本机边界：**没有 Docker、没有 PostgreSQL、没有配置 AI provider key**（见 §11 风险的验证一节）；
 > PostgreSQL / Docker / GHCR / Release 冒烟一律以 CI 与 Release workflow 为准，本地不声称已验证。
+>
+> 交付状态（后续追加）：本文件的设计**已全部落地**，v2.1.0 就是它的实施版本（ADR-163 至 ADR-166，实施记录见 §17），
+> 之后**不再更新本文**。按 **ADR-167**，v2.1.0 = Source Ingestion / Snapshot，**v2.2.0 = Strategy Compiler**——
+> 编译器与本文档无关，其契约在 `docs/29_STRATEGY_COMPILER_CONTRACT.md`，现状审计在 `docs/28_STRATEGY_COMPILER_GAP_ANALYSIS.md`。
 
 ---
 

@@ -63,6 +63,28 @@ def _compile_error(
     )
 
 
+# The OpenAPI document has to describe the refusals above: `_compile_error` builds its
+# own JSONResponse, so FastAPI cannot infer the shape from a model, and a generated
+# client would otherwise treat a 404/409 body as undefined (docs/29 §16.7).
+_COMPILE_ERROR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["error"],
+    "properties": {
+        "error": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["code", "message", "details"],
+            "properties": {
+                "code": {"type": "string"},
+                "message": {"type": "string"},
+                "details": {"type": "object"},
+            },
+        }
+    },
+}
+
+
 @router.get("/ai/status", response_model=AIStatusOut, summary="AI configuration and budget")
 def ai_status(db: Session = Depends(get_db)) -> AIStatusOut:
     configured = get_active_provider(db)
@@ -659,6 +681,28 @@ def formalize_hypothesis_endpoint(
     # refusal paths return their own JSONResponse, so this route is not one model.
     status_code=201,
     response_model=None,
+    # The refusals that happen before the compiler answers are built by hand, so the
+    # document has to be told about them. Without this it offered only 201 and 422, and
+    # the five refusal codes existed nowhere but in docs/29 §16.7 and in the tests.
+    responses={
+        404: {
+            "description": (
+                "The row the request names does not exist: `draft_not_found` or "
+                "`strategy_not_found` (docs/29 §16.7). A transport answer, not a compiler "
+                "verdict, so the body carries no `report`."
+            ),
+            "content": {"application/json": {"schema": _COMPILE_ERROR_SCHEMA}},
+        },
+        409: {
+            "description": (
+                "The target identity is already taken and nothing was compiled: "
+                "`draft_already_compiled`, `version_unassignable` or `version_conflict` "
+                "(docs/29 §16.7). `error.details` locates the target; a 409 never carries "
+                "`result` or `report` (ADR-169)."
+            ),
+            "content": {"application/json": {"schema": _COMPILE_ERROR_SCHEMA}},
+        },
+    },
 )
 def compile_draft_endpoint(
     draft_id: int, payload: CompileDraftIn, db: Session = Depends(get_db)

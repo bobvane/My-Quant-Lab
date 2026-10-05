@@ -22,6 +22,9 @@ import re
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "Test-NasDeployment.ps1"
 TEXT = SCRIPT.read_text(encoding="utf-8")
+# The edge behaviour the web liveness step asserts lives in this file, so the guard
+# reads both: the script and nginx drifted apart once already (see below).
+NGINX = REPO_ROOT / "docker" / "web.nginx.conf"
 
 _STEP = re.compile(r"^\s*Step\s+(?:'([^']*)'|\"([^\"]*)\")\s*\{", re.MULTILINE)
 
@@ -59,12 +62,37 @@ def test_every_step_can_fail() -> None:
 
 
 def test_the_web_liveness_step_reads_the_body() -> None:
-    """A 200 from the web edge is not evidence: nginx default pages are 200 too."""
+    """A 200 from the web edge is not evidence: nginx default pages are 200 too.
+
+    The edge answers this path itself -- `return 200 "ok\\n"` in the
+    `location = /healthz` block of `docker/web.nginx.conf` -- and that is the web
+    container's own liveness answer, not a proxy to the API (whose probe has its own
+    step at `/api/v1/healthz`). The step asked for an API body nginx never served for
+    two days, and could not have read one anyway: the edge sends nginx's
+    `application/octet-stream` first, so `Invoke-WebRequest` returns a `byte[]` and
+    `"$($r.Content)"` compares the decimal byte list `"111 107 10"`. Found by the
+    v2.2.0 NAS acceptance (2026-10-05) against a deployment that was correct.
+    """
 
     body = _step("Web 容器 /healthz")
-    assert "alive" in body
-    assert "-notmatch" in body
+    assert "'ok'" in body, "the step no longer compares the body with what the edge sends"
+    assert "byte[]" in body and "GetString" in body, (
+        "the step reads a byte[] through string interpolation, so it compares "
+        "'111 107 10' instead of the body"
+    )
+    assert "-notmatch" in body or "-ne" in body
+    assert "text/plain" in body, "a 200 carrying the application's HTML would pass"
     assert "throw" in body
+    assert "alive" not in body, "the step is back on the API probe this path never served"
+    assert "'\"status\"'" not in body
+
+    # Pin the edge behaviour the step asserts, so the script and nginx cannot drift
+    # apart again without a test saying which side moved.
+    nginx = NGINX.read_text(encoding="utf-8")
+    location = nginx[nginx.index("location = /healthz") :]
+    location = location[: location.index("}")]
+    assert r'return 200 "ok\n";' in location
+    assert "text/plain" in location
 
 
 def test_the_api_liveness_step_reads_the_answer() -> None:

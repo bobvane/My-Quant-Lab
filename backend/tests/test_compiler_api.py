@@ -487,3 +487,27 @@ def test_a_supported_capability_report_compiles(client, db_session) -> None:
     assert response.status_code == 201, response.json()
     assert response.json()["result"] == "COMPILED"
     assert _version_count(db_session) == 1
+
+
+# --- I. the document a generated client reads ---------------------------------------
+
+
+def test_the_openapi_document_declares_the_refusals(client) -> None:
+    """A refusal the document does not describe is one a client cannot handle.
+
+    ``_compile_error`` answers a 404/409 itself, so FastAPI cannot infer either shape
+    from a model: without the declaration the document offered only 201 and 422, and
+    the five codes docs/29 §16.7 freezes lived nowhere but in the contract and in this
+    module's own tests -- which a generated client never reads.
+    """
+
+    responses = client.get("/openapi.json").json()["paths"][COMPILE_URL]["post"]["responses"]
+
+    assert {"201", "404", "409", "422"} <= set(responses)
+    assert "draft_not_found" in responses["404"]["description"]
+    assert "strategy_not_found" in responses["404"]["description"]
+    for code in ("draft_already_compiled", "version_unassignable", "version_conflict"):
+        assert code in responses["409"]["description"], code
+    envelope = responses["409"]["content"]["application/json"]["schema"]
+    assert envelope["properties"]["error"]["required"] == ["code", "message", "details"]
+    assert set(envelope["properties"]["error"]["properties"]) == {"code", "message", "details"}

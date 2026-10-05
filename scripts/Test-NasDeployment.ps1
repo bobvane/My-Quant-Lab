@@ -124,17 +124,32 @@ function Get-ApiStatus {
 Write-Output "My Quant Lab — NAS 端到端检查"
 Write-Output "target: $Base   time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
-# ---- 1. The web container serves the UI and proxies /healthz ---------------
+# ---- 1. The web container serves the UI and answers its own liveness path ----
 Step 'Web 容器 /healthz' {
     $r = Invoke-WebRequest -Uri "$Base/healthz" -TimeoutSec 20 -UseBasicParsing
-    # nginx proxies this path to the API (docker/web.nginx.conf). A 200 on its own is
-    # not evidence of that: an nginx default page, a stale proxy target or a captive
-    # portal all answer 200 as well, so the body has to say what it is.
-    $body = "$($r.Content)"
-    if ($body -notmatch '"status"\s*:\s*"alive"') {
-        throw "HTTP $($r.StatusCode) 但响应体不是 API 存活探针：$($body.Substring(0, [Math]::Min(200, $body.Length)))"
+    # nginx answers this path itself -- `return 200 "ok\n"` in the `location = /healthz`
+    # block of docker/web.nginx.conf -- and that is the web edge's own liveness answer,
+    # not a proxy to the API: the API probe is the `/api/v1/healthz` step below. A bare
+    # 200 is not evidence of it (an nginx default page, a stale upstream or a captive
+    # portal answer 200 too), so the body has to be read. Reading it means decoding it:
+    # the edge sends two Content-Type headers (nginx's own application/octet-stream,
+    # then the text/plain its config adds), so Invoke-WebRequest returns a byte[] and
+    # "$($r.Content)" would compare the decimal byte list ("111 107 10") to `ok`.
+    $body = if ($r.Content -is [byte[]]) {
+        [System.Text.Encoding]::UTF8.GetString($r.Content)
+    } else {
+        "$($r.Content)"
     }
-    "HTTP $($r.StatusCode), status=alive"
+    $body = $body.Trim()
+    if ($body -ne 'ok') {
+        $shown = $body.Substring(0, [Math]::Min(200, $body.Length))
+        throw "HTTP $($r.StatusCode) 但响应体不是 web 边界的存活应答 ok：'$shown'"
+    }
+    $types = @($r.Headers['Content-Type']) -join ' | '
+    if ($types -notmatch 'text/plain') {
+        throw "Content-Type='$types'（期望含 text/plain）：这个应答不是 nginx 的 /healthz，可能被反代到别处或退回了默认页"
+    }
+    "HTTP $($r.StatusCode), body=ok, content-type=$types"
 }
 
 Step 'Web 容器首页 (/)' {

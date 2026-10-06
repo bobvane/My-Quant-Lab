@@ -27,10 +27,17 @@ PROVIDER_CALLERS = frozenset({"ai/provider.py", "ai/runtime.py"})
 HTTP_CALLERS = frozenset({"ai/provider.py", "data/ai_provider_service.py"})
 
 #: Every module of the AI layer, as directories are not walked here.
+#:
+#: ``confirmation.py`` joined in v2.4.0 for the human gate. It is a deliberate
+#: addition and not a widening of the provider boundary: it asks no model
+#: anything (it only writes an audit event about a draft), and it lives here
+#: because the artifact it decides about -- ``strategy_drafts`` -- belongs to
+#: this layer, next to the ``research_schemas`` that describe it.
 AI_MODULES = frozenset(
     {
         "ai/__init__.py",
         "ai/budget.py",
+        "ai/confirmation.py",
         "ai/explain.py",
         "ai/provider.py",
         "ai/research.py",

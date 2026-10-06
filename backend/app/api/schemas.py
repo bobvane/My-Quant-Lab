@@ -872,6 +872,20 @@ class CompileDraftIn(BaseModel):
     strategy_id: int = Field(ge=1)
 
 
+class DraftConfirmationIn(BaseModel):
+    """A human answer about one draft (v2.4.0 Step 1).
+
+    ``needs_revision`` is a third answer on purpose: a reviewer who wants the
+    draft reworked should not have to reject the run to say so, and the record
+    should say which of the two happened.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["confirmed", "rejected", "needs_revision"]
+    note: str | None = Field(default=None, max_length=2000)
+
+
 class ResearchRunOut(BaseModel):
     """A research run and whatever it produced, including its refusals."""
 

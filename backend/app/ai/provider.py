@@ -180,6 +180,29 @@ class AIRequest:
         return hashlib.sha256(payload.encode()).hexdigest()
 
 
+class ProviderCallError(RuntimeError):
+    """The provider answered, but not in a shape this contract can read."""
+
+
+@dataclass(frozen=True)
+class ProviderReply:
+    """One model answer: the text, plus whatever usage the provider reported.
+
+    ``usage`` stays plain data on purpose. A provider that reports nothing
+    leaves it empty and the caller decides whether a guess is acceptable -- for
+    a model with a configured price it is not, because "cost = estimated tokens
+    x price" is a number nobody can audit afterwards.
+    """
+
+    text: str
+    model: str
+    usage: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def reported_usage(self) -> bool:
+        return bool(self.usage)
+
+
 class OpenAICompatibleProvider:
     """Minimal client for any ``/v1/chat/completions`` compatible endpoint."""
 
@@ -197,6 +220,10 @@ class OpenAICompatibleProvider:
         #: Hard ceiling for one call, from ``AI_TASK_TIMEOUT_SECONDS``: a research
         #: task may think for minutes, but it may not hang a worker for ever.
         self.timeout = float(timeout or 60.0)
+        #: The last answer, usage included. Callers that need to know what the
+        #: provider said it consumed read it here instead of re-parsing a body
+        #: the client already threw away.
+        self.last_reply: ProviderReply | None = None
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -212,6 +239,25 @@ class OpenAICompatibleProvider:
         temperature: float = 0.1,
         max_tokens: int | None = None,
     ) -> str:
+        return self.reply(
+            messages, model=model, temperature=temperature, max_tokens=max_tokens
+        ).text
+
+    def reply(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float = 0.1,
+        max_tokens: int | None = None,
+    ) -> ProviderReply:
+        """Ask for one completion and keep the usage the provider reported.
+
+        The usage is the only honest source for a cost: it is what the provider
+        says it consumed. ``chat`` still returns just the text, so the older
+        callers are untouched, but nothing needs to re-derive tokens from a
+        character count when the answer carries the real numbers.
+        """
         import httpx
 
         body: dict[str, Any] = {
@@ -228,7 +274,29 @@ class OpenAICompatibleProvider:
             timeout=self.timeout,
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        try:
+            payload = response.json()
+            answer = payload["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise ProviderCallError(
+                f"provider {self.name!r} answered without a readable choice: {exc!r}"
+            ) from exc
+
+        usage = payload.get("usage") or {}
+        reply = ProviderReply(
+            text=answer,
+            model=str(payload.get("model") or model),
+            usage={
+                key: int(value)
+                for key, value in (
+                    ("input_tokens", usage.get("prompt_tokens")),
+                    ("output_tokens", usage.get("completion_tokens")),
+                )
+                if isinstance(value, int)
+            },
+        )
+        self.last_reply = reply
+        return reply
 
     def structured_output(
         self,
@@ -345,6 +413,9 @@ class AIRouter:
         # Remaining budget per provider; empty means "unlimited" (backwards
         # compatible with the single-provider callers).
         self.budgets = budgets or {}
+        #: The last answer this router obtained, usage included, so a caller can
+        #: price the call without re-reading a body the client already dropped.
+        self.last_reply: ProviderReply | None = None
 
     def pick(self, task_type: str, preferred_model: str | None = None) -> tuple[str, str]:
         if not self.providers:
@@ -399,6 +470,10 @@ class AIRouter:
             structured_facts=request.structured_facts,
             untrusted_sources=request.untrusted_sources,
         )
-        return provider.structured_output(
+        output = provider.structured_output(
             messages, model=model, schema=request.schema or SIGNAL_EXPLANATION_SCHEMA
         )
+        #: Kept for the caller: the returned dict carries the model's answer, the
+        #: usage (when the provider reported any) lives on the client.
+        self.last_reply = getattr(provider, "last_reply", None)
+        return output

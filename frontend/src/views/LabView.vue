@@ -4,7 +4,9 @@ import {
   api,
   ApiError,
   type AIResearchCapabilityReport,
+  type AIResearchDraftConfirmation,
   type AIResearchDraftContent,
+  type AIResearchDraftDecision,
   type AIResearchHypothesisContent,
   type AIResearchRun,
   type AIResearchRunSummary,
@@ -41,6 +43,8 @@ const run = ref<AIResearchRun | null>(null)
 const runs = ref<AIResearchRunSummary[]>([])
 const busy = ref(false)
 const formalizing = ref(false)
+const confirming = ref(false)
+const confirmationNote = ref('')
 const loadingRuns = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -83,6 +87,22 @@ const capability = computed<AIResearchCapabilityReport | null>(
 )
 const violations = computed<AIResearchViolation[]>(() => run.value?.violations ?? [])
 const warnings = computed<AIResearchWarning[]>(() => run.value?.warnings ?? [])
+// 人工确认：后端只回最新一次；null / 缺失 = 还没有人拍过板。
+const confirmation = computed<AIResearchDraftConfirmation | null>(
+  () => run.value?.draft?.confirmation ?? null,
+)
+
+const DECISION_LABELS: Record<string, string> = {
+  confirmed: '已确认',
+  rejected: '已驳回',
+  needs_revision: '需修改',
+}
+
+// 未知取值不把引擎的词直接印在普通模式上，说一句人话就够。
+function decisionLabel(decision: string | null | undefined): string {
+  if (!decision) return '尚未人工确认'
+  return DECISION_LABELS[decision] ?? '已记录人工判断'
+}
 
 const STATUS_LABELS: Record<string, string> = {
   pending: '已排队，还没开始',
@@ -368,6 +388,30 @@ async function formalize() {
     }
   } finally {
     formalizing.value = false
+  }
+}
+
+// 人工确认：POST 之后重新读一次运行，页面上看到的永远是后端记下来的那一份。
+async function confirmDraft(decision: AIResearchDraftDecision) {
+  const current = run.value
+  if (!current?.draft || confirming.value) return
+  resetNotices()
+  confirming.value = true
+  try {
+    const note = confirmationNote.value.trim()
+    await api.confirmStrategyDraft(current.draft.draft_id, decision, note || undefined)
+    run.value = await api.aiResearchRun(current.run_id)
+    confirmationNote.value = ''
+    notice.value = `这次人工决定已经记下来了：${decisionLabel(decision)}。草案本身没有被改动，也没有生成可执行的策略。`
+  } catch (e) {
+    // 404 = 这条草案后端已经不在了；422 = 备注超长等可以在本地避免的输入问题。
+    if (e instanceof ApiError && e.status === 404) {
+      error.value = '这条草案后端已经找不到了：刷新「最近的研究」后重新打开这次研究。'
+    } else {
+      handleFailure(e)
+    }
+  } finally {
+    confirming.value = false
   }
 }
 
@@ -752,6 +796,39 @@ onMounted(loadRuns)
         <ul class="answer-list">
           <li v-for="(item, index) in draftContent.notes ?? []" :key="index">{{ item }}</li>
         </ul>
+      </div>
+
+      <!-- 人工确认：把人自己的判断单独记一笔，和 AI 的结论分开放 -->
+      <div style="margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px">
+        <h4>人工确认</h4>
+        <p class="muted">
+          当前人工结论：<b>{{ decisionLabel(confirmation?.decision) }}</b>
+          <template v-if="confirmation">
+            · 由 {{ confirmation.decided_by }} 于 {{ formatTime(confirmation.decided_at) }} 记录
+            <template v-if="isAdvanced">
+              · 审计号 {{ confirmation.audit_id }} · 人工裁决
+              {{ confirmation.is_human_decision ? '是' : '否' }}
+            </template>
+          </template>
+        </p>
+        <p v-if="confirmation?.note" class="muted">备注：{{ confirmation.note }}</p>
+        <p class="muted">
+          这一步只是把你自己的判断记下来：不改动这份草案，不调用 AI，也不会生成可执行的策略。
+        </p>
+        <textarea
+          v-model="confirmationNote"
+          rows="2"
+          maxlength="2000"
+          :disabled="confirming"
+          placeholder="备注（可选，最多 2000 字）"
+          style="min-height: 52px; font-family: inherit; font-size: 13px"
+        ></textarea>
+        <div class="row" style="margin-top: 8px">
+          <button :disabled="confirming" @click="confirmDraft('confirmed')">确认</button>
+          <button class="ghost" :disabled="confirming" @click="confirmDraft('rejected')">驳回</button>
+          <button class="ghost" :disabled="confirming" @click="confirmDraft('needs_revision')">需修改</button>
+          <span v-if="confirming" class="muted">正在记录这次人工决定…</span>
+        </div>
       </div>
 
       <template v-if="isAdvanced">

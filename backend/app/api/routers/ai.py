@@ -30,6 +30,7 @@ from app.api.schemas import (
     AIStatusOut,
     AITaskOut,
     CompileDraftIn,
+    DraftConfirmationIn,
     ExplainOut,
     FormalizeIn,
     ResearchRunIn,
@@ -814,4 +815,56 @@ def compile_draft_endpoint(
         "version": strategy_version.version,
         "compile_hash": result.compile_hash,
         "report": result.report,
+    }
+
+
+@router.post(
+    "/ai/strategy/drafts/{draft_id}/confirmations",
+    summary="Record a human decision about a draft",
+    # 201: a row was created, and the row *is* the record -- an audit event.
+    status_code=201,
+    response_model=None,
+    responses={
+        404: {"description": "The draft does not exist."},
+        422: {"description": "The decision is not one of the three allowed answers."},
+    },
+)
+def confirm_draft_endpoint(
+    draft_id: int, payload: DraftConfirmationIn, db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """Record what a person decided about one draft (v2.4.0 Step 1).
+
+    The draft is the AI's proposal; this is the human answer, kept as an
+    append-only audit event. It creates no ``StrategyVersion``, sets no
+    ``validation_status`` and touches no ``is_current``: a confirmation is
+    evidence about a draft, and the deterministic compiler plus the ADR-171
+    activation gate remain the only ways a strategy goes live. The audit row is
+    the whole transaction.
+    """
+
+    from app.ai import confirmation as confirmation_service
+    from app.domain.models import StrategyDraft as StrategyDraftRow
+
+    draft = db.get(StrategyDraftRow, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="draft_not_found")
+
+    try:
+        record = confirmation_service.record_confirmation(
+            db, draft=draft, decision=payload.decision, note=payload.note
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    db.commit()
+    return {
+        "draft_id": draft.id,
+        "run_id": draft.run_id,
+        "decision": record.decision,
+        "label": confirmation_service.LABELS[record.decision],
+        "confirmation": confirmation_service.confirmation_view(db, draft.id),
+        # Stated in the response, not implied: this endpoint cannot make a
+        # strategy live, and a client should not have to read the source to know.
+        "strategy_version_created": False,
+        "compiled_strategy_version_id": draft.compiled_strategy_version_id,
     }

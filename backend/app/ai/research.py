@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai import research_schemas as gates
+from app.ai.confirmation import confirmation_view
 from app.ai.explain import AI_UNCONFIGURED, get_active_providers
 from app.ai.provider import AIRequest, BudgetExceeded, UntrustedSource
 from app.ai.role_contracts import contract_for_role, system_contract
@@ -1181,7 +1182,17 @@ def hypothesis_payload(row: StrategyHypothesisRow | None) -> dict[str, Any] | No
     }
 
 
-def draft_payload(row: StrategyDraftRow | None) -> dict[str, Any] | None:
+def draft_payload(
+    row: StrategyDraftRow | None,
+    *,
+    confirmation: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The draft as the API exposes it, with its human decision attached.
+
+    ``confirmation`` is passed in rather than looked up so this stays a pure
+    projection; ``run_payload`` is the caller that knows the session.
+    """
+
     if row is None:
         return None
     return {
@@ -1199,6 +1210,10 @@ def draft_payload(row: StrategyDraftRow | None) -> dict[str, Any] | None:
         "ai_task_id": row.ai_task_id,
         "content": row.draft_json or {},
         "capability_report": row.capability_report_json or {},
+        #: ``None`` means no human has answered for this draft yet. A draft is a
+        #: proposal until then; the compiler and the activation gate are what
+        #: make anything live.
+        "confirmation": confirmation,
     }
 
 
@@ -1221,7 +1236,10 @@ def run_payload(db: Session, run: AIResearchRun) -> dict[str, Any]:
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
         "hypothesis": hypothesis_payload(hypothesis_row),
-        "draft": draft_payload(draft_row),
+        "draft": draft_payload(
+            draft_row,
+            confirmation=(confirmation_view(db, draft_row.id) if draft_row is not None else None),
+        ),
     }
 
 

@@ -348,18 +348,48 @@ def run_task(
         db.commit()
         raise RuntimeError(f"AI provider call failed: {exc}") from exc
 
-    in_tokens = estimate_tokens(request.system_prompt + request.user_prompt)
-    out_tokens = estimate_tokens(str(validated))
     in_price = float(model.input_cost_per_mtok) if model else 0.0
     out_price = float(model.output_cost_per_mtok) if model else 0.0
+    #: What the provider said it consumed, if anything (see ``ProviderReply``).
+    #: The client that answered holds the reply; a router that reports on its own
+    #: behalf (tests) is honoured too.
+    reply = getattr(live.get(provider_name), "last_reply", None) or getattr(
+        router, "last_reply", None
+    )
+    reported = dict(getattr(reply, "usage", None) or {})
+    priced = in_price > 0 or out_price > 0
+    if priced and not reported:
+        # A priced model must report usage: otherwise the ledger would record a
+        # confident "cost" that is really a character count times a rate card.
+        task.status = "failed"
+        task.error_message = (
+            f"provider {provider.name!r} reported no token usage for {model_name!r}; "
+            "refusing to estimate the cost of a priced model"
+        )[:500]
+        db.commit()
+        raise RuntimeError(task.error_message)
+
+    if reported:
+        in_tokens = int(
+            reported.get("input_tokens")
+            or estimate_tokens(request.system_prompt + request.user_prompt)
+        )
+        out_tokens = int(reported.get("output_tokens") or estimate_tokens(str(validated)))
+    else:
+        in_tokens = estimate_tokens(request.system_prompt + request.user_prompt)
+        out_tokens = estimate_tokens(str(validated))
     cost = (in_tokens / 1_000_000) * in_price + (out_tokens / 1_000_000) * out_price
 
     task.output_json = dict(validated)
     task.output_hash = output_hash(validated)
     task.token_usage_json = {
+        "input_tokens": in_tokens,
+        "output_tokens": out_tokens,
         "input_tokens_estimated": in_tokens,
         "output_tokens_estimated": out_tokens,
-        "estimated": True,
+        #: False only when the provider itself reported the numbers.
+        "estimated": not reported,
+        "reported_by_provider": bool(reported),
     }
     task.cost_usd = Decimal(str(cost))
     task.status = "completed"

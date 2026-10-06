@@ -821,6 +821,33 @@ export interface AIResearchCapabilityReport {
   items: AIResearchCapabilityItem[]
 }
 
+/** 人工确认可以给出的三种结论；后端对未知取值回 422。 */
+export type AIResearchDraftDecision = 'confirmed' | 'rejected' | 'needs_revision'
+
+/**
+ * 一次人工确认的记录（Human Confirmation）。
+ *
+ * 它是「人看过草案并拍板」这件事本身，和 AI 的判断分开存放：`is_human_decision`
+ * 恒为 true，`audit_id` 指向审计流水。它不改写草案，也不生成可执行策略版本。
+ */
+export interface AIResearchDraftConfirmation {
+  decision: string
+  note: string | null
+  decided_by: string
+  decided_at: string
+  audit_id: number
+  is_human_decision: boolean
+}
+
+/** `POST /ai/strategy/drafts/{id}/confirmations` 的 201 响应。 */
+export interface AIResearchDraftConfirmationResult {
+  draft_id: number
+  run_id: number
+  decision: string
+  confirmation: AIResearchDraftConfirmation
+  strategy_version_created: boolean
+}
+
 /** 一行草案：`content` 与 `capability_report` 分开返回。 */
 export interface AIResearchDraft {
   draft_id: number
@@ -835,6 +862,8 @@ export interface AIResearchDraft {
   ai_task_id?: number | null
   content: AIResearchDraftContent
   capability_report: AIResearchCapabilityReport
+  /** 最新一次人工确认；`null` / 缺失表示还没有人拍过板。 */
+  confirmation?: AIResearchDraftConfirmation | null
 }
 
 export interface AIResearchViolation {
@@ -1318,6 +1347,20 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  // 人工确认：把「人看过草案、怎么决定」单独记一笔。不调用 AI，不改写草案，
+  // 也不会生成可执行策略版本（`strategy_version_created` 恒为 false）。
+  confirmStrategyDraft: (
+    draftId: number,
+    decision: AIResearchDraftDecision,
+    note?: string,
+  ) =>
+    request<AIResearchDraftConfirmationResult>(
+      `/ai/strategy/drafts/${draftId}/confirmations`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ decision, note: note?.trim() ? note.trim() : null }),
+      },
+    ),
   auditForEntity: (entityType: string, entityId: string) =>
     request<{ total: number; events: Array<Record<string, unknown>> }>(
       `/audit/logs/entity/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`,

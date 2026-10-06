@@ -86,6 +86,25 @@ def test_an_unknown_path_is_not_a_way_around_the_token(client, monkeypatch) -> N
     assert client.get("/api/v1/strategies").status_code == 401
 
 
+def test_the_human_confirmation_endpoint_is_gated_too(client, monkeypatch) -> None:
+    """v2.4.0's human gate is a write endpoint, so it is a door like any other.
+
+    The middleware decides by path, not by route, so this is really a check that
+    the new endpoint did not get itself carved out of the gate -- a draft review
+    is exactly the kind of write that must not answer an unauthenticated caller.
+    """
+    monkeypatch.setattr(settings, "api_auth_token", TOKEN)
+    url = "/api/v1/ai/strategy/drafts/1/confirmations"
+    body = {"decision": "confirmed"}
+
+    assert client.post(url, json=body).status_code == 401
+    assert client.post(url, json=body, headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+    # Past the gate it reaches the handler, which answers 404 for an unknown draft.
+    allowed = client.post(url, json=body, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert allowed.status_code == 404
+
+
 def test_auth_token_is_validated() -> None:
     with pytest.raises(ValidationError):
         Settings(api_auth_token="short")

@@ -331,11 +331,12 @@ execution: ExecutionSpec         # fill_model, entry_order_type, ..., sizing
 
 **Compiler 必须显式选边**：建议跟随 importer（严格）。编译器产出的 DSL 只要有 `validate_strategy` 失败项，就**拒绝并返回 422**，绝不落 invalid 版本（理由见 §7.3：invalid 版本仍可能被激活并进入信号路径）。
 
-### 7.3 激活路径（P0 缺口）
+### 7.3 激活路径（P0 缺口 —— 已由 v2.3.0 / ADR-171 收口）
 
 - `PUT /strategy-versions/{version_id}/activate`（`backend/app/api/routers/strategy_versions.py:81-103`）翻转 `is_current`（`:88-92`）、写审计 `strategy_version_activated`（`:93-100`），**完全不查 `validation_status`**；而模块 docstring（`:1-5`）声称「Versions themselves are immutable; what changes here is only *which* version is the active one」。
 - 信号路径按 `is_current` 选版本（`backend/app/simulation/signal_engine.py:352,383`）+ `load_spec`（`:144`），**无 validity 过滤**；只有回测端点有 `validation_status != "valid" → 422`（`backend/app/api/routers/backtests.py:56-60`）。
 - 结论：`contracts/SYSTEM.md:40-41`「Nothing else reaches the backtest engine」对 `POST /backtests` 成立，**对信号路径不成立**。编译器若留下 invalid 版本，即使回测端点拒绝，它仍可能被激活进扫描；扫描期异常会被 `signal_engine.py:348-367` 吞成「无信号」（静默的伪证据）。
+- **后续状态（v2.3.0，本节三处已全部收口）**：① `backend/app/api/routers/strategy_versions.py` 在翻转 `is_current` 之前拒绝非 `valid` 版本（**422 + 既有** `{"detail": "strategy version is '<status>', not 'valid'"}` 形状，并写 `strategy_version_activation_rejected` 审计）；② `backend/app/data/strategy_service.py` 的 `create_strategy_version` 在 `make_current` 为真且状态不在 `ACTIVATABLE_VALIDATION_STATUSES` 时抛 `ValidationStatusNotActivatable`（判定在 `db.add` 之前 ⇒ 零写入）；③ `backend/app/simulation/signal_engine.py` 的 `scan_all` 与 `scan_and_persist` 两条版本查询同时要求 `is_current AND validation_status = 'valid'`（选择条件，不再依赖异常捕获）。决策记录见 `docs/17_DECISIONS.md` 的 ADR-171，落地状态见 `docs/19` §5.5，实机验收见 `docs/15_ROADMAP_ACCEPTANCE.md` 的「v2.3.0 的读数」段；本节其余内容保持写作当时（Step 2B 之前）的只读快照不变。
 
 ### 7.4 版本分配与幂等
 

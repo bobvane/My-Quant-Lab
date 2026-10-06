@@ -62,15 +62,12 @@ write_version() {
     printf '%s\n' "$1" > "$VERSION_FILE"
 }
 
-sync_env_example() {
-    # Keep .env.example's documented MQL_VERSION aligned with the release.
-    # The tag keeps the "v" prefix; file contents must not (PEP 440 rejects it).
-    local version="$1" version="${1#v}"
-    if [ -f "${REPO_ROOT}/.env.example" ]; then
-        sed -i.bak "s/^MQL_VERSION=.*/MQL_VERSION=${version}/" "${REPO_ROOT}/.env.example" \
-            && rm -f "${REPO_ROOT}/.env.example.bak"
-    fi
-}
+# `.env.example` is deliberately NOT mirrored here (ADR-172). It is the deployment
+# template a user copies, and its `MQL_VERSION` stays `latest` on purpose: a file copied
+# straight out of the repo should follow the newest release instead of pinning whatever
+# version happened to be current when it was written. An operator who wants to freeze a
+# version edits their own `.env` (README, "锁定版本（可选）"). The product version mirrors
+# are the five files rewritten by sync_version_references() below.
 
 sync_version_references() {
     # version.txt is the single source of truth. Mirror the version WITHOUT the
@@ -116,7 +113,6 @@ cmd_set() {
         exit 2
     fi
     write_version "$version"
-    sync_env_example "$version"
     sync_version_references "$version"
     echo "version set to $version"
 }
@@ -126,10 +122,11 @@ cmd_bump() {
     local new_version
     new_version="$(bump_version)"
     write_version "$new_version"
-    sync_env_example "$new_version"
     sync_version_references "$new_version"
 
-    git -C "$REPO_ROOT" add "$VERSION_FILE" .env.example backend/app/__init__.py \
+    # `.env.example` is not part of a release commit: the template keeps its permanent
+    # `latest` default and never moves with the version (ADR-172).
+    git -C "$REPO_ROOT" add "$VERSION_FILE" backend/app/__init__.py \
         backend/pyproject.toml frontend/package.json frontend/package-lock.json 2>/dev/null || true
     git -C "$REPO_ROOT" commit -m "build: release ${new_version}"
 
@@ -155,8 +152,8 @@ docker compose up -d
 
 - Web UI: http://<nas-ip>:8081
 - API docs: http://<nas-ip>:8081/docs
-- Market data defaults to `synthetic` (deterministic offline data). Set
-  `MARKET_DATA_PROVIDER=yahoo_finance` for real quotes.
+- Market data defaults to `yahoo_finance` (real quotes; no key needed). Set
+  `MARKET_DATA_PROVIDER=synthetic` for deterministic offline data.
 - AI is optional; quantitative features work with AI disabled.
 - No broker integration: this project never places orders.
 EOF

@@ -8,9 +8,14 @@ the helper accepts one anyway (`set` only checked the shape of the number, while
 these guards pin the scheme down (ADR-078/ADR-079).
 
 The second half matters for a different reason: `version.txt` is the single
-source of truth, and the six files that mirror it can drift. The lock file once
-sat at 0.9.8 while the application had already shipped 1.0.0, so the invariant is
-asserted here rather than trusted.
+source of truth, and the five product files that mirror it can drift. The lock
+file once sat at 0.9.8 while the application had already shipped 1.0.0, so the
+invariant is asserted here rather than trusted.
+
+`.env.example` is deliberately NOT one of those mirrors (ADR-172): it is the
+deployment template a user copies, so its `MQL_VERSION` stays `latest` and
+`version.sh` must never rewrite it or stage it in a release commit. Pinning a
+concrete version is an operator's choice, made in their own `.env`.
 """
 
 from __future__ import annotations
@@ -110,7 +115,12 @@ def test_every_version_reference_agrees_with_version_txt() -> None:
 
     plain = _released_version().removeprefix("v")
 
-    assert re.search(rf"^MQL_VERSION={re.escape(plain)}$", _text(ENV_EXAMPLE), re.MULTILINE)
+    # `.env.example` is the deployment template, not a product version mirror
+    # (ADR-172): it ships `latest` so a file copied straight out of the repo follows
+    # the newest release, and `version.sh` must not pin it to the release it writes.
+    assert re.search(r"^MQL_VERSION=latest$", _text(ENV_EXAMPLE), re.MULTILINE), (
+        ".env.example must keep the permanent `latest` default an operator copies"
+    )
     assert f'__version__ = "{plain}"' in _text(INIT)
     assert re.search(rf'^version = "{re.escape(plain)}"$', _text(PYPROJECT), re.MULTILINE)
 
@@ -119,6 +129,25 @@ def test_every_version_reference_agrees_with_version_txt() -> None:
     lock = json.loads(_text(PACKAGE_LOCK))
     assert lock["version"] == plain, "the lock file top level drifted"
     assert lock["packages"][""]["version"] == plain, "the lock file root entry drifted"
+
+
+def test_the_deployment_template_is_not_a_product_version_mirror() -> None:
+    """`.env.example` ships `latest` on purpose; no release may rewrite it (ADR-172)."""
+
+    assert re.search(r"^MQL_VERSION=latest$", _text(ENV_EXAMPLE), re.MULTILINE), (
+        ".env.example must document the permanent `latest` default an operator copies"
+    )
+
+    script = _text(VERSION_SCRIPT)
+    assert "sync_env_example" not in script, (
+        "version.sh rewrites the deployment template again; it is not a version mirror"
+    )
+    staged = script[
+        script.index('git -C "$REPO_ROOT" add') : script.index('git -C "$REPO_ROOT" commit')
+    ]
+    assert ".env.example" not in staged, (
+        "the release commit stages the deployment template; it must stay untouched"
+    )
 
 
 @needs_bash
@@ -135,14 +164,14 @@ def test_an_uncarried_version_is_refused_and_changes_nothing() -> None:
 
 @needs_bash
 def test_a_carried_version_is_accepted_and_synced_everywhere(tmp_path: pathlib.Path) -> None:
-    """The six-place sync, exercised in a throwaway copy of the tree."""
+    """The five-place product sync, plus the template that must NOT move (ADR-172)."""
 
     (tmp_path / "scripts").mkdir()
     shutil.copy(VERSION_SCRIPT, tmp_path / "scripts" / "version.sh")
     (tmp_path / "backend" / "app").mkdir(parents=True)
     (tmp_path / "frontend").mkdir()
     (tmp_path / "version.txt").write_text("v1.5.15\n", encoding="utf-8")
-    (tmp_path / ".env.example").write_text("MQL_VERSION=1.5.15\n", encoding="utf-8")
+    (tmp_path / ".env.example").write_text("MQL_VERSION=latest\n", encoding="utf-8")
     (tmp_path / "backend" / "app" / "__init__.py").write_text(
         '__version__ = "1.5.15"\n', encoding="utf-8"
     )
@@ -170,7 +199,10 @@ def test_a_carried_version_is_accepted_and_synced_everywhere(tmp_path: pathlib.P
     assert result.returncode == 0, result.stdout + result.stderr
 
     assert (tmp_path / "version.txt").read_text(encoding="utf-8").strip() == "v1.6.0"
-    assert "MQL_VERSION=1.6.0" in (tmp_path / ".env.example").read_text(encoding="utf-8")
+    template = (tmp_path / ".env.example").read_text(encoding="utf-8")
+    assert template.strip() == "MQL_VERSION=latest", (
+        "the release rewrote the deployment template; it must keep `latest` (ADR-172)"
+    )
     assert '__version__ = "1.6.0"' in (tmp_path / "backend" / "app" / "__init__.py").read_text(
         encoding="utf-8"
     )

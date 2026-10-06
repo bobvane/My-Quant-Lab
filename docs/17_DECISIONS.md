@@ -104,6 +104,7 @@ API 默认只绑定 `127.0.0.1`，由 web 容器代理 `/api`。
 同步写入 `version.txt`、`backend/pyproject.toml`、`backend/app/__init__.py`、
 `frontend/package.json` 与 `.env.example`。
 > 修订（ADR-079 / ADR-085）：上面 `v0.0.10` 这个示例是旧规则的写法，已废止 —— 第三段**永远**是一位，`v1.6.9` 之后是 `v1.7.0`；`scripts/version.sh set` 会直接拒绝多位的版本号。
+> 修订（ADR-172）：上面这份清单里的 `.env.example` 已退出产品版本镜像 —— 它是用户拷贝的部署模板，`MQL_VERSION` 永久保持 `latest`，`version.sh` 不再改写它、也不再把它纳入版本提交。
 **理由**：版本号来源唯一，避免各处手工修改导致不一致。
 
 ## ADR-018：标签驱动发布到 GHCR
@@ -1936,6 +1937,7 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：规则早就在注释里、进位函数也早就正确，唯一出错的是「入口接不接受一个不合规的版本号」——所以修入口而不是写文档。守卫写成可执行的等式（六处同步 + 进位表 + 拒绝多位），是因为这类漂移发生在人手里而不是代码里：文档里的例子会被照抄，而失败的 `set` 不会被无视。历史 tag 不改写（v1.5.10–v1.5.15 保留原样）；编号从 v1.5.15 直接跳到 v1.6.0，回到收敛路径。
 - 影响与兼容：`version.sh set` 现在拒绝多位第三段（包括本地临时用法），`bump` 不变（本来就正确）；已发布的 tag 与 Release 不受影响；下一个版本号是 v1.6.0。
 - 测试：与 ADR-078 同一次运行（22 passed / 1 failed → `set v1.6.0` 之后全绿）；红证据里 `version.sh set v1.5.16` 在旧脚本上 rc 0 并打印 `version set to v1.5.16`，新脚本 rc 2 并说明进位规则。
+> 修订（ADR-172）：本 ADR 描述的「六处版本引用」现在是**五处产品版本镜像**（`backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/package-lock.json` 两处）—— `.env.example` 的 `MQL_VERSION` 已永久固定为 `latest`、不再是镜像，守卫也随之收紧（见 ADR-172）。
 
 ## ADR-080：等一个永远不会答应的数据库，不能看起来像在等一个慢的（`docker/entrypoint.sh` 的等待循环必须保留并判定理由）
 
@@ -2210,6 +2212,8 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：默认值写两份就会产生两个答案，而答案是哪一个取决于谁最后说话；探针写在镜像里、compose 又覆盖它，等于让「哪个探针在跑」变成需要人工核对的事实。这是 ADR-091「同一事实不能有两份答案」在部署配置上的实例：可以派生的就不要重复声明，必须声明的就让它只有一处。
 - 影响与兼容：`docker run` 不带 `--health-cmd` 的镜像不再自带探针（Dockerfile 注释里写明）；compose 的行为除探针归属外没有变化；`MARKET_DATA_PROVIDER` 的默认值从 `yahoo_finance` 改为 `synthetic`，与 `.env.example`/compose/测试夹具一致 —— 本地与 CI 都不会因此去请求外网。
 - 测试：`backend/tests/test_deploy_defaults.py` 的 `test_every_default_compose_writes_is_the_one_the_example_documents`、`test_every_required_variable_is_documented`、`test_the_code_defaults_are_the_ones_the_example_documents`、`test_every_service_declares_the_probe_that_runs`、`test_the_proxy_runs_as_the_user_both_files_name`。红证据见 `docs/15` 的 v1.6.8 行。
+> 修订（ADR-172）：上面第 4 条与「影响与兼容」中关于例外与默认值的两句话已不再成立 —— `.env.example` 发的是给运维用的真实 provider（`MARKET_DATA_PROVIDER=yahoo_finance`），compose 自己的兜底仍是 `synthetic`，所以这条守卫里**唯一**的例外是 `MARKET_DATA_PROVIDER`（`MQL_VERSION` 不再是例外：模板与 compose 都写 `latest`）；代码默认值仍是 `synthetic`（裸 `Settings()` 不触网）。CI 与本地栈在壳层显式覆盖 `MARKET_DATA_PROVIDER=synthetic`，因此它们依然不会去请求外网（ADR-077：壳层值胜过 env 文件）。
+
 ## ADR-101：引用别人的代码要钉住那一次提交（可变标签不是版本）
 
 - 背景：`.github/workflows/` 里 24 处 `uses:` 全部指向可变主标签（`ci.yml:37` 的 `actions/checkout@v7`、`nightly.yml` 的 8 处、`release.yml` 的 10 处，共 9 个不同的 action），其中 `docker/login-action`、`docker/setup-buildx-action`、`docker/build-push-action`、`docker/metadata-action`、`softprops/action-gh-release` 都是第三方代码；而 `release.yml` 与 `nightly.yml` 的作业持有 `packages: write`（能推 ghcr 镜像），release 作业还用一个能创建 Release 的 token。标签是别人可以随时重新指向的指针：某个 action 仓库被接管、或维护者改一次 tag，下一次推到 `main` 就跑上了不同的代码，而这次提交里没有任何一行发生变化。
@@ -3160,6 +3164,21 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 影响与兼容：本切片（Step 1 起）只改 `backend/app/data/strategy_service.py`、`backend/app/api/routers/strategy_versions.py`、`backend/app/api/routers/strategies.py`、`backend/app/simulation/signal_engine.py`、`backend/app/api/routers/ai.py`（仅补一个 `make_current=False` 关键字实参）、`docs/12_API_SPEC.md` 与相关测试；**不新增迁移、不改 DB 结构、不改 DSL/`SCHEMA_VERSION`/验证器/引擎计算逻辑/前端/AI 契约与预算/Docker/CI**。既有行为变更**恰好一处**：编译产出的版本不再自动成为当前版本（`backend/tests/test_compiler_api.py:425` 的 `[False, True]` 必须随之改为 `[False, False]`，并在该处注释里说明这是 ADR-171 的有意变更）；生产上编译器从未成功编译过任何草案（0 行 `compiled_strategy_version_id`），故真实影响为零。
 
 - 测试（Step 0 先写、此刻应为**红**；详单见 `docs/19` §5.5）：`backend/tests/test_activation_validity.py` —— ①`ACTIVATABLE_VALIDATION_STATUSES` 等于 `("valid",)`；②invalid 版本手动激活 → 422 + 冻结句 + 原当前版本不变；③直接插入的 `pending` 版本手动激活 → 422；④valid 版本激活 → 200（兼容，绿）；⑤被拒绝的激活写 `strategy_version_activation_rejected`（payload 逐键断言）；⑥省略 `make_current` 的 invalid 创建 → 422 + 冻结句 + **零写入**且原当前版本不变；⑦`make_current=false` 的 invalid 创建 → 201 且 `is_current=false`（兼容，绿）；⑧扫描器跳过 `is_current=true` 但 `validation_status="invalid"` 的版本，并以同场景的 valid 版本作正向对照。另在 `backend/tests/test_compiler_api.py` 新增 `test_a_compiled_version_does_not_become_current_by_itself`（编译 → `is_current is False`，随后显式激活 → 200），补上第 8 条。**后续状态（v2.3.0 Step 1，已发布）**：这些守卫全部为绿（`backend/tests/test_activation_validity.py` 8 passed、`backend/tests/test_compiler_api.py` 17 passed，全仓 1371 passed / 4 skipped），v2.3.0 已在 NAS 上只读实机验收通过（Overall READY、Critical Findings = 0，读数见 `docs/15_ROADMAP_ACCEPTANCE.md` 的「v2.3.0 的读数」段）。
+
+## ADR-172：`.env.example` 是部署模板而不是产品版本镜像；CI 冒烟自己钉 `synthetic`
+
+- 背景：同一个事实被两个机制同时拥有，两处都咬到了人。
+  1. `.env.example` 既是对外交付的部署模板，又被 `scripts/version.sh` 当作第六个版本镜像：`sync_env_example()` 在每次 `set`/`bump` 里 `sed -i.bak "s/^MQL_VERSION=.*/MQL_VERSION=${version}/"` 覆写它，`cmd_bump` 再把它 `git add` 进版本提交（原 `scripts/version.sh:65-73`、`:119`、`:129`、`:132`）。结果是模板里那句「默认 `latest`，想锁定版本改成具体 tag」的注释在每次发布后都与内容相反：运维 `cp .env.example .env` 拿到的是**发布当刻**的版本，而不是最新发布版——注释承诺的行为只存在于注释里。
+  2. 同一份模板又被 CI 的 compose 冒烟当作输入：`compose` job 全程用 `--env-file .env.example` 起栈（`.github/workflows/ci.yml`），于是「模板面向运维的默认值」与「冒烟必须离线确定性」被压成同一个旋钮。`.env.example` 一旦发 `MARKET_DATA_PROVIDER=yahoo_finance`（真实行情，拷贝即用），`Smoke 1/5` 就会去 Yahoo 同步演示代码 `DEMO-AAPL` —— 该代码在 Yahoo 上不存在（ADR-080 已记录这条事实），同步 0 根 K 线，`assert d['inserted']>0` 失败。
+- 决策：
+  1. `.env.example` **不属于产品版本镜像**。产品版本镜像是 `sync_version_references()` 重写的那五处：`version.txt`（唯一事实来源）与 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/package-lock.json`（顶级与 `packages.""` 各一处）。
+  2. `scripts/version.sh` 删除 `sync_env_example()`；`set` 与 `bump` 都不再改写 `.env.example`，`cmd_bump` 的 `git add` 清单也不再包含它 —— 模板的 `MQL_VERSION=latest` 是**永久值**，一个版本提交不会因为升级版本号而改到这一行。
+  3. 想锁定版本的消费者在自己的 `.env` 里写 `MQL_VERSION=vX.Y.Z`（README「锁定版本（可选）」）；模板永远发 `latest`。
+  4. `.env.example` 面向真实部署发 `MARKET_DATA_PROVIDER=yahoo_finance`（拷贝即用、无需 Key）；`docker-compose.yml:45` 自己的兜底仍是 `synthetic`，所以没有 `.env` 的裸 `docker compose up` 保持离线，`backend/app/core/config.py:140` 的代码默认值也仍是 `synthetic`。
+  5. **测试自己在壳层说清楚，而不是把模板改回去**：CI 的 `compose` job 增加 job 级 `env: MARKET_DATA_PROVIDER: synthetic`；壳层/作业级值胜过 `--env-file`（ADR-077）。`backend` job 的测试步骤、`scripts/Invoke-Tests.ps1:35` 与 `scripts/Start-LocalStack.ps1:26` 本来就是这么写的；release 与 nightly 的冒烟只跑 `scripts/verify-stack.sh`（纯健康检查、不碰行情），行为不变。
+- 理由：①模板是给人读、给人拷贝的文件，它的价值就是「拷出来就能用」；把发布流水线的内部状态写进去，等于每次发布都悄悄改一次用户会照抄的默认值，而解释它的注释留在原地讲一个已经不存在的行为（ADR-091：同一事实不能有两份答案）。②模板里的版本号语义是「跟随最新发布」而不是「钉住这次发布」，想固定版本的人有明确写法（自己的 `.env`）。③测试的确定性不该靠篡改交付物获得：把 `synthetic` 放进测试自己的环境变量，冒烟照样离线确定，模板也照样面向真实部署 —— 两种意图各自只有一处声明。
+- 影响与兼容：`version.sh set/bump` 少写一个文件（`cmd_notes()` 里「行情默认 `synthetic`」的句子也随本次改为「默认 `yahoo_finance`，想离线用 `synthetic`」，因为它在模板改默认值之后已经与事实相反）；守卫同步收紧：`backend/tests/test_release_version_scheme.py` 的「六处」叙述改为「五处产品镜像 + 模板必须保持 `latest`」，`backend/tests/test_deploy_defaults.py` 的 `COMPOSE_ONLY` 从 `{"MQL_VERSION", "MARKET_DATA_PROVIDER"}` 收紧为只有 `MARKET_DATA_PROVIDER`（模板的 `latest` 与 compose 的 `${MQL_VERSION:-latest}` 现在一致，豁免不再需要）；文档里「六处版本镜像」的说法按修订注记更正（ADR-017、ADR-079、ADR-100 的修订行与 `docs/15` 的 v2.2.0「版本策略」行），而 v1.9.2–v1.9.9 的历史读数保留原样 —— 它们记的是当时的事实。**不新增迁移，不改业务代码、API、DB、Compiler、Activation Gate、Scanner、Backtest。**
+- 测试：`backend/tests/test_release_version_scheme.py` 新增 `test_the_deployment_template_is_not_a_product_version_mirror`（模板含 `^MQL_VERSION=latest$`；`version.sh` 里不再出现 `sync_env_example`；版本提交的 `git add` 段不含 `.env.example`），`test_a_carried_version_is_accepted_and_synced_everywhere` 在临时树里跑完 `set v1.6.0` 后断言模板仍是 `MQL_VERSION=latest`；`backend/tests/test_script_guard_integrity.py` 新增 `test_the_compose_smoke_test_pins_the_deterministic_provider`（`jobs.compose.env.MARKET_DATA_PROVIDER == "synthetic"`，且该 job 确实用 `--env-file .env.example` 起栈，否则这条守卫无意义）。
 
 
 

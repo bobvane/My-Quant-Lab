@@ -122,6 +122,13 @@ jobs:
     # place the real startup path is exercised, so it must never be skipped.
     needs: [backend, frontend]
     if: ${{ !cancelled() }}
+    # This job boots the stack from `--env-file .env.example`, and that template ships
+    # the real provider (`MARKET_DATA_PROVIDER=yahoo_finance`) because it is the file an
+    # operator copies. A shell value wins over the env file (ADR-077), so the smoke test
+    # pins the deterministic provider for itself: `DEMO-AAPL` has no Yahoo series, which
+    # is why the stock template would sync 0 bars and fail `Smoke 1/5` (ADR-172).
+    env:
+      MARKET_DATA_PROVIDER: synthetic
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 

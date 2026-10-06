@@ -47,21 +47,24 @@ DOCUMENTED = re.compile(r"^(#?)\s*([A-Z][A-Z0-9_]*)=(\S*)", re.MULTILINE)
 COMPOSE_DEFAULT = re.compile(r"\$\{([A-Z][A-Z0-9_]*):-([^}]*)\}")
 COMPOSE_REQUIRED = re.compile(r"\$\{([A-Z][A-Z0-9_]*):\?([^}]*)\}")
 
-# The example file pins the release it ships (scripts/version.sh rewrites it), so
-# it deliberately disagrees with compose's fallback: `latest` follows the project
-# when no .env exists at all.
-COMPOSE_ONLY = {"MQL_VERSION"}
+# Defaults where the example and compose deliberately disagree. `.env.example` ships the
+# real provider so a copied file works out of the box, while compose's own fallback stays
+# offline so a bare `docker compose up` never reaches out; CI and the local stack override
+# it back to `synthetic` in the shell, where a shell value wins (ADR-077, ADR-172).
+# `MQL_VERSION` is no longer an exception: the template is not a product version mirror and
+# ships the very `latest` compose falls back to (ADR-172).
+COMPOSE_ONLY = {"MARKET_DATA_PROVIDER"}
 
 # Defaults whose two layers mean different things on purpose.
 CODE_EXCEPTIONS = {
     "APP_ENVIRONMENT": "a bare Settings() is for local work; the deployment ships production",
     "DOCKER_PROXY_URL": "None means 'no proxy configured'; the example documents the bundled one",
+    "MARKET_DATA_PROVIDER": "a bare Settings() stays offline; the example ships the real provider",
     "SECRET_KEY": "both values are published placeholders production refuses, by name",
 }
 
 # Deployment knobs whose code default must be the documented one.
 KNOBS = {
-    "MARKET_DATA_PROVIDER": "market_data_provider",
     "RATE_LIMIT_PER_MINUTE": "rate_limit_per_minute",
     "AI_DAILY_BUDGET_USD": "ai_daily_budget_usd",
     "AI_TASK_BUDGET_USD": "ai_task_budget_usd",

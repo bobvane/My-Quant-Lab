@@ -109,7 +109,7 @@ MQL_VERSION=v0.9.0
 
 首次进入「行情与策略」页面：
 
-1. 点击 **同步日线数据**（默认 `synthetic` 行情源，无需 API Key，即可跑通全流程）
+1. 点击 **同步日线数据**（`.env.example` 默认 `MARKET_DATA_PROVIDER=yahoo_finance`，真实行情、无需 API Key；想用演示代码 `DEMO-AAPL` 离线跑通全流程，就把 `.env` 改成 `synthetic`）
 2. 编辑左侧 DSL → **校验 DSL** → **创建策略与版本**
 3. 回到「研究仪表盘」→ **立即扫描** 查看信号
 4. 到「回测实验室」运行回测并查看权益曲线
@@ -129,8 +129,11 @@ docker compose logs --tail 80 quantlab-api
 | `container quantlab-api is unhealthy` | 启动失败 | `docker compose logs --tail 100 quantlab-api`，日志会直接给出原因 |
 | 拉取镜像缓慢或超时 | 和 GitHub 之间的网络问题 | 多试几次，或换个时间段；也可以在有源码的机器上用 `docker-compose.build.yml` 本地构建 |
 
-> **想用真实行情**：`.env` 中设置 `MARKET_DATA_PROVIDER=yahoo_finance`
+> **默认已是真实行情**：`.env.example` 发的是 `MARKET_DATA_PROVIDER=yahoo_finance`
 > （美股 / ETF / 加密货币，如 AAPL、SPY、BTC-USD；无需密钥，镜像已内置 yfinance）。
+>
+> **想改用离线演示数据**：`.env` 中设置 `MARKET_DATA_PROVIDER=synthetic`（确定性的内置
+> 数据，只服务 `DEMO-AAPL` / `DEMO-BTC`，完全不触网；CI 与本地测试栈就是这么跑的）。
 >
 > 也可以在单次同步时用 `provider` 参数临时指定，例如
 > `POST /api/v1/market-data/sync` 请求体带 `{"symbol": "AAPL", "provider": "yahoo_finance"}`。

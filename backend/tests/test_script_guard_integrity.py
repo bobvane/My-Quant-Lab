@@ -112,6 +112,28 @@ def test_the_release_reads_the_version_file_it_ships() -> None:
     )
 
 
+def test_the_compose_smoke_test_pins_the_deterministic_provider() -> None:
+    """`.env.example` ships the real provider, so the smoke job has to say `synthetic`.
+
+    The `compose` job boots the stack with `--env-file .env.example`, and `Smoke 1/5`
+    asserts that syncing `DEMO-AAPL` inserted bars. Yahoo has no such symbol, so the
+    stock template would sync 0 bars and fail the step; a job/shell value wins over the
+    env file (ADR-077), which is why this job states the provider itself (ADR-172).
+    """
+
+    workflow = yaml.safe_load(_text(CI))
+    job = (workflow.get("jobs") or {})["compose"]
+    assert (job.get("env") or {}).get("MARKET_DATA_PROVIDER") == "synthetic", (
+        "the compose smoke job inherits .env.example's yahoo_finance; Smoke 1/5 syncs DEMO-AAPL"
+    )
+    boots = [
+        step
+        for step in job.get("steps") or []
+        if "--env-file .env.example" in str(step.get("run", ""))
+    ]
+    assert boots, "the compose job no longer boots from .env.example; this guard is moot"
+
+
 def test_the_local_stack_script_can_fail() -> None:
     """The web half printed "vite did not come up" and still exited 0 (ADR-073 shape)."""
 

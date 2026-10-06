@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.models import AIModel, AIProvider
@@ -24,12 +24,15 @@ from app.infrastructure.secrets import decrypt_secret, encrypt_secret, mask_secr
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ModelConfigError",
     "ProviderConfigError",
     "create_provider",
     "delete_provider",
     "list_providers",
+    "serialize_model",
     "serialize_provider",
     "test_connection",
+    "update_model",
     "update_provider",
 ]
 
@@ -40,6 +43,16 @@ _MAX_DETAIL_CHARS = 300
 
 class ProviderConfigError(ValueError):
     """Raised when a provider cannot be created/updated/deleted as requested."""
+
+
+class ModelConfigError(ProviderConfigError):
+    """Raised when a model cannot be enabled/disabled as requested (HTTP 409).
+
+    The only such rule today is the "last routable model" guard: disabling the
+    provider's ``default_model`` while it is the last active model would leave an
+    enabled provider with nothing to route to, so the request is refused instead
+    of silently changing ``default_model``.
+    """
 
 
 def _validate_base_url(base_url: str) -> str:
@@ -165,6 +178,28 @@ def serialize_provider(db: Session, provider: AIProvider) -> dict[str, Any]:
     }
 
 
+def serialize_model(db: Session, model: AIModel) -> dict[str, Any]:
+    """Public shape of one model row.
+
+    ``provider_is_active`` rides along because the two switches are independent:
+    without it the UI cannot tell a routable model from one whose provider is
+    disabled, which is exactly the confusion ADR-173 closes.
+    """
+
+    provider = db.get(AIProvider, model.provider_id)
+    return {
+        "id": model.id,
+        "provider_id": model.provider_id,
+        "provider": provider.name if provider is not None else None,
+        "provider_is_active": bool(provider.is_active) if provider is not None else False,
+        "model_name": model.model_name,
+        "capability_tier": model.capability_tier,
+        "input_cost_per_mtok": float(model.input_cost_per_mtok or 0),
+        "output_cost_per_mtok": float(model.output_cost_per_mtok or 0),
+        "is_active": bool(model.is_active),
+    }
+
+
 def list_providers(db: Session) -> list[dict[str, Any]]:
     rows = db.scalars(select(AIProvider).order_by(AIProvider.id)).all()
     return [serialize_provider(db, row) for row in rows]
@@ -271,6 +306,44 @@ def update_provider(
         provider.is_active = is_active
     db.flush()
     return provider
+
+
+def update_model(db: Session, model_id: int, *, is_active: bool) -> AIModel:
+    """Enable or disable one model row (ADR-173).
+
+    Only ``is_active`` changes: no row is deleted, no foreign key moves, and the
+    AI task / usage history that references this model stays readable. The one
+    refusal is the last-routable-model guard — see :class:`ModelConfigError`.
+    """
+
+    model = db.get(AIModel, model_id)
+    if model is None:
+        raise ProviderConfigError(f"model {model_id} not found")
+
+    provider = db.get(AIProvider, model.provider_id)
+    if not is_active and model.is_active and provider is not None:
+        is_default = (provider.default_model or None) == model.model_name
+        if is_default:
+            others = db.scalar(
+                select(func.count())
+                .select_from(AIModel)
+                .where(
+                    AIModel.provider_id == provider.id,
+                    AIModel.id != model.id,
+                    AIModel.is_active.is_(True),
+                )
+            )
+            if not others:
+                raise ModelConfigError(
+                    f"'{model.model_name}' is the only active model of provider "
+                    f"'{provider.name}' and it is that provider's default_model; "
+                    "enable another model and point default_model at it, or "
+                    "deactivate the provider itself"
+                )
+
+    model.is_active = is_active
+    db.flush()
+    return model
 
 
 def delete_provider(db: Session, provider_id: int) -> str:

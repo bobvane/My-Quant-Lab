@@ -3,7 +3,9 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   api,
+  ApiError,
   type AIProviderRecord,
+  type AIStatus,
   type AppSettingsEnvironment,
   type HealthResponse,
   type NotificationConfig,
@@ -202,6 +204,19 @@ const testingNew = ref(false)
 const testResult = ref<ProviderTestResult | null>(null)
 const testingId = ref<number | null>(null)
 const busyId = ref<number | null>(null)
+// provider 表格里那三个按钮的结果显示在表格正下方。这一页顶部的横幅在按钮滚出视野时
+// 等于没有反馈，而「删除被拒绝」恰恰是最需要当场说清楚的一种结果：历史记录必须保留，
+// 所以正确做法是停用而不是删除（ADR-083）。
+const providerError = ref('')
+const providerNotice = ref('')
+// 模型目录那一列「状态 / 操作」的反馈同理：停用模型被拒绝时必须写在模型表旁边，
+// 而不是页面顶部。两层开关（供应商、模型）独立，各自的反馈也各自留痕（ADR-173）。
+const modelError = ref('')
+const modelNotice = ref('')
+const modelBusyId = ref<number | null>(null)
+// 「当前实际路由」只能由后端回答：它要看供应商与模型两层开关叠加后的结果，
+// 前端自己推会出现「目录写着启用、实际没在用」这类误读（ADR-173）。
+const aiRoute = ref<AIStatus | null>(null)
 
 // --- Temporary remote access (ADR-125) ---------------------------------------
 // A Cloudflare Quick Tunnel the operator opens on purpose. The API owns the
@@ -331,6 +346,7 @@ async function load() {
       tunnel,
       systemHealth,
       systemInfo,
+      aiStatusResult,
     ] = await Promise.all([
       api.audit().catch(() => {
         note('审计日志')
@@ -350,10 +366,14 @@ async function load() {
       // instead of holding the rest of the page hostage (ADR-069).
       api.health().catch(() => note('系统信息') ?? null),
       api.systemInfo().catch(() => note('系统信息') ?? null),
+      // 这一行只读 /ai/status，不做任何推断：供应商与模型两层开关叠加后的结果只有
+      // 后端知道（ADR-173）。
+      api.aiStatus().catch(() => note('AI 路由状态') ?? null),
     ])
     health.value = systemHealth
     if (!systemHealth) healthError.value = '健康检查没有响应'
     serverInfo.value = systemInfo
+    aiRoute.value = aiStatusResult ?? null
     if (tunnel) applyTemporaryAccess(tunnel)
     notifyEvents.value = notifyLog.events
     aiPrompts.value = prompts.prompts
@@ -524,6 +544,8 @@ async function testStored(id: number) {
 
 async function toggleActive(row: AIProviderRecord) {
   error.value = ''
+  providerError.value = ''
+  providerNotice.value = ''
   busyId.value = row.id
   try {
     await api.updateAiProvider(row.id, { is_active: !row.is_active })
@@ -535,6 +557,43 @@ async function toggleActive(row: AIProviderRecord) {
   }
 }
 
+// 模型行的「启用 / 停用」。供应商已停用时，模型仍然可以被单独设置——两层开关互不
+// 联动（ADR-173）；状态列会说明它当前为什么不在路由里。
+function modelState(row: Record<string, any>): string {
+  if (!row.provider_is_active) return '供应商已停用'
+  return row.is_active ? '启用' : '停用'
+}
+
+async function toggleModelActive(row: Record<string, any>) {
+  modelError.value = ''
+  modelNotice.value = ''
+  modelBusyId.value = Number(row.id)
+  const id = Number(row.id)
+  const next = !row.is_active
+  try {
+    await api.updateAiModel(id, next)
+    modelNotice.value = `${next ? '已启用' : '已停用'}模型「${row.model_name}」`
+    await load()
+  } catch (e) {
+    // 409 = 这是该供应商最后一个可用模型，而且它就是 default_model。后端拒绝而不是
+    // 偷偷改 default_model（ADR-173），所以这里必须把下一步动作说清楚。
+    modelError.value =
+      e instanceof ApiError && e.status === 409
+        ? `不能停用模型「${row.model_name}」：它是供应商「${row.provider}」当前唯一可用模型。请先启用另一个模型并把默认模型换成它，或者直接停用整个供应商。`
+        : (e as Error).message
+  } finally {
+    modelBusyId.value = null
+  }
+}
+
+const routeSummary = computed(() => {
+  const status = aiRoute.value
+  // null 与「未配置」是两件事：前者是没读到，后者是后端明确回答没有可路由的模型。
+  if (!status) return '未知（状态读取失败）'
+  if (!status.configured) return '未配置'
+  return `${status.provider_name || '—'} / ${status.model || '—'}`
+})
+
 async function remove(row: AIProviderRecord) {
   const ok = window.confirm(
     `确定删除 provider「${row.name}」？它的模型配置会一并删除，且不可恢复；有 AI 调用记录时后端会拒绝，请改为停用。`,
@@ -542,13 +601,20 @@ async function remove(row: AIProviderRecord) {
   if (!ok) return
   error.value = ''
   info.value = ''
+  providerError.value = ''
+  providerNotice.value = ''
   busyId.value = row.id
   try {
     await api.deleteAiProvider(row.id)
-    info.value = `已删除 provider「${row.name}」`
+    providerNotice.value = `已删除 provider「${row.name}」及其模型配置`
     await load()
   } catch (e) {
-    error.value = (e as Error).message
+    // 409 = 这个 provider 或者它名下的模型出现在 AI 任务 / 用量历史里。后端拒绝是设计
+    // 行为（ADR-083），这里必须把「改用停用」说在按钮旁边，而不是让用户以为按钮坏了。
+    providerError.value =
+      e instanceof ApiError && e.status === 409
+        ? `不能删除 provider「${row.name}」：它已经有 AI 调用记录，历史必须保留；请改用「停用」。`
+        : (e as Error).message
   } finally {
     busyId.value = null
   }
@@ -714,6 +780,9 @@ onUnmounted(() => {
         尚未配置 AI provider —— 信号与回测的「AI 解释」按钮会在配置后可用。
       </p>
 
+      <p v-if="providerError" class="error" style="margin-top: 8px">{{ providerError }}</p>
+      <p v-if="providerNotice" class="notice" style="margin-top: 8px">{{ providerNotice }}</p>
+
       <p class="muted" style="margin-top: 8px">
         模型可用 <code>模型名:能力档:输入价:输出价</code> 填写（如
         <code>gpt-4o-mini:cheap:0.15:0.6</code>）；路由按任务能力档 + 成本 + 预算选模型。
@@ -727,6 +796,7 @@ onUnmounted(() => {
     <template v-if="isAdvanced">
     <div class="card" style="margin-top: 14px">
       <h3>AI 模型目录（路由用）</h3>
+      <p class="muted" style="margin-top: 4px">当前实际路由：{{ routeSummary }}</p>
       <table v-if="aiModels.length">
         <thead>
           <tr>
@@ -734,7 +804,8 @@ onUnmounted(() => {
             <th>模型</th>
             <th>能力档</th>
             <th>输入/输出价 (per Mtok)</th>
-            <th>启用</th>
+            <th>状态</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -743,11 +814,25 @@ onUnmounted(() => {
             <td>{{ m.model_name }}</td>
             <td>{{ m.capability_tier }}</td>
             <td class="muted">{{ formatNumber(m.input_cost_per_mtok, 3) }} / {{ formatNumber(m.output_cost_per_mtok, 3) }}</td>
-            <td>{{ m.is_active ? '是' : '否' }}</td>
+            <td>{{ modelState(m) }}</td>
+            <td>
+              <button
+                class="ghost"
+                :disabled="modelBusyId === Number(m.id)"
+                @click="toggleModelActive(m)"
+              >
+                {{ m.is_active ? '停用' : '启用' }}
+              </button>
+            </td>
           </tr>
         </tbody>
       </table>
       <p v-else class="muted">还没有模型条目。</p>
+      <p v-if="modelError" class="error" style="margin-top: 8px">{{ modelError }}</p>
+      <p v-if="modelNotice" class="notice" style="margin-top: 8px">{{ modelNotice }}</p>
+      <p class="muted" style="margin-top: 8px">
+        一个模型要真正参与路由，需要它自己启用、它的供应商也启用，并且供应商的 API Key 可用；停用不会删除模型，历史 AI 任务与用量都保留。
+      </p>
     </div>
 
     <div v-if="aiPrompts.length" class="card" style="margin-top: 14px">

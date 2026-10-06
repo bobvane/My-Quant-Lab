@@ -220,6 +220,52 @@ def delete_ai_provider(provider_id: int, db: Session = Depends(get_db)) -> dict[
     return {"deleted": provider_id, "name": name}
 
 
+@router.put("/ai/models/{model_id}", summary="Enable or disable an AI model")
+def update_ai_model(
+    model_id: int, payload: dict[str, Any], db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """Flip one model's routing switch (ADR-173).
+
+    Disabling is the retirement verb here: the row and every AI task / usage row
+    that references it survive, so history is never traded for cleanliness. The
+    endpoint refuses (409) only when the change would leave an enabled provider
+    with no routable model at all.
+    """
+
+    from app.api.schemas import AIModelUpdate
+    from app.data.ai_provider_service import (
+        ModelConfigError,
+        ProviderConfigError,
+        serialize_model,
+        update_model,
+    )
+
+    try:
+        spec = AIModelUpdate.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        model = update_model(db, model_id, is_active=spec.is_active)
+    except ModelConfigError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="ai_model_updated",
+        entity_type="ai_model",
+        entity_id=str(model.id),
+        action="update",
+        # Never carries a key or a base URL: the flag and the public name only.
+        payload={"model_name": model.model_name, "is_active": bool(model.is_active)},
+    )
+    db.commit()
+    db.refresh(model)
+    return serialize_model(db, model)
+
+
 @router.post("/ai/providers/{provider_id}/test", summary="Test a stored provider")
 def test_stored_provider(provider_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     from app.data.ai_provider_service import ProviderConfigError, test_connection

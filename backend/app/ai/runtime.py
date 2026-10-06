@@ -25,7 +25,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.ai.budget import guard, record_usage, spent_today_usd, spent_today_usd_all
@@ -219,11 +219,22 @@ def _catalogue(
                 )
             )
         if not pmodels:
-            models.append(
-                ModelOption(
-                    provider.name, provider.default_model or "default", "standard", 0.0, 0.0
-                )
+            # Two situations look alike here and must not be treated alike
+            # (ADR-173). If the provider has no model row at all, the default
+            # model is the only name we have ever known, so it stays routable as
+            # a compatibility route. If rows exist but every one of them was
+            # switched off, there is nothing to fall back to: synthesizing the
+            # default model would resurrect a model the operator just disabled,
+            # at price 0 and with no ``ai_models`` row to account against.
+            declared = db.scalar(
+                select(func.count()).select_from(AIModel).where(AIModel.provider_id == provider.id)
             )
+            if not declared:
+                models.append(
+                    ModelOption(
+                        provider.name, provider.default_model or "default", "standard", 0.0, 0.0
+                    )
+                )
     return live, by_name, provider_models, models, budgets
 
 
@@ -247,6 +258,12 @@ def run_task(
         raise RuntimeError("ai_not_configured")
 
     live, by_name, provider_models, models, budgets = _catalogue(db, providers)
+    if not models:
+        # Every enabled provider has model rows and every one of them is switched
+        # off. Refusing here is what stops ``AIRouter.pick`` from inventing a
+        # "default" model: that would call the provider at price 0 and file the
+        # task with ``model_id = NULL``, i.e. a model nobody enabled (ADR-173).
+        raise RuntimeError("ai_no_active_model")
     global_limit = float(settings.ai_daily_budget_usd or 0.0)
     global_spent = spent_today_usd_all(db)
     total_budget = max(0.0, global_limit - global_spent)

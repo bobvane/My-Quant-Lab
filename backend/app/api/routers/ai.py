@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -37,7 +37,7 @@ from app.api.schemas import (
     ResearchRunOut,
 )
 from app.core.db import get_db
-from app.domain.models import AITask
+from app.domain.models import AIModel, AITask
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ai"])
@@ -101,6 +101,28 @@ def ai_status(db: Session = Depends(get_db)) -> AIStatusOut:
             ),
         )
     provider, model, _ = configured
+    if model is None:
+        # The provider is enabled but no model row on it is active. With no rows
+        # at all the default model is our only name and stays routable; with rows
+        # that were all switched off, routing refuses (ADR-173). Asking the same
+        # question here keeps this endpoint from naming a model that ``run_task``
+        # would never call.
+        declared = db.scalar(
+            select(func.count()).select_from(AIModel).where(AIModel.provider_id == provider.id)
+        )
+        if declared:
+            spent, calls = spent_today_usd(db, provider.id)
+            return AIStatusOut(
+                configured=False,
+                provider_name=provider.name,
+                spent_today_usd=spent,
+                tasks_today=calls,
+                note=(
+                    f"Provider '{provider.name}' has no active model: every model row is "
+                    "deactivated, so no AI task can be routed. Enable one in the model "
+                    "catalogue to use explanations again."
+                ),
+            )
     spent, calls = spent_today_usd(db, provider.id)
     budget = float(provider.daily_budget_usd or 0)
     return AIStatusOut(
@@ -311,24 +333,12 @@ def usage_today(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 @router.get("/ai/models", summary="AI models across providers")
 def list_models(db: Session = Depends(get_db)) -> dict[str, Any]:
-    from app.domain.models import AIModel, AIProvider
+    from app.data.ai_provider_service import serialize_model
 
     rows = db.scalars(select(AIModel).order_by(AIModel.id)).all()
-    providers = {p.id: p.name for p in db.scalars(select(AIProvider)).all()}
-    return {
-        "models": [
-            {
-                "id": m.id,
-                "provider": providers.get(m.provider_id),
-                "model_name": m.model_name,
-                "capability_tier": m.capability_tier,
-                "input_cost_per_mtok": float(m.input_cost_per_mtok),
-                "output_cost_per_mtok": float(m.output_cost_per_mtok),
-                "is_active": m.is_active,
-            }
-            for m in rows
-        ]
-    }
+    # One serializer for both the read and the enable/disable write, so the UI
+    # can never see two different shapes for the same row (ADR-173).
+    return {"models": [serialize_model(db, m) for m in rows]}
 
 
 @router.get("/ai/usage", summary="AI usage rows (by date / provider)")

@@ -1321,6 +1321,13 @@ export const api = {
   explainBacktest: (runId: number) =>
     request<ExplainResult>(`/backtests/${runId}/explain`, { method: 'POST' }),
   aiModels: () => request<{ models: Array<Record<string, any>> }>('/ai/models'),
+  // 模型级开关：停用不删除，历史 AI Task / Usage 保留（ADR-173）。409 = 该模型是
+  // 供应商当前唯一可用模型，后端拒绝而不是偷偷改 default_model。
+  updateAiModel: (id: number, isActive: boolean) =>
+    request<Record<string, any>>(`/settings/ai/models/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_active: isActive }),
+    }),
   aiPrompts: () => request<{ prompts: Array<Record<string, any>> }>('/ai/prompts'),
   aiTasksList: (limit = 50) => request<Array<Record<string, any>>>(`/ai/tasks?limit=${limit}`),
   // Read-only audit detail of one AI task: structured output, token usage and

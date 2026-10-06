@@ -637,6 +637,19 @@ class AIModelIn(BaseModel):
     output_cost_per_mtok: float = Field(default=0.0, ge=0)
 
 
+class AIModelUpdate(BaseModel):
+    """Enable or disable one registered model (ADR-173).
+
+    A model is only one of the two switches: it stays unroutable while its
+    provider is disabled, and disabling it never deletes the row, so the AI task
+    and usage history attached to it stays readable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool
+
+
 class AIProviderCreate(BaseModel):
     """Create an AI provider.
 

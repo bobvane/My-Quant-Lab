@@ -427,6 +427,7 @@ Deterministic, evidence-gated promotion/degradation. No AI is involved.
 ## AI Models
 
 `GET /ai/models` [已实现] —— 跨供应商的 AI 模型；按供应商过滤用 `provider_id` query 参数。
+`PUT /settings/ai/models/{model_id}` [已实现] —— 启用/停用一个模型（body `{"is_active": true|false}`；停用不删除任何行，供应商最后一个可路由的 `default_model` 会被 409 拒绝）。
 
 ## AI Tasks
 

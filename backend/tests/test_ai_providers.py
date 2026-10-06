@@ -153,6 +153,68 @@ def test_delete_removes_unused_provider(client) -> None:
     assert client.get("/api/v1/settings/ai/providers").json()["providers"] == []
 
 
+def test_delete_takes_the_default_model_row_with_it(client, db_session) -> None:
+    """The ``default_model`` is not a referrer: it is a row this delete owns.
+
+    Creating a provider auto-registers its default model (`create_provider`), so
+    the model row is the provider's own child -- the cascade is the intended
+    route for a model that no call ever used.
+    """
+    from sqlalchemy import select
+
+    from app.domain.models import AIModel
+
+    created = client.post("/api/v1/settings/ai/providers", json=_create_payload()).json()
+    provider_id = created["id"]
+    assert db_session.scalar(select(AIModel).where(AIModel.provider_id == provider_id)) is not None
+
+    assert client.delete(f"/api/v1/settings/ai/providers/{provider_id}").status_code == 200
+
+    assert db_session.scalar(select(AIModel).where(AIModel.provider_id == provider_id)) is None
+
+
+def test_a_deactivated_provider_without_history_still_deletes(client) -> None:
+    """Deactivating is not a lock: it changes nothing about whether a delete is allowed."""
+    created = client.post("/api/v1/settings/ai/providers", json=_create_payload()).json()
+    provider_id = created["id"]
+    off = client.put(f"/api/v1/settings/ai/providers/{provider_id}", json={"is_active": False})
+    assert off.status_code == 200 and off.json()["is_active"] is False
+
+    assert client.delete(f"/api/v1/settings/ai/providers/{provider_id}").status_code == 200
+    assert client.get("/api/v1/settings/ai/providers").json()["providers"] == []
+
+
+def test_a_refused_delete_keeps_the_provider_model_and_history(client, db_session) -> None:
+    """The 409 must be a refusal, not a partial delete that dropped the audit trail."""
+    from sqlalchemy import func, select
+
+    from app.domain.models import AIModel, AITask
+
+    created = client.post("/api/v1/settings/ai/providers", json=_create_payload()).json()
+    provider_id = created["id"]
+    db_session.add(
+        AITask(
+            task_type="signal_explanation",
+            provider_id=provider_id,
+            prompt_name="signal_explain",
+            prompt_version="1.0.0",
+            input_hash="h" * 64,
+            status="completed",
+        )
+    )
+    db_session.commit()
+
+    assert client.delete(f"/api/v1/settings/ai/providers/{provider_id}").status_code == 409
+
+    listed = client.get("/api/v1/settings/ai/providers").json()["providers"]
+    assert [p["id"] for p in listed] == [provider_id]
+    assert db_session.scalar(select(AIModel).where(AIModel.provider_id == provider_id)) is not None
+    tasks = db_session.scalar(
+        select(func.count()).select_from(AITask).where(AITask.provider_id == provider_id)
+    )
+    assert tasks == 1
+
+
 def test_audit_records_provider_changes_without_secrets(client) -> None:
     client.post("/api/v1/settings/ai/providers", json=_create_payload())
     audit = client.get("/api/v1/audit/logs").json()

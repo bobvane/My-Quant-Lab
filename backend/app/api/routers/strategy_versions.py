@@ -15,7 +15,11 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import StrategyVersionOut
 from app.core.db import get_db
-from app.data.strategy_service import record_audit
+from app.data.strategy_service import (
+    ACTIVATABLE_VALIDATION_STATUSES,
+    activation_refusal,
+    record_audit,
+)
 from app.domain.models import StrategyParameter, StrategyVersion
 
 logger = logging.getLogger(__name__)
@@ -85,6 +89,26 @@ def activate_version(version_id: int, db: Session = Depends(get_db)) -> Strategy
     row = db.get(StrategyVersion, version_id)
     if row is None:
         raise HTTPException(status_code=404, detail="strategy version not found")
+    if row.validation_status not in ACTIVATABLE_VALIDATION_STATUSES:
+        # Activation is what puts a rule set on the signal path, so a version the
+        # validator did not mark `valid` may not take it (ADR-171). The refusal is
+        # itself auditable: "someone tried to activate an unvalidated version" is a
+        # fact worth keeping, and nothing else is written.
+        record_audit(
+            db,
+            event_type="strategy_version_activation_rejected",
+            entity_type="strategy_version",
+            entity_id=str(row.id),
+            action="reject",
+            payload={
+                "strategy_id": row.strategy_id,
+                "version": row.version,
+                "validation_status": row.validation_status,
+                "reason": "validation_status_not_valid",
+            },
+        )
+        db.commit()
+        raise HTTPException(status_code=422, detail=activation_refusal(row.validation_status))
     db.query(StrategyVersion).filter(
         StrategyVersion.strategy_id == row.strategy_id,
         StrategyVersion.id != row.id,

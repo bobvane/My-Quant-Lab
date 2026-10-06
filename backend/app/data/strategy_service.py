@@ -21,6 +21,9 @@ from app.strategies.validator import validate_strategy
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ACTIVATABLE_VALIDATION_STATUSES",
+    "ValidationStatusNotActivatable",
+    "activation_refusal",
     "create_strategy_version",
     "immutable_hash",
     "load_spec",
@@ -36,6 +39,32 @@ __all__ = [
 # read as three numbers is still a legal version (reviewers use `v2-beta`), it
 # just has to be named by the caller instead of guessed (ADR-061).
 _VERSION_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$")
+
+# The one predicate the activation gate consults (ADR-171). `is_current` is the role
+# the signal scanner consumes, so a version may only take it after static validation
+# said `valid`. Every write path -- activation, `make_current` on create, the scanner's
+# own selection -- reads this tuple instead of re-spelling `== "valid"`, so there is
+# exactly one place to change if the rule ever changes.
+ACTIVATABLE_VALIDATION_STATUSES: tuple[str, ...] = ("valid",)
+
+
+class ValidationStatusNotActivatable(ValueError):
+    """A write path tried to make a version current that the gate forbids.
+
+    Subclasses ``ValueError`` on purpose: every caller that already maps a rejected
+    write to a 4xx keeps working without a new branch (the API routers answer 422 with
+    the message verbatim).
+    """
+
+
+def activation_refusal(status: str) -> str:
+    """The frozen refusal sentence (ADR-171), shared by every write path.
+
+    It is the wording the backtest gate already uses, so one phrase identifies "this
+    version may not drive anything" across the API.
+    """
+
+    return f"strategy version is '{status}', not 'valid'"
 
 
 def slugify(name: str) -> str:
@@ -195,6 +224,17 @@ def create_strategy_version(
     report = validate_strategy(spec)
     status = "valid" if report.is_valid else "invalid"
     errors = [i.as_dict() for i in report.errors]
+
+    if make_current and status not in ACTIVATABLE_VALIDATION_STATUSES:
+        # The gate runs before the row is built, so a refused create leaves no trace
+        # at all: no version, no parameters, no lifecycle change -- and no audit row
+        # either, because there is no entity for one to point at (ADR-171 §6). The
+        # 422 itself is the record, and recording the version is still possible by
+        # asking for it explicitly with `make_current=False`.
+        raise ValidationStatusNotActivatable(
+            f"{activation_refusal(status)}; pass make_current=false to record it "
+            "without making it current"
+        )
 
     strategy_version = StrategyVersion(
         strategy_id=strategy.id,

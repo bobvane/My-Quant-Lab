@@ -781,6 +781,9 @@ def compile_draft_endpoint(
             version=version,
             dsl=result.as_dsl(),
             evidence={"compile_report": result.report},
+            # COMPILED is not "live" (ADR-171). Compiling produces a version; what
+            # puts it on the signal path is a separate, explicit, audited activation.
+            make_current=False,
             commit=False,
         )
     except ValueError as exc:

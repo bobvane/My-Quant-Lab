@@ -422,7 +422,10 @@ def test_a_second_draft_for_the_same_strategy_takes_the_next_version(client, db_
 
     versions = db_session.scalars(select(StrategyVersion).order_by(StrategyVersion.id)).all()
     assert [row.version for row in versions] == ["1.0.0", "1.0.1"]
-    assert [row.is_current for row in versions] == [False, True]
+    # ADR-171 changed this line on purpose: compiling no longer activates, so both
+    # versions stay inactive until a human activates one. It used to read
+    # `[False, True]` -- the compiler inherited `make_current=True` from the service.
+    assert [row.is_current for row in versions] == [False, False]
     assert db_session.get(StrategyDraft, first.id).compiled_strategy_version_id == versions[0].id
     assert db_session.get(StrategyDraft, second.id).compiled_strategy_version_id == versions[1].id
 
@@ -511,3 +514,32 @@ def test_the_openapi_document_declares_the_refusals(client) -> None:
     envelope = responses["409"]["content"]["application/json"]["schema"]
     assert envelope["properties"]["error"]["required"] == ["code", "message", "details"]
     assert set(envelope["properties"]["error"]["properties"]) == {"code", "message", "details"}
+
+
+# --- J. the compiled version is not the active one (ADR-171) ------------------------
+
+
+def test_a_compiled_version_does_not_become_current_by_itself(client, db_session) -> None:
+    """Compiling produces a version; *activating* it is a separate, explicit act.
+
+    ADR-171: the compiled version is created with ``make_current=False``. Until it was,
+    an AI-originated draft reached the signal path without anyone deciding to promote it
+    (the endpoint simply inherited the service's ``make_current=True`` default), which is
+    the one path ``docs/15``'s Phase 8 acceptance says must not exist. Activation now
+    requires ``validation_status == "valid"``; this guard pins the other half -- that
+    compiling never activates.
+    """
+
+    draft = _store_draft(db_session, _payload())
+    strategy = _store_strategy(db_session)
+
+    body = client.post(_url(draft.id), json={"strategy_id": strategy.id}).json()
+    version = db_session.get(StrategyVersion, body["strategy_version_id"])
+
+    assert version.validation_status == "valid"
+    assert version.is_current is False
+
+    activated = client.put(f"/api/v1/strategy-versions/{version.id}/activate")
+
+    assert activated.status_code == 200
+    assert activated.json()["is_current"] is True

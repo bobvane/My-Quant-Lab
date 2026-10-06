@@ -63,7 +63,7 @@ API base: `/api/v1`
 `POST /strategies` [已实现] —— 创建策略。
 `GET /strategies/{strategy_id}` [已实现] —— 取单个策略。
 `DELETE /strategies/{strategy_id}` [已实现] —— 删除策略及其全部版本。
-`POST /strategies/{strategy_id}/versions` [已实现] —— 创建一个新的不可变策略版本。
+`POST /strategies/{strategy_id}/versions` [已实现] —— 创建一个新的不可变策略版本。`make_current` 默认为 `true`，但只有本次校验结论是 `valid` 时才会成为当前版本：非 `valid` 且 `make_current=true` 时返回 422（`{"detail": "strategy version is '<status>', not 'valid'; pass make_current=false to record it without making it current"}`）且**一行都不写**（既不写版本，也不动原当前版本）；`make_current=false` 时 `valid`/`pending`/`invalid` 都可以被记录（ADR-171）。
 `GET /strategies/{strategy_id}/versions` [已实现] —— 列出某个策略的版本。
 `POST /strategies/validate` [已实现] —— 校验一份 DSL 文档（不落库）。请求体就是**裸 DSL 对象**本身（不是 `{dsl: …}` 包裹，也没有别的字段）；响应是 `StrategyValidationOut`：`is_valid`（没有任何 `error` 级问题时为真）、`issues`（每条形如 `{severity, code, message, path}`，`path` 可为 null）、`available_columns`（校验器认识的列名，排序后给出）。DSL 连结构都解析不了时返回 200 且 `is_valid=false`，只给一条 `code="schema_error"`、`path=null` 的 error，`available_columns` 为空 —— 400/422 只留给请求体本身不是 JSON 的情况。前端「从 GitHub 导入」的第 6 步渲染的就是这两个字段（ADR-113）。
 
@@ -71,7 +71,7 @@ API base: `/api/v1`
 
 `GET /strategy-versions` [已实现] —— 列出策略版本。
 `GET /strategy-versions/{version_id}` [已实现] —— 取单个策略版本。
-`PUT /strategy-versions/{version_id}/activate` [已实现] —— 激活某个版本。
+`PUT /strategy-versions/{version_id}/activate` [已实现] —— 激活某个版本。只有 `validation_status == "valid"` 的版本可以被激活；`pending`/`invalid` 返回 422（`{"detail": "strategy version is '<status>', not 'valid'"}`），并把这次拒绝记为审计事件 `strategy_version_activation_rejected`（ADR-171）。
 `GET /strategy-versions/{version_id}/parameters` [已实现] —— 该版本已存储的参数。
 `GET /strategies/versions/{version_id}/verify` [已实现] —— 校验某个策略版本没有被改动过。
 

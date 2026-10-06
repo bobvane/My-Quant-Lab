@@ -205,6 +205,18 @@ v1.9.8 的 tag 推上去之后，GitHub 上一次红了三处：CI 的 `Run Post
 
 **这套顺序的落地状态（v2.2.0 编译器切片，工作区）**：Step 2A（契约冻结）、Step 2B（`backend/app/compiler/` 的 Compiler Core）、Step 2C（`POST /api/v1/ai/strategy/drafts/{draft_id}/compile` 与草案 → 版本绑定）、Step 2D（409 走项目 `error` 信封 = ADR-169；capability 报告按落库的 `CapabilityDecision.verdict` 读 = ADR-170）**已全部落地**，三份守卫共 **80 例**（`test_compiler_contract.py` 16 + `test_compiler_core.py` 49 + `test_compiler_api.py` 15），全仓 1361 passed / 4 skipped。工作区六处版本镜像已置为 **v2.2.0**，**尚未 commit / tag / push / release / deploy**——所以上面每一条纪律仍是**进行中的约束**，不是「做完就作废」的检查表。**`is_current` 激活路径不检查 `validation_status` 这件事没有在 Step 2D 里修**：它已登记为独立的 P0 级契约缺口（`docs/28` §7.3、G8/G9/G11；`docs/26` §26），要动它必须另立切片，并把 `backend/app/data/strategy_service.py`、`backend/app/api/routers/strategy_versions.py` 与信号扫描路径（`backend/app/simulation/signal_engine.py`）一起纳入范围。
 
+## 5.5 激活有效性门（v2.3.0 起，ADR-171）
+
+`is_current` 是**分发**角色：信号路径只看它选版本（`backend/app/simulation/signal_engine.py:352`、`:383`）。因此「谁能成为当前版本」必须由契约回答，而不是由默认值回答——在 v2.3.0 之前它恰恰是由默认值回答的（`make_current` 默认 true，编译端点又继承了这个默认）。
+
+- **唯一可成为当前版本的状态是 `valid`**：`pending` 与 `invalid` 都不行，`pending` 不享有任何宽容。判定只有一处来源——`backend/app/data/strategy_service.py` 的 `ACTIVATABLE_VALIDATION_STATUSES = ("valid",)`，激活、`make_current=true` 的创建、扫描选择三条路径共用，不许各写各的 `== "valid"` 字面量。
+- **编译器产物不自动 current**：编译的语义是产出，不是上线；编译出的版本要驱动信号，必须再由人显式激活（而激活现在要求 valid）。这与 `docs/15` Phase 8 的验收（不存在「AI 一句话升级策略」的路径）一致，也是 `docs/29` §5.3「编译器是纯函数、落库归服务层」的自然推论。
+- **拒绝的形状**：两种拒绝都是 422 + 项目既有的 `{"detail": …}`，句子以 `strategy version is '<status>', not 'valid'` 开头（与 `backend/app/api/routers/backtests.py:56-60` 逐字相同）；**不新造信封**（ADR-169 的教训：同一个状态码在同一个端点不许有两种读法）。`make_current=false` 永远允许——把无效版本记进账本是账本需求，被禁止的只是「无效 + 成为当前」，且被拒绝的创建**一行都不写**。
+- **拒绝也要留痕**：被拒绝的激活写 `strategy_version_activation_rejected`；被拒绝的创建不写（它没有产生任何实体，`entity_id` 无值可指），由 422 响应本身充当记录——这条不对称是刻意的。
+- **守卫怎么写**：契约文字与常量由 `backend/tests/test_activation_validity.py` 与 ADR-171 双向钉住；扫描与编译两条路径都必须带**正向对照**，不许用「什么都没发生」当断言——扫描器的防御性 `except`（`signal_engine.py:362-364`、`:393-395`）会让坏数据看起来像「没有信号」。
+
+**落地状态（v2.3.0 Step 1）**：契约已冻结（ADR-171），门已在三条写入路径上落地——`backend/app/data/strategy_service.py` 导出判定常量、拒绝异常与冻结句，`backend/app/api/routers/strategy_versions.py` 拒绝并审计，`backend/app/api/routers/ai.py` 落库时显式 `make_current=False`，`backend/app/simulation/signal_engine.py` 的两条扫描查询按 `is_current AND validation_status IN ('valid',)` 选择；Step 0 的守卫测试全部转为通过。本切片不加迁移、不改 DB 结构、不改引擎计算、不改前端与版本号。
+
 ## 6. 未来扩展策略
 
 当新增策略时，优先：

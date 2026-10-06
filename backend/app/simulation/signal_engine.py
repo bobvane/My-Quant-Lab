@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.data.market_data_repo import load_bars
-from app.data.strategy_service import load_spec
+from app.data.strategy_service import ACTIVATABLE_VALIDATION_STATUSES, load_spec
 from app.data.symbols import canonical_symbol
 from app.domain.models import (
     Asset,
@@ -349,7 +349,16 @@ def scan_all(db: Session, *, asset_ids: list[int] | None = None) -> list[dict[st
     """Scan every current strategy version against every series (dry run)."""
 
     results: list[dict[str, Any]] = []
-    versions = db.scalars(select(StrategyVersion).where(StrategyVersion.is_current.is_(True))).all()
+    versions = db.scalars(
+        select(StrategyVersion).where(
+            StrategyVersion.is_current.is_(True),
+            # Only a version static validation called `valid` may drive signals
+            # (ADR-171). This is a selection condition, not the defensive `except`
+            # below: a version that may not run must never be picked in the first
+            # place, or a silent failure starts to look like "no signal".
+            StrategyVersion.validation_status.in_(ACTIVATABLE_VALIDATION_STATUSES),
+        )
+    ).all()
     series_stmt = select(MarketDataSeries).where(MarketDataSeries.is_archived.is_(False))
     if asset_ids:
         series_stmt = series_stmt.where(MarketDataSeries.asset_id.in_(asset_ids))
@@ -380,7 +389,16 @@ def scan_and_persist(db: Session, *, asset_ids: list[int] | None = None) -> dict
     evaluated = 0
     results: list[dict[str, Any]] = []
     holdings = load_portfolio_holdings()  # fetched once per scan, not per signal
-    versions = db.scalars(select(StrategyVersion).where(StrategyVersion.is_current.is_(True))).all()
+    versions = db.scalars(
+        select(StrategyVersion).where(
+            StrategyVersion.is_current.is_(True),
+            # Only a version static validation called `valid` may drive signals
+            # (ADR-171). This is a selection condition, not the defensive `except`
+            # below: a version that may not run must never be picked in the first
+            # place, or a silent failure starts to look like "no signal".
+            StrategyVersion.validation_status.in_(ACTIVATABLE_VALIDATION_STATUSES),
+        )
+    ).all()
     series_stmt = select(MarketDataSeries).where(MarketDataSeries.is_archived.is_(False))
     if asset_ids:
         series_stmt = series_stmt.where(MarketDataSeries.asset_id.in_(asset_ids))

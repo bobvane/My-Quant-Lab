@@ -9,7 +9,9 @@ Hard rules enforced here:
 * the AI layer may only *explain* engine-computed facts;
 * it can never produce prices, returns, win rates, drawdowns or balances;
 * every call is versioned, hashed, budget-checked and cached;
-* structured output is validated against a JSON schema before it is stored.
+* structured output is validated against a JSON schema before it is stored;
+* a provider that answers HTTP 200 with an error body is diagnosed as such,
+  never silently re-labelled as a missing key.
 """
 
 from __future__ import annotations
@@ -17,11 +19,26 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: How much of one provider-reported error field may reach a log or the
+#: database. The text is third-party input (OpenRouter relays the upstream
+#: provider's own message), so it is clipped and stripped of anything
+#: credential-shaped before it is ever formatted into an exception.
+PROVIDER_ERROR_FIELD_LIMIT = 300
+PROVIDER_ERROR_TEXT_LIMIT = 600
+
+#: ``Bearer <token>`` anywhere in untrusted text, whatever the token looks like.
+_BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{4,}")
+#: An explicit ``Authorization: ...`` echo.
+_AUTHORIZATION_PATTERN = re.compile(r"(?i)\bauthorization\b\s*[:=]\s*\S+")
+#: Common API-key shapes (``sk-…``, ``sk-or-v1-…``, ``gsk_…``, ``xai-…`` …).
+_KEY_SHAPED_PATTERN = re.compile(r"\b(?:sk|pk|rk|gsk|xai|key|token)[-_][A-Za-z0-9._\-]{6,}")
 
 __all__ = [
     "AIRequest",
@@ -231,6 +248,118 @@ class OpenAICompatibleProvider:
             "Content-Type": "application/json",
         }
 
+    def _safe_text(self, value: Any, *, limit: int = PROVIDER_ERROR_FIELD_LIMIT) -> str:
+        """One untrusted provider string, single-line, clipped, de-secreted.
+
+        Everything here arrives from a third party, so it is never trusted and
+        never allowed to carry the credential this client sent. The key is
+        redacted literally first: pattern matching alone would miss a provider
+        that echoes the header in a shape no pattern predicts.
+        """
+
+        text = " ".join(str(value).split())
+        if self._api_key:
+            text = text.replace(self._api_key, "***")
+        text = _BEARER_PATTERN.sub("Bearer ***", text)
+        text = _AUTHORIZATION_PATTERN.sub("Authorization ***", text)
+        text = _KEY_SHAPED_PATTERN.sub("***", text)
+        if len(text) > limit:
+            text = f"{text[:limit]}…"
+        return text
+
+    def _error_parts(self, error: Any) -> tuple[list[str], str]:
+        """``(identity fields, message)`` of an OpenRouter-shaped error object.
+
+        Only the documented, scalar fields are kept: ``code`` and
+        ``metadata.error_type`` / ``metadata.provider_code``. Anything nested or
+        unrecognised (``metadata.raw``, the echoed request body) is deliberately
+        dropped rather than stored.
+
+        The message is returned separately because it is the one field that can
+        be arbitrarily long: callers put it last, and the ledger clips what it
+        stores from the right. An identity lost to that clip is a failure nobody
+        can look up.
+        """
+
+        identity: list[str] = []
+        message = ""
+        if isinstance(error, dict):
+            if error.get("code") is not None:
+                identity.append(f"code={self._safe_text(error['code'], limit=40)}")
+            metadata = error.get("metadata")
+            if isinstance(metadata, dict):
+                for label in ("error_type", "provider_code"):
+                    if metadata.get(label):
+                        identity.append(f"{label}={self._safe_text(metadata[label], limit=120)}")
+            if error.get("message"):
+                message = f"message={self._safe_text(error['message'])}"
+        elif error:
+            message = f"message={self._safe_text(error)}"
+        return identity, message
+
+    def _shape_error(self, response: Any, detail: str) -> ProviderCallError:
+        """A 2xx body this client cannot read as a chat completion."""
+
+        status = getattr(response, "status_code", None)
+        where = f"HTTP {status}" if isinstance(status, int) else "HTTP 2xx"
+        return ProviderCallError(
+            f"provider {self.name!r} answered {where} without a readable choice: {detail}"
+        )
+
+    def _error_envelope_error(self, payload: dict[str, Any]) -> ProviderCallError:
+        """Turn a 2xx ``{"error": {...}}`` body into a loud, sanitised failure.
+
+        OpenRouter answers ``200 OK`` as soon as an upstream provider accepts a
+        request; a generation that fails after that point is reported inside the
+        body instead of the status. Trusting the status alone turns "the
+        provider refused" into a bare ``KeyError('choices')``.
+        """
+
+        identity, message = self._error_parts(payload.get("error"))
+        generation_id = payload.get("id")
+        if generation_id:
+            identity.append(f"generation_id={self._safe_text(generation_id, limit=120)}")
+        detail = "; ".join([*identity, message] if message else identity)
+        hint = self._safe_text(
+            detail or "no detail in the envelope", limit=PROVIDER_ERROR_TEXT_LIMIT
+        )
+        return ProviderCallError(f"provider {self.name!r} answered with an error body: {hint}")
+
+    def _read_answer(self, response: Any, payload: Any) -> str:
+        """The answer text, or a readable ``ProviderCallError``.
+
+        The success path is unchanged: ``choices[0].message.content``. Every
+        other shape fails loudly and says which part was wrong, because a
+        half-parsed answer reaching the ledger is worse than no answer.
+        """
+
+        if not isinstance(payload, dict):
+            raise self._shape_error(response, "the body is not a JSON object")
+        if payload.get("error") is not None:
+            raise self._error_envelope_error(payload)
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            raise self._shape_error(response, "the body has no 'choices' list")
+        if not choices:
+            raise self._shape_error(response, "'choices' is empty")
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise self._shape_error(response, "'choices[0]' is not an object")
+        if choice.get("finish_reason") == "error":
+            # A partial answer with finish_reason "error" is a failure: the
+            # upstream provider gave up mid-generation. It must never be
+            # validated, stored or billed as the model's answer.
+            identity, message = self._error_parts(choice.get("error"))
+            detail = "; ".join([*identity, message] if message else identity)
+            raise self._shape_error(response, f"the choice failed: {detail or 'no error detail'}")
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise self._shape_error(response, "'choices[0].message' is missing")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise self._shape_error(response, "'choices[0].message.content' is missing or not text")
+        return content
+
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -276,11 +405,12 @@ class OpenAICompatibleProvider:
         response.raise_for_status()
         try:
             payload = response.json()
-            answer = payload["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
+        except ValueError as exc:
             raise ProviderCallError(
-                f"provider {self.name!r} answered without a readable choice: {exc!r}"
+                f"provider {self.name!r} answered with a body that is not JSON: "
+                f"{type(exc).__name__}"
             ) from exc
+        answer = self._read_answer(response, payload)
 
         usage = payload.get("usage") or {}
         reply = ProviderReply(

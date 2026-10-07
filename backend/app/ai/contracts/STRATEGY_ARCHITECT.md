@@ -36,6 +36,12 @@ Runtime status: invoked by `backend/app/ai/research.py` since v1.9.8 through
 - Every rule carries its origin (EXPLICIT / INFERRED / ASSUMED / UNKNOWN) and, for
   EXPLICIT and INFERRED, the evidence it came from. A rule may keep or weaken the
   provenance of the hypothesis rule it derives from, never strengthen it.
+- Every non-empty `evidence.quote` is looked up in the source by the server, whatever
+  the rule's origin: a quote is one contiguous passage copied character for character
+  out of the named source; only the amount of whitespace may differ. A summary, a
+  reworded sentence, a re-formatted date or number and two passages joined into one
+  quote are all refused — to cite two places, send two `evidence` entries, one
+  evidence entry per passage.
 - Preserve the original idea: your draft may refine it, never replace it. If you
   propose a reduced experiment, mark it experimental and state that it is not the
   original strategy.
@@ -55,7 +61,8 @@ only:
 - `rules` — one entry per rule: `id`, `field` (market / universe / timeframe /
   indicator / entry / exit / risk / sizing / execution / parameter),
   `statement`, `origin`, `confidence`, `derived_from` (the hypothesis rule id it
-  comes from, or null), `parameters`, `required_capabilities`, `evidence`.
+  comes from, or null), `parameters`, `required_capabilities`, `evidence` — where
+  `quote` is the verbatim contiguous passage described above.
 - `unknowns` — what could not be formalized: `field`, `why`,
   `needed_to_formalize`.
 - `assumptions` — every ASSUMED rule: `statement`, `applies_to` (the rule field —

@@ -52,6 +52,7 @@ __all__ = [
     "ARCHITECT_ROLE",
     "CAPABILITY_VERDICTS",
     "CONFIDENCES",
+    "EVIDENCE_QUOTE_DESCRIPTION",
     "EVIDENCE_REQUIRED_ORIGINS",
     "FORBIDDEN_CONTENT_KEYS",
     "FORBIDDEN_METRIC_KEYS",
@@ -146,6 +147,19 @@ APPLIES_TO_DESCRIPTION = (
     f"rules[].field ({', '.join(RULE_FIELDS)}). Name the field itself, such as "
     "'indicator' — never the rule id, such as 'r-oversold': an ASSUMED rule whose "
     "field no assumption names is refused."
+)
+
+#: The one wording of the ``evidence[].quote`` contract. Both model-facing schemas
+#: carry it verbatim, so the text the model reads cannot drift away from what
+#: ``_quote_span`` enforces: one contiguous passage of the named source, character
+#: for character apart from whitespace (ADR-159).
+EVIDENCE_QUOTE_DESCRIPTION = (
+    "Words copied character for character out of this source — one contiguous passage, "
+    "never a summary, a reworded sentence or a re-formatted date or number; only the "
+    "amount of whitespace may differ. The server looks the quote up exactly as it is "
+    "written and refuses the answer when it is not there: to cite two places, send two "
+    "evidence entries, one evidence entry per passage, instead of joining them into one "
+    "quote."
 )
 
 #: What a draft may be. There is deliberately no "SUPPORTED_AND_EXECUTABLE": a
@@ -477,7 +491,10 @@ RESEARCH_SCHEMA: dict[str, Any] = {
                             "properties": {
                                 "source_ref": {"type": "string"},
                                 "locator": {"type": "string"},
-                                "quote": {"type": "string"},
+                                "quote": {
+                                    "type": "string",
+                                    "description": EVIDENCE_QUOTE_DESCRIPTION,
+                                },
                             },
                         },
                     },
@@ -594,7 +611,10 @@ FORMALIZATION_SCHEMA: dict[str, Any] = {
                             "properties": {
                                 "source_ref": {"type": "string"},
                                 "locator": {"type": "string"},
-                                "quote": {"type": "string"},
+                                "quote": {
+                                    "type": "string",
+                                    "description": EVIDENCE_QUOTE_DESCRIPTION,
+                                },
                             },
                         },
                     },
@@ -626,7 +646,10 @@ FORMALIZATION_SCHEMA: dict[str, Any] = {
                             "properties": {
                                 "source_ref": {"type": "string"},
                                 "locator": {"type": "string"},
-                                "quote": {"type": "string"},
+                                "quote": {
+                                    "type": "string",
+                                    "description": EVIDENCE_QUOTE_DESCRIPTION,
+                                },
                             },
                         },
                     },
@@ -957,6 +980,75 @@ def _clear_verification(evidence: Evidence) -> None:
     evidence.verified_against = None
 
 
+#: A run of words this short is not treated as "material the source really contains"
+#: when explaining a refusal. Diagnostic only, and deliberately conservative.
+_EDGE_MIN_CHARS = 8
+
+
+def _real_edge(text: str, tokens: list[str], *, from_end: bool) -> str:
+    """The longest run of the quote's words at one end that really is in the source."""
+
+    for size in range(len(tokens) - 1, 0, -1):
+        part = tokens[-size:] if from_end else tokens[:size]
+        candidate = " ".join(part)
+        if len(candidate) >= _EDGE_MIN_CHARS and _quote_span(text, candidate) is not None:
+            return candidate
+    return ""
+
+
+def _mismatch_kind(text: str, quote: str) -> str:
+    """Explain *which way* a refused quote fails: ``stitched``, ``partial``, ``absent``.
+
+    Diagnostic only: the quote is already refused and nothing here can accept one. A
+    quote the model joined out of separate passages has a real run of words at each end
+    that do not meet in the middle; a quote mixing the source's words with words of its
+    own has such a run at one end only; a quote that is not in the source at all —
+    a summary, a reworded sentence, a re-formatted value — has neither.
+    """
+
+    wanted = _normalise_whitespace(quote)
+    tokens = wanted.split(" ")
+    if len(tokens) < 2:
+        return "absent"
+    head = _real_edge(text, tokens, from_end=False)
+    tail = _real_edge(text, tokens, from_end=True)
+    if head and tail and len(head) + len(tail) < len(wanted):
+        return "stitched"
+    if head or tail:
+        return "partial"
+    return "absent"
+
+
+def _mismatch_message(*, where: str, ref: str, quote: str, text: str) -> str:
+    """Say why the words were not found, without widening what counts as a match.
+
+    Every branch is the same ``evidence_mismatch`` and the same strict lookup; only the
+    wording differs, because the fix differs: a stitched quote needs one evidence entry
+    per passage, a partly-real quote needs the words the source does not contain dropped,
+    and a quote that is not there at all needs to become a real contiguous passage.
+    """
+
+    kind = _mismatch_kind(text, quote)
+    if kind == "stitched":
+        return (
+            f"{where} quotes '{quote}', which is not one contiguous passage of '{ref}': it reads "
+            "as two real passages of the source joined together rather than one. Send one "
+            "evidence entry per passage instead of joining them into a single quote"
+        )
+    if kind == "partial":
+        return (
+            f"{where} quotes '{quote}', of which only part appears in '{ref}'; a quote is copied "
+            "character for character out of the source, one contiguous passage at a time, so the "
+            "words around it that the source does not contain cannot be part of it"
+        )
+    return (
+        f"{where} quotes '{quote}', which does not appear in '{ref}' as one contiguous passage; "
+        "a quote is copied character for character out of the source — a summary, a reworded "
+        "sentence and a re-formatted date or number are refused, and two passages are two "
+        "evidence entries"
+    )
+
+
 def _check_evidence(
     *,
     where: str,
@@ -1038,10 +1130,7 @@ def _check_evidence(
             violations.append(
                 Violation(
                     code="evidence_mismatch",
-                    message=(
-                        f"{where} quotes '{quote}', which does not appear in '{ref}'; words the "
-                        "material does not contain are a fabrication, not evidence"
-                    ),
+                    message=_mismatch_message(where=where, ref=ref, quote=quote, text=text),
                     field_name=where,
                 )
             )

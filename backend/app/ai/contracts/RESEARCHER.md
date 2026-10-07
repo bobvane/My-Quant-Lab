@@ -47,7 +47,13 @@ You are given a question and one or more sources. Answer with JSON only:
   execution / parameter), `statement`, `origin`, `confidence` (low / medium /
   high), `parameters`, `required_capabilities` and `evidence` when the material
   gives you one. An `evidence` entry carries `source_ref` (one of the exact
-  source refs you were given), `locator` and `quote`.
+  source refs you were given), `locator` and `quote` — where `quote` is one
+  contiguous passage copied character for character out of that source; only the
+  amount of whitespace may differ. The server looks the quote up exactly as it is
+  written and refuses the answer when it is not there. A summary, a reworded
+  sentence, a re-formatted date or number and two passages joined into one quote
+  are all refused: to cite two places, send two `evidence` entries, one evidence
+  entry per passage.
 - `ambiguities` — every phrase you could not pin down: `phrase`, `readings` (the
   readings you considered), `needs_decision`.
 - `unknowns` — what the material does not say: `field`, `why`,
@@ -61,8 +67,10 @@ You are given a question and one or more sources. Answer with JSON only:
 - `limitations` — what this understanding cannot support.
 - `confidence` — your own reading of the evidence (low / medium / high).
 
-An EXPLICIT or INFERRED rule must carry evidence. A definition you add so the idea
-becomes testable is ASSUMED, never EXPLICIT, and must also appear in
-`assumptions`. Anything you cannot determine is UNKNOWN and must appear in
-`unknowns`. When the material cannot support a rule, saying so is the result, not
-a failure.
+An EXPLICIT or INFERRED rule must carry evidence, and every non-empty `quote` is
+looked up in the source by the server whatever the rule's origin: an ASSUMED or
+UNKNOWN rule may go without a quote, but a quote it does send is checked the same
+way. A definition you add so the idea becomes testable is ASSUMED, never EXPLICIT,
+and must also appear in `assumptions`. Anything you cannot determine is UNKNOWN and
+must appear in `unknowns`. When the material cannot support a rule, saying so is the
+result, not a failure.

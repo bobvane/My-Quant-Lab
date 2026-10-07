@@ -44,13 +44,30 @@ jobs:
             version="${GITHUB_REF#refs/tags/}"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "Releasing ${version}"
+          # A pre-release tag (`v2.5.0-rc.1`) publishes images without publishing a
+          # version: it is a candidate for a version, not that version. Decided once,
+          # here, and read by the two steps below that must behave differently (ADR-175).
+          if [[ "${version#v}" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Releasing ${version} (pre-release: images only)"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Releasing ${version}"
+          fi
 
       # The version scheme has a guard (`backend/tests/test_release_version_scheme.py`),
       # but it runs on `ci.yml`, which is triggered by pushes to main — never by a tag.
       # So the one event that actually publishes could not see the one check that would
       # have stopped it. Read version.txt here: the tag and the file it releases must
       # agree, and the tag must still look like vX.Y.Z (ADR-091).
+      #
+      # A pre-release tag never writes back to version.txt (ADR-175). version.txt is the
+      # version that has shipped, and a candidate has not shipped — the version scheme's
+      # own guard refuses a suffix anyway (ADR-079; `version.sh set v2.5.0-rc.1` exits 2).
+      # So the candidate is checked rather than rejected: it must look like
+      # `vX.Y.Z-<label>`, and its base must be AHEAD of the released version it is a
+      # candidate for. That refuses a tag that is not a version at all, and equally a
+      # "candidate" of a version that is already out.
       - name: The tag must agree with version.txt
         run: |
           set -euo pipefail
@@ -58,16 +75,30 @@ jobs:
           tag="${version#v}"
           declared="$(tr -d '[:space:]' < version.txt)"
           declared="${declared#v}"
-          if ! [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]$ ]]; then
-            echo "tag '$version' is not vX.Y.Z; see docs/17 ADR-017" >&2
+          if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]$ ]]; then
+            if [ "$tag" != "$declared" ]; then
+              echo "tag says '$version' but version.txt says '$declared'" >&2
+              echo "run 'bash scripts/version.sh set ${version}' before tagging" >&2
+              exit 1
+            fi
+            echo "tag ${version} matches version.txt (${declared})"
+          elif [[ "$tag" =~ ^([0-9]+\.[0-9]+\.[0-9])-[0-9A-Za-z][0-9A-Za-z.-]*$ ]]; then
+            base="${BASH_REMATCH[1]}"
+            if [ "$base" = "$declared" ]; then
+              echo "pre-release tag '$version' names the released version ${declared}" >&2
+              echo "a candidate names the version it is a candidate for, which is not out yet" >&2
+              exit 1
+            fi
+            newest=$(printf '%s\n%s\n' "$declared" "$base" | sort -V | tail -n1)
+            if [ "$newest" != "$base" ]; then
+              echo "pre-release tag '$version' is behind version.txt (${declared})" >&2
+              exit 1
+            fi
+            echo "pre-release ${version}: images only; version.txt stays ${declared}"
+          else
+            echo "tag '$version' is not vX.Y.Z, nor vX.Y.Z-<label>; see docs/17 ADR-017" >&2
             exit 1
           fi
-          if [ "$tag" != "$declared" ]; then
-            echo "tag says '$version' but version.txt says '$declared'" >&2
-            echo "run 'bash scripts/version.sh set ${version}' before tagging" >&2
-            exit 1
-          fi
-          echo "tag ${version} matches version.txt (${declared})"
 
       # `latest` must point at the NEWEST release, not at whichever run finished last.
       # Releases are deliberately not serialised (cancel-in-progress: false, so a
@@ -75,12 +106,22 @@ jobs:
       # older version overwrite `latest` — which silently hands anyone using the
       # default `MQL_VERSION=latest` a stale build. Tagging `latest` is now gated on
       # this version actually being the highest tag.
+      #
+      # A pre-release never owns `latest` (ADR-175): it is not the newest release, it is
+      # a candidate for one. Only stable `vX.Y.Z` tags compete, and only against each
+      # other — otherwise `v2.5.0-rc.1` would outrank the `v2.5.0` that follows it, and
+      # the default `MQL_VERSION=latest` would freeze on a candidate nobody chose.
       - name: Decide whether this release owns the latest tag
         id: latest
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
-          highest=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then
+            echo "tag_latest=false" >> "$GITHUB_OUTPUT"
+            echo "${version} is a pre-release; 'latest' stays with the stable releases"
+            exit 0
+          fi
+          highest=$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]$' | head -n1 || true)
           if [ "$version" = "$highest" ]; then
             echo "tag_latest=true" >> "$GITHUB_OUTPUT"
             echo "${version} is the highest tag (${highest}); it owns 'latest'"
@@ -99,6 +140,9 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
+      # `2.5` is the tag a user pins to follow a release line, so only a released version
+      # may move it: a candidate publishes `v2.5.0-rc.1` / `2.5.0-rc.1` and nothing else
+      # (ADR-175). The `latest` gate reads the flag the same way.
       - name: Backend metadata
         id: backend_meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
@@ -107,7 +151,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.version.outputs.prerelease == 'false' }}
             type=raw,value=latest,enable=${{ steps.latest.outputs.tag_latest }}
 
       - name: Build and push backend image
@@ -129,7 +173,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.version.outputs.prerelease == 'false' }}
             type=raw,value=latest,enable=${{ steps.latest.outputs.tag_latest }}
 
       - name: Proxy metadata
@@ -140,7 +184,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.version.outputs.prerelease == 'false' }}
             type=raw,value=latest,enable=${{ steps.latest.outputs.tag_latest }}
 
       - name: Build and push proxy image

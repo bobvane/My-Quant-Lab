@@ -376,6 +376,16 @@ git push origin main && git push origin <新版本号>
 
 升级时在 NAS 上 `docker compose pull && docker compose up -d`，再跑 `scripts/Test-NasDeployment.ps1` 验证。
 
+**发布候选**（`vX.Y.Z-rc.N`，例如 `v2.5.0-rc.1`）是「不等下一个大版本，先把已经完成的 `main` 变成可拉取镜像」的通道（ADR-175）：
+它照常构建并推送 `backend` / `web` / `docker-proxy` 三个镜像，但**不改 `version.txt`**，也**不移动 `latest` 与 `X.Y` 线标签**——
+因此跟随 `latest` 的部署不会被候选动到。在 NAS 的 `.env` 里把 `MQL_VERSION` 指向候选即可试用，验收通过后再发正式版本：
+
+```bash
+MQL_VERSION=v2.5.0-rc.1
+```
+
+候选的数据库迁移与正式版完全一致：`quantlab-api` 启动时自动 `alembic upgrade head`，无需在 NAS 上手动执行任何命令。
+
 ---
 
 ## 常见问题

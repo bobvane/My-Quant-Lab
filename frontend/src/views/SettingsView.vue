@@ -580,11 +580,37 @@ function selectionPayload(): { models: Array<Record<string, unknown>>; manual: s
   }
 }
 
+/** 发现面板是否对准「还没保存的新 provider」（表单场景）。 */
+const discoveryForNewProvider = computed(() => !discoveryTargetId.value)
+
+/** 新 provider 场景这个按钮会一并创建 provider，文案要如实说明（ADR-178）。 */
+const discoverySaveLabel = computed(() => {
+  if (savingModels.value || saving.value) {
+    return discoveryForNewProvider.value ? '创建中…' : '保存中…'
+  }
+  return discoveryForNewProvider.value ? '创建 Provider 并保存模型' : '保存模型选择'
+})
+
 async function saveModels() {
   const target = discoveryTargetId.value
-  if (!target) return
   error.value = ''
   discoveryNotice.value = ''
+  if (!target) {
+    // 面板对准的是还没保存的新 provider：这里就把 provider 连同勾选/手动模型一起建出来，
+    // 不再要求用户回去点表单下方的「添加」（ADR-178）。没有勾选也允许创建——发现不是创建前提。
+    const selected = discoveryPicked.value.length + manualEntries.value.length
+    const created = await save()
+    info.value = created
+      ? selected > 0
+        ? `Provider 已创建，并保存 ${selected} 个模型`
+        : 'Provider 已创建'
+      : ''
+    if (!created) {
+      // 失败原因本来只在表单顶部的 error 里，面板也要显示，否则又变成「点了没反应」。
+      discoveryNotice.value = error.value || '创建失败：请检查名称、base_url 与 API Key'
+    }
+    return
+  }
   savingModels.value = true
   try {
     const { models, manual } = selectionPayload()
@@ -616,12 +642,16 @@ async function testBeforeSave() {
   }
 }
 
-async function save() {
+/**
+ * 创建 provider。表单上的「添加」与发现面板在**新 provider** 场景下的「创建 Provider 并
+ * 保存模型」都走这里；返回是否真的创建成功，调用方据此决定提示什么（ADR-178）。
+ */
+async function save(): Promise<boolean> {
   error.value = ''
   info.value = ''
   if (!providerName.value.trim() || !baseUrl.value.trim() || !apiKey.value.trim()) {
     error.value = '名称、base_url、API Key 都是必填项'
-    return
+    return false
   }
   saving.value = true
   try {
@@ -643,8 +673,10 @@ async function save() {
     testResult.value = null
     closeDiscovery()
     await load()
+    return true
   } catch (e) {
     error.value = (e as Error).message
+    return false
   } finally {
     saving.value = false
   }
@@ -983,8 +1015,8 @@ onUnmounted(() => {
         </p>
 
         <div class="row" style="margin-top: 8px">
-          <button :disabled="savingModels" @click="saveModels">
-            {{ savingModels ? '保存中…' : '保存模型选择' }}
+          <button :disabled="savingModels || saving" @click="saveModels">
+            {{ discoverySaveLabel }}
           </button>
           <button class="ghost" @click="closeDiscovery">取消</button>
         </div>

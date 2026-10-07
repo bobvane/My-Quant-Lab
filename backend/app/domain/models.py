@@ -1073,7 +1073,10 @@ class AuditLog(Base):
     actor: Mapped[str] = mapped_column(String(128), default="system", nullable=False)
     entity_type: Mapped[str] = mapped_column(String(48), nullable=False)
     entity_id: Mapped[str] = mapped_column(String(48), nullable=False)
-    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    # 64, not 32: "strategy_experiment_adopted_from_backtest" is 41 characters, and
+    # PostgreSQL refused the write while SQLite (every local test) accepted it (ADR-186 --
+    # the same too-narrow-column trap ADR-064 hit on alembic_version.version_num).
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
     payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=_now, server_default=func.now(), nullable=False

@@ -3365,6 +3365,15 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 影响与兼容：`ExperimentResult.metrics_json` 对**新**的实验行多一个派生键 `total_fees`；收养行同样在逐字复制之外只多这一个键（引擎产出的键仍然逐字不动）。此变更**不需要迁移、不回填**：变更前创建的行没有这个键，发布投影给出 `null`、界面显示「未知」——如实表达「这条实验创建时还没人合计过手续费」，而不是假装它是 0。
 - 测试：`backend/tests/test_experiment_lifecycle.py` 断言运行路径发布的 `metrics` 八键齐全、`total_fees` 等于该 run 已存逐笔 `fees` 之和、`final_equity`/`cagr` 与 run 的存储值逐字相同；`backend/tests/test_experiment_adoption.py` 断言收养路径八键与 run 存储值一致、收养只多 `total_fees` 这一个键（`body["metrics"] == stored_metrics` 一类断言按八键形状更新）；compare 的 `metrics` 名单是这八个。
 
+## ADR-186：审计动作的长度是列宽契约，不是注释
 
-
-
+- 背景：Phase B 上线后，NAS 上 `POST /api/v1/experiments/from-backtest/{run_id}`（界面「保存为实验」）对**每一条尚未被收养的回测**都返回 HTTP 500（`internal server error (incident …)`），而列表、新建实验、重复收养（409）都正常。根因是 `audit_logs.action` 在 `backend/alembic/versions/0001_initial_schema.py:73` 建为 `sa.String(length=32)`，而收养流程要写的动作 `strategy_experiment_adopted_from_backtest`（`backend/app/data/experiment_service.py:909`）有 41 个字符。PostgreSQL 严格按列宽拒绝写入（`psycopg.errors.StringDataRightTruncation: value too long for type character varying(32)`），SQLite 不校验长度——于是本地 1617 条测试与本地浏览器 E2E 全绿，生产却必然 500；事务整体回滚，所以没有留下脏数据。这与 ADR-064（revision id 超过 Alembic 自带的 `VARCHAR(32)`）是同一形状的缺陷：**只在 PostgreSQL 上现形的写入宽度**。
+- 决策：
+  1. `AuditLog.action` 宽度由 `String(32)` 提到 `String(64)`（`backend/app/domain/models.py`），迁移 `0020_audit_log_action_width`（`down_revision = "0019_experiment_lifecycle"`）把已有库的列改宽：SQLite 走 `batch_alter_table`（重建表并拷贝行），其它方言直接 `ALTER COLUMN TYPE`，`downgrade` 对称反向。
+  2. 动作用词**一个字都不改**：仍然是 `strategy_experiment_adopted_from_backtest`。把一个已经写进审计语义的名字缩短去迁就列宽，等于让「审计记了什么」变成列定义的函数。
+  3. 不改 `0001_initial_schema`（已应用的历史迁移，改写会让已部署库与全新库走出两条历史）；加宽而不是重建或删除 `audit_logs`，已有行一个不动。
+  4. 新增守卫 `backend/tests/test_audit_action_length.py`：模型宽度 ≥ 64；AST 扫 `app/` 里所有 `action=` 字面量并断言确实看见了那 8 条（防止「扫描什么都没匹配到」的假绿）；运行时才拼出来的动作表（`strategies/lifecycle`、`ai/confirmation`）逐个量长度；真跑一次迁移链，断言产出的 DDL 宽度与模型一致。
+  5. 端到端回归写进 `backend/tests/test_postgres_triggers.py`（CI 里带 `postgres:16-alpine` service 真跑）：先从 `information_schema` 查实际列宽，再走真实收养路径调用 `adopt_backtest_run`——就是生产会 500 的那一次写入。
+- 理由：①「审计动作能不能写进去」是可被断言的事实，不该靠人记着「这个字符串长一点」；②守卫分成模型/字面量/运行时/迁移链四层，任一层漂移都会红；③回归必须在 PostgreSQL 上跑，SQLite 永远抓不到这一类缺陷（ADR-064 的教训已经写在 `backend/tests/test_postgres_triggers.py` 的模块 docstring 里）。
+- 影响与兼容：纯加宽，旧数据可读、写入不变形；`downgrade` 在存在超长行时会**明确报错**而不是静默截断（宁可失败也不毁证据）；`audit_logs` 的两个索引 `ix_audit_logs_created`/`ix_audit_logs_entity` 在 SQLite 重建表后由迁移重建，行与索引都在（实测 `0019 → 0020 → 0019 → 0020` 往返后两行审计原样保留）。`event_type`（`String(64)`，最长 36）与 `entity_type`/`entity_id`（`String(48)`）本次不动。
+- 测试：`backend/tests/test_audit_action_length.py`（4 例）、`backend/tests/test_postgres_triggers.py::test_adopting_a_run_fits_the_audit_action_column`、`backend/tests/test_experiment_adoption.py::test_adopting_a_run_writes_the_full_ledger_action`（收养后审计里恰好一行、action 逐字 41 字符）。

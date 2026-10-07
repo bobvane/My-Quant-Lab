@@ -10,6 +10,15 @@ first version (the ``is_current`` flip itself fires the trigger).
 These tests run the REAL migration chain against a REAL PostgreSQL and
 exercise the exact service-layer paths that failed. In CI the backend job
 provides a postgres service and sets TEST_POSTGRES_URL.
+
+A second PostgreSQL-only failure has the same shape -- something the app writes
+does not fit the column it is written to. ``0001`` created ``audit_logs.action``
+as ``VARCHAR(32)`` while the adoption ledger entry is 41 characters
+(``strategy_experiment_adopted_from_backtest``), so ``POST
+/experiments/from-backtest/{run_id}`` answered HTTP 500 on the deployed NAS and
+every local SQLite run stayed green (ADR-186). The last test here therefore
+writes that real ledger entry through the real service path and reads the column
+width back from ``information_schema``.
 """
 
 from __future__ import annotations
@@ -244,3 +253,88 @@ def test_timestamps_come_back_utc(pg_db) -> None:
     pg_db.refresh(strategy)
     assert strategy.created_at.tzinfo is not None
     assert strategy.created_at.utcoffset() == dt.timedelta(0)
+
+
+@needs_pg
+def test_adopting_a_run_fits_the_audit_action_column(pg_db) -> None:
+    """The 41-character adoption action must be storable on PostgreSQL (ADR-186).
+
+    ``audit_logs.action`` shipped as ``VARCHAR(32)``, so this exact write raised
+    ``StringDataRightTruncation: value too long for type character varying(32)`` inside
+    ``adopt_backtest_run`` and ``POST /experiments/from-backtest/{run_id}`` answered HTTP 500
+    for every run that had not been adopted yet. SQLite -- the whole local suite -- stores the
+    same string happily, which is why this test drives the real service path against real
+    PostgreSQL instead of trusting a green SQLite run.
+    """
+    from sqlalchemy import text
+
+    from app.data.experiment_service import adopt_backtest_run
+    from app.data.strategy_service import create_strategy_version
+    from app.domain.models import (
+        Asset,
+        AuditLog,
+        BacktestResult,
+        BacktestRun,
+        MarketDataSeries,
+        MarketDataSource,
+        Strategy,
+    )
+
+    action = "strategy_experiment_adopted_from_backtest"
+    assert len(action) == 41
+
+    width = pg_db.execute(
+        text(
+            "SELECT character_maximum_length FROM information_schema.columns "
+            "WHERE table_name = 'audit_logs' AND column_name = 'action'"
+        )
+    ).scalar()
+    assert width is not None, "audit_logs.action is missing from the migrated schema"
+    assert width >= len(action), f"audit_logs.action is VARCHAR({width}); ADR-186 needs more"
+
+    strategy = Strategy(name="PG Audit Width", slug="pg-audit-width")
+    pg_db.add(strategy)
+    pg_db.flush()
+    version = create_strategy_version(pg_db, strategy, version="1.0.0", dsl=DSL)
+
+    asset = Asset(symbol="PGAUD", asset_class="stock")
+    pg_db.add(asset)
+    pg_db.flush()
+    source = MarketDataSource(name="pg-audit-src", provider_type="rest_api", base_url="x")
+    pg_db.add(source)
+    pg_db.flush()
+    series = MarketDataSeries(
+        asset_id=asset.id, timeframe="1d", source_id=source.id, dataset_version="v1"
+    )
+    pg_db.add(series)
+    pg_db.flush()
+
+    run = BacktestRun(
+        strategy_version_id=version.id,
+        dataset_version_id=series.id,
+        parameters_json={"trend_period": 20},
+        execution_model_json={"initial_capital": 10_000},
+        dataset_hash="abc",
+        status="completed",
+    )
+    pg_db.add(run)
+    pg_db.flush()
+    pg_db.add(
+        BacktestResult(
+            backtest_run_id=run.id,
+            summary_json={"total_return": 0.1, "final_equity": 11_000.0},
+            equity_curve_json=[],
+            metrics_json={"total_return": 0.1, "final_equity": 11_000.0},
+            result_hash="deadbeef",
+        )
+    )
+    pg_db.flush()
+
+    # The write that used to answer HTTP 500 in production.
+    experiment = adopt_backtest_run(pg_db, run.id)
+    assert experiment.status == "completed"
+
+    entries = pg_db.query(AuditLog).filter_by(entity_id=str(experiment.id)).all()
+    adopted = [row for row in entries if row.event_type == "experiment_adopted_from_backtest"]
+    assert len(adopted) == 1, [row.event_type for row in entries]
+    assert adopted[0].action == action

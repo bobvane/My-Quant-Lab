@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from app.api.schemas import MarketDataSyncRequest
 from app.domain.models import (
+    AuditLog,
     BacktestResult,
     BacktestRun,
     ExperimentResult,
@@ -400,3 +401,35 @@ def test_compare_rejects_ids_that_are_not_numbers(client) -> None:
     response = client.get("/api/v1/experiments/compare", params={"ids": "1,abc"})
     assert response.status_code == 422, response.text
     assert "comma separated integers" in response.json()["detail"]
+
+
+def test_adopting_a_run_writes_the_full_ledger_action(client, db_session) -> None:
+    """The adoption ledger entry is 41 characters; ``audit_logs.action`` must hold it whole.
+
+    The column shipped as ``VARCHAR(32)``, so PostgreSQL rejected this very write and every
+    adoption answered HTTP 500 on the deployed NAS, while SQLite -- this suite -- stored the
+    same string without complaint (ADR-186). The width is also asserted in
+    ``tests/test_audit_action_length.py``; it is asserted here as well because this is the
+    flow that writes it.
+    """
+
+    version_id = _seed(client)
+    run_id = _completed_run(client, version_id)
+    adopted = _adopt(client, run_id)
+    assert adopted.status_code == 201, adopted.text
+    experiment_id = adopted.json()["id"]
+
+    entries = db_session.scalars(
+        select(AuditLog).where(
+            AuditLog.entity_type == "strategy_experiment",
+            AuditLog.entity_id == str(experiment_id),
+            AuditLog.event_type == "experiment_adopted_from_backtest",
+        )
+    ).all()
+    assert len(entries) == 1, [entry.event_type for entry in entries]
+
+    entry = entries[0]
+    assert entry.action == "strategy_experiment_adopted_from_backtest"
+    assert len(entry.action) == 41
+    assert AuditLog.__table__.c.action.type.length is not None
+    assert AuditLog.__table__.c.action.type.length >= len(entry.action)

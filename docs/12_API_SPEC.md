@@ -279,6 +279,49 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
   阈值 `0.3` 的 `effective_vote` 是 `1/3`。
 - 每次运行写审计事件 `ensemble_sweep_completed`。
 
+## Strategy Experiments
+
+`POST /experiments` [已实现] —— 创建一个实验（201）：把一次量化研究跑成**可回读的实体**，而
+不只是一次 HTTP 响应；`kind` 决定跑哪一种既有引擎（**不重实现任何量化算法**）。
+
+`GET /experiments` [已实现] —— 实验历史，最新在前（`?limit=20&strategy_version_id=`）。
+
+`GET /experiments/{experiment_id}` [已实现] —— 单次实验及其全部结果行；POST 结束之后仍可回读。
+
+`GET /experiments/compare` [已实现] —— 逐个实验并排对比**已存**数据（`?ids=1&ids=2`），与回测
+对比端点同形：`{"metrics": [...], "experiments": [...]}`，不重算任何量化值。
+
+`DELETE /experiments/{experiment_id}` [已实现] —— 204，级联删除该实验的结果行，**不删除底层
+`BacktestRun`**（回测是它自己的产物，删除回测另有其门）。
+
+五种 `kind`（都复用既有研究函数，实验层只负责记录与回读）：
+
+- `backtest`：复用回测端点的同一持久化路径（真实 `BacktestRun` + `BacktestResult` + 指标 + 成交
+  明细落库，单次回测查询照常可用），实验行经 `experiment_results.backtest_run_id` 建立
+  Experiment→StrategyVersion→BacktestResult 血缘。
+- `sensitivity`：`grid`（至少一个轴）逐点独立回测，**每个网格点一行**结果：`parameters_json`
+  是该点参数、`metrics_json` 是该点指标、`payload_json` 是该点引擎对象。
+- `monte_carlo`：**重采样已存回测的成交明细**（`backtest_run_id`，只接受 `completed` 运行），
+  不重跑回测。
+- `walk_forward`：`train_bars`（默认 250，≥60）/ `test_bars`（默认 60，≥20）/ `step`（≥1）。
+- `oos`：`oos_pct`（默认 0.2，0–1 开区间）或 `oos_start`。
+
+请求字段：`name`(1–120) / `kind` / `strategy_version_id` 必填，另有 `notes`、`symbol`、
+`series_id`、`timeframe`、`start`、`end`、`parameters`、`grid`、`metric`、`backtest_run_id`、
+`runs`(默认 1000，1–5000)、`trades_per_run`、`seed`。`request_json` 保存校验后的原始请求（复现）。
+
+`extra="forbid"`：未知字段 422。kind 专属的必填项与越界值在**写任何行之前**校验，因此 422 是
+**零写入**；未知 `strategy_version_id` 404；无法解析的 series / symbol 404/422。实验行先以
+`status="running"` 落库，成功后置 `completed` 并写 `summary_json`；引擎抛错时**仍然创建**实验
+行，落 `status="failed"` + `error_message`（审计 `experiment_failed`），POST 仍返回 201 ——
+失败是一个实体，不是静默丢弃。
+
+敏感性实验的 `summary_json` 额外给出 `grid_points` / `evaluated_points` / `ranked_points` /
+`warmup_unmet_points` 与 best / worst / stable：**warm-up 未满足的点（从未交易、平坦 0.0 净值）
+不得赢得排名**（ADR-055），它同时留在每个点的 `payload_json` 与 summary 的
+`warmup_unmet_results` 里，任何一层都不许丢。两个新表 `strategy_experiments` /
+`experiment_results`（迁移 `0016_strategy_experiments`，ADR-174）是这些结果的事实来源。
+
 ## Paper Accounts
 
 `GET /paper/accounts` [已实现] —— 列出模拟账户。
@@ -463,7 +506,7 @@ v2.0.0 的验收修复把四件事收紧：EXPLICIT 规则的引文由服务端�
 
 v2.1.0 起平台可以自己读一份材料：抓取（guard → fetch → parse）先写一条 append-only 的 source snapshot，再把它当作**不可信材料**交给研究者（ADR-163/164/165/166）。
 
-`POST /ai/research` [已实现] —— 一次完整研究运行。请求 `{question, sources: [{label?, kind?, source_ref, text?, uri?, snapshot_id?, retention?, license_note?}], model?}`（`question` 3–4000 字；`sources` 1–8 条，每条 `text` 非空且 `source_ref` 唯一标识本次材料；`retention` 取 `excerpt` / `full`，缺省按 `kind` 决定——`user_input` 是用户自己的材料，整份保留；其余按第三方处理，默认只留 metadata 与 ≤500 字符摘录，要整份保留必须同时给 `license_note`，取值不合法或缺 license_note 返回 400）。`kind` 取 `user_input` / `text` / `github_file` / `url` / `pdf`：前三类要求 `text`；`url` / `pdf` 可以改给 `uri`（平台自己抓取、解析并先写一条 source snapshot）或 `snapshot_id`（复用已经观测过的那一份）；`text` 与 `uri`/`snapshot_id` 同时给出时以 `text` 为准并记一条 `text_preferred` 警告，绝不会偷偷联网（ADR-163）。同步走完 RESEARCHER 与 STRATEGY_ARCHITECT 两步，返回 run payload：`run_id`、`question`、`status`（`pending`/`running`/`completed`/`rejected`/`failed`）、`current_step`、`capability_status`、`attempts`、`sources`、`warnings`、`violations`、`error_message`、`researcher_task_id`、`architect_task_id`、`created_at`、`completed_at`，以及 `hypothesis`（`hypothesis_id`/`status`/`confidence`/`role`/`prompt_version`/`provider`/`model`/`ai_task_id` + `content`）与 `draft`（`draft_id`/`version`/`status`/`capability_status`/`model_status`/`executable`/`compiled_strategy_version_id` + `content` + `capability_report` + `confirmation`）。模型答得不合格时**仍返回 200**，`status = "rejected"` 且 `violations[]` 逐条给出违规码与原因（不自动修正，不做第二次语义尝试）；未配置 AI provider 时 503。抓取类来源另有两条**明确分层**的失败语义：任一来源被安全策略拒绝（私网/回环/link-local/非 http(s)/robots 禁止）时整次运行以 `rejected` 结束并返回 **422**（`detail.error = "source_blocked"`，绝不静默降级成「少一个来源的答案」）；来源抓不到或读不出时返回 **502**（`detail.error = "source_unavailable"`），两者都会留下 run 行与 snapshot 行供事后查证（ADR-164）。
+`POST /ai/research` [已实现] —— 一次完整研究运行。请求 `{question, sources: [{label?, kind?, source_ref, text?, uri?, snapshot_id?, retention?, license_note?}], model?}`（`question` 3–4000 字；`sources` 1–8 条，每条 `text` 非空且 `source_ref` 唯一标识本次材料；`retention` 取 `excerpt` / `full`，缺省按 `kind` 决定——`user_input` 是用户自己的材料，整份保留；其余按第三方处理，默认只留 metadata 与 ≤500 字符摘录，要整份保留必须同时给 `license_note`，取值不合法或缺 license_note 返回 400）。`kind` 取 `user_input` / `text` / `github_file` / `url` / `pdf`：前三类要求 `text`；`url` / `pdf` 可以改给 `uri`（平台自己抓取、解析并先写一条 source snapshot）或 `snapshot_id`（复用已经观测过的那一份）；`text` 与 `uri`/`snapshot_id` 同时给出时以 `text` 为准并记一条 `text_preferred` 警告，绝不会偷偷联网（ADR-163）。**默认异步（v2.5.0）**：请求内只做校验、建 run 行与来源摄取（`prepare_research()`），随即入队 Celery 任务 `quantlab.run_research` 并返回 **202** + 同一个 run payload，其中 `status = "queued"`、`current_step = "queued"`——真正的 RESEARCHER 与 STRATEGY_ARCHITECT 两步在 worker 进程里由 `execute_research()` 完成，前端轮询 `GET /ai/research/{run_id}` 观察进展（阶段跳过 `queued` → `ingest` → `researcher` → `architect` → 终局）；只有把 `AI_RESEARCH_ASYNC` 设为 `false`（无 worker 的部署、测试）才恢复「请求内同步跑完两步再返回 200」的旧行为。无论哪条路径，返回的都是同一个 run payload：`run_id`、`question`、`status`（`queued`/`pending`/`running`/`completed`/`rejected`/`failed`）、`current_step`、`capability_status`、`attempts`、`sources`、`warnings`、`violations`、`error_message`、`researcher_task_id`、`architect_task_id`、`created_at`、`completed_at`，以及 `hypothesis`（`hypothesis_id`/`status`/`confidence`/`role`/`prompt_version`/`provider`/`model`/`ai_task_id` + `content`）与 `draft`（`draft_id`/`version`/`status`/`capability_status`/`model_status`/`executable`/`compiled_strategy_version_id` + `content` + `capability_report` + `confirmation`）。模型答得不合格时**仍返回 200**，`status = "rejected"` 且 `violations[]` 逐条给出违规码与原因（不自动修正，不做第二次语义尝试）；未配置 AI provider 时 503。抓取类来源另有两条**明确分层**的失败语义：任一来源被安全策略拒绝（私网/回环/link-local/非 http(s)/robots 禁止）时整次运行以 `rejected` 结束并返回 **422**（`detail.error = "source_blocked"`，绝不静默降级成「少一个来源的答案」）；来源抓不到或读不出时返回 **502**（`detail.error = "source_unavailable"`），两者都会留下 run 行与 snapshot 行供事后查证（ADR-164）。
 
 `GET /ai/research` [已实现] —— 最近研究运行的摘要列表（query `limit` 默认 20、上限 100）：`run_id`/`question`/`status`/`current_step`/`capability_status`/`attempts`/`violation_count`/`warning_count`/`created_at`/`completed_at`，不含假设与草案正文。
 
@@ -479,7 +522,7 @@ v2.1.0 起平台可以自己读一份材料：抓取（guard → fetch → parse
 
 `POST /ai/strategy/formalize` [已实现] —— 单独让 STRATEGY_ARCHITECT 再形式化一次：请求 `{run_id}` 或 `{hypothesis_id}` → `{"draft": {...}}`（字段同 run payload 里的 `draft`）。回答不是草案时 422，detail 带 `step` 与 violations；两个 id 都没给返回 400；id 未知返回 404。本端点是研究层内部的重跑入口，五步主链路已包含该步。
 
-`POST /ai/strategy/drafts/{draft_id}/compile` [已实现] —— 把已存草案编译成策略版本：请求 `{strategy_id}`（只有目标，不接受 spec / `compile_hash` / `compiler_version`）→ 201 `{result, strategy_id, strategy_version_id, version, compile_hash, report}`，其中 `report` 就是编译器返回的那一份；`NEEDS_USER_DECISION` / `REJECTED` 返回 422 且不创建任何行；draft 或 strategy 未知返回 404；草案已绑定、版本号不可自增、目标版本号已被占用返回 409（docs/29 §16.7）。
+`POST /ai/strategy/drafts/{draft_id}/compile` [已实现] —— 把已存草案编译成策略版本：请求 `{strategy_id}`（只有目标，不接受 spec / `compile_hash` / `compiler_version`）→ 201 `{result, strategy_id, strategy_version_id, version, compile_hash, report}`，其中 `report` 就是编译器返回的那一份；`NEEDS_USER_DECISION` / `REJECTED` 返回 422 且不创建任何行；draft 或 strategy 未知返回 404；草案已绑定、**草案未经人工确认**、版本号不可自增、目标版本号已被占用返回 409（docs/29 §16.7）。**人工确认门（v2.5.0）**：调用编译器之前先读最新人工决定（`backend/app/ai/confirmation.py` 的 `require_confirmation`）——没有答复、或最新答复不是 `confirmed` 时返回 409 `draft_not_confirmed`，`details = {draft_id, decision}`（`decision` 为 `null` / `"rejected"` / `"needs_revision"`），**不写任何行、不带 `report`**。这是服务端强制门：绕过页面直接调本端点同样被拒；顺序固定为 404 → `draft_already_compiled` → `draft_not_confirmed` → 版本号类 409。
 
 `POST /ai/strategy/drafts/{draft_id}/confirmations` [已实现] —— 记录**人工确认**（v2.4.0）：请求 `{decision: "confirmed" | "rejected" | "needs_revision", note?}`（`note` ≤ 2000 字，取值不合法返回 422）→ 201 `{draft_id, run_id, decision, label, confirmation, strategy_version_created: false, compiled_strategy_version_id}`；draft 未知返回 404。`confirmation` 就是 `GET /ai/research/{run_id}` 里 `draft.confirmation` 的形状（`decision`/`label`/`note`/`decided_by`/`decided_at`/`audit_id`/`is_human_decision`/`strategy_version_created`），未确认时为 `null`。它**只追加一条审计事件**（`strategy_draft_confirmed` / `strategy_draft_rejected` / `strategy_draft_needs_revision`，`entity_type=strategy_draft`）：不创建 `StrategyVersion`、不写 `validation_status`、不碰 `is_current`——人工确认是关于草案的证据，让策略上线仍然只有确定性编译器与 ADR-171 激活门两条路；重复提交即追加新事件，最新一条就是当前决定。
 

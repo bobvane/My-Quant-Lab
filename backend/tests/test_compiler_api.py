@@ -19,6 +19,7 @@ from research_payloads import draft_payload
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
+from app.ai import confirmation as confirmation_service
 from app.ai.research_schemas import CapabilityDecision
 from app.data import strategy_service
 from app.domain.models import (
@@ -169,8 +170,15 @@ def _store_draft(
     payload: dict[str, Any],
     *,
     capability: dict[str, Any] | None = None,
+    confirmed: bool = True,
 ) -> StrategyDraft:
-    """A stored draft, built the way the research layer builds one (`ai/research.py`)."""
+    """A stored draft, built the way the research layer builds one (`ai/research.py`).
+
+    ``confirmed`` records the human decision the compile endpoint requires before it
+    will call the compiler (v2.5.0 Step 2). These tests are about the compiler, so the
+    fixture answers for the human by default; the gate's own edges are tested in
+    `test_draft_confirmation.py`.
+    """
 
     run = AIResearchRun(question="why does this strategy work?", status="drafted")
     db_session.add(run)
@@ -188,6 +196,8 @@ def _store_draft(
     )
     db_session.add(draft)
     db_session.flush()
+    if confirmed:
+        confirmation_service.record_confirmation(db_session, draft=draft, decision="confirmed")
     db_session.commit()
     return draft
 
@@ -509,7 +519,12 @@ def test_the_openapi_document_declares_the_refusals(client) -> None:
     assert {"201", "404", "409", "422"} <= set(responses)
     assert "draft_not_found" in responses["404"]["description"]
     assert "strategy_not_found" in responses["404"]["description"]
-    for code in ("draft_already_compiled", "version_unassignable", "version_conflict"):
+    for code in (
+        "draft_already_compiled",
+        "draft_not_confirmed",
+        "version_unassignable",
+        "version_conflict",
+    ):
         assert code in responses["409"]["description"], code
     envelope = responses["409"]["content"]["application/json"]["schema"]
     assert envelope["properties"]["error"]["required"] == ["code", "message", "details"]

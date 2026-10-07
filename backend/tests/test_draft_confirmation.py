@@ -146,27 +146,106 @@ def test_unknown_draft_and_bad_payloads_are_refused(client, db_session, drafted_
     assert payload["draft"]["confirmation"] is None
 
 
+def _compile(client, draft_id: int, strategy_id: int):
+    return client.post(
+        f"/api/v1/ai/strategy/drafts/{draft_id}/compile", json={"strategy_id": strategy_id}
+    )
+
+
+def _versions(db_session) -> list[StrategyVersion]:
+    return list(db_session.scalars(select(StrategyVersion)))
+
+
 def test_nothing_an_ai_endpoint_does_makes_a_version_current(client, db_session, drafted_run):
-    """Confirmed or not, the AI path cannot reach the signal scanner (ADR-171 intact)."""
+    """Confirmed or not, the AI path cannot reach the signal scanner (ADR-171 intact).
+
+    The Martin draft is not compilable (`docs/29` §17.2: entry/exit/risk/sizing are
+    all undecided), so "the gate opened" shows up here as the compiler's own
+    verdict instead of a version. That a *successful* compile does not activate is
+    pinned in `test_compiler_api.py`.
+    """
 
     assert _current_versions(db_session) == []
+    strategy_id = _new_strategy(client)
 
-    compiled = client.post(
-        f"/api/v1/ai/strategy/drafts/{drafted_run.id}/compile",
-        json={"strategy_id": _new_strategy(client)},
-    )
-    assert compiled.status_code in (201, 422)
+    # Unanswered: the compiler is not even called.
+    assert _compile(client, drafted_run.id, strategy_id).status_code == 409
 
     _confirm(client, drafted_run.id, "confirmed", "ship the research version")
 
+    compiled = _compile(client, drafted_run.id, strategy_id)
+    assert compiled.status_code == 422, compiled.text
+    assert compiled.json()["result"] == "NEEDS_USER_DECISION"
+
+    assert _versions(db_session) == []
     assert _current_versions(db_session) == []
-    if compiled.status_code == 201:
-        version = db_session.get(StrategyVersion, compiled.json()["strategy_version_id"])
-        assert version is not None
-        assert version.validation_status == "valid"
-        # The compiler's product is deliberately not live: a human still has to
-        # activate it, and only the ADR-171 gate lets a valid version through.
-        assert version.is_current is False
+
+
+# --- the compile gate (v2.5.0 Step 2) ----------------------------------------------
+
+
+def test_compile_refuses_a_draft_no_human_has_answered_for(client, db_session, drafted_run):
+    """The gate is a server rule: the API refuses exactly what the button refuses."""
+
+    strategy_id = _new_strategy(client)
+
+    response = _compile(client, drafted_run.id, strategy_id)
+
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert body["error"]["code"] == "draft_not_confirmed"
+    assert body["error"]["details"] == {"draft_id": drafted_run.id, "decision": None}
+    # A transport refusal carries no compiler verdict, invented or otherwise.
+    assert "report" not in body
+    assert "result" not in body
+    # ...and it wrote nothing at all.
+    assert _versions(db_session) == []
+    assert db_session.get(StrategyDraft, drafted_run.id).compiled_strategy_version_id is None
+
+
+def test_only_a_confirmed_decision_opens_the_gate(client, db_session, drafted_run):
+    strategy_id = _new_strategy(client)
+
+    for decision in ("rejected", "needs_revision"):
+        _confirm(client, drafted_run.id, decision)
+        refused = _compile(client, drafted_run.id, strategy_id)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["error"]["details"]["decision"] == decision
+        assert _versions(db_session) == []
+
+    _confirm(client, drafted_run.id, "confirmed", "ok now")
+    allowed = _compile(client, drafted_run.id, strategy_id)
+
+    # The gate is behind us: what answers now is the compiler, and its verdict is
+    # the only thing in the body -- no "not confirmed" refusal is left.
+    assert allowed.status_code != 409, allowed.text
+    assert allowed.json()["result"] == "NEEDS_USER_DECISION"
+
+
+def test_a_later_rejection_closes_the_gate_again(client, db_session, drafted_run):
+    """Consent is revocable: the newest answer decides, so no update path is needed."""
+
+    strategy_id = _new_strategy(client)
+    _confirm(client, drafted_run.id, "confirmed")
+    _confirm(client, drafted_run.id, "rejected", "second thoughts")
+
+    refused = _compile(client, drafted_run.id, strategy_id)
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"]["details"]["decision"] == "rejected"
+    assert _versions(db_session) == []
+
+
+def test_the_gate_is_checked_after_the_named_rows_exist(client, drafted_run):
+    """404s keep their meaning: a missing target is reported as missing, not as ungated."""
+
+    missing_draft = _compile(client, 999_999, _new_strategy(client))
+    assert missing_draft.status_code == 404
+    assert missing_draft.json()["error"]["code"] == "draft_not_found"
+
+    missing_strategy = _compile(client, drafted_run.id, 999_999)
+    assert missing_strategy.status_code == 404
+    assert missing_strategy.json()["error"]["code"] == "strategy_not_found"
 
 
 def _new_strategy(client) -> int:

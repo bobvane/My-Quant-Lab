@@ -47,6 +47,9 @@ x-backend-env: &backend-env
   AI_TASK_BUDGET_USD: ${AI_TASK_BUDGET_USD:-1.0}
   AI_DAILY_TASK_LIMIT: ${AI_DAILY_TASK_LIMIT:-20}
   AI_TASK_TIMEOUT_SECONDS: ${AI_TASK_TIMEOUT_SECONDS:-600}
+  # Run research in the worker instead of inside the POST /ai/research request.
+  # Set to false only for a deployment without quantlab-worker (docs/06 §21).
+  AI_RESEARCH_ASYNC: ${AI_RESEARCH_ASYNC:-true}
   GHOSTFOLIO_BASE_URL: ${GHOSTFOLIO_BASE_URL:-}
   GHOSTFOLIO_API_KEY: ${GHOSTFOLIO_API_KEY:-}
   # System Resource Monitor (docs/20_RESOURCE_MONITOR.md)

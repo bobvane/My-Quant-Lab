@@ -22,6 +22,12 @@ __all__ = [
     "BacktestOut",
     "BacktestSummaryOut",
     "BarOut",
+    "ExperimentCompareOut",
+    "ExperimentCreate",
+    "ExperimentDetailOut",
+    "ExperimentListOut",
+    "ExperimentResultOut",
+    "ExperimentSummaryOut",
     "ExplainOut",
     "GithubAnalyzeRequest",
     "GithubAnalyzeOut",
@@ -334,6 +340,101 @@ class MonteCarloOut(BaseModel):
     summary: dict[str, Any]
     sample_equity_paths: list[list[float]]
     warnings: list[str]
+
+
+class ExperimentCreate(BaseModel):
+    """One persisted research experiment (docs/25, ADR-174).
+
+    ``kind`` selects which existing engine runs and what the kind-specific fields mean;
+    the fields another kind would have used are accepted but inert (they are echoed back
+    in the stored request, so the history shows exactly what was sent).
+
+    Every kind-specific requirement is enforced before a row is written -- a rejected
+    request answers 422 and stores nothing -- so the ranges below match the shapes the
+    sibling research endpoints already accept, rather than defining a second contract for
+    the same engine. ``extra="forbid"`` keeps a typo such as ``runs_count`` from silently
+    becoming a default-valued experiment.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    kind: Literal["backtest", "sensitivity", "monte_carlo", "walk_forward", "oos"]
+    strategy_version_id: int
+    notes: str | None = None
+    symbol: str | None = None
+    series_id: int | None = None
+    timeframe: str = "1d"
+    start: str | None = None
+    end: str | None = None
+    parameters: dict[str, Any] | None = None
+    grid: dict[str, list[Any]] | None = None
+    metric: str = "sharpe"
+    backtest_run_id: int | None = None
+    runs: int = Field(default=1000, ge=1, le=5000)
+    trades_per_run: int | None = Field(default=None, ge=1)
+    seed: int = 0
+    train_bars: int = Field(default=250, ge=60)
+    test_bars: int = Field(default=60, ge=20)
+    step: int | None = Field(default=None, ge=1)
+    oos_pct: float | None = Field(default=0.2, gt=0.0, lt=1.0)
+    oos_start: str | None = None
+
+
+class ExperimentResultOut(BaseModel):
+    """One stored result row: a grid point, or the single payload of another kind.
+
+    ``parameters`` is the parameter set this exact result was produced with, which is what
+    makes a sweep re-readable as parameter/result pairs instead of a flat list of scores.
+    """
+
+    id: int
+    kind: str
+    label: str | None = None
+    parameters: dict[str, Any] | None = None
+    backtest_run_id: int | None = None
+    metrics: dict[str, Any] | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: dt.datetime
+
+
+class ExperimentSummaryOut(BaseModel):
+    """List/history shape: no result rows and no engine payloads."""
+
+    id: int
+    name: str
+    kind: str
+    status: str
+    strategy_version_id: int
+    series_id: int | None = None
+    symbol: str | None = None
+    timeframe: str
+    result_count: int = 0
+    backtest_run_id: int | None = None
+    # The five comparable metrics, flattened out of the stored summary so a history row
+    # is readable without loading the experiment. Stored, never recomputed.
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    created_at: dt.datetime
+    started_at: dt.datetime | None = None
+    completed_at: dt.datetime | None = None
+    error_message: str | None = None
+
+
+class ExperimentDetailOut(ExperimentSummaryOut):
+    notes: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    request: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] | None = None
+    results: list[ExperimentResultOut] = Field(default_factory=list)
+
+
+class ExperimentListOut(BaseModel):
+    experiments: list[ExperimentSummaryOut] = Field(default_factory=list)
+
+
+class ExperimentCompareOut(BaseModel):
+    metrics: list[str]
+    experiments: list[dict[str, Any]]
 
 
 class EnsembleMemberIn(BaseModel):

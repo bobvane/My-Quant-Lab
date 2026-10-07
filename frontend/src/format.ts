@@ -26,6 +26,51 @@ export function formatDateTime(value: string | null | undefined): string {
 }
 
 /**
+ * Engine metrics the API returns as fractions (0.0512 is 5.12%), so they need
+ * `formatPercent` (ADR-087): `total_return` and `sharpe` sit in one row and are
+ * not the same unit. These tables are rendered by both BacktestView and the Lab's
+ * experiment panel, so the rule lives here instead of being re-typed at each call
+ * site.
+ */
+const RATIO_METRICS = new Set([
+  'total_return',
+  'cagr',
+  'max_drawdown',
+  'win_rate',
+  'annualized_volatility',
+  'exposure',
+])
+
+/** Money and per-trade money: four decimals of a dollar amount are noise. */
+const MONEY_METRICS = new Set([
+  'final_equity',
+  'initial_capital',
+  'avg_win',
+  'avg_loss',
+  'expectancy',
+])
+
+/**
+ * Counts come back as floats (`2.0` trades) and read as noise that way; the
+ * engine's integer fields are the ones a reader compares by eye.
+ */
+const COUNT_METRICS = new Set([
+  'number_of_trades',
+  'max_consecutive_losses',
+  'max_drawdown_duration_bars',
+])
+
+export function formatMetric(key: string, value: number | null | undefined, digits = 4): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—'
+  // A percentage needs two decimals, not four: the extra digits are noise.
+  if (RATIO_METRICS.has(key)) return formatPercent(value, 2)
+  if (MONEY_METRICS.has(key)) return formatNumber(value, 2)
+  if (COUNT_METRICS.has(key)) return formatNumber(value, 0)
+  if (key === 'average_holding_bars') return formatNumber(value, 1)
+  return formatNumber(value, digits)
+}
+
+/**
  * P&L of a paper account as a fraction of the money it was funded with.
  *
  * `realizedPnl` is the account's realized P&L, not `cash - netDeposits`: a position that

@@ -719,6 +719,7 @@ body: {"strategy_id": 7}
 404  {"error": {"code": "draft_not_found",    "message": "…"}}
 404  {"error": {"code": "strategy_not_found", "message": "…"}}
 409  {"error": {"code": "draft_already_compiled", "message": "…", "details": { … }}}
+409  {"error": {"code": "draft_not_confirmed",    "message": "…", "details": { … }}}
 409  {"error": {"code": "version_unassignable",    "message": "…", "details": { … }}}
 409  {"error": {"code": "version_conflict",        "message": "…", "details": { … }}}
 422  {"result": "NEEDS_USER_DECISION" | "REJECTED", "report": { … }}
@@ -726,6 +727,7 @@ body: {"strategy_id": 7}
 
 - **状态码的理由**：`201` 对应「创建了一行」（与 `POST /strategies/{id}/versions` 的 `strategies.py:202-215` 一致）；`422` 对应「判定为不可编译、什么都没创建」（与 `importer.py:190-197` 的 `422 + issues` 一致）；`409` 对应「目标身份冲突，换个版本号可重试」。
 - **`409` 一律走项目的 `error` 信封，且绝不带 `report`**：`draft_already_compiled` / `version_unassignable` / `version_conflict` 都是**输入边界错误**——编译器没有产出任何 `CompileResult`，所以响应体里**不允许**出现 `result` 或 `report`（伪造一份 `{"result": "REJECTED", "report": …}` 会让客户端以为编译器真的跑过一轮）。`error.details` 只放机器可读的定位信息（如 `{"strategy_id": 7, "versions": ["1.0.0"]}`）。
+- **`draft_not_confirmed` 属于同一信封、另一种原因**（v2.5.0 Step 2）：草案是 AI 的提议，把提议变成 `StrategyVersion` 需要一个真人的答复。端点因此在调用编译器**之前**读 `latest_confirmation()`；没有答复、或最新答复不是 `confirmed`（`rejected`/`needs_revision` 都算），就返回 `409 draft_not_confirmed`，`details` 给出 `{"draft_id": …, "decision": null | "rejected" | "needs_revision"}`，且**什么都不写**。这不是编译器判定，所以同样不带 `report`；它与 `draft_already_compiled` 的先后是固定的：已编译的草案先报「已经编译过」，不会因为缺确认而给出误导性的拒绝。确认本身仍只写一条 `audit_logs` 证据（`strategy_version_created: false`），AI 侧没有任何端点能代替人做出这个答复。
 - **`version_conflict` 不可由编译器产生**：§9 收录它是为了让「目标 `(strategy_id, version)` 已被占用」（`uq_strategy_version`，`backend/app/domain/models.py:200` 所在表约束）在词表里有个名字；它只可能出现在 API 层已分配版本号之后的写入失败/竞态路径上（`backend/app/api/routers/ai.py` 的 `IntegrityError` 处理）。编译器自身对已占用版本无感知（`compile_strategy_draft()` 不查库，见 §4.1）。
 - **三态都要带 `result`**：客户端必须读 `result` 而不是只看状态码（422 有两种含义）。
 - 新的编译端点**自动继承** `backend/app/api/main.py:138-169` 的 Bearer 鉴权与 `:171-176` 的变更型请求限流；不得绕开中间件（例如自建 app）。

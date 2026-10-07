@@ -367,3 +367,39 @@ External Source
 7. **明确不做**（`docs/27` §13）：不发布关键词/正则 injection detector（结构性隔离才是边界，见 ADR-165）、不做 OCR / 视觉模型 / 浏览器渲染、不做 GitHub issue/discussion、不做 object storage、不上 Celery、不改 `/lab` UI，也绝不出现 `URL → AI → StrategySpec → Backtest` 这条链。
 
 测试：`backend/tests/test_source_research.py`（12 例，服务层 + 端点层）与 `backend/tests/test_source_injection.py`（8 例，隔离证明）全绿；v2.0.0 的研究层测试（`test_ai_research.py`、`test_api_contract.py`、`test_ai_provider_boundary.py`）行为不变。唯一被有意取代的行为：`kind="pdf"` 且什么都不给时，错误消息从 "cannot read a 'pdf' source" 变成 "a 'pdf' source needs a uri, a snapshot_id, or the text itself"——因为本版确实能读 PDF 了。
+
+## 21. 研究闭环落地：异步研究、人工确认门与策略实验（工作区改动，未发布）
+
+本节补上 §20 之后的空档（v2.2.0–v2.4.0 未在本文件追加小节）。本节写的是**工作区里已经改完、但还没有发布**的代码：`version.txt` 仍是 `v2.4.4`，本轮不打 tag、不做 release（下一个 release 版本号规划为 `v2.5.0`）。到目前为止，AI 只走到「草案」，而 Compiler 虽然已经存在（`docs/29`），却没有一条从研究到可运行策略版本的路：`/lab` 页面自述「不生成可执行的策略」。本次改动把这个断点接上，并且只做接通，不改动任何一道既有验证门的语义：
+
+```text
+Research（异步执行）
+  → Research Result（可轮询的状态）
+  → Strategy Draft
+  → Human Confirmation（服务端强制的前置门）
+  → Compile（Strategy Compiler）
+  → StrategyVersion（不可变）
+  → Activate（既有 valid-only 激活门）
+  → Backtest
+  → Strategy Experiment（持久化的实验实体，可重新读取、可比较）
+```
+
+1. **研究异步化（§A）**——`POST /ai/research` 不再把两次模型调用留在 HTTP 请求里。`AI_RESEARCH_ASYNC`（`backend/app/core/config.py`，默认 `true`）为真时：请求内只做 `prepare_research()`（校验 + 保留策略 + 摄取 `research_artifacts` + provider 可用性检查），然后入队 Celery 任务 `quantlab.run_research` 并返回 **202**，正文是 `ResearchRunOut`，其中 `status="queued"`、`current_step="queued"`；实际执行在 worker 里由 `execute_research()` 完成（researcher → architect 两段）。前端轮询既有的 `GET /ai/research/{run_id}` 即可看到 `queued → running → completed | rejected | failed`，不再依赖长连接，也**没有**去调大 nginx 超时。
+   - 失败语义不变：provider 报错、超时、空 choices、非法响应仍由 `execute_research()` 落成 `status="failed"` + `error_message`；worker 自身的意外崩溃由 `mark_research_failed()` 记成同一形状（任务先 `commit()` 再抛，避免回滚把失败态抹掉），已经进入终局的 run 会被幂等跳过，不会被覆盖。
+   - 请求内仍然可能立刻失败：provider 未配置 → 503 `ai_not_configured`（**不入队**）；摄取被安全策略拒绝 → 422；抓不到材料 → 502。这些判断在 `prepare_research()` 里做完，所以「请求返回 202」意味着这次运行确实已经开始。
+   - **一个有意取代的行为（ADR-153 / ADR-161）**：`execute_research()` 用 `_stored_material()` 重读这次 run **自己保留的**材料摘录，而不是请求里那份内存全文——worker 在另一个进程里，而且一份 run 只能引用它真正留存下来的材料。`formalize_hypothesis()` 一直就是这条规则。
+   - 没有新增任务系统：复用既有 Celery + Redis 与 `app/workers/tasks.py` 的既有风格；`AI_RESEARCH_ASYNC=false` 时走原来的同步内联路径（测试与没有 worker 的部署都依赖它）。
+2. **人工确认门（§B）**——Compile 现在必须由人开门。`backend/app/ai/confirmation.py` 新增 `require_confirmation(db, draft)`：读该草案最新一次人工决定（`latest_confirmation()`，结论存在 `audit_logs` 里），没有答复或最新答复不是 `confirmed` 就抛 `ConfirmationRequired`，编译端点把它翻成 **409 `draft_not_confirmed`**，`details` = `{"draft_id": …, "decision": null|"rejected"|"needs_revision"}`。这道门在**服务端**，绕不过去：直接调 API 也一样被拒；被拒的编译**什么都不写**（不建 StrategyVersion、不留审计行，`details` 里也没有 `report`/`result`）。AI 层只能读确认、不能写确认——`backend/tests/test_ai_provider_boundary.py` 用 AST 钉住「`app/ai/` 下没有任何模块调用 `record_confirmation`」。判定顺序是固定的：未知草案/未知策略先给 404，已编译的草案先给 `draft_already_compiled`（不会因为缺确认而给出误导性的拒绝），然后才是这道门；`Activate` 仍然只认既有 valid-only 激活门，本版没有放宽它。
+3. **策略实验成为一等实体（§D、ADR-174）**——迁移 `0016_strategy_experiments` 新增两张表：`strategy_experiments`（这次实验要研究什么、用哪个 StrategyVersion、跑哪一种 kind、状态与时间戳、校验后的原始请求 `request_json`）与 `experiment_results`（每个产出的结果各一行）。kind 五种：`backtest` / `sensitivity` / `monte_carlo` / `walk_forward` / `oos`。五条必须守住的语义：
+   - **参数↔结果成对**：一次敏感性扫描给每个网格点写一行 `experiment_results`（该点的参数、该点的指标、引擎的点对象），所以历史里不会只剩「最好/最差」两个数；`best`/`worst` 只从**没有被预热拖垮**的点里挑（`warmup_unmet` 的点是「策略根本没交易」的平坦 0，直接排序会击败真正亏损的点——ADR-055）。
+   - **结果可重新读取**：响应结束不代表结果消失，`GET /experiments/{id}` 在任何时候都读得回来；`GET /experiments?limit=&strategy_version_id=` 给历史，`GET /experiments/compare?ids=…` 只投影库里已存的数（与 `GET /backtests/compare` 同一组五个指标），**不重算**。`DELETE /experiments/{id}` 只删实验与其结果，底层 `BacktestRun` 是它自己的产物，不跟着消失（血缘保留）。
+   - **不重造算法**：五种 kind 分别调用既有的 `store_backtest` / `run_sensitivity` / `run_monte_carlo` / `run_walk_forward` / `run_holdout`；Monte Carlo 从**已存**的 `BacktestTrade` 重采样，从不重跑回测（这正是把 trades 留在库里的理由）。
+   - **失败也是结果**：校验类失败（未知版本、未知 run、缺 `backtest_run_id`、网格为空、K 线不足……）→ 404/422 且**零写入**；引擎执行失败 → **201 + `status="failed"` + `error_message`**（这一行本身就是本次 POST 的交付物，UI 据此显示失败），并记 `experiment_failed` 审计。
+   - **同步执行、零新增基建**：与 `POST /backtests` 一样在请求内跑完，没有新 worker、没有新队列、没有新设置项；`POST /backtests` 的落库路径被抽成 `backend/app/data/backtest_service.py`（`load_backtest_inputs` / `store_backtest`）供两个端点共用——是抽函数，不是抄一份。
+4. **前端闭环（§C、§E）**——这一版的重点不是「API 有了」，而是普通用户在 `/lab`（`frontend/src/views/LabView.vue`）上能一次走完：
+   - **研究**：提交后立刻显示排队态（「研究进行中」「已经等了 N 秒 · 研究号 #N · 当前步骤 queued」），每 2 秒轮询一次 `GET /ai/research/{run_id}`，进入终局自动停；等待过程不占用 HTTP 连接。`?run=<id>` 会写进地址栏，刷新或换页面回来会重新落下当时那一次研究；「最近的研究」也能随时重开一条（读的是服务端已存结果，不调 AI、不产生费用）。
+   - **编译与激活**：在页面里选目标策略（或就地新建）→ 编译 → 展示生成的 StrategyVersion 与编译器报告（逐条拒绝原因，完整报告折叠在「技术细节」）→ 激活为当前版本 → 「去「回测」用这一版」带 `?strategy_version_id=` 跳到回测页并预填。按钮为什么按不动是逐条写明的（与服务端同一套规则：已编译 / 还没有人工确认 / 结论不是「已确认」/ 还没选目标策略）。
+   - **实验**：实验卡片在普通模式下就可见，按 kind 只显示该跑法需要的字段，禁用时永远打印原因；结果区把 `failed` 画成醒目错误、`completed` 画成指标卡，敏感性结果按目标指标排名并标出「预热不足」的点（ADR-055）；原始 JSON 只留在折叠的「技术细节」里；`?experiment=<id>` 深链 + 刷新保留；勾选两条以上才能比较；删除前确认并说明底层回测运行不会被删。
+   - **仍未接上的（如实记录）**：这一页只接收「贴进来的文字」——后端自 v2.1.0 起支持 `url` / `pdf` / `github_file`，但本页还没有入口（页面文案已改成说明这一点，不再声称平台做不到）；实验是同步执行的，所以正常路径上看不到 `running`；敏感性只给表、没有图。
+5. **指标单位只在一处定义（Leaning 收敛）**——回测页与实验表原来各有一份 `formatMetric`，且都把交易次数显示成 `2.0000`、把金额显示成 `10,000.0000`。现在规则集中在 `frontend/src/format.ts` 的同一个 `formatMetric`：比率 → 百分比两位，金额 → 两位小数，计数 → 整数，`average_holding_bars` → 一位小数，其余 → 四位（ADR-087 的单位区分不变），`BacktestView.vue` 改为引用它。
+6. **测试与验收（§J、§G）**——后端新增/更新：`backend/tests/test_research_async.py`（异步生命周期与失败态）、`backend/tests/test_draft_confirmation.py`（门的四个边界）、`backend/tests/test_compiler_contract.py`（§16.7 的四个 409 码冻结表）、`backend/tests/test_experiments.py`（五种 kind、结果回读、比较、级联删除、零写入、引擎失败）、`backend/tests/test_strategy_experiments_migration.py`、`backend/tests/test_lab_journey_contracts.py`（前端旅程契约，含「页面不得再声称读不了网页/PDF」这条守卫）。真实浏览器验收（Chrome 对本机运行同一份代码与 `dist` 的栈）：研究（排队 → 完成 / 被拒）→ 草案 → **未确认时编译被拦**（UI 灰 + 直接调 API 得 409 `draft_not_confirmed`、零写入）→ 人工确认 → 编译出 StrategyVersion → 激活 → 回测 → 建实验（`backtest` / `sensitivity`）→ 回读结果 → 刷新仍在 → 两条实验对比 → 删除（列表 6→5，底层 `BacktestRun` 仍在）。这一轮 Browser UAT 抓到的两个用户级问题已修：页面文案漂移（见上）与「刷新后丢掉当前打开的那一次研究」（补 `?run=<id>`）。

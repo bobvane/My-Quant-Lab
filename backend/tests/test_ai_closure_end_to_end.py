@@ -319,7 +319,17 @@ def test_the_whole_closure_runs_through_the_api(client, db_session, local_provid
     assert detail["draft"]["compiled_strategy_version_id"] is None
     assert db_session.scalars(select(StrategyVersion)).all() == []
 
-    # 4) The human gate records a decision and creates no version.
+    # 4) The compiler refuses a draft no human has answered for, even over the API.
+    strategy_id = client.post("/api/v1/strategies", json={"name": "Closure target"}).json()["id"]
+    refused = client.post(
+        f"/api/v1/ai/strategy/drafts/{draft_id}/compile", json={"strategy_id": strategy_id}
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"]["code"] == "draft_not_confirmed"
+    assert refused.json()["error"]["details"]["decision"] is None
+    assert db_session.scalars(select(StrategyVersion)).all() == []
+
+    # 5) The human gate records a decision and creates no version.
     confirmed = client.post(
         f"/api/v1/ai/strategy/drafts/{draft_id}/confirmations",
         json={"decision": "confirmed", "note": "walked through the closure by hand"},
@@ -328,8 +338,7 @@ def test_the_whole_closure_runs_through_the_api(client, db_session, local_provid
     assert confirmed.json()["strategy_version_created"] is False
     assert db_session.scalars(select(StrategyVersion)).all() == []
 
-    # 5) The compiler turns the confirmed draft into a version that is valid...
-    strategy_id = client.post("/api/v1/strategies", json={"name": "Closure target"}).json()["id"]
+    # 6) The compiler turns the confirmed draft into a version that is valid...
     compiled = client.post(
         f"/api/v1/ai/strategy/drafts/{draft_id}/compile", json={"strategy_id": strategy_id}
     )
@@ -346,7 +355,7 @@ def test_the_whole_closure_runs_through_the_api(client, db_session, local_provid
         == []
     )
 
-    # 6) Only the explicit human activation puts it on the ADR-171 signal path.
+    # 7) Only the explicit human activation puts it on the ADR-171 signal path.
     activated = client.put(f"/api/v1/strategy-versions/{version_id}/activate")
     assert activated.status_code == 200, activated.text
     db_session.expire_all()
@@ -359,7 +368,7 @@ def test_the_whole_closure_runs_through_the_api(client, db_session, local_provid
     ).all()
     assert [row.id for row in scannable] == [version_id]
 
-    # 7) Every step left an audit trail.
+    # 8) Every step left an audit trail.
     events = [
         row.event_type
         for row in db_session.scalars(select(AuditLog).order_by(AuditLog.id))

@@ -64,8 +64,11 @@ __all__ = [
     "SourceRejected",
     "SourceUnavailable",
     "draft_payload",
+    "execute_research",
     "formalize_hypothesis",
     "hypothesis_payload",
+    "mark_research_failed",
+    "prepare_research",
     "run_payload",
     "run_summary",
     "recent_runs",
@@ -616,20 +619,6 @@ def _call(
     )
 
 
-def _source_kinds(meta: list[dict[str, Any]]) -> dict[str, str]:
-    return {str(entry["source_ref"]): str(entry["kind"]) for entry in meta}
-
-
-def _source_hashes(meta: list[dict[str, Any]]) -> dict[str, str]:
-    """The hash of the version of each source this run read (ADR-161)."""
-
-    return {
-        str(entry["source_ref"]): str(entry["text_hash"])
-        for entry in meta
-        if entry.get("text_hash")
-    }
-
-
 # --------------------------------------------------------------------------- #
 # Steps
 # --------------------------------------------------------------------------- #
@@ -948,17 +937,31 @@ def _finish(
     return run
 
 
-def start_research(
+def prepare_research(
     db: Session,
     *,
     question: str,
     inputs: list[ResearchInput],
-    model: str | None = None,
     providers: Any = None,
-    router_factory: Any = None,
     ingest: Any = None,
+    queued: bool = False,
 ) -> AIResearchRun:
-    """Run the researcher and the architect once, and store what survived."""
+    """Read the material and store it; the model steps come later (docs/06).
+
+    This is everything a run needs *before* it spends a token -- the question, the
+    retained material, and the provider check -- and it is separable so that a
+    caller which must not hold a request open can answer immediately and let a
+    worker run :func:`execute_research` afterwards.
+
+    The refusals raised here stay exceptions instead of becoming run rows, because
+    none of them called a model: an unusable question and an unfetchable source are
+    the request's own problem, and the API answers both with a 400. A source that
+    was read and then blocked or lost *is* recorded, on the run, at step ``ingest``.
+
+    ``queued`` names the one difference between the two callers: a run that a
+    worker will pick up starts as ``queued``, and one this process will finish starts
+    as ``running`` at ``ingest``.
+    """
 
     question = (question or "").strip()
     if not question:
@@ -977,8 +980,8 @@ def start_research(
 
     run = AIResearchRun(
         question=question,
-        status="running",
-        current_step="ingest",
+        status="queued" if queued else "running",
+        current_step="queued" if queued else "ingest",
         sources_json=[],
         warnings_json=[],
         violations_json=[],
@@ -987,7 +990,7 @@ def start_research(
     db.flush()
 
     try:
-        sources, warnings, meta = _ingest(db, run, inputs, ingest=ingest)
+        _sources, warnings, meta = _ingest(db, run, inputs, ingest=ingest)
     except SourceRejected as refused:
         # A blocked source is not dropped from the run: an answer built from whatever
         # happened to be reachable is not the answer that was asked for (docs/27 §5.2).
@@ -999,17 +1002,45 @@ def start_research(
         run.sources_json = []
         run.warnings_json = []
         return _finish(db, run, "failed", "ingest", error=f"{unavailable.code}: {unavailable}")
-    kinds = _source_kinds(meta)
-    source_hashes = _source_hashes(meta)
     run.sources_json = meta
     run.warnings_json = list(warnings)
     db.flush()
 
     live = providers if providers is not None else get_active_providers(db)
     if not live:
+        # Nothing can answer this deployment. The run records the request and why it
+        # could not be served, and no worker is asked to fail again later.
+        return _finish(db, run, "failed", "failed", error=AI_UNCONFIGURED)
+    return run
+
+
+def execute_research(
+    db: Session,
+    run: AIResearchRun,
+    *,
+    model: str | None = None,
+    providers: Any = None,
+    router_factory: Any = None,
+) -> AIResearchRun:
+    """Run the researcher and the architect for a run that is already prepared.
+
+    The material is read back from what the run retained (:func:`_stored_material`),
+    never from whatever the caller happened to hold: every citation is checked
+    against the excerpt on file (ADR-153, ADR-161), which is the same rule a
+    re-formalization follows and the only rule a worker in another process *can*
+    follow. The sources themselves are not touched here -- ingest stored them -- so
+    everything below decides the run's own status and nothing else.
+    """
+
+    sources, kinds, source_hashes = _stored_material(db, run.id)
+    warnings = list(run.warnings_json or [])
+
+    live = providers if providers is not None else get_active_providers(db)
+    if not live:
         return _finish(db, run, "failed", "failed", error=AI_UNCONFIGURED)
 
     try:
+        run.status = "running"
         run.current_step = "researcher"
         db.flush()
         hypothesis_row, claims = _researcher_step(
@@ -1051,6 +1082,48 @@ def start_research(
         return _finish(db, run, "rejected", rejected.step or run.current_step, error=str(rejected))
     except RuntimeError as exc:
         return _finish(db, run, "failed", run.current_step, error=str(exc))
+
+
+def start_research(
+    db: Session,
+    *,
+    question: str,
+    inputs: list[ResearchInput],
+    model: str | None = None,
+    providers: Any = None,
+    router_factory: Any = None,
+    ingest: Any = None,
+) -> AIResearchRun:
+    """Prepare a run and execute it in this process, for callers that must wait.
+
+    The tests and a deployment with no worker (``AI_RESEARCH_ASYNC=false``) use
+    this: the answer is complete when the call returns. The API queues
+    :func:`execute_research` instead, so that a request does not have to survive two
+    model calls (docs/26 C10).
+    """
+
+    run = prepare_research(db, question=question, inputs=inputs, providers=providers, ingest=ingest)
+    if run.status in {"rejected", "failed"}:
+        # Ingest already decided this run, for the same reason in either caller.
+        return run
+    return execute_research(
+        db, run, model=model, providers=providers, router_factory=router_factory
+    )
+
+
+def mark_research_failed(db: Session, run: AIResearchRun, error: BaseException) -> AIResearchRun:
+    """Record a crash the pipeline itself did not classify (a worker's last resort).
+
+    A worker dies in ways the steps cannot see: a lost database connection, a
+    killed child, a serializer that refuses a payload. The run must not sit in
+    ``running`` forever because of it -- and a run that already reached a verdict
+    must not be rewritten by the aftermath, so the current status decides.
+    """
+
+    if run.status in {"completed", "rejected", "failed"}:
+        return run
+    detail = f"{type(error).__name__}: {error}".strip()
+    return _finish(db, run, "failed", run.current_step or "failed", error=detail[:1000])
 
 
 def formalize_hypothesis(

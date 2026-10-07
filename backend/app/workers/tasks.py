@@ -478,3 +478,46 @@ def check_github_sources() -> dict:
         # actually produced is reported beside it, so the summary cannot drift
         # from the vocabulary check_source uses (ADR-058).
         return {"checked": len(sources), **outcomes}
+
+
+# --------------------------------------------------------------------------- #
+# AI research: the model half of a run, off the request path
+# --------------------------------------------------------------------------- #
+@celery_app.task(name="quantlab.run_research")
+def run_research(run_id: int, model: str | None = None) -> dict:
+    """Run the researcher and the architect for a research run that is waiting.
+
+    The API stores the material and returns; this task is what turns a ``queued``
+    run into a ``completed``, ``rejected`` or ``failed`` one (docs/26 C10). The run
+    row is the only state that crosses the process boundary, so it is also the
+    lock: a run that already reached a verdict is left exactly as it is, which
+    makes a duplicate delivery free instead of a second bill.
+
+    ``model`` is the model the caller asked for, carried across the boundary
+    because the request that chose it is long gone by the time this runs. An
+    unknown name is the runtime's problem, not this task's: it resolves the route
+    and records its own failure on the run.
+
+    A crash the pipeline itself did not classify is recorded on the run and
+    committed *before* the exception is re-raised, so neither ``session_scope``'s
+    rollback nor a Celery retry can leave a run stuck in ``running`` for ever.
+    """
+
+    from app.ai import research as research_service
+    from app.domain.models import AIResearchRun
+
+    with session_scope() as db:
+        run = db.get(AIResearchRun, run_id)
+        if run is None:
+            logger.warning("research run %s was queued but does not exist", run_id)
+            return {"run_id": run_id, "status": "missing"}
+        if run.status not in {"queued", "running"}:
+            return {"run_id": run_id, "status": run.status, "skipped": "already decided"}
+        try:
+            research_service.execute_research(db, run, model=model)
+        except Exception as exc:  # noqa: BLE001 - the worker's last resort, see docstring
+            logger.exception("research run %s crashed", run_id)
+            research_service.mark_research_failed(db, run, exc)
+            db.commit()
+            raise
+        return {"run_id": run_id, "status": run.status, "step": run.current_step}

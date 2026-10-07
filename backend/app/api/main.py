@@ -27,6 +27,9 @@ from app.api.routers import (
     backtests as backtests_router,
 )
 from app.api.routers import (
+    experiments as experiments_router,
+)
+from app.api.routers import (
     feature_snapshots as feature_snapshots_router,
 )
 from app.api.routers import (
@@ -259,6 +262,7 @@ def create_app() -> FastAPI:
         lifecycle_router.router,
         backtests_router.router,
         backtest_metrics_router.router,
+        experiments_router.router,
         research_router.router,
         resources_router.router,
         paper_router.router,

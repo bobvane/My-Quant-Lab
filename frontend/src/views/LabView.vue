@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   api,
   ApiError,
@@ -13,27 +14,51 @@ import {
   type AIResearchSourceMeta,
   type AIResearchViolation,
   type AIResearchWarning,
+  type Asset,
+  type BacktestSummary,
+  type CompileRejection,
+  type ExperimentCompareOut,
+  type ExperimentCreatePayload,
+  type ExperimentDetailOut,
+  type ExperimentKind,
+  type ExperimentResultOut,
+  type ExperimentSummaryOut,
+  type Strategy,
+  type StrategyVersion,
 } from '@/api'
+import MetricHint from '@/components/MetricHint.vue'
 import { isAdvanced } from '@/mode'
+import { formatDateTime, formatMetric, toneOf } from '@/format'
+import { metricKeyLabel, timeframeLabel, validationLabel } from '@/wording'
 
-// 「AI 研究实验室」（§17）：把一条最小但诚实的链路走完——
-// 研究输入 → AI 理解 → 策略假设 → 策略草案 → 能力检查。
+// 「AI 研究实验室」（§17 + v2.4.0 的编译/激活）：把一条最小但诚实的链路走完——
+// 研究输入 → AI 理解 → 策略假设 → 策略草案 → 人工确认 → 编译 → 策略版本 → 激活 → 回测。
 //
-// 这一页刻意不做三件事，也不假装做了：
-// ① 草案永远不可执行（`executable === false`），这一版没有编译、没有回测，
-//    所以页面上不会出现收益、回撤、夏普这类结果数字（模型写了会被标记为未验证）；
+// 这一页刻意不做的事，也不假装做了：
+// ① 草案本身永远不可执行（`executable === false`）：编译之前没有策略、没有回测，
+//    所以草案里不会出现收益、回撤、夏普这类数字（模型写了会被标成未验证）；
 // ② AI 自己补的假设必须被看见：`origin === 'ASSUMED'` 的规则在普通模式和高级
 //    模式下都会写明「AI 提出的假设，不是你的原话」；
-// ③ 能力结论用服务端算出来的那一份（`capability_status` / `capability_report`），
-//    缺什么就说什么，绝不把「部分支持」说成「可以运行」。
+// ③ 能力结论用服务端算出来的那一份（`capability_status` / `capability_report`）；
+// ④ 「编译」与「激活」是两件事，也是两道不同的门：编译需要人工确认过草案，激活
+//    需要人来点（`window.confirm` 守卫）。两处都由服务端兜底，页面只是照实说。
 //
-// 普通模式（默认）只讲人话：AI 理解到了什么、规则说了什么、还缺什么、能力结论是什么。
-// 来源徽标、置信度、派生关系、能力 token、违规代码、运行号与尝试次数只在高级模式出现。
+// 普通模式（默认）只讲人话：AI 理解到了什么、规则说了什么、还缺什么、能不能编译、
+// 版本是不是当前版本。来源徽标、置信度、派生关系、能力 token、违规代码、运行号、
+// 编译报告的原始 JSON 只在高级模式或折叠区里出现。
 
 const QUESTION_MIN = 3
 const QUESTION_MAX = 4000
 const SOURCE_MAX = 40000
 const MAX_SOURCES = 8
+
+// 后台研究是异步的：POST 只把运行排进队列（202 + status="queued"），所以状态要靠轮询。
+const POLL_MS = 2000
+const POLL_FAILURE_LIMIT = 3
+/** 等多久之后补一句「可以关掉这一页」的说明。 */
+const POLL_HINT_SECONDS = 60
+
+const router = useRouter()
 
 const question = ref('')
 const sourceLabel = ref('')
@@ -46,10 +71,37 @@ const formalizing = ref(false)
 const confirming = ref(false)
 const confirmationNote = ref('')
 const loadingRuns = ref(false)
+const loadingRun = ref(false)
 const error = ref('')
 const notice = ref('')
 const notConfigured = ref(false)
 const configDetail = ref('')
+
+// 轮询状态。`polling` 是给模板看的镜像：`pollTimer` 本身不是响应式的。
+let pollTimer: number | undefined
+const polling = ref(false)
+const pollFailures = ref(0)
+const pollStartedAt = ref<number | null>(null)
+const elapsedSeconds = ref(0)
+
+// 编译 / 版本：这三块各自有独立的错误位置，因为它们在页面下方，顶部那条提示看不见。
+const strategies = ref<Strategy[]>([])
+const loadingStrategies = ref(false)
+const compileStrategyId = ref('')
+const newStrategyName = ref('')
+const creatingStrategy = ref(false)
+const compiling = ref(false)
+const activating = ref(false)
+const compileError = ref('')
+const compileDetail = ref('')
+const versionError = ref('')
+const compiledVersion = ref<StrategyVersion | null>(null)
+const loadingVersion = ref(false)
+const compileReport = ref<Record<string, any> | null>(null)
+/** 编译器自己拒绝（422）时的结论；`null` = 这次编译没有 422。 */
+const compileOutcome = ref<{ result: string; report: Record<string, any> | null } | null>(null)
+/** 已经为哪一份版本发过读回请求：避免每次轮询都重复发一次。 */
+const requestedVersionId = ref<number | null>(null)
 
 // --------------------------------------------------------------------------- //
 // 输入校验：把后端会拒绝的情况提前说清楚，而不是等 400 回来
@@ -91,6 +143,10 @@ const warnings = computed<AIResearchWarning[]>(() => run.value?.warnings ?? [])
 const confirmation = computed<AIResearchDraftConfirmation | null>(
   () => run.value?.draft?.confirmation ?? null,
 )
+// 这份草案编译出来的版本号；有值 = 编译过了，页面该显示版本而不是「编译」按钮。
+const draftCompiledVersionId = computed<number | null>(
+  () => run.value?.draft?.compiled_strategy_version_id ?? null,
+)
 
 const DECISION_LABELS: Record<string, string> = {
   confirmed: '已确认',
@@ -106,6 +162,7 @@ function decisionLabel(decision: string | null | undefined): string {
 
 const STATUS_LABELS: Record<string, string> = {
   pending: '已排队，还没开始',
+  queued: '已排队，正在后台执行',
   running: 'AI 正在分析',
   completed: '已完成',
   rejected: '没有通过校验',
@@ -117,12 +174,28 @@ function statusLabel(status: string | null | undefined): string {
   return STATUS_LABELS[status] ?? status
 }
 
+/** 还在跑（或还没开始跑）的状态：轮询只在这些状态上有意义。 */
+function isLiveStatus(status: string | null | undefined): boolean {
+  return status === 'queued' || status === 'running' || status === 'pending'
+}
+
+const liveSentence = computed(() => {
+  const status = run.value?.status
+  if (status === 'queued') {
+    return '这次研究已经排队，后台正在准备执行。这一步不需要你等着：页面可以关掉，稍后在下面的「最近的研究」里重新打开就能看到结果。'
+  }
+  if (status === 'running') {
+    return `AI 正在读材料、写假设与草案。页面每 ${POLL_MS / 1000} 秒自动读一次状态，这一步不需要你等着，也可以先去忙别的。`
+  }
+  return ''
+})
+
 const statusSentence = computed(() => {
   const status = run.value?.status
   if (status === 'completed') return 'AI 已经读完材料，下面是它给出的理解、假设、草案和能力结论。'
   if (status === 'rejected') return 'AI 的回答没有通过校验。系统没有替它修改，也没有把这份回答当成结论存下来。'
   if (status === 'failed') return '这次研究没有跑完，下面是后端记下来的原因。'
-  if (status === 'running' || status === 'pending') return '这次研究还在进行中，过一会儿点「重新读一次结果」再看。'
+  if (status === 'queued' || status === 'running') return '这次研究还在后台跑，页面会自动更新状态。'
   return ''
 })
 
@@ -258,11 +331,6 @@ function sourceTitle(item: AIResearchSourceMeta, index: number): string {
   return item.label?.trim() || `材料 ${index + 1}`
 }
 
-function formatTime(value: string | null | undefined): string {
-  if (!value) return '—'
-  return value.replace('T', ' ').slice(0, 16)
-}
-
 const draftMarketSentence = computed(() => {
   const market = draftContent.value?.market
   if (!market) return ''
@@ -274,24 +342,111 @@ const draftMarketSentence = computed(() => {
   return parts.join(' · ')
 })
 
-const nextStep = computed(() => {
-  const current = run.value
-  if (notConfigured.value) {
-    return { text: '到「系统管理」把 AI 提供方配好，再回到这一页重试。', to: '/settings', linkText: '去「系统管理」' }
+// --------------------------------------------------------------------------- //
+// 编译：拒绝码 → 人话。这些码是服务端的契约（ADR-167/ADR-171），不是文案。
+// --------------------------------------------------------------------------- //
+const COMPILE_ERROR_REASONS: Record<string, string> = {
+  draft_not_confirmed:
+    '这份草案还没有人工确认过，所以服务端不允许编译。先在上面「人工确认」里选一个结论——只有「确认」过的草案才允许编译。',
+  draft_already_compiled:
+    '这份草案已经编译过了，同一份草案不会编译出第二个版本。下面显示的就是它生成的策略版本。',
+  version_unassignable:
+    '目标策略现有的版本号读不出「主版本.次版本.补丁」的形式，服务端没法自动算下一个版本号。换一个策略，或者先去「我的策略」把这个策略的版本整理成这种格式。',
+  version_conflict:
+    '这个版本号刚刚已经被占用了（可能是别处同时编译出来的）。再点一次「编译为策略版本」，服务端会分配下一个空闲版本号。',
+  strategy_not_found:
+    '选中的策略已经不存在了。点「刷新策略列表」重新选一个目标策略。',
+  draft_not_found:
+    '这条草案后端已经找不到了。点「最近的研究」里的「刷新列表」，然后重新打开这次研究。',
+}
+
+/** 编译器拒绝码 → 人话（docs/29 §9.1 的固定词表）。 */
+const REJECTION_REASONS: Record<string, string> = {
+  needs_user_decision: '有一处必须由你来定：编译器不会替你在两种读法之间选一个。',
+  unknown_blocks_slot: '有一条规则用到了原文没说清的字段，而这个字段是必须填的。',
+  ambiguous_phrase: '草案里有一句话可以有两种读法，需要人先定下来。',
+  capability_missing: '草案需要的能力，系统目前没有实现。',
+  not_expressible: '草案里的内容无法用这套策略语言表达。',
+  indicator_unmapped: '草案用到的指标，在指标库里找不到对应的实现。',
+  parameter_invalid: '某个参数的值不合法（超出范围、类型不对，或者这份草案本身读不出来）。',
+  rule_unmapped: '有一条规则没法落到策略语言里的任何位置。',
+  rule_conflict: '有两条规则互相冲突，同时生效会自相矛盾。',
+  indicator_collision: '两个不同的指标被映射成了同一个名字。',
+  missing_required_slot: '策略必须填的某个位置（例如入场或风控）是空的。',
+  validation_failed: '编译出来的策略定义没有通过校验器。',
+  engine_incompatible: '编译出来的定义，回测引擎跑不了。',
+  provenance_invalid: '规则来源的标记不合法。',
+  version_conflict: '版本号冲突。',
+}
+
+function rejectionReason(item: CompileRejection): string {
+  return REJECTION_REASONS[item.code] ?? `编译器给出的原因（未归类：${item.code}）`
+}
+
+const compileOutcomeLabel = computed(() => {
+  const result = compileOutcome.value?.result
+  if (result === 'NEEDS_USER_DECISION') return '需要你先做决定'
+  if (result === 'REJECTED') return '编译器拒绝了'
+  return result || '编译器没有通过'
+})
+
+const compileOutcomeTone = computed(() =>
+  compileOutcome.value?.result === 'NEEDS_USER_DECISION' ? 'warn' : 'bad',
+)
+
+const compileOutcomeSentence = computed(() => {
+  const result = compileOutcome.value?.result
+  if (result === 'NEEDS_USER_DECISION') {
+    return '编译器在草案里遇到了必须由人来定的地方。它不会替你做这个决定，所以这次没有生成策略版本，草案也没有被改动。'
   }
-  if (!current) {
-    return { text: '写好研究问题和材料，点「开始研究」；结果会留在这一页，也会进「最近的研究」。', to: '', linkText: '' }
+  if (result === 'REJECTED') {
+    return '编译器没法把这份草案变成一条可执行的策略。下面每一条都是它给出的原因；这次没有生成策略版本，草案也没有被改动。'
   }
-  if (current.status === 'failed') {
-    return { text: '先看上面的原因：如果是 AI 没配置或额度用完，去「系统管理」处理；否则改一下研究输入再试一次。', to: '/settings', linkText: '检查 AI 配置' }
+  return '编译器没有生成策略版本。'
+})
+
+const compileRejections = computed<CompileRejection[]>(() => {
+  const raw = compileOutcome.value?.report?.rejections
+  return Array.isArray(raw) ? (raw as CompileRejection[]) : []
+})
+
+/** 折叠区里的原始报告：刚编译成功的那份，或这次 422 的那份。 */
+const compileReportText = computed(() => {
+  const report = compileReport.value ?? compileOutcome.value?.report ?? null
+  return report ? JSON.stringify(report, null, 2) : ''
+})
+
+const targetStrategyId = computed<number | null>(() => {
+  const value = Number(compileStrategyId.value)
+  return Number.isInteger(value) && value > 0 ? value : null
+})
+
+const canCompile = computed(
+  () =>
+    !compiling.value &&
+    !!run.value?.draft &&
+    !draftCompiledVersionId.value &&
+    confirmation.value?.decision === 'confirmed' &&
+    targetStrategyId.value !== null,
+)
+
+/** 编译按钮为什么是灰的——逐条说清，服务端的同一条规则在这里提前讲。 */
+const compileBlockedReason = computed(() => {
+  const draft = run.value?.draft
+  if (!draft) return ''
+  if (draftCompiledVersionId.value) {
+    return '这条草案已经编译过了：下面是它生成的策略版本，不能再编译第二次。'
   }
-  if (current.status === 'rejected') {
-    return { text: '系统不会自动修改 AI 的回答。把问题问得更具体、材料补得更完整，然后重新开始一次研究。', to: '', linkText: '' }
+  if (!confirmation.value) {
+    return '还没有人工确认。先在上面「人工确认」里选一个结论；服务端只接受「已确认」的草案，所以现在按不了。'
   }
-  if (current.draft) {
-    return { text: '读一遍上面的草案，判断这件事值不值得做。要往下走，就得先把缺的能力补上，或者按 AI 的替代思路把策略缩小。', to: '', linkText: '' }
+  if (confirmation.value.decision !== 'confirmed') {
+    return `当前人工结论是「${decisionLabel(confirmation.value.decision)}」，不是「已确认」。要编译请重新选「确认」。`
   }
-  return { text: '这次只拿到了假设、还没有草案：点「重新生成策略草案」让 AI 再写一次。', to: '', linkText: '' }
+  if (targetStrategyId.value === null) {
+    return '还没有选目标策略：在下面挑一个已存在的策略，或者新建一个——编译出来的版本要挂在某个策略下面。'
+  }
+  return ''
 })
 
 // --------------------------------------------------------------------------- //
@@ -302,16 +457,23 @@ function resetNotices() {
   notice.value = ''
   notConfigured.value = false
   configDetail.value = ''
+  compileError.value = ''
+  compileDetail.value = ''
+  versionError.value = ''
+  compileOutcome.value = null
 }
 
-function handleFailure(e: unknown) {
-  // 503 = 没有可用的 AI 提供方：把后端的原文照实显示，并指向设置页。
+/** 503 = 没有可用的 AI 提供方：这不是页面错误，是配置缺失，单独渲染。 */
+function handleFailure(e: unknown, target: 'page' | 'compile' | 'version' = 'page') {
   if (e instanceof ApiError && e.status === 503) {
     notConfigured.value = true
     configDetail.value = e.message
     return
   }
-  error.value = (e as Error).message
+  const text = (e as Error).message
+  if (target === 'compile') compileError.value = text
+  else if (target === 'version') versionError.value = text
+  else error.value = text
 }
 
 async function loadRuns() {
@@ -326,9 +488,129 @@ async function loadRuns() {
   }
 }
 
+async function loadStrategies() {
+  loadingStrategies.value = true
+  try {
+    strategies.value = await api.strategies()
+    // 只有一个策略时替用户选上；有多个就不猜，让用户自己选，避免编译到不相干的策略上。
+    if (strategies.value.length === 1 && targetStrategyId.value === null) {
+      compileStrategyId.value = String(strategies.value[0].id)
+    }
+  } catch (e) {
+    handleFailure(e, 'compile')
+  } finally {
+    loadingStrategies.value = false
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// 轮询：POST 只返回 202 + status="queued"，真正的结果要自己读回来
+// --------------------------------------------------------------------------- //
+function stopPolling() {
+  if (pollTimer !== undefined) {
+    window.clearInterval(pollTimer)
+    pollTimer = undefined
+  }
+  polling.value = false
+}
+
+function startPolling() {
+  stopPolling()
+  pollFailures.value = 0
+  pollStartedAt.value = Date.now()
+  elapsedSeconds.value = 0
+  polling.value = true
+  pollTimer = window.setInterval(() => {
+    void tick()
+  }, POLL_MS)
+}
+
+async function tick() {
+  const current = run.value
+  if (!current) {
+    stopPolling()
+    return
+  }
+  if (pollStartedAt.value !== null) {
+    elapsedSeconds.value = Math.floor((Date.now() - pollStartedAt.value) / 1000)
+  }
+  try {
+    const fresh = await api.aiResearchRun(current.run_id)
+    pollFailures.value = 0
+    applyRun(fresh)
+    if (!isLiveStatus(fresh.status)) {
+      stopPolling()
+      if (fresh.status === 'completed') {
+        notice.value = '这次研究已经跑完，下面是它的结果。'
+      }
+      await loadRuns()
+    }
+  } catch (e) {
+    pollFailures.value += 1
+    // 连续读不到就停：一个永远转下去的圈比一句错误更糟。
+    if (pollFailures.value >= POLL_FAILURE_LIMIT) {
+      stopPolling()
+      error.value = `连续 ${POLL_FAILURE_LIMIT} 次都没读到这次运行的状态（${(e as Error).message}）。已经停止自动刷新，可以点「刷新状态」再试一次。`
+    }
+  }
+}
+
+/** 把一次运行读回页面：换运行就清掉上一条的编译结果，状态变了就开/关轮询。 */
+function applyRun(fresh: AIResearchRun) {
+  const previousRunId = run.value?.run_id ?? null
+  run.value = fresh
+  rememberOpenRun(fresh.run_id)
+  if (previousRunId !== fresh.run_id) {
+    compiledVersion.value = null
+    compileReport.value = null
+    compileOutcome.value = null
+    requestedVersionId.value = null
+    elapsedSeconds.value = 0
+  }
+  const versionId = fresh.draft?.compiled_strategy_version_id ?? null
+  if (versionId) {
+    if (requestedVersionId.value !== versionId) {
+      requestedVersionId.value = versionId
+      // 编译报告不随运行保存，重新打开这次研究只能看到版本本身。
+      compileReport.value = null
+      void loadCompiledVersion(versionId)
+    }
+  } else if (compiledVersion.value) {
+    compiledVersion.value = null
+    compileReport.value = null
+    requestedVersionId.value = null
+  }
+  // 已经在轮询就不要重启：重启会把计时清零，进度看起来像卡住了。
+  if (isLiveStatus(fresh.status)) {
+    if (!polling.value) startPolling()
+  } else {
+    stopPolling()
+  }
+}
+
+async function loadCompiledVersion(versionId: number) {
+  loadingVersion.value = true
+  try {
+    const all = await api.allStrategyVersions()
+    const found = all.find((item) => item.id === versionId) ?? null
+    compiledVersion.value = found
+    if (!found) {
+      versionError.value = `这次编译生成的策略版本 #${versionId} 现在读不到了（可能已经被删除）。`
+    }
+  } catch (e) {
+    handleFailure(e, 'version')
+  } finally {
+    loadingVersion.value = false
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// 动作
+// --------------------------------------------------------------------------- //
 async function submit() {
   if (inputProblem.value || busy.value) return
   resetNotices()
+  stopPolling()
   busy.value = true
   run.value = null
   const source: { text: string; kind: string; source_ref: string; label?: string } = {
@@ -339,7 +621,9 @@ async function submit() {
   const label = sourceLabel.value.trim()
   if (label) source.label = label
   try {
-    run.value = await api.aiResearchStart({ question: question.value.trim(), sources: [source] })
+    // 后端默认异步：这里拿到的大多是 202 + status="queued"，也可能（异步关闭时）
+    // 直接是终态。applyRun 两种都处理：是终态就不轮询。
+    applyRun(await api.aiResearchStart({ question: question.value.trim(), sources: [source] }))
     await loadRuns()
   } catch (e) {
     handleFailure(e)
@@ -350,27 +634,41 @@ async function submit() {
 
 async function openRun(runId: number) {
   resetNotices()
+  stopPolling()
+  loadingRun.value = true
   try {
-    run.value = await api.aiResearchRun(runId)
+    applyRun(await api.aiResearchRun(runId))
   } catch (e) {
     handleFailure(e)
+  } finally {
+    loadingRun.value = false
   }
 }
 
+/** 手动刷新：不改动页面上的提示，只把状态读回来；读回来的还是进行中就会继续轮询。 */
 async function refreshRun() {
   const current = run.value
   if (!current) return
-  await openRun(current.run_id)
+  loadingRun.value = true
+  error.value = ''
+  try {
+    applyRun(await api.aiResearchRun(current.run_id))
+  } catch (e) {
+    handleFailure(e)
+  } finally {
+    loadingRun.value = false
+  }
 }
 
 async function formalize() {
   const current = run.value
   if (!current || formalizing.value) return
   resetNotices()
+  stopPolling()
   formalizing.value = true
   try {
     await api.aiStrategyFormalize({ run_id: current.run_id })
-    run.value = await api.aiResearchRun(current.run_id)
+    applyRun(await api.aiResearchRun(current.run_id))
     notice.value = '草案已经重新生成，下面是新的这一份。'
     await loadRuns()
   } catch (e) {
@@ -378,7 +676,7 @@ async function formalize() {
     // 这次运行上，所以重新读一次运行就能拿到真正的拒绝原因。
     if (e instanceof ApiError && e.status === 422) {
       try {
-        run.value = await api.aiResearchRun(current.run_id)
+        applyRun(await api.aiResearchRun(current.run_id))
         notice.value = 'AI 这次给的草案没有通过校验，原因见下面的「AI 理解」卡片。'
       } catch {
         error.value = '这次改写没有通过校验，而且重新读取运行详情也失败了。'
@@ -400,9 +698,12 @@ async function confirmDraft(decision: AIResearchDraftDecision) {
   try {
     const note = confirmationNote.value.trim()
     await api.confirmStrategyDraft(current.draft.draft_id, decision, note || undefined)
-    run.value = await api.aiResearchRun(current.run_id)
+    applyRun(await api.aiResearchRun(current.run_id))
     confirmationNote.value = ''
-    notice.value = `这次人工决定已经记下来了：${decisionLabel(decision)}。草案本身没有被改动，也没有生成可执行的策略。`
+    notice.value =
+      decision === 'confirmed'
+        ? '这次人工决定已经记下来了：已确认。草案本身没有被改动；现在可以往下走「编译为策略版本」了。'
+        : `这次人工决定已经记下来了：${decisionLabel(decision)}。草案本身没有被改动，也不会生成策略版本——服务端只接受「已确认」的草案去编译。`
   } catch (e) {
     // 404 = 这条草案后端已经不在了；422 = 备注超长等可以在本地避免的输入问题。
     if (e instanceof ApiError && e.status === 404) {
@@ -415,15 +716,903 @@ async function confirmDraft(decision: AIResearchDraftDecision) {
   }
 }
 
-onMounted(loadRuns)
+async function createStrategyInline() {
+  const name = newStrategyName.value.trim()
+  if (!name || creatingStrategy.value) return
+  compiling.value = false
+  creatingStrategy.value = true
+  compileError.value = ''
+  try {
+    const created = await api.createStrategy(name)
+    newStrategyName.value = ''
+    strategies.value = [...strategies.value, created]
+    compileStrategyId.value = String(created.id)
+    notice.value = `策略「${created.name}」已经建好，并选为这次编译的目标策略。`
+  } catch (e) {
+    handleFailure(e, 'compile')
+  } finally {
+    creatingStrategy.value = false
+  }
+}
+
+/** 编译拒绝时按码说人话；422 是编译器自己拒绝，正文是 `{result, report}`。 */
+async function handleCompileFailure(e: unknown) {
+  if (e instanceof ApiError && e.status === 422 && e.body && typeof e.body.result === 'string') {
+    compileOutcome.value = {
+      result: e.body.result,
+      report: (e.body.report ?? null) as Record<string, any> | null,
+    }
+    return
+  }
+  const code = e instanceof ApiError ? e.code : null
+  const known = code ? COMPILE_ERROR_REASONS[code] : undefined
+  if (known) {
+    // 这两条说明页面上的认知已经过时了（还没确认 / 已经编译过）：跟着服务端重读一次。
+    if (code === 'draft_not_confirmed' || code === 'draft_already_compiled') {
+      const current = run.value
+      if (current) {
+        try {
+          applyRun(await api.aiResearchRun(current.run_id))
+        } catch {
+          /* 读不回来也不影响下面这句提示 */
+        }
+      }
+    }
+    compileError.value = known
+    compileDetail.value = (e as ApiError).message
+    return
+  }
+  handleFailure(e, 'compile')
+}
+
+async function compile() {
+  const current = run.value
+  const draft = current?.draft
+  const strategyId = targetStrategyId.value
+  if (!current || !draft || strategyId === null || compiling.value) return
+  resetNotices()
+  compiling.value = true
+  compileReport.value = null
+  try {
+    const result = await api.compileStrategyDraft(draft.draft_id, strategyId)
+    compileReport.value = result.report ?? null
+    requestedVersionId.value = result.strategy_version_id
+    await loadCompiledVersion(result.strategy_version_id)
+    notice.value = `编译成功：草案已经冻结成策略版本 ${result.version}。它还不是当前版本——要让它生效，在下面点「激活为当前版本」。`
+    applyRun(await api.aiResearchRun(current.run_id))
+    await loadRuns()
+  } catch (e) {
+    await handleCompileFailure(e)
+  } finally {
+    compiling.value = false
+  }
+}
+
+async function activate() {
+  const version = compiledVersion.value
+  if (!version || activating.value) return
+  const ok = window.confirm(
+    `确定把策略版本 ${version.version} 激活为当前版本吗？\n\n激活只改「哪一版是当前版本」：不改这一版的内容，不触发回测，也不会下单。之后可以随时再激活别的版本。`,
+  )
+  if (!ok) return
+  versionError.value = ''
+  notice.value = ''
+  activating.value = true
+  try {
+    const updated = await api.activateVersion(version.id)
+    compiledVersion.value = updated
+    notice.value = `策略版本 ${updated.version} 现在是当前版本。要验证它，下一步去「回测」用这一版跑一次。`
+  } catch (e) {
+    handleFailure(e, 'version')
+  } finally {
+    activating.value = false
+  }
+}
+
+function goToBacktest() {
+  const version = compiledVersion.value
+  if (!version) return
+  void router.push({ path: '/backtest', query: { strategy_version_id: String(version.id) } })
+}
+
+// --------------------------------------------------------------------------- //
+// 实验（Strategy Experiment）：把「跑一次」变成一条留在服务端的记录
+// --------------------------------------------------------------------------- //
+//
+// 一次实验 = 用某一版策略按一种跑法跑一次，并把结果（每个网格点的参数与指标）存下来。
+// 这一节刻意不做的事：
+// ① 不自己算任何指标：表里的分数全部来自服务端的 `results` / `summary`，页面只翻译单位；
+// ② 不推荐参数：敏感性按目标指标排序，只说明「哪一组分数高」，排序不是推荐（引擎的立场）；
+// ③ 201 不等于成功：引擎跑挂了也回 201 + `status: "failed"`；页面照样把这条记录摆出来，
+//    并把 `error_message` 放在最显眼的地方——记录本身就是那次尝试的交付物；
+// ④ 删除实验只删这条记录：它背后那次 `BacktestRun` 是独立产物，不会被一起删掉。
+
+/** 服务端 `ExperimentCreate.kind` 的五个取值，以及每一种要求你给什么。 */
+const EXPERIMENT_KINDS: Array<{ value: ExperimentKind; label: string; hint: string }> = [
+  {
+    value: 'backtest',
+    label: '跑一次回测',
+    hint: '用这一版策略跑一次完整回测。这一次运行本身就是实验记录。',
+  },
+  {
+    value: 'sensitivity',
+    label: '参数敏感性（扫一遍）',
+    hint: '给每个参数几个候选值，所有组合各跑一遍，看哪一组分数最高。',
+  },
+  {
+    value: 'monte_carlo',
+    label: '成交重采样（蒙特卡洛）',
+    hint: '挑一次已经跑完的回测，把它的成交记录重新洗牌再算一遍，看结果稳不稳。不会重跑回测。',
+  },
+  {
+    value: 'walk_forward',
+    label: '滚动前进',
+    hint: '用一段数据算、紧接着的一段检验，然后整段往前挪：看它在不同时间段是不是都成立。',
+  },
+  {
+    value: 'oos',
+    label: '样本外检验',
+    hint: '把数据按时间切成前后两段，只看后一段（样本外）的结果。',
+  },
+]
+
+/** 敏感性扫描可用的目标指标：服务端 `TRACKED_METRICS`，顺序照抄引擎的报告顺序。 */
+const EXPERIMENT_METRICS: readonly string[] = [
+  'total_return',
+  'cagr',
+  'sharpe',
+  'sortino',
+  'max_drawdown',
+  'win_rate',
+  'profit_factor',
+  'expectancy',
+  'number_of_trades',
+  'exposure',
+]
+
+/** 服务端 `MAX_GRID_POINTS`：超过这个点数会被 422 拒绝，先在页面上说清楚。 */
+const EXPERIMENT_MAX_GRID_POINTS = 144
+
+const EXPERIMENT_TIMEFRAMES = ['1d', '1h', '4h', '1w']
+
+const EXPERIMENT_STATUS_LABELS: Record<string, string> = {
+  queued: '已排队',
+  running: '运行中',
+  completed: '已完成',
+  failed: '没有跑完',
+}
+
+const route = useRoute()
+
+const experimentList = ref<ExperimentSummaryOut[]>([])
+const experimentVersions = ref<StrategyVersion[]>([])
+const experimentAssets = ref<Asset[]>([])
+const experimentBacktests = ref<BacktestSummary[]>([])
+const loadingExperiments = ref(false)
+const loadingExperiment = ref(false)
+const loadingExperimentVersions = ref(false)
+const loadingExperimentBacktests = ref(false)
+const creatingExperiment = ref(false)
+const comparingExperiments = ref(false)
+const deletingExperimentId = ref<number | null>(null)
+const experimentError = ref('')
+const experimentNotice = ref('')
+const experimentDetailError = ref('')
+
+const experimentVersionId = ref('')
+const experimentKind = ref<ExperimentKind>('backtest')
+const experimentName = ref('')
+const experimentSymbol = ref('')
+const experimentTimeframe = ref('1d')
+const experimentMetric = ref('sharpe')
+const experimentNotes = ref('')
+const experimentStart = ref('')
+const experimentEnd = ref('')
+const experimentSeriesId = ref('')
+const experimentParametersText = ref('')
+const experimentGridText = ref('')
+const experimentRuns = ref('1000')
+const experimentSeed = ref('0')
+const experimentTradesPerRun = ref('')
+const experimentTrainBars = ref('250')
+const experimentTestBars = ref('60')
+const experimentStep = ref('')
+const experimentOosPct = ref('0.2')
+const experimentBacktestRunId = ref('')
+
+const openExperiment = ref<ExperimentDetailOut | null>(null)
+const openExperimentId = ref<number | null>(null)
+const compareExperimentIds = ref<number[]>([])
+const experimentCompare = ref<ExperimentCompareOut | null>(null)
+
+/** 地址栏里的 `?experiment=<id>`：刷新之后从这里回到当时打开的那一条。 */
+const requestedExperimentId = (() => {
+  const raw = route.query.experiment
+  const text = Array.isArray(raw) ? raw[0] : raw
+  const parsed = text ? Number.parseInt(text, 10) : Number.NaN
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+})()
+
+/** 地址栏里的 `?run=<id>`：刷新或换页面回来之后，重新落下当时那一次研究。 */
+const requestedRunId = (() => {
+  const raw = route.query.run
+  const text = Array.isArray(raw) ? raw[0] : raw
+  const parsed = text ? Number.parseInt(text, 10) : Number.NaN
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+})()
+
+function experimentKindLabel(kind: string): string {
+  return EXPERIMENT_KINDS.find((item) => item.value === kind)?.label ?? '未知跑法'
+}
+
+function experimentKindHint(kind: string): string {
+  return EXPERIMENT_KINDS.find((item) => item.value === kind)?.hint ?? ''
+}
+
+function experimentStatusLabel(status: string): string {
+  return EXPERIMENT_STATUS_LABELS[status] ?? '状态未知'
+}
+
+function strategyName(strategyId: number): string {
+  return strategies.value.find((item) => item.id === strategyId)?.name ?? `策略 #${strategyId}`
+}
+
+function experimentVersionLabel(version: StrategyVersion): string {
+  const current = version.is_current ? '（当前版本）' : ''
+  return `${strategyName(version.strategy_id)} · ${version.version}${current} · ${validationLabel(version.validation_status)}`
+}
+
+const experimentNeedsSeries = computed(() => experimentKind.value !== 'monte_carlo')
+
+const selectedExperimentVersion = computed<StrategyVersion | null>(
+  () => experimentVersions.value.find((item) => String(item.id) === experimentVersionId.value) ?? null,
+)
+
+const experimentDefaultName = computed(
+  () =>
+    `${experimentKindLabel(experimentKind.value)} · ${selectedExperimentVersion.value?.version ?? '未选版本'}`,
+)
+
+/** JSON 输入在本地先解析：写错了就在这里说，不拿半个请求去问服务端。 */
+function parseJsonObject(
+  text: string,
+  what: string,
+  requireArrays = false,
+): { value: Record<string, unknown> | null; problem: string } {
+  const trimmed = text.trim()
+  if (!trimmed) return { value: null, problem: '' }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    return { value: null, problem: `${what}不是合法的 JSON：按示例写成一个对象，例如 {"risk_pct": 2}。` }
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { value: null, problem: `${what}要写成用 { } 包起来的对象，不能是数组或单个值。` }
+  }
+  if (requireArrays) {
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!Array.isArray(value) || value.length === 0) {
+        return {
+          value: null,
+          problem: `${what}里的 ${key} 要是一个非空数组，例如 {"risk_pct": [1, 2, 3]}。`,
+        }
+      }
+    }
+  }
+  return { value: parsed as Record<string, unknown>, problem: '' }
+}
+
+function integerProblem(text: string, what: string, min: number, max: number): string {
+  if (!text.trim()) return ''
+  const value = Number(text)
+  if (!Number.isInteger(value) || value < min || value > max) {
+    return `${what}要填 ${min} 到 ${max} 之间的整数。`
+  }
+  return ''
+}
+
+const experimentGridPoints = computed<number | null>(() => {
+  if (experimentKind.value !== 'sensitivity') return null
+  const { value, problem } = parseJsonObject(experimentGridText.value, '网格', true)
+  if (problem || !value) return null
+  return Object.values(value).reduce<number>(
+    (total, values) => total * (Array.isArray(values) ? values.length : 1),
+    1,
+  )
+})
+
+const experimentBlockedReason = computed<string>(() => {
+  if (!experimentVersionId.value) {
+    return '还差一个策略版本：在上面选一版；一版都没有的话，先去「策略」页编译出一版。'
+  }
+  if (
+    experimentNeedsSeries.value &&
+    !experimentSymbol.value.trim() &&
+    !experimentSeriesId.value.trim()
+  ) {
+    return '还差一个标的代码：填一个代码（例如 SPY），或在「高级设置」里填数据序列号。'
+  }
+  const parameters = parseJsonObject(experimentParametersText.value, '策略参数')
+  if (parameters.problem) return parameters.problem
+  if (experimentKind.value === 'sensitivity') {
+    if (!experimentGridText.value.trim()) {
+      return '还差一个网格：在「高级设置」里写要扫的参数，例如 {"risk_pct": [1, 2, 3]}。'
+    }
+    const grid = parseJsonObject(experimentGridText.value, '网格', true)
+    if (grid.problem) return grid.problem
+    const points = experimentGridPoints.value
+    if (points !== null && points > EXPERIMENT_MAX_GRID_POINTS) {
+      return `网格太大了：${points} 个点超过服务端上限 ${EXPERIMENT_MAX_GRID_POINTS} 个，而每个点都要跑一次回测——请缩小范围。`
+    }
+  }
+  if (experimentKind.value === 'monte_carlo') {
+    if (!experimentBacktestRunId.value) {
+      return '还差一次已经跑完的回测：在上面选一条记录；一条都没有的话，先去「回测」页跑一次。'
+    }
+    const runs = integerProblem(experimentRuns.value, '重采样次数', 1, 5000)
+    if (runs) return runs
+    const trades = integerProblem(experimentTradesPerRun.value, '每次取的成交笔数', 1, 100000)
+    if (trades) return trades
+    const seed = integerProblem(experimentSeed.value, '随机种子', 0, 2147483647)
+    if (seed) return seed
+  }
+  if (experimentKind.value === 'walk_forward') {
+    const train = integerProblem(experimentTrainBars.value, '训练窗口（根）', 60, 100000)
+    if (train) return train
+    const test = integerProblem(experimentTestBars.value, '检验窗口（根）', 20, 100000)
+    if (test) return test
+    const step = integerProblem(experimentStep.value, '步长（根）', 1, 100000)
+    if (step) return step
+  }
+  if (experimentKind.value === 'oos') {
+    const text = experimentOosPct.value.trim()
+    if (text) {
+      const pct = Number(text)
+      if (!Number.isFinite(pct) || pct <= 0 || pct >= 1) {
+        return '样本外比例要大于 0 且小于 1：0.2 表示用最后 20% 的数据做样本外检验。'
+      }
+    }
+  }
+  return ''
+})
+
+function buildExperimentPayload(): ExperimentCreatePayload | null {
+  const version = selectedExperimentVersion.value
+  if (!version) return null
+  const payload: ExperimentCreatePayload = {
+    name: (experimentName.value.trim() || experimentDefaultName.value).slice(0, 120),
+    kind: experimentKind.value,
+    strategy_version_id: version.id,
+  }
+  const notes = experimentNotes.value.trim()
+  if (notes) payload.notes = notes
+  if (experimentNeedsSeries.value) {
+    const symbol = experimentSymbol.value.trim()
+    if (symbol) payload.symbol = symbol.toUpperCase()
+    const seriesId = experimentSeriesId.value.trim()
+    if (seriesId) payload.series_id = Number(seriesId)
+    if (experimentTimeframe.value) payload.timeframe = experimentTimeframe.value
+    const start = experimentStart.value.trim()
+    if (start) payload.start = start
+    const end = experimentEnd.value.trim()
+    if (end) payload.end = end
+  }
+  // 重采样读的是一次已经跑完的回测，策略参数在那一次就已经定下来了。
+  if (experimentKind.value !== 'monte_carlo') {
+    const parsed = parseJsonObject(experimentParametersText.value, '策略参数').value
+    if (parsed) payload.parameters = parsed
+  }
+  if (experimentKind.value === 'sensitivity') {
+    const grid = parseJsonObject(experimentGridText.value, '网格', true).value
+    if (grid) payload.grid = grid as Record<string, unknown[]>
+    payload.metric = experimentMetric.value
+  }
+  if (experimentKind.value === 'monte_carlo') {
+    payload.backtest_run_id = Number(experimentBacktestRunId.value)
+    const runs = Number(experimentRuns.value)
+    if (Number.isInteger(runs)) payload.runs = runs
+    const trades = experimentTradesPerRun.value.trim()
+    if (trades && Number.isInteger(Number(trades))) payload.trades_per_run = Number(trades)
+    const seed = Number(experimentSeed.value)
+    if (Number.isInteger(seed)) payload.seed = seed
+  }
+  if (experimentKind.value === 'walk_forward') {
+    const train = Number(experimentTrainBars.value)
+    if (Number.isInteger(train)) payload.train_bars = train
+    const test = Number(experimentTestBars.value)
+    if (Number.isInteger(test)) payload.test_bars = test
+    const step = experimentStep.value.trim()
+    if (step && Number.isInteger(Number(step))) payload.step = Number(step)
+  }
+  if (experimentKind.value === 'oos') {
+    const pct = experimentOosPct.value.trim()
+    if (pct) payload.oos_pct = Number(pct)
+  }
+  return payload
+}
+
+function handleExperimentFailure(e: unknown, what = '实验没有建成') {
+  if (e instanceof ApiError && e.status === 422) {
+    experimentError.value = `${what}：服务端拒绝了这次输入——${e.message}。这次请求没有写入任何记录，改完上面的字段再试一次。`
+    return
+  }
+  experimentError.value = `${what}：${(e as Error).message}`
+}
+
+async function loadExperiments() {
+  loadingExperiments.value = true
+  try {
+    const response = await api.experiments()
+    experimentList.value = response.experiments
+  } catch (e) {
+    experimentError.value = `读不到实验列表：${(e as Error).message}`
+  } finally {
+    loadingExperiments.value = false
+  }
+}
+
+async function loadExperimentVersions() {
+  loadingExperimentVersions.value = true
+  try {
+    const versions = await api.allStrategyVersions()
+    experimentVersions.value = [...versions].sort((a, b) => b.id - a.id)
+    if (!experimentVersionId.value && experimentVersions.value.length) {
+      const current = experimentVersions.value.find((item) => item.is_current)
+      experimentVersionId.value = String((current ?? experimentVersions.value[0]).id)
+    }
+  } catch (e) {
+    experimentError.value = `读不到策略版本列表：${(e as Error).message}`
+  } finally {
+    loadingExperimentVersions.value = false
+  }
+}
+
+async function loadExperimentAssets() {
+  try {
+    experimentAssets.value = await api.assets()
+  } catch {
+    // 标的列表只是输入建议：读不到就让用户自己敲代码，不该挡住建实验。
+    experimentAssets.value = []
+  }
+}
+
+async function loadExperimentBacktests() {
+  loadingExperimentBacktests.value = true
+  try {
+    const runs = await api.backtests()
+    experimentBacktests.value = runs.filter((run) => run.status === 'completed').slice(0, 30)
+  } catch (e) {
+    experimentError.value = `读不到回测记录：${(e as Error).message}`
+  } finally {
+    loadingExperimentBacktests.value = false
+  }
+}
+
+async function reloadExperimentChoices() {
+  experimentError.value = ''
+  await Promise.all([
+    loadExperimentVersions(),
+    loadExperimentBacktests(),
+    loadExperimentAssets(),
+    loadExperiments(),
+  ])
+}
+
+/**
+ * 只改写地址栏里的一个参数，其它原样保留。
+ *
+ * 列表和结果本身都来自服务端，所以去掉参数只是回到「没打开任何一条」的状态，不是数据丢失。
+ */
+function queryWith(key: 'experiment' | 'run', id: number | null): Record<string, string> {
+  const query: Record<string, string> = {}
+  for (const [name, value] of Object.entries(route.query)) {
+    if (name === key) continue
+    if (typeof value === 'string') query[name] = value
+  }
+  if (id !== null) query[key] = String(id)
+  return query
+}
+
+/**
+ * 把「打开的是哪一条」写进地址栏。
+ *
+ * 有了它，刷新页面（甚至把链接发给别人）还能落在同一条实验上。
+ */
+function rememberOpenExperiment(id: number | null) {
+  void router.replace({ path: route.path, query: queryWith('experiment', id) })
+}
+
+/**
+ * 把「打开的是哪一次研究」写进地址栏。
+ *
+ * 轮询每 2 秒会重新读一次运行，所以这里先用地址栏现值做一次幂等判断，避免无意义的 replace。
+ */
+function rememberOpenRun(id: number | null) {
+  const raw = route.query.run
+  const current = Number.parseInt(typeof raw === 'string' ? raw : '', 10)
+  if (Number.isFinite(current) ? current === id : id === null) return
+  void router.replace({ path: route.path, query: queryWith('run', id) })
+}
+
+function applyExperiment(detail: ExperimentDetailOut) {
+  openExperiment.value = detail
+  openExperimentId.value = detail.id
+  rememberOpenExperiment(detail.id)
+}
+
+async function openExperimentById(id: number) {
+  loadingExperiment.value = true
+  experimentDetailError.value = ''
+  try {
+    applyExperiment(await api.experiment(id))
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      openExperiment.value = null
+      openExperimentId.value = null
+      experimentDetailError.value = '这条实验后端已经找不到了（可能刚被删掉）：刷新列表后重新选一条。'
+      rememberOpenExperiment(null)
+      await loadExperiments()
+    } else {
+      experimentDetailError.value = `读不到这条实验：${(e as Error).message}`
+    }
+  } finally {
+    loadingExperiment.value = false
+  }
+}
+
+function refreshOpenExperiment() {
+  const id = openExperimentId.value
+  if (id !== null) void openExperimentById(id)
+}
+
+function closeExperiment() {
+  openExperiment.value = null
+  openExperimentId.value = null
+  experimentDetailError.value = ''
+  rememberOpenExperiment(null)
+}
+
+async function createExperiment() {
+  if (experimentBlockedReason.value || creatingExperiment.value) return
+  const payload = buildExperimentPayload()
+  if (!payload) return
+  experimentError.value = ''
+  experimentNotice.value = ''
+  experimentDetailError.value = ''
+  creatingExperiment.value = true
+  try {
+    const detail = await api.createExperiment(payload)
+    applyExperiment(detail)
+    await loadExperiments()
+    if (detail.status === 'failed') {
+      // 201 只是「记录建成了」：引擎的失败也要留在这条记录上，并被看见。
+      experimentError.value = `实验「${detail.name}」记下来了，但引擎这次没有跑完：${
+        detail.error_message ?? '服务端没有给出原因。'
+      }`
+    } else {
+      experimentNotice.value = `实验「${detail.name}」跑完了：存下 ${detail.result_count} 条结果。`
+    }
+  } catch (e) {
+    handleExperimentFailure(e)
+  } finally {
+    creatingExperiment.value = false
+  }
+}
+
+async function removeExperiment(id: number, name: string) {
+  const ok = window.confirm(
+    `确定删除实验「${name}」吗？\n\n` +
+      '只会删掉这条实验记录和它存下来的结果。它背后那次回测运行不会被删除——在「回测」页里仍然找得到。\n' +
+      '删掉之后不能恢复。',
+  )
+  if (!ok) return
+  deletingExperimentId.value = id
+  experimentError.value = ''
+  experimentNotice.value = ''
+  try {
+    await api.deleteExperiment(id)
+    if (openExperimentId.value === id) {
+      openExperiment.value = null
+      openExperimentId.value = null
+      rememberOpenExperiment(null)
+    }
+    compareExperimentIds.value = compareExperimentIds.value.filter((item) => item !== id)
+    experimentCompare.value = null
+    experimentNotice.value = `实验「${name}」已经删除。它背后那次回测运行没有被删掉。`
+    await loadExperiments()
+  } catch (e) {
+    handleExperimentFailure(e, '删除没有成功')
+  } finally {
+    deletingExperimentId.value = null
+  }
+}
+
+function toggleExperimentCompare(id: number) {
+  compareExperimentIds.value = compareExperimentIds.value.includes(id)
+    ? compareExperimentIds.value.filter((item) => item !== id)
+    : [...compareExperimentIds.value, id]
+  // 选中的集合变了，上一次的对比结果就不再对应它，直接作废而不是让它看起来还是新的。
+  experimentCompare.value = null
+}
+
+function clearExperimentCompare() {
+  compareExperimentIds.value = []
+  experimentCompare.value = null
+}
+
+async function runExperimentCompare() {
+  if (compareExperimentIds.value.length < 2 || comparingExperiments.value) return
+  comparingExperiments.value = true
+  experimentDetailError.value = ''
+  try {
+    experimentCompare.value = await api.compareExperiments(compareExperimentIds.value)
+  } catch (e) {
+    handleExperimentFailure(e, '对比没有成功')
+  } finally {
+    comparingExperiments.value = false
+  }
+}
+
+// ---- 打开的那一条实验：把服务端存下的结果翻成人话 -------------------------- //
+
+const experimentSummary = computed<Record<string, unknown> | null>(
+  () => openExperiment.value?.summary ?? null,
+)
+
+function summaryObject(key: string): Record<string, unknown> | null {
+  const value = experimentSummary.value?.[key]
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function summaryNumber(key: string): number | null {
+  const value = experimentSummary.value?.[key]
+  return typeof value === 'number' ? value : null
+}
+
+function summaryText(key: string): string | null {
+  const value = experimentSummary.value?.[key]
+  return typeof value === 'string' ? value : null
+}
+
+const experimentSummaryMetrics = computed<Array<{ key: string; value: number | null }>>(() =>
+  Object.entries(openExperiment.value?.metrics ?? {}).map(([key, value]) => ({
+    key,
+    value: typeof value === 'number' ? value : null,
+  })),
+)
+
+/** 敏感性点：`payload.objective` 是引擎用来排名的分数；没测到的点是 `null`。 */
+function resultObjective(row: ExperimentResultOut): number | null {
+  const value = row.payload?.objective
+  return typeof value === 'number' ? value : null
+}
+
+function resultWarmupUnmet(row: ExperimentResultOut): boolean {
+  return row.payload?.warmup_unmet === true
+}
+
+function resultMetric(row: ExperimentResultOut, key: string): number | null {
+  const value = (row.metrics ?? {})[key]
+  return typeof value === 'number' ? value : null
+}
+
+function resultHash(row: ExperimentResultOut): string | null {
+  const value = row.payload?.result_hash
+  return typeof value === 'string' ? value : null
+}
+
+function isBestResult(row: ExperimentResultOut): boolean {
+  const hash = resultHash(row)
+  return hash !== null && summaryObject('best')?.result_hash === hash
+}
+
+function isWorstResult(row: ExperimentResultOut): boolean {
+  const hash = resultHash(row)
+  return hash !== null && summaryObject('worst')?.result_hash === hash
+}
+
+/**
+ * 逐条结果：敏感性按目标指标从高到低重排（服务端存的是网格顺序）。
+ *
+ * 只重排，不重算：分数还是引擎给的那一个。没测到的点（预热不足 / 指标未定义）排最后。
+ */
+const experimentResults = computed<ExperimentResultOut[]>(() => {
+  const rows = openExperiment.value?.results ?? []
+  if (openExperiment.value?.kind !== 'sensitivity') return rows
+  return [...rows].sort((a, b) => {
+    const left = resultObjective(a)
+    const right = resultObjective(b)
+    if (left === null && right === null) return a.id - b.id
+    if (left === null) return 1
+    if (right === null) return -1
+    return right - left || a.id - b.id
+  })
+})
+
+/** 参数列：这一批结果里出现过的参数名。 */
+const experimentResultAxes = computed<string[]>(() => {
+  const keys: string[] = []
+  for (const row of experimentResults.value) {
+    for (const key of Object.keys(row.parameters ?? {})) {
+      if (!keys.includes(key)) keys.push(key)
+    }
+  }
+  return keys
+})
+
+/** 指标列：先按引擎的报告顺序，再补上表里多出来的键。 */
+const experimentResultMetrics = computed<string[]>(() => {
+  const present = new Set<string>()
+  for (const row of experimentResults.value) {
+    for (const key of Object.keys(row.metrics ?? {})) present.add(key)
+  }
+  const ordered = EXPERIMENT_METRICS.filter((key) => present.has(key))
+  const extra = [...present].filter((key) => !EXPERIMENT_METRICS.includes(key)).sort()
+  return [...ordered, ...extra]
+})
+
+const sensitivityWarmupUnmet = computed(
+  () =>
+    openExperiment.value?.kind === 'sensitivity' &&
+    experimentResults.value.some((row) => resultWarmupUnmet(row)),
+)
+
+function axisValue(row: ExperimentResultOut, axis: string): string {
+  const value = (row.parameters ?? {})[axis]
+  if (value === undefined || value === null) return '—'
+  return typeof value === 'object' ? JSON.stringify(value) : String(value)
+}
+
+/** `summary.best` / `summary.worst` 是 `{parameters, objective, result_hash}`。 */
+function compactPointText(point: Record<string, unknown> | null): string {
+  if (!point) return '—'
+  const parameters = (point.parameters ?? {}) as Record<string, unknown>
+  const values = Object.entries(parameters)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(', ')
+  const metric = summaryText('metric') ?? 'total_return'
+  const objective = typeof point.objective === 'number' ? point.objective : null
+  return `${values || '（没有参数）'} → ${metricKeyLabel(metric)} ${formatMetric(metric, objective)}`
+}
+
+function compareNumber(row: Record<string, unknown>, key: string): number | null {
+  const value = row[key]
+  return typeof value === 'number' ? value : null
+}
+
+function compareText(row: Record<string, unknown>, key: string): string | null {
+  const value = row[key]
+  return typeof value === 'string' ? value : null
+}
+
+const openExperimentText = computed(() =>
+  openExperiment.value ? JSON.stringify(openExperiment.value, null, 2) : '',
+)
+
+const experimentNextStep = computed<{ text: string; to: NextStepTarget; linkText: string }>(() => {
+  const versionId =
+    openExperiment.value?.strategy_version_id ??
+    (experimentVersionId.value ? Number(experimentVersionId.value) : null)
+  if (versionId === null) {
+    return {
+      text: '上面选一版策略跑一次实验；跑完之后，这一版随时可以拿去「回测」页看权益曲线和成交明细。',
+      to: '',
+      linkText: '',
+    }
+  }
+  return {
+    text: '实验只把结果存下来做对照；要看权益曲线、逐笔成交和执行模型，用「回测」页打开这一版。',
+    to: { path: '/backtest', query: { strategy_version_id: String(versionId) } },
+    linkText: '去「回测」',
+  }
+})
+
+// --------------------------------------------------------------------------- //
+// 下一步：永远给一条能走的路，不留下「点了一下什么也没发生」
+// --------------------------------------------------------------------------- //
+type NextStepTarget = string | { path: string; query: Record<string, string> }
+
+const nextStep = computed<{ text: string; to: NextStepTarget; linkText: string }>(() => {
+  const current = run.value
+  if (notConfigured.value) {
+    return { text: '到「系统管理」把 AI 提供方配好，再回到这一页重试。', to: '/settings', linkText: '去「系统管理」' }
+  }
+  if (!current) {
+    return {
+      text: '写好研究问题和材料，点「开始研究」；结果会留在这一页，也会进「最近的研究」。',
+      to: '',
+      linkText: '',
+    }
+  }
+  if (isLiveStatus(current.status)) {
+    return {
+      text: '这次研究在后台跑着，状态每 2 秒自动更新一次。这一页可以关掉，稍后在「最近的研究」里重新打开它。',
+      to: '',
+      linkText: '',
+    }
+  }
+  if (current.status === 'failed') {
+    return {
+      text: '先看上面的原因：如果是 AI 没配置或额度用完，去「系统管理」处理；否则改一下研究输入再试一次。',
+      to: '/settings',
+      linkText: '检查 AI 配置',
+    }
+  }
+  if (current.status === 'rejected') {
+    return {
+      text: '系统不会自动修改 AI 的回答。把问题问得更具体、材料补得更完整，然后重新开始一次研究。',
+      to: '',
+      linkText: '',
+    }
+  }
+  const version = compiledVersion.value
+  if (version) {
+    if (version.is_current) {
+      return {
+        text: `策略版本 ${version.version} 已经是当前版本，可以用它去回测了。`,
+        to: { path: '/backtest', query: { strategy_version_id: String(version.id) } },
+        linkText: '去「回测」用这一版',
+      }
+    }
+    return {
+      text: `草案已经编译成策略版本 ${version.version}，但还没有激活。在下面「策略版本」里点「激活为当前版本」；也可以先去「回测」用它试跑一次（没激活也能回测）。`,
+      to: { path: '/backtest', query: { strategy_version_id: String(version.id) } },
+      linkText: '先去「回测」试跑这一版',
+    }
+  }
+  if (draftCompiledVersionId.value) {
+    return { text: '这次草案编译过，但版本信息还没读回来：点「刷新状态」重试一次。', to: '', linkText: '' }
+  }
+  if (current.draft) {
+    if (!confirmation.value) {
+      return {
+        text: '读一遍上面的草案，然后在「人工确认」里给出你的结论——只有「已确认」的草案才允许编译成策略版本。',
+        to: '',
+        linkText: '',
+      }
+    }
+    if (confirmation.value.decision !== 'confirmed') {
+      return {
+        text: '这次的人工结论不是「已确认」，所以服务端不允许编译。改主意的话，重新选「确认」即可。',
+        to: '',
+        linkText: '',
+      }
+    }
+    return {
+      text: '草案已经人工确认。在下面选一个目标策略（或新建一个），然后点「编译为策略版本」。',
+      to: '',
+      linkText: '',
+    }
+  }
+  return { text: '这次只拿到了假设、还没有草案：点「重新生成策略草案」让 AI 再写一次。', to: '', linkText: '' }
+})
+
+onMounted(() => {
+  void loadRuns()
+  void loadStrategies()
+  void loadExperiments()
+  void loadExperimentVersions()
+  void loadExperimentBacktests()
+  void loadExperimentAssets()
+  // 地址栏里带着 ?experiment=<id>（刷新页面或别人发来的链接）时，把当时那一条读回来。
+  if (requestedExperimentId !== null) void openExperimentById(requestedExperimentId)
+  // 同理：?run=<id> 时把当时那一次研究读回来，刷新后不用再去列表里找。
+  if (requestedRunId !== null) void openRun(requestedRunId)
+})
+
+onUnmounted(stopPolling)
 </script>
 
 <template>
   <div>
     <h1 class="page-title">AI 研究实验室</h1>
     <p class="page-sub">
-      把你手上的一段材料和一个问题交给 AI：它先说出自己理解到了什么，再给出一份策略草案，
-      最后系统检查这份草案需要的能力有没有。这一页只做这一条链路——不执行、不回测、不下单。
+      把一个研究问题交给 AI：它先说出自己理解到了什么，再给出一份策略草案；你确认之后，
+      系统把它编译成一条正式的策略版本，你决定要不要激活，然后拿去回测。
+      每一步都由你拍板——这一页不执行交易、不下单。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -440,16 +1629,18 @@ onMounted(loadRuns)
       <ul class="answer-list">
         <li>
           <b>你在哪：</b>「AI 研究实验室」。它和「研究策略」不同：这里不碰行情数据、不动回测引擎，
-          只是把文字材料交给 AI 读，看它理解出什么。
-        </li>
-        <li><b>你能做什么：</b>写一个研究问题、贴一段材料，点「开始研究」。一次只放一段材料。</li>
-        <li>
-          <b>结果怎么看：</b>先看「AI 理解」对不对得上你的意思，再看规则——尤其是它自己补的假设；
-          最后看能力结论：这份草案系统能不能实现。
+          先把文字材料交给 AI 读，再把它读出来的东西编译成一条正式策略。
         </li>
         <li>
-          <b>下一步：</b>读一遍草案决定值不值得做；缺能力就去「系统管理」看配置；
-          问题问得不好就改输入重来。
+          <b>你能做什么：</b>走完一条完整链路——写问题、贴材料 → 看 AI 的理解和假设 → 读草案 →
+          人工确认 → 编译成策略版本 → 激活 → 去回测。
+        </li>
+        <li>
+          <b>结果怎么看：</b>先看「AI 理解」对不对得上你的意思，再看规则（尤其是 AI 自己补的假设），
+          然后看能力结论：这份草案系统能不能实现。
+        </li>
+        <li>
+          <b>下一步：</b>页面底部永远写着下一步该做什么；进行中的研究会自动刷新状态，不用一直守着。
         </li>
       </ul>
     </div>
@@ -459,7 +1650,8 @@ onMounted(loadRuns)
       <h3>① 研究输入</h3>
       <p class="muted">
         一个问句 + 一段材料就够了。材料可以是一段研报摘录、一条公告、或者你自己写下的策略想法。
-        这一版不会去抓网页或解析 PDF，只有你贴进来的文字会被读到。
+        这一页只接收你贴进来的文字：后端本身支持按 URL、PDF、GitHub 文件抓取材料，
+        但还没有接到这个页面上，所以现在只有你贴进来的文字会被读到。
       </p>
 
       <label class="muted" for="lab-question">研究问题</label>
@@ -493,19 +1685,52 @@ onMounted(loadRuns)
       <p v-if="inputProblem" class="notice warn">⚠️ {{ inputProblem }}</p>
 
       <button :disabled="!canSubmit" style="margin-top: 10px" @click="submit">
-        {{ busy ? 'AI 正在读…' : '开始研究' }}
+        {{ busy ? '正在提交…' : '开始研究' }}
       </button>
       <p v-if="busy" class="muted" style="margin-top: 8px">
-        AI 要读完材料再回答，通常要等十几秒到一分钟；这一步不能中途取消，请勿重复点击。
+        正在把这次研究排进后台队列。
+      </p>
+      <p v-else-if="run && isLiveStatus(run.status)" class="muted" style="margin-top: 8px">
+        现在还有一次研究在跑。再点「开始研究」会开始新的一次，这一页会切到新的那次——
+        旧的仍然留在下面的「最近的研究」里，随时能打开。
       </p>
       <p v-else-if="blockedReason" class="muted" style="margin-top: 8px">{{ blockedReason }}</p>
+    </div>
+
+    <!-- 后台研究的状态：POST 返回 202 之后，真正的结果要靠轮询读回来 -->
+    <div v-if="run && isLiveStatus(run.status)" class="card card-quiet" style="margin-top: 14px">
+      <div class="row" style="justify-content: space-between; align-items: flex-start">
+        <h3 style="margin: 0">研究进行中</h3>
+        <button class="ghost" :disabled="loadingRun" @click="refreshRun">
+          {{ loadingRun ? '读取中…' : '刷新状态' }}
+        </button>
+      </div>
+      <p class="conclusion-sentence">{{ liveSentence }}</p>
+      <p class="wait">
+        已经等了 {{ elapsedSeconds }} 秒 · 研究号 #{{ run.run_id }} · 当前步骤
+        {{ run.current_step || '—' }}
+      </p>
+      <p v-if="elapsedSeconds >= POLL_HINT_SECONDS" class="muted">
+        超过 {{ POLL_HINT_SECONDS }} 秒还没结束是正常的（AI 要读完材料再写两份内容）。
+        后台会继续跑，这一页可以关掉，稍后在「最近的研究」里重新打开就能看到结果。
+      </p>
+      <div class="row" style="margin-top: 8px">
+        <span v-if="polling" class="muted">正在每 2 秒自动刷新一次。</span>
+        <span v-else class="muted">自动刷新已停止；点「刷新状态」手动读一次。</span>
+        <button v-if="polling" class="ghost" @click="stopPolling">停止自动刷新</button>
+      </div>
+      <p v-if="pollFailures" class="muted">
+        最近有 {{ pollFailures }} 次没读到状态；连续 {{ POLL_FAILURE_LIMIT }} 次失败会自动停下来。
+      </p>
     </div>
 
     <!-- ② AI 理解 -->
     <div v-if="run" class="card" style="margin-top: 14px">
       <div class="row" style="justify-content: space-between; align-items: flex-start">
         <h3 style="margin: 0">② AI 理解到了什么</h3>
-        <button class="ghost" @click="refreshRun">重新读一次结果</button>
+        <button class="ghost" :disabled="loadingRun" @click="refreshRun">
+          {{ loadingRun ? '读取中…' : '重新读一次结果' }}
+        </button>
       </div>
 
       <p class="muted" style="margin-top: 8px">
@@ -545,6 +1770,13 @@ onMounted(loadRuns)
       <p v-if="run.status === 'failed'" class="error" style="margin-top: 10px">
         {{ run.error_message || '后端没有给出具体原因。' }}
       </p>
+      <p
+        v-else-if="run.error_message && run.status !== 'rejected'"
+        class="muted"
+        style="margin-top: 10px"
+      >
+        后端附注：{{ run.error_message }}
+      </p>
 
       <!-- 警告不是拒绝：材料被截断、或模型写了没算过的数字。 -->
       <div v-if="warnings.length" style="margin-top: 10px">
@@ -581,7 +1813,8 @@ onMounted(loadRuns)
         <p class="muted">
           共 {{ run.sources.length }} 段：{{ run.sources.map((s, i) => sourceTitle(s, i)).join('、') }}
         </p>
-        <template v-if="isAdvanced">
+        <details v-if="isAdvanced" style="margin-top: 6px">
+          <summary class="muted">每段材料的读取明细（技术细节）</summary>
           <table>
             <thead>
               <tr>
@@ -602,7 +1835,7 @@ onMounted(loadRuns)
               </tr>
             </tbody>
           </table>
-        </template>
+        </details>
       </div>
     </div>
 
@@ -804,7 +2037,7 @@ onMounted(loadRuns)
         <p class="muted">
           当前人工结论：<b>{{ decisionLabel(confirmation?.decision) }}</b>
           <template v-if="confirmation">
-            · 由 {{ confirmation.decided_by }} 于 {{ formatTime(confirmation.decided_at) }} 记录
+            · 由 {{ confirmation.decided_by }} 于 {{ formatDateTime(confirmation.decided_at) }} 记录
             <template v-if="isAdvanced">
               · 审计号 {{ confirmation.audit_id }} · 人工裁决
               {{ confirmation.is_human_decision ? '是' : '否' }}
@@ -813,7 +2046,8 @@ onMounted(loadRuns)
         </p>
         <p v-if="confirmation?.note" class="muted">备注：{{ confirmation.note }}</p>
         <p class="muted">
-          这一步只是把你自己的判断记下来：不改动这份草案，不调用 AI，也不会生成可执行的策略。
+          这一步只记录你自己的判断：不改动这份草案、不调用 AI、也不生成策略版本。
+          它决定的是「这份草案允不允许被编译」——服务端只接受结论为「确认」的草案。
         </p>
         <textarea
           v-model="confirmationNote"
@@ -835,7 +2069,8 @@ onMounted(loadRuns)
         <p class="muted" style="margin-top: 10px">
           草案 #{{ run?.draft?.draft_id }} · 版本 {{ run?.draft?.version ?? '—' }} ·
           模型自报结论 {{ run?.draft?.content?.status ?? '—' }} · 服务端判定
-          {{ run?.draft?.capability_status ?? '—' }} · 模型 {{ run?.draft?.model ?? '—' }}
+          {{ run?.draft?.capability_status ?? '—' }} · 模型 {{ run?.draft?.model ?? '—' }} ·
+          已编译版本 {{ run?.draft?.compiled_strategy_version_id ?? '（还没有）' }}
         </p>
         <p v-if="draftContent.parameters && Object.keys(draftContent.parameters).length" class="muted">
           草案参数：{{ JSON.stringify(draftContent.parameters) }}
@@ -878,45 +2113,198 @@ onMounted(loadRuns)
 
       <p class="muted" style="margin-top: 10px">
         这份结论只回答「系统能不能实现它」，不回答「它赚不赚钱」：这一版没有跑过任何回测，
-        所以既不能说它可行，也不能说它不行。草案本身也不能直接运行，还需要先补齐能力、再编译成正式策略。
+        所以既不能说它可行，也不能说它不行。缺的能力不会因为编译而消失——编译器只做翻译，
+        它遇到做不到的地方会直接拒绝。
       </p>
 
       <template v-if="isAdvanced">
-        <h4>逐项明细（服务端核对，不采信模型的声称）</h4>
-        <table>
-          <thead>
-            <tr>
-              <th>能力</th>
-              <th>状态</th>
-              <th>谁要的</th>
-              <th>影响规则</th>
-              <th>原因</th>
-              <th>模型声称支持</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(item, index) in capability.items" :key="index">
-              <td class="mono">{{ item.capability }}</td>
-              <td class="mono">{{ item.status }}</td>
-              <td class="mono">{{ item.required_by ?? '—' }}</td>
-              <td class="mono">{{ item.affected_rule ?? '—' }}</td>
-              <td>{{ item.reason || '—' }}</td>
-              <td>
-                {{ item.claimed_supported ? '是' : '否' }}
-                <span v-if="item.overclaimed" class="muted">（与能力清单不符）</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-if="capability.model_capabilities.length" class="muted">
-          模型自身的能力项（不计入系统支持度）：{{ capability.model_capabilities.join('、') }}
-        </p>
+        <details style="margin-top: 6px">
+          <summary class="muted">逐项明细（服务端核对，不采信模型的声称）</summary>
+          <table>
+            <thead>
+              <tr>
+                <th>能力</th>
+                <th>状态</th>
+                <th>谁要的</th>
+                <th>影响规则</th>
+                <th>原因</th>
+                <th>模型声称支持</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(item, index) in capability.items" :key="index">
+                <td class="mono">{{ item.capability }}</td>
+                <td class="mono">{{ item.status }}</td>
+                <td class="mono">{{ item.required_by ?? '—' }}</td>
+                <td class="mono">{{ item.affected_rule ?? '—' }}</td>
+                <td>{{ item.reason || '—' }}</td>
+                <td>
+                  {{ item.claimed_supported ? '是' : '否' }}
+                  <span v-if="item.overclaimed" class="muted">（与能力清单不符）</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="capability.model_capabilities.length" class="muted">
+            模型自身的能力项（不计入系统支持度）：{{ capability.model_capabilities.join('、') }}
+          </p>
+        </details>
       </template>
     </div>
 
-    <p class="next-line">下一步：{{ nextStep.text }}<RouterLink v-if="nextStep.to" :to="nextStep.to">{{ nextStep.linkText }}</RouterLink></p>
+    <!-- ⑥ 编译为策略版本：人工确认之后的第一道实门 -->
+    <div v-if="draftContent && !compiledVersion" class="card" style="margin-top: 14px">
+      <h3>⑥ 编译为策略版本</h3>
+      <p class="muted">
+        编译是把这份草案冻结成一条正式的策略版本：内容不会变，之后可以回测、可以激活。
+        编译器是确定性的，它只认草案里已经写下来的东西——遇到需要人来定的地方，它会拒绝，而不是替你决定。
+        编译不调用 AI，也不产生费用。
+      </p>
 
-    <!-- 最近的研究 -->
+      <p v-if="compileBlockedReason" class="notice warn">⚠️ {{ compileBlockedReason }}</p>
+
+      <label class="muted" for="lab-compile-strategy">目标策略（编译出来的版本会挂在这个策略下面）</label>
+      <div class="row">
+        <select
+          id="lab-compile-strategy"
+          v-model="compileStrategyId"
+          :disabled="compiling || loadingStrategies"
+        >
+          <option value="" disabled>
+            {{ loadingStrategies ? '正在读取策略列表…' : '请选择目标策略' }}
+          </option>
+          <option v-for="item in strategies" :key="item.id" :value="String(item.id)">
+            {{ item.name }}（已有 {{ item.version_count }} 个版本）
+          </option>
+        </select>
+        <button class="ghost" :disabled="loadingStrategies" @click="loadStrategies">
+          {{ loadingStrategies ? '读取中…' : '刷新策略列表' }}
+        </button>
+      </div>
+      <p v-if="!strategies.length && !loadingStrategies" class="muted" style="margin-top: 6px">
+        现在还没有任何策略。用下面的输入框建一个（也可以去「我的策略」页面创建）。
+      </p>
+
+      <label class="muted" for="lab-new-strategy" style="margin-top: 10px">新建一个策略</label>
+      <div class="row">
+        <input
+          id="lab-new-strategy"
+          v-model="newStrategyName"
+          type="text"
+          maxlength="200"
+          :disabled="creatingStrategy"
+          placeholder="例如：均线突破（日线）"
+        />
+        <button
+          class="ghost"
+          :disabled="creatingStrategy || !newStrategyName.trim()"
+          @click="createStrategyInline"
+        >
+          {{ creatingStrategy ? '创建中…' : '新建策略' }}
+        </button>
+      </div>
+      <p v-if="!newStrategyName.trim()" class="muted" style="margin-top: 6px">
+        新策略的名字不能为空，所以「新建策略」现在是灰的。
+      </p>
+
+      <button :disabled="!canCompile" style="margin-top: 10px" @click="compile">
+        {{ compiling ? '正在编译…' : '编译为策略版本' }}
+      </button>
+      <p v-if="compiling" class="muted" style="margin-top: 8px">
+        正在把草案交给编译器；这一步是确定性的，不调用 AI。
+      </p>
+
+      <p v-if="compileError" class="error" style="margin-top: 10px">{{ compileError }}</p>
+      <p v-if="compileDetail" class="muted">后端原文：{{ compileDetail }}</p>
+
+      <!-- 编译器拒绝（422）：说清是哪一类问题，原始报告收进折叠区 -->
+      <div v-if="compileOutcome" style="margin-top: 12px">
+        <p class="verdict-line">
+          <span class="verdict" :class="compileOutcomeTone">{{ compileOutcomeLabel }}</span>
+        </p>
+        <p class="conclusion-sentence">{{ compileOutcomeSentence }}</p>
+        <ul v-if="compileRejections.length" class="answer-list">
+          <li v-for="(item, index) in compileRejections" :key="index">
+            {{ rejectionReason(item) }}
+            <span class="muted">
+              （位置：{{ item.slot || '—' }}
+              <template v-if="item.rule_ids?.length"> · 涉及规则 {{ item.rule_ids.join('、') }}</template>
+              <template v-if="item.user_decidable"> · 需要人决定</template>）
+            </span>
+            <p v-if="isAdvanced && item.detail" class="muted" style="margin: 4px 0 0">{{ item.detail }}</p>
+          </li>
+        </ul>
+        <p v-if="!compileRejections.length" class="muted">编译器没有列出具体原因。</p>
+        <p v-if="compileOutcome.result === 'NEEDS_USER_DECISION'" class="muted">
+          需要人定的事只能由你来定：回到上面的假设与草案，把含糊的地方写清楚，
+          可以用「需修改」记下你的意见，然后重新生成草案再编译。
+        </p>
+        <details v-if="compileReportText" style="margin-top: 8px">
+          <summary class="muted">编译器完整报告（技术细节）</summary>
+          <pre class="code-block" style="max-height: 320px; overflow: auto">{{ compileReportText }}</pre>
+        </details>
+      </div>
+    </div>
+
+    <!-- ⑦ 策略版本与激活 -->
+    <div v-if="compiledVersion" class="card" style="margin-top: 14px">
+      <h3>⑦ 策略版本</h3>
+      <p class="conclusion-sentence">
+        草案已经编译成策略版本 {{ compiledVersion.version }}（策略 #{{ compiledVersion.strategy_id }}）。
+      </p>
+      <p class="muted">
+        校验状态：<b>{{ validationLabel(compiledVersion.validation_status) }}</b>
+        · 是否当前版本：<b>{{ compiledVersion.is_current ? '是，正在生效' : '不是，还没激活' }}</b>
+        · 编译时间：{{ formatDateTime(compiledVersion.created_at) }}
+        <template v-if="isAdvanced"> · 不可变哈希 {{ compiledVersion.immutable_hash.slice(0, 12) }}…</template>
+      </p>
+      <p v-if="compileReport" class="muted">
+        这次编译的原始报告在下面的折叠区里。报告不随运行保存，所以重新打开这次研究时，
+        只剩版本本身——要看报告就得当场编译。
+      </p>
+
+      <div class="row" style="margin-top: 8px">
+        <button v-if="!compiledVersion.is_current" :disabled="activating" @click="activate">
+          {{ activating ? '正在激活…' : '激活为当前版本' }}
+        </button>
+        <span v-else class="verdict ok">已是当前版本</span>
+        <button class="ghost" @click="goToBacktest">去「回测」用这一版</button>
+      </div>
+      <p class="muted" style="margin-top: 8px">
+        激活只改「哪一版是当前版本」：不改这一版的内容，不触发回测，也不会下单。
+        之后可以随时再激活别的版本——不激活也能先拿去回测。
+      </p>
+      <p v-if="versionError" class="error">{{ versionError }}</p>
+
+      <details v-if="compileReportText" style="margin-top: 8px">
+        <summary class="muted">编译器完整报告（技术细节）</summary>
+        <pre class="code-block" style="max-height: 320px; overflow: auto">{{ compileReportText }}</pre>
+      </details>
+    </div>
+
+    <!-- 服务器说这条草案编译过，但版本还没读回来 -->
+    <div
+      v-else-if="draftCompiledVersionId && !compiledVersion"
+      class="card card-quiet"
+      style="margin-top: 14px"
+    >
+      <h3>⑦ 策略版本</h3>
+      <p class="muted">
+        这条草案已经编译过（策略版本 #{{ draftCompiledVersionId }}），正在把版本信息读回来…
+      </p>
+      <div class="row">
+        <button class="ghost" :disabled="loadingVersion" @click="refreshRun">
+          {{ loadingVersion ? '读取中…' : '重新读一次' }}
+        </button>
+      </div>
+      <p v-if="versionError" class="error">{{ versionError }}</p>
+    </div>
+
+    <p class="next-line">
+      下一步：{{ nextStep.text }}<RouterLink v-if="nextStep.to" :to="nextStep.to">{{ nextStep.linkText }}</RouterLink>
+    </p>
+
+    <!-- 最近的研究：刷新页面之后从这里把上一次的运行（连同草案、确认、已编译版本）读回来 -->
     <div class="card" style="margin-top: 14px">
       <div class="row" style="justify-content: space-between; align-items: flex-start">
         <h3 style="margin: 0">最近的研究</h3>
@@ -940,19 +2328,521 @@ onMounted(loadRuns)
         </thead>
         <tbody>
           <tr v-for="item in runs" :key="item.run_id">
-            <td class="muted">{{ formatTime(item.created_at) }}</td>
+            <td class="muted">{{ formatDateTime(item.created_at) }}</td>
             <td>{{ item.question }}</td>
             <td>{{ statusLabel(item.status) }}</td>
             <td>{{ verdictLabelOf(item.capability_status) }}</td>
             <td v-if="isAdvanced" class="mono">#{{ item.run_id }}</td>
             <td>
-              <button class="ghost" @click="openRun(item.run_id)">打开</button>
+              <button class="ghost" :disabled="loadingRun" @click="openRun(item.run_id)">打开</button>
             </td>
           </tr>
         </tbody>
       </table>
       <p v-if="runs.length" class="muted" style="margin-top: 8px">
         打开一条记录只会读回当时的结果，不会重新调用 AI，也不会产生任何费用。
+        如果那次编译过，页面会直接显示编译出的策略版本和它的激活状态。
+      </p>
+    </div>
+
+    <!-- 实验：把「跑一次」变成一条留在服务端的记录（新跑 → 看结果 → 刷新后回访 → 对比 → 删除） -->
+    <div class="card" style="margin-top: 14px">
+      <h3>实验</h3>
+      <p class="muted">
+        一次实验 = 用某一版策略按一种跑法跑一次，结果存在服务端：每个参数组合对应的分数都留着，
+        刷新页面（甚至关掉浏览器再回来）还找得到。跑的是后端已经实现好的引擎，这一页只负责发起和查看。
+      </p>
+
+      <p v-if="experimentError" class="error">{{ experimentError }}</p>
+      <p v-if="experimentDetailError" class="error">{{ experimentDetailError }}</p>
+      <p v-if="experimentNotice && !experimentError && !experimentDetailError" class="notice">
+        {{ experimentNotice }}
+      </p>
+
+      <h4 style="margin-top: 16px">① 新跑一次</h4>
+      <div class="grid cols-2">
+        <div>
+          <label class="muted" for="experiment-version">用哪一版策略</label>
+          <select id="experiment-version" v-model="experimentVersionId" :disabled="loadingExperimentVersions">
+            <option value="">（先选一版）</option>
+            <option v-for="version in experimentVersions" :key="version.id" :value="String(version.id)">
+              {{ experimentVersionLabel(version) }}
+            </option>
+          </select>
+          <p v-if="loadingExperimentVersions" class="muted">正在读策略版本…</p>
+          <p v-else-if="!experimentVersions.length" class="muted">
+            还没有任何策略版本：先在上面把策略草案编译成一条版本，再回到这里。
+          </p>
+        </div>
+        <div>
+          <label class="muted" for="experiment-kind">跑法</label>
+          <select id="experiment-kind" v-model="experimentKind">
+            <option v-for="kind in EXPERIMENT_KINDS" :key="kind.value" :value="kind.value">
+              {{ kind.label }}
+            </option>
+          </select>
+          <p class="muted">{{ experimentKindHint(experimentKind) }}</p>
+        </div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top: 12px">
+        <div>
+          <label class="muted" for="experiment-name">给它起个名字</label>
+          <input
+            id="experiment-name"
+            v-model="experimentName"
+            type="text"
+            maxlength="120"
+            :placeholder="experimentDefaultName"
+          />
+          <p class="muted">留空就用「{{ experimentDefaultName }}」；列表里靠这个名字认出它。</p>
+        </div>
+        <div v-if="experimentNeedsSeries">
+          <label class="muted" for="experiment-symbol">标的代码</label>
+          <input
+            id="experiment-symbol"
+            v-model="experimentSymbol"
+            type="text"
+            list="experiment-asset-list"
+            placeholder="例如 SPY"
+          />
+          <datalist id="experiment-asset-list">
+            <option v-for="asset in experimentAssets" :key="asset.id" :value="asset.symbol" />
+          </datalist>
+          <p class="muted">填一个有数据的代码；高级设置里也可以直接填数据序列号。</p>
+        </div>
+      </div>
+
+      <!-- 成交重采样：从已经跑完的回测里挑一次，不重跑那次回测 -->
+      <div v-if="experimentKind === 'monte_carlo'" class="grid cols-2" style="margin-top: 12px">
+        <div>
+          <label class="muted" for="experiment-source-run">重采样哪一次回测</label>
+          <select
+            id="experiment-source-run"
+            v-model="experimentBacktestRunId"
+            :disabled="loadingExperimentBacktests"
+          >
+            <option value="">（选一次已经跑完的回测）</option>
+            <option v-for="item in experimentBacktests" :key="item.id" :value="String(item.id)">
+              #{{ item.id }} · {{ item.symbol ?? '未标标的' }} · {{ timeframeLabel(item.timeframe) }} ·
+              {{ formatDateTime(item.created_at) }}
+            </option>
+          </select>
+          <p v-if="loadingExperimentBacktests" class="muted">正在读回测记录…</p>
+          <p v-else-if="!experimentBacktests.length" class="muted">
+            还没有已完成的回测记录：先去「回测」页跑一次，再回来重采样它的成交。
+          </p>
+          <p v-else class="muted">
+            只会读那次回测存下来的成交记录，不会重跑回测、也不会产生新的回测运行。
+            一次成交都没有的回测不能重采样，服务端会直接拒绝并说明原因。
+          </p>
+          <p class="muted">选中的回测运行号：{{ experimentBacktestRunId || '（还没选）' }}</p>
+        </div>
+      </div>
+      <div v-if="experimentKind === 'monte_carlo'" class="grid cols-3" style="margin-top: 12px">
+        <div>
+          <label class="muted" for="experiment-runs">重采样次数</label>
+          <input id="experiment-runs" v-model="experimentRuns" type="text" inputmode="numeric" />
+        </div>
+        <div>
+          <label class="muted" for="experiment-trades-per-run">每次取多少笔成交</label>
+          <input
+            id="experiment-trades-per-run"
+            v-model="experimentTradesPerRun"
+            type="text"
+            inputmode="numeric"
+            placeholder="留空 = 和原来一样多"
+          />
+        </div>
+        <div>
+          <label class="muted" for="experiment-seed">随机种子</label>
+          <input id="experiment-seed" v-model="experimentSeed" type="text" inputmode="numeric" />
+          <p class="muted">同一个种子会得到同一批结果，方便和别人核对。</p>
+        </div>
+      </div>
+
+      <!-- 滚动前进：训练窗口 + 检验窗口 -->
+      <div v-if="experimentKind === 'walk_forward'" class="grid cols-3" style="margin-top: 12px">
+        <div>
+          <label class="muted" for="experiment-train-bars">训练窗口（根）</label>
+          <input id="experiment-train-bars" v-model="experimentTrainBars" type="text" inputmode="numeric" />
+        </div>
+        <div>
+          <label class="muted" for="experiment-test-bars">检验窗口（根）</label>
+          <input id="experiment-test-bars" v-model="experimentTestBars" type="text" inputmode="numeric" />
+        </div>
+        <div>
+          <label class="muted" for="experiment-step">步长（根）</label>
+          <input
+            id="experiment-step"
+            v-model="experimentStep"
+            type="text"
+            inputmode="numeric"
+            placeholder="留空 = 引擎默认"
+          />
+          <p class="muted">留空表示按引擎的默认步长往前挪。</p>
+        </div>
+      </div>
+
+      <!-- 样本外检验：按时间切一刀，只看后面那段 -->
+      <div v-if="experimentKind === 'oos'" class="grid cols-2" style="margin-top: 12px">
+        <div>
+          <label class="muted" for="experiment-oos-pct">样本外比例</label>
+          <input id="experiment-oos-pct" v-model="experimentOosPct" type="text" inputmode="decimal" />
+          <p class="muted">0 到 1 之间：0.2 表示最后 20% 的数据只用来检验。</p>
+        </div>
+      </div>
+
+      <!-- 敏感性：扫哪些参数、按哪个指标排名 -->
+      <div v-if="experimentKind === 'sensitivity'" class="grid cols-2" style="margin-top: 12px">
+        <div>
+          <label class="muted" for="experiment-metric">按哪个指标排名</label>
+          <select id="experiment-metric" v-model="experimentMetric">
+            <option v-for="key in EXPERIMENT_METRICS" :key="key" :value="key">{{ metricKeyLabel(key) }}</option>
+          </select>
+          <p class="muted">扫描结果按这个指标从高到低排；页面只负责把分数摊开，不代表推荐哪一组参数。</p>
+        </div>
+        <div>
+          <label class="muted" for="experiment-grid">要扫的参数（网格）</label>
+          <textarea
+            id="experiment-grid"
+            v-model="experimentGridText"
+            class="mono"
+            style="min-height: 96px"
+            placeholder='例如 {"risk_pct": [1, 2, 3]}'
+          ></textarea>
+          <p class="muted">
+            每个参数给出候选值，所有组合各跑一遍（点数 = 各参数取值个数相乘）。当前
+            {{ experimentGridPoints ?? '—' }} 个点，服务端上限 {{ EXPERIMENT_MAX_GRID_POINTS }} 个。
+          </p>
+        </div>
+      </div>
+
+      <details style="margin-top: 12px">
+        <summary class="muted">高级设置（可选，不填就用默认值）</summary>
+        <div class="grid cols-2" style="margin-top: 10px">
+          <div>
+            <label class="muted" for="experiment-timeframe">周期</label>
+            <select id="experiment-timeframe" v-model="experimentTimeframe">
+              <option v-for="tf in EXPERIMENT_TIMEFRAMES" :key="tf" :value="tf">{{ timeframeLabel(tf) }}</option>
+            </select>
+          </div>
+          <div>
+            <label class="muted" for="experiment-parameters">策略参数覆盖</label>
+            <textarea
+              id="experiment-parameters"
+              v-model="experimentParametersText"
+              class="mono"
+              style="min-height: 72px"
+              placeholder='例如 {"risk_pct": 2}'
+            ></textarea>
+            <p class="muted">只覆盖这一版策略里的同名参数；留空表示按策略版本自己的设定跑。</p>
+          </div>
+        </div>
+        <div class="grid cols-3" style="margin-top: 10px">
+          <div>
+            <label class="muted" for="experiment-start">开始日期</label>
+            <input id="experiment-start" v-model="experimentStart" type="text" placeholder="YYYY-MM-DD" />
+          </div>
+          <div>
+            <label class="muted" for="experiment-end">结束日期</label>
+            <input id="experiment-end" v-model="experimentEnd" type="text" placeholder="YYYY-MM-DD" />
+          </div>
+          <div>
+            <label class="muted" for="experiment-series">数据序列号</label>
+            <input
+              id="experiment-series"
+              v-model="experimentSeriesId"
+              type="text"
+              inputmode="numeric"
+              placeholder="例如 12"
+            />
+            <p class="muted">填了它就可以不填标的代码。</p>
+          </div>
+        </div>
+        <div style="margin-top: 10px">
+          <label class="muted" for="experiment-notes">备注</label>
+          <input id="experiment-notes" v-model="experimentNotes" type="text" placeholder="这次想验证什么？" />
+        </div>
+        <p class="muted" style="margin-top: 8px">
+          日期和数据序列号是给引擎的精确定位；平时只用标的代码加上默认周期就够了。
+        </p>
+      </details>
+
+      <div class="row" style="margin-top: 14px; align-items: center">
+        <button :disabled="creatingExperiment || !!experimentBlockedReason" @click="createExperiment">
+          {{ creatingExperiment ? '正在跑…' : '开始实验' }}
+        </button>
+        <button
+          class="ghost"
+          :disabled="loadingExperimentVersions || loadingExperimentBacktests"
+          @click="reloadExperimentChoices"
+        >
+          重新读取可选项
+        </button>
+      </div>
+      <p v-if="experimentBlockedReason" class="muted">{{ experimentBlockedReason }}</p>
+      <p v-if="creatingExperiment" class="wait">
+        正在跑：实验在服务端同步执行，网格点多的敏感性扫描要等一会儿，请不要关掉这一页。
+      </p>
+
+      <h4 style="margin-top: 18px">② 这次实验的结果</h4>
+      <p v-if="loadingExperiment" class="wait">正在读这条实验…</p>
+      <p v-else-if="!openExperiment" class="muted">
+        还没有打开任何一条实验：上面跑一次，或者到下面的「最近的实验」里打开一条。
+      </p>
+      <template v-else>
+        <p>
+          <strong>{{ openExperiment.name }}</strong>
+          <span class="badge">{{ experimentKindLabel(openExperiment.kind) }}</span>
+          <span class="badge">{{ experimentStatusLabel(openExperiment.status) }}</span>
+        </p>
+        <p class="muted">
+          {{ strategyName(openExperiment.strategy_version_id) }}（策略版本 #{{ openExperiment.strategy_version_id }}）
+          · {{ openExperiment.symbol ?? '未标标的' }} · {{ timeframeLabel(openExperiment.timeframe) }} · 存下
+          {{ openExperiment.result_count }} 条结果 · 建于 {{ formatDateTime(openExperiment.created_at) }}
+          <template v-if="openExperiment.completed_at">
+            · 跑完于 {{ formatDateTime(openExperiment.completed_at) }}
+          </template>
+        </p>
+
+        <p v-if="openExperiment.status === 'failed'" class="error">
+          ⚠️ 这条实验没有跑完：{{ openExperiment.error_message ?? '服务端没有给出原因。' }}
+        </p>
+        <p v-if="openExperiment.status === 'failed'" class="muted">
+          这条记录仍然留着：它就是这次尝试的结果，参数、目标和报错都在这里。改完输入再跑一次就行。
+        </p>
+
+        <p v-if="experimentSummaryMetrics.length" class="muted" style="margin-top: 10px">
+          关键指标（同一条实验存下来的对照口径）：
+        </p>
+        <div v-if="experimentSummaryMetrics.length" class="grid cols-4">
+          <div v-for="item in experimentSummaryMetrics" :key="item.key" class="stat small">
+            <div class="muted">
+              {{ metricKeyLabel(item.key) }}
+              <MetricHint :label="item.key" />
+            </div>
+            <div :class="toneOf(item.value)">{{ formatMetric(item.key, item.value) }}</div>
+          </div>
+        </div>
+
+        <div v-if="openExperiment.kind === 'sensitivity'" style="margin-top: 12px">
+          <p v-if="openExperiment.status === 'completed'" class="muted">
+            排名用的指标：{{ metricKeyLabel(summaryText('metric') ?? 'total_return') }}
+            <template v-if="summaryNumber('evaluated_points') !== null">
+              · 网格 {{ summaryNumber('grid_points') ?? '—' }} 个点，实际测到
+              {{ summaryNumber('evaluated_points') }} 个，参与排名 {{ summaryNumber('ranked_points') ?? '—' }} 个
+            </template>
+          </p>
+          <p v-if="summaryObject('best') || summaryObject('worst')" class="conclusion-sentence">
+            <span v-if="summaryObject('best')">分数最高的一组：{{ compactPointText(summaryObject('best')) }}</span>
+            <span v-if="summaryObject('worst')">　分数最低的一组：{{ compactPointText(summaryObject('worst')) }}</span>
+          </p>
+          <p v-if="sensitivityWarmupUnmet" class="notice warn">
+            ⚠️ 有 {{ summaryNumber('warmup_unmet_points') ?? '若干' }} 个点整段落在预热期内：引擎算不出指标，
+            它们不参与平均、极差和排名（ADR-055），下表里会标成「预热不足」。
+          </p>
+        </div>
+
+        <h4 style="margin-top: 18px">③ 存下来的结果</h4>
+        <p v-if="!experimentResults.length" class="muted">
+          这条实验没有存下任何结果（引擎跑挂的那次就是这种：以上面的报错为准）。
+        </p>
+        <template v-else>
+          <p class="muted">
+            <template v-if="openExperiment.kind === 'sensitivity'">
+              每一行是一组参数跑出来的结果，按{{ metricKeyLabel(summaryText('metric') ?? 'total_return') }}从高到低排；
+              没测到的点排在最后。排序只是把分数摊开看，不是推荐。
+            </template>
+            <template v-else>每一行是这次实验存下的一条结果，指标全部来自服务端。</template>
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>结果</th>
+                <th v-for="axis in experimentResultAxes" :key="axis" class="mono">{{ axis }}</th>
+                <th v-for="key in experimentResultMetrics" :key="key">{{ metricKeyLabel(key) }}</th>
+                <th v-if="isAdvanced">结果号</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in experimentResults"
+                :key="row.id"
+                :class="{
+                  muted: resultWarmupUnmet(row),
+                  best: isBestResult(row),
+                  worst: isWorstResult(row),
+                }"
+              >
+                <td>
+                  {{ row.label ?? resultHash(row) ?? '—' }}
+                  <span v-if="isBestResult(row)" class="badge">分数最高</span>
+                  <span v-if="isWorstResult(row)" class="badge">分数最低</span>
+                  <span v-if="resultWarmupUnmet(row)" class="badge">预热不足</span>
+                </td>
+                <td v-for="axis in experimentResultAxes" :key="axis" class="mono">{{ axisValue(row, axis) }}</td>
+                <td v-for="key in experimentResultMetrics" :key="key" :class="toneOf(resultMetric(row, key))">
+                  {{ formatMetric(key, resultMetric(row, key)) }}
+                </td>
+                <td v-if="isAdvanced" class="mono">#{{ row.id }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="openExperiment.kind === 'sensitivity'" class="muted">
+            带「预热不足」的行是引擎明确标为不可比的点：它整段落在指标预热期内，没有可用的分数（ADR-055），
+            不参与排名，也不进这里的排序。
+          </p>
+        </template>
+
+        <details style="margin-top: 12px">
+          <summary class="muted">技术细节（原始 JSON：这次请求与每个点的引擎返回）</summary>
+          <pre class="code-block" style="max-height: 320px; overflow: auto">{{ openExperimentText }}</pre>
+        </details>
+
+        <div class="row" style="margin-top: 10px; align-items: center">
+          <button class="ghost" :disabled="loadingExperiment" @click="refreshOpenExperiment">重新读一次</button>
+          <button class="ghost" @click="closeExperiment">收起</button>
+        </div>
+      </template>
+
+      <h4 style="margin-top: 18px">④ 最近的实验</h4>
+      <div class="row" style="justify-content: space-between; align-items: flex-start">
+        <p class="muted" style="margin: 0">
+          最新 20 条。列表和结果都存在服务端，刷新页面之后还在；勾选两条以上可以对比。
+        </p>
+        <button class="ghost" :disabled="loadingExperiments" @click="loadExperiments">
+          {{ loadingExperiments ? '读取中…' : '刷新列表' }}
+        </button>
+      </div>
+      <p v-if="!experimentList.length" class="muted">
+        还没有任何实验记录。上面跑一次之后，这里会留着它，随时能再打开。
+      </p>
+      <table v-else>
+        <thead>
+          <tr>
+            <th>对比</th>
+            <th>时间</th>
+            <th>名字</th>
+            <th>跑法</th>
+            <th>状态</th>
+            <th>结果数</th>
+            <th>总收益</th>
+            <th>最大回撤</th>
+            <th>夏普比率</th>
+            <th>胜率</th>
+            <th>交易数</th>
+            <th v-if="isAdvanced">实验号</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in experimentList" :key="item.id">
+            <td>
+              <input
+                type="checkbox"
+                style="width: auto"
+                :checked="compareExperimentIds.includes(item.id)"
+                @change="toggleExperimentCompare(item.id)"
+              />
+            </td>
+            <td class="muted">{{ formatDateTime(item.created_at) }}</td>
+            <td>{{ item.name }}</td>
+            <td>{{ experimentKindLabel(item.kind) }}</td>
+            <td :class="{ error: item.status === 'failed' }">{{ experimentStatusLabel(item.status) }}</td>
+            <td>{{ item.result_count }}</td>
+            <td :class="toneOf(item.metrics?.total_return)">
+              {{ formatMetric('total_return', item.metrics?.total_return) }}
+            </td>
+            <td :class="toneOf(item.metrics?.max_drawdown)">
+              {{ formatMetric('max_drawdown', item.metrics?.max_drawdown) }}
+            </td>
+            <td :class="toneOf(item.metrics?.sharpe)">{{ formatMetric('sharpe', item.metrics?.sharpe) }}</td>
+            <td :class="toneOf(item.metrics?.win_rate)">{{ formatMetric('win_rate', item.metrics?.win_rate) }}</td>
+            <td :class="toneOf(item.metrics?.number_of_trades)">
+              {{ formatMetric('number_of_trades', item.metrics?.number_of_trades) }}
+            </td>
+            <td v-if="isAdvanced" class="mono">#{{ item.id }}</td>
+            <td>
+              <button class="ghost" :disabled="loadingExperiment" @click="openExperimentById(item.id)">打开</button>
+              <button
+                class="ghost danger"
+                :disabled="deletingExperimentId === item.id"
+                @click="removeExperiment(item.id, item.name)"
+              >
+                {{ deletingExperimentId === item.id ? '删除中…' : '删除' }}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-if="experimentList.length" class="muted" style="margin-top: 8px">
+        打开一条只会读回当时存下的结果，不会重新跑。删除实验只删这条记录和它的结果，
+        它背后那次回测运行不会被删掉——在「回测」页里仍然找得到。
+      </p>
+
+      <div class="row" style="margin-top: 12px; align-items: center">
+        <button :disabled="comparingExperiments || compareExperimentIds.length < 2" @click="runExperimentCompare">
+          {{ comparingExperiments ? '对比中…' : `对比选中（${compareExperimentIds.length}）` }}
+        </button>
+        <button class="ghost" :disabled="!compareExperimentIds.length" @click="clearExperimentCompare">
+          清空选择
+        </button>
+      </div>
+      <p v-if="compareExperimentIds.length < 2" class="muted">
+        勾两条以上才能对比（现在选了 {{ compareExperimentIds.length }} 条）：对比表用「总收益 / 最大回撤 /
+        夏普比率 / 胜率 / 交易次数」这五项，和「回测」页的对比口径一致。
+      </p>
+
+      <div v-if="experimentCompare" style="margin-top: 12px">
+        <table>
+          <thead>
+            <tr>
+              <th>指标</th>
+              <th v-for="row in experimentCompare.experiments" :key="String(row.id)">
+                {{ compareText(row, 'name') ?? `实验 #${row.id}` }}
+                <div class="muted">
+                  {{ experimentKindLabel(compareText(row, 'kind') ?? '') }} ·
+                  {{ experimentStatusLabel(compareText(row, 'status') ?? '') }} ·
+                  {{ compareText(row, 'symbol') ?? '未标标的' }} ·
+                  {{ timeframeLabel(compareText(row, 'timeframe')) }}
+                </div>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="metric in experimentCompare.metrics" :key="metric">
+              <td>
+                {{ metricKeyLabel(metric) }}
+                <MetricHint :label="metric" />
+              </td>
+              <td
+                v-for="row in experimentCompare.experiments"
+                :key="String(row.id)"
+                :class="toneOf(compareNumber(row, metric))"
+              >
+                {{ formatMetric(metric, compareNumber(row, metric)) }}
+              </td>
+            </tr>
+            <tr>
+              <td>存下的结果数</td>
+              <td v-for="row in experimentCompare.experiments" :key="String(row.id)">
+                {{ compareNumber(row, 'result_count') ?? '—' }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted">
+          指标取自服务端存的同一份结果，页面没有重算任何东西；某条实验在某个指标上没有值
+          （比如那条跑挂了），会显示「—」。
+        </p>
+      </div>
+
+      <p class="next-line">
+        下一步：{{ experimentNextStep.text }}
+        <RouterLink v-if="experimentNextStep.to" :to="experimentNextStep.to">
+          {{ experimentNextStep.linkText }}
+        </RouterLink>
       </p>
     </div>
   </div>

@@ -124,18 +124,26 @@ def test_outcome_ratios_are_rendered_as_percentages() -> None:
 
 
 def test_the_backtest_page_keys_its_units_on_the_metric_name() -> None:
-    """`total_return` and `sharpe` sit in one table and are not the same unit."""
+    """`total_return` and `sharpe` sit in one table and are not the same unit.
 
-    assert "const RATIO_METRICS = new Set([" in BACKTEST
+    The rule lives in one place (``frontend/src/format.ts``) because the backtest page and
+    the Lab experiment tables render the same engine metric keys; the page itself must not
+    grow a second copy of it (ADR-087).
+    """
+
+    assert "const RATIO_METRICS = new Set([" in FORMAT_TEXT
     for key in ("'total_return'", "'cagr'", "'max_drawdown'", "'win_rate'", "'exposure'"):
-        assert key in BACKTEST, key
-    assert "? formatPercent(value, 2) : formatNumber(value, digits)" in BACKTEST
-    # Sharpe, profit factor and trade counts keep their own unit.
-    block = BACKTEST[
-        BACKTEST.index("const RATIO_METRICS") : BACKTEST.index("function formatMetric")
-    ]
+        assert key in FORMAT_TEXT, key
+    assert "if (RATIO_METRICS.has(key)) return formatPercent(value, 2)" in FORMAT_TEXT
+    # Sharpe, profit factor and trade counts keep their own unit (a count is not a ratio).
+    ratio_set = re.search(r"const RATIO_METRICS = new Set\(\[(.*?)\]\)", FORMAT_TEXT, re.S)
+    assert ratio_set, "the ratio metric list is gone"
     for key in ("sharpe", "profit_factor", "number_of_trades"):
-        assert f"'{key}'" not in block, f"{key} is not a fraction: {block}"
+        assert f"'{key}'" not in ratio_set.group(1), f"{key} is not a fraction"
+    # The page imports the shared helper instead of defining its own.
+    assert "import { formatDateTime, formatMetric" in BACKTEST
+    assert "function formatMetric" not in BACKTEST, "the backtest page kept a second unit rule"
+    assert "RATIO_METRICS" not in BACKTEST, "the backtest page kept a second ratio list"
     # Every mixed-unit table goes through the helper.
     assert "formatMetric(k, oosResult.in_sample[k])" in BACKTEST
     assert "formatMetric(k, oosResult.out_of_sample[k])" in BACKTEST

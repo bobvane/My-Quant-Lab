@@ -6,6 +6,7 @@ Mapping of the V1 data model (``docs/11_DATA_MODEL.md``):
 * strategies, strategy_versions, strategy_parameters
 * feature_snapshots
 * backtest_runs, backtest_results, backtest_metrics, backtest_trades
+* strategy_experiments, experiment_results
 * paper_accounts, paper_positions, paper_orders, paper_trades
 * ai_providers, ai_models, ai_prompts, ai_tasks, ai_usage
 * audit_logs, system_settings
@@ -411,6 +412,87 @@ class BacktestTrade(Base):
     run: Mapped[BacktestRun] = relationship(back_populates="trades")
 
     __table_args__ = (Index("ix_backtest_trades_run", "backtest_run_id"),)
+
+
+# --------------------------------------------------------------------------- #
+# 4b. Strategy experiments
+# --------------------------------------------------------------------------- #
+class StrategyExperiment(Base):
+    """A persisted research experiment.
+
+    An experiment is the durable record of one research run: which strategy
+    version and dataset it used, the validated request that produced it, the
+    parameter configuration, and -- through ``ExperimentResult`` -- every
+    per-point result. The HTTP response is only a view onto this row: re-reading
+    a finished experiment must not require re-running any quant code.
+    """
+
+    __tablename__ = "strategy_experiments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="running", nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    strategy_version_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_versions.id"), nullable=False
+    )
+    series_id: Mapped[int | None] = mapped_column(ForeignKey("market_data.id"))
+    symbol: Mapped[str | None] = mapped_column(String(32))
+    timeframe: Mapped[str] = mapped_column(String(16), default="1d", nullable=False)
+    # The parameter configuration the experiment actually ran, and the validated
+    # original request. Both are stored so a stored experiment can be reproduced
+    # or replayed without guessing what the caller meant.
+    parameters_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    # Human-facing summary plus the primary result metrics. Nullable because a
+    # failed experiment has no summary to show.
+    summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, server_default=func.now(), nullable=False
+    )
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    results: Mapped[list[ExperimentResult]] = relationship(
+        back_populates="experiment", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_strategy_experiments_status", "status", "created_at"),
+        Index("ix_strategy_experiments_version", "strategy_version_id", "created_at"),
+    )
+
+
+class ExperimentResult(Base):
+    """One measured point of an experiment.
+
+    For a parameter sweep this row *is* the parameter <-> result pair:
+    ``parameters_json`` are the parameters that produced ``metrics_json`` and
+    ``payload_json``. ``backtest_run_id`` keeps the lineage to the persisted
+    ``backtest_runs`` artefact when the point produced one.
+    """
+
+    __tablename__ = "experiment_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    experiment_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_experiments.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(160))
+    parameters_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    backtest_run_id: Mapped[int | None] = mapped_column(ForeignKey("backtest_runs.id"))
+    metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, server_default=func.now(), nullable=False
+    )
+
+    experiment: Mapped[StrategyExperiment] = relationship(back_populates="results")
+
+    __table_args__ = (Index("ix_experiment_results_experiment", "experiment_id", "id"),)
 
 
 # --------------------------------------------------------------------------- #

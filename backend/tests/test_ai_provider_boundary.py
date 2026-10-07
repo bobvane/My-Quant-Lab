@@ -146,3 +146,20 @@ def test_a_role_asks_the_runtime_and_not_the_provider(name: str):
     assert "run_task" in called
     assert not called & PROVIDER_CALLS
     assert "httpx" not in source
+
+
+def test_no_ai_module_can_answer_for_the_human():
+    """The AI layer may read a confirmation; only a person may record one.
+
+    The compile gate (v2.5.0 Step 2) turns on the newest recorded decision, so a
+    module in this layer that could append one would be able to open the gate by
+    itself. The writer lives in the confirmations endpoint, which is not an AI
+    module; this is the tripwire that keeps it that way.
+    """
+
+    writers = {"record_confirmation"}
+    offenders = sorted(
+        name for name, tree, _source in _modules() if name in AI_MODULES and _calls(tree) & writers
+    )
+
+    assert offenders == [], f"an AI module records the human decision: {offenders}"

@@ -19,6 +19,10 @@ os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("MARKET_DATA_PROVIDER", "synthetic")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-0123456789abcdef")
 os.environ.setdefault("APP_ENVIRONMENT", "test")
+# The research pipeline runs inline here: the suite has no broker and no worker, and
+# the inline path is the same prepare/execute pair the queue drives. The async
+# lifecycle has its own tests, which turn this back on and watch the seam instead.
+os.environ.setdefault("AI_RESEARCH_ASYNC", "false")
 
 import datetime as dt  # noqa: E402
 

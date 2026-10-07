@@ -23,7 +23,7 @@ import MultiLineChart from '@/components/MultiLineChart.vue'
 import SensitivityChart from '@/components/SensitivityChart.vue'
 import StatCard from '@/components/StatCard.vue'
 import ThresholdSweepChart from '@/components/ThresholdSweepChart.vue'
-import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
+import { formatDateTime, formatMetric, formatNumber, formatPercent, toneOf } from '@/format'
 import { isAdvanced } from '@/mode'
 // 引擎的指标键名与术语在这一页出现过三次（明细、敏感性表头、对比表头），
 // 三处都走同一个翻译表，否则同一个键会写出三种中文（ADR-127）。
@@ -83,26 +83,9 @@ const SENS_METRICS = [
   'exposure',
 ]
 
-/**
- * Metrics the API returns as fractions (0.0512 is 5.12%), so they must be
- * rendered with `formatPercent`. Everything else is already in its own unit —
- * Sharpe/Sortino are ratios of returns, profit factor is a multiple, expectancy
- * and MAE/MFE are prices, trade counts are counts (ADR-087).
- */
-const RATIO_METRICS = new Set([
-  'total_return',
-  'cagr',
-  'max_drawdown',
-  'win_rate',
-  'annualized_volatility',
-  'exposure',
-])
-
-function formatMetric(key: string, value: number | null | undefined, digits = 4): string {
-  if (value == null) return '—'
-  // A percentage needs two decimals, not four: the extra digits are noise.
-  return RATIO_METRICS.has(key) ? formatPercent(value, 2) : formatNumber(value, digits)
-}
+// Metrics come back in their own unit (Sharpe/Sortino are ratios of returns, profit
+// factor is a multiple, expectancy and MAE/MFE are prices, trade counts are counts),
+// so the shared formatter decides how each one reads (ADR-087).
 
 /**
  * Parameters a strategy actually declares, with the values its indicators read via

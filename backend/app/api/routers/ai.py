@@ -36,6 +36,7 @@ from app.api.schemas import (
     ResearchRunIn,
     ResearchRunOut,
 )
+from app.core.config import settings
 from app.core.db import get_db
 from app.domain.models import AIModel, AITask
 
@@ -515,18 +516,38 @@ def ai_audit(task_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     "/ai/research",
     response_model=ResearchRunOut,
     summary="Research a strategy idea: sources in, hypothesis and draft out",
+    # The same endpoint answers 202 when the model steps were queued, and the document
+    # has to say so: a client that knows only 200 would read a queued run as a
+    # finished one (docs/26 C10).
+    responses={
+        202: {
+            "model": ResearchRunOut,
+            "description": (
+                "The material was read and stored, and the model steps were queued: "
+                "`status` is `queued` and `GET /ai/research/{run_id}` reports the rest. "
+                "This is the answer when `AI_RESEARCH_ASYNC` is on (the default)."
+            ),
+        }
+    },
 )
-def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) -> ResearchRunOut:
+def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) -> Any:
     """Read material, form a hypothesis, formalize a draft, check capabilities.
 
     A refusal is a result, not an error: the run is returned with
     ``status="rejected"`` and the violations that caused it. The draft is never
     executable, and nothing here reaches the backtest engine.
 
+    Two model calls do not fit inside a proxy's patience, so by default the material
+    is read and stored here and the model steps are queued: the answer is 202 with a
+    run whose ``status`` is ``queued``, and ``GET /ai/research/{run_id}`` carries the
+    outcome from there. ``AI_RESEARCH_ASYNC=false`` runs the same pipeline inline and
+    answers 200 with the finished run, which a deployment with no worker needs.
+
     A source the platform had to fetch itself can fail before any model is called:
     a source blocked on policy grounds refuses the whole run (422), and a source
     that could not be fetched or read fails it (502) — neither is dressed up as an
-    AI rejection (docs/27 §5.2).
+    AI rejection (docs/27 §5.2). Both are decided before anything is queued, because
+    neither answer would change if a worker tried.
     """
 
     from app.ai import research as research_service
@@ -544,17 +565,43 @@ def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) ->
         )
         for item in payload.sources
     ]
+    queued = settings.ai_research_async
     try:
-        run = research_service.start_research(
+        run = research_service.prepare_research(
             db,
             question=payload.question,
             inputs=inputs,
-            model=payload.model,
             ingest=_research_ingester(db),
+            queued=queued,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
+
+    _raise_for_unserved_run(run)
+    if not queued:
+        run = research_service.execute_research(db, run, model=payload.model)
+        db.commit()
+        _raise_for_unserved_run(run)
+        return ResearchRunOut(**research_service.run_payload(db, run))
+
+    _enqueue_research(run.id, payload.model)
+    return JSONResponse(
+        status_code=202,
+        content=ResearchRunOut(**research_service.run_payload(db, run)).model_dump(mode="json"),
+    )
+
+
+def _raise_for_unserved_run(run: Any) -> None:
+    """Raise the transport answer for a run that never reached a model.
+
+    Three outcomes are decided before a token is spent, and each keeps the answer it
+    already had: a deployment with no provider (503), a source blocked by policy (422)
+    and a source that could not be read (502). In async mode this runs *before*
+    anything is queued, so a request that cannot be served is never handed to a worker
+    that would only rediscover it.
+    """
+
     if run.status == "failed" and run.error_message == AI_UNCONFIGURED:
         # The run row stays: it records that the request was made and why it
         # could not be answered.
@@ -570,7 +617,19 @@ def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) ->
                 "message": run.error_message or "a source could not be read",
             },
         )
-    return ResearchRunOut(**research_service.run_payload(db, run))
+
+
+def _enqueue_research(run_id: int, model: str | None = None) -> None:
+    """Hand a prepared run to the worker, and nothing else.
+
+    Imported inside the function on purpose: the API process needs no Celery to serve
+    every other endpoint, and a test can replace this one seam to assert that a queued
+    request really was queued instead of run inline.
+    """
+
+    from app.workers.tasks import run_research
+
+    run_research.delay(run_id, model)
 
 
 def _research_ingester(db: Session) -> Any:
@@ -706,10 +765,12 @@ def formalize_hypothesis_endpoint(
         },
         409: {
             "description": (
-                "The target identity is already taken and nothing was compiled: "
-                "`draft_already_compiled`, `version_unassignable` or `version_conflict` "
-                "(docs/29 §16.7). `error.details` locates the target; a 409 never carries "
-                "`result` or `report` (ADR-169)."
+                "Nothing was compiled, for one of two reasons. The human gate has not "
+                "been passed: `draft_not_confirmed` (no review recorded, or the newest "
+                "decision is `rejected`/`needs_revision`). Or the target identity is "
+                "already taken: `draft_already_compiled`, `version_unassignable` or "
+                "`version_conflict` (docs/29 §16.7). `error.details` locates the draft "
+                "or the target; a 409 never carries `result` or `report` (ADR-169)."
             ),
             "content": {"application/json": {"schema": _COMPILE_ERROR_SCHEMA}},
         },
@@ -729,6 +790,7 @@ def compile_draft_endpoint(
     hash, no compiler version -- because the compiler is the only way in.
     """
 
+    from app.ai import confirmation as confirmation_service
     from app.compiler import compile_strategy_draft
     from app.data import strategy_service
     from app.domain.models import Strategy, StrategyVersion
@@ -758,6 +820,21 @@ def compile_draft_endpoint(
                 "strategy_version_id": draft.compiled_strategy_version_id,
                 "version": bound.version if bound is not None else None,
             },
+        )
+
+    # The human gate (v2.5.0 Step 2). A draft is a proposal; only a person may
+    # turn it into a strategy version, so the compiler is not called at all until
+    # the newest recorded decision is "confirmed". This is enforced here rather
+    # than in the UI, which means a direct API call is refused exactly the same
+    # way. Nothing has been written when this returns.
+    try:
+        confirmation_service.require_confirmation(db, draft)
+    except confirmation_service.ConfirmationRequired as exc:
+        return _compile_error(
+            409,
+            confirmation_service.UNCONFIRMED_CODE,
+            str(exc),
+            {"draft_id": draft.id, "decision": exc.decision},
         )
 
     # The version comes from the project's own rule (ADR-061), not from a new one

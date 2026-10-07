@@ -11,6 +11,20 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /**
+     * The machine-readable code the server used (`error.code`), or `null`.
+     *
+     * Callers must branch on this and not on `message`: the API answers in
+     * English, and a refusal that has a code has a name the UI can translate.
+     */
+    readonly code: string | null = null,
+    /** The structured fields the server attached to its refusal (`error.details`). */
+    readonly details: Record<string, any> = {},
+    /**
+     * The raw error body. A 422 from the strategy compiler is `{result, report}`
+     * with no `error` envelope at all, so this is the only place to read it.
+     */
+    readonly body: Record<string, any> | null = null,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -24,13 +38,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     let detail = `请求失败 (${response.status})`
+    let code: string | null = null
+    let details: Record<string, any> = {}
+    let body: Record<string, any> | null = null
     try {
-      const body = await response.json()
-      detail = body?.detail ?? body?.error?.message ?? detail
+      const parsed = await response.json()
+      if (parsed && typeof parsed === 'object') {
+        body = parsed as Record<string, any>
+        detail = body.detail ?? body.error?.message ?? detail
+        if (typeof body.error?.code === 'string') code = body.error.code
+        if (body.error?.details && typeof body.error.details === 'object') {
+          details = body.error.details as Record<string, any>
+        }
+      }
     } catch {
       /* keep default detail */
     }
-    throw new ApiError(detail, response.status)
+    throw new ApiError(detail, response.status, code, details, body)
   }
   if (response.status === 204) return undefined as T
   return (await response.json()) as T
@@ -860,10 +884,44 @@ export interface AIResearchDraft {
   executable: boolean
   model?: string | null
   ai_task_id?: number | null
+  /**
+   * 这份草案编译出来的策略版本；`null` / 缺失 = 还没有编译过。
+   *
+   * 它是「编译过」这件事的记录，所以刷新页面、重新打开一条旧运行，都能从
+   * 这个字段知道该显示版本与激活步骤，而不是再显示一次「编译」按钮。
+   */
+  compiled_strategy_version_id?: number | null
   content: AIResearchDraftContent
   capability_report: AIResearchCapabilityReport
   /** 最新一次人工确认；`null` / 缺失表示还没有人拍过板。 */
   confirmation?: AIResearchDraftConfirmation | null
+}
+
+/** `POST /ai/strategy/drafts/{id}/compile` 成功（201）时新建的那个策略版本。 */
+export interface CompileDraftResult {
+  result: string
+  strategy_id: number
+  strategy_version_id: number
+  version: string
+  compile_hash: string | null
+  /** 编译器留下的完整报告（`rejections` / `slots` / `rules` / `dsl_validation`…）。 */
+  report: Record<string, any>
+}
+
+/** 编译报告里的一条拒绝项（docs/29 §16.6）。 */
+export interface CompileRejection {
+  code: string
+  slot: string
+  rule_ids?: string[]
+  detail?: string
+  /** 这一条是否属于「必须由人来定」的那一类。 */
+  user_decidable?: boolean
+}
+
+/** 编译器自己拒绝（422）时的正文：`{result, report}`，没有 `error` 信封。 */
+export interface CompileDraftRefusal {
+  result: string
+  report: Record<string, any>
 }
 
 export interface AIResearchViolation {
@@ -929,6 +987,90 @@ export interface AIResearchRunSummary {
   warning_count?: number
   created_at?: string | null
   completed_at?: string | null
+}
+
+// ---- 策略实验（/experiments）：一次实验 = 一条留在服务端的记录 -------------------
+
+/** 一次实验的跑法。服务端 `ExperimentCreate.kind` 只认这五个。 */
+export type ExperimentKind = 'backtest' | 'sensitivity' | 'monte_carlo' | 'walk_forward' | 'oos'
+
+/**
+ * `POST /experiments` 的请求体（服务端 `extra="forbid"`，多发一个键就是 422）。
+ *
+ * 可选字段只在所选 kind 需要时才发：服务端按 `model_fields_set` 判断哪些字段是
+ * 「这次跑法点名要的」，多余的默认值会改变它的判断（例如 `timeframe`）。
+ */
+export interface ExperimentCreatePayload {
+  name: string
+  kind: ExperimentKind
+  strategy_version_id: number
+  notes?: string
+  symbol?: string
+  series_id?: number
+  timeframe?: string
+  start?: string
+  end?: string
+  parameters?: Record<string, unknown>
+  grid?: Record<string, unknown[]>
+  metric?: string
+  backtest_run_id?: number
+  runs?: number
+  trades_per_run?: number
+  seed?: number
+  train_bars?: number
+  test_bars?: number
+  step?: number
+  oos_pct?: number
+  oos_start?: string
+}
+
+export interface ExperimentResultOut {
+  id: number
+  kind: string
+  label: string | null
+  parameters: Record<string, unknown> | null
+  backtest_run_id: number | null
+  metrics: Record<string, number | null> | null
+  /** 引擎在这个点上的完整对象：敏感性点里的 `warmup_unmet` / `objective` / `warnings` 都在这里。 */
+  payload: Record<string, unknown>
+  created_at: string
+}
+
+export interface ExperimentSummaryOut {
+  id: number
+  name: string
+  kind: string
+  status: string
+  strategy_version_id: number
+  series_id: number | null
+  symbol: string | null
+  timeframe: string
+  result_count: number
+  backtest_run_id: number | null
+  metrics: Record<string, number | null>
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  error_message: string | null
+}
+
+/** 详情 = 列表投影 + 请求原文 + 引擎摘要 + 逐条结果。 */
+export interface ExperimentDetailOut extends ExperimentSummaryOut {
+  notes: string | null
+  parameters: Record<string, unknown>
+  request: Record<string, unknown>
+  summary: Record<string, unknown> | null
+  results: ExperimentResultOut[]
+}
+
+export interface ExperimentListOut {
+  experiments: ExperimentSummaryOut[]
+}
+
+/** 对比：`metrics` 是服务端给出的指标列，`experiments` 的指标键平铺在每一行上。 */
+export interface ExperimentCompareOut {
+  metrics: string[]
+  experiments: Array<Record<string, unknown>>
 }
 
 export const api = {
@@ -1368,6 +1510,19 @@ export const api = {
         body: JSON.stringify({ decision, note: note?.trim() ? note.trim() : null }),
       },
     ),
+  /**
+   * 编译：把一份**已人工确认**的草案冻结成一个正式的策略版本（ADR-171：编译不等于
+   * 激活，`make_current` 恒为 false）。
+   *
+   * 服务端是唯一裁判，几种拒绝都要按码处理，不能只看 message：
+   * 409 `draft_not_confirmed` / `draft_already_compiled` / `version_unassignable` /
+   * `version_conflict`，以及 422（编译器自己拒绝，正文是 `{result, report}`）。
+   */
+  compileStrategyDraft: (draftId: number, strategyId: number) =>
+    request<CompileDraftResult>(`/ai/strategy/drafts/${draftId}/compile`, {
+      method: 'POST',
+      body: JSON.stringify({ strategy_id: strategyId }),
+    }),
   auditForEntity: (entityType: string, entityId: string) =>
     request<{ total: number; events: Array<Record<string, unknown>> }>(
       `/audit/logs/entity/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`,
@@ -1383,6 +1538,22 @@ export const api = {
     request<{ deleted: number; name: string }>(`/strategies/${id}`, { method: 'DELETE' }),
   deleteBacktest: (id: number) =>
     request<{ deleted: number }>(`/backtests/${id}`, { method: 'DELETE' }),
+  createExperiment: (payload: ExperimentCreatePayload) =>
+    request<ExperimentDetailOut>('/experiments', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  experiments: (limit = 20, strategyVersionId?: number) =>
+    request<ExperimentListOut>(
+      `/experiments?limit=${limit}${
+        strategyVersionId ? `&strategy_version_id=${strategyVersionId}` : ''
+      }`,
+    ),
+  experiment: (id: number) => request<ExperimentDetailOut>(`/experiments/${id}`),
+  compareExperiments: (ids: number[]) =>
+    request<ExperimentCompareOut>(`/experiments/compare?ids=${ids.join(',')}`),
+  // 204 无正文：删掉的只是这条实验记录，它产生的 BacktestRun 是另一个产物。
+  deleteExperiment: (id: number) => request<void>(`/experiments/${id}`, { method: 'DELETE' }),
   updateAiProvider: (id: number, payload: Record<string, unknown>) =>
     request<AIProviderRecord>(`/settings/ai/providers/${id}`, {
       method: 'PUT',

@@ -21,6 +21,12 @@ The gate this serves is a *process* gate: the draft is the AI's proposal, this
 record is a human's answer, and a live strategy still needs the deterministic
 compiler plus the ADR-171 activation gate (``validation_status == "valid"``).
 Nothing here can shortcut either of them.
+
+Since v2.5.0 the gate is enforced, not merely recorded: ``require_confirmation``
+is called by the compile endpoint before the compiler runs, so a draft nobody
+answered -- or whose newest answer is ``rejected``/``needs_revision`` -- cannot
+become a ``StrategyVersion`` at all. Direct API calls hit the same check, because
+the check lives in the endpoint and not in a button.
 """
 
 from __future__ import annotations
@@ -61,6 +67,11 @@ LABELS: dict[str, str] = {
 }
 
 ENTITY_TYPE = "strategy_draft"
+
+#: The stable code the compile endpoint refuses an unconfirmed draft with. It is
+#: a transport-level conflict (409), not a compiler rejection: the compiler never
+#: saw the draft, so no ``report`` exists to return.
+UNCONFIRMED_CODE = "draft_not_confirmed"
 
 #: Who is answering. The deployment authenticates with a single bearer token, so
 #: the audit can identify the role but not the person; per-person identity would
@@ -182,6 +193,40 @@ def confirmation_view(db: Session, draft_id: int) -> dict[str, Any] | None:
     }
 
 
+class ConfirmationRequired(RuntimeError):
+    """The compiler may not run: no human has said "yes" to this draft.
+
+    ``decision`` is the newest answer that was recorded (``None`` when the draft
+    was never reviewed), which is what lets the refusal say *why* instead of a
+    generic "not allowed".
+    """
+
+    def __init__(self, decision: str | None) -> None:
+        self.decision = decision
+        if decision is None:
+            message = "this draft has not been reviewed by a human yet"
+        else:
+            message = (
+                f"the latest human decision for this draft is '{decision}'; "
+                "only a 'confirmed' decision lets the compiler run"
+            )
+        super().__init__(message)
+
+
+def require_confirmation(db: Session, draft: StrategyDraft) -> Confirmation:
+    """Return the draft's confirmation, or refuse with ``ConfirmationRequired``.
+
+    Reads only: a refused compile must leave no trace beyond the refusal itself.
+    "Latest wins" is deliberate -- a draft that was confirmed and then rejected
+    is not confirmed any more, so revoking consent needs no update path either.
+    """
+
+    latest = latest_confirmation(db, draft.id)
+    if latest is None or latest.decision != "confirmed":
+        raise ConfirmationRequired(latest.decision if latest is not None else None)
+    return latest
+
+
 __all__ = [
     "ACTIONS",
     "DECISIONS",
@@ -189,9 +234,12 @@ __all__ = [
     "ENTITY_TYPE",
     "EVENT_TYPES",
     "LABELS",
+    "UNCONFIRMED_CODE",
     "Confirmation",
+    "ConfirmationRequired",
     "confirmation_view",
     "latest_confirmation",
     "record_confirmation",
+    "require_confirmation",
     "validate_decision",
 ]

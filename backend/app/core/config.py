@@ -157,6 +157,11 @@ class Settings(BaseSettings):
     # Hard ceiling for one provider call, in seconds: a research task may think
     # for minutes, but it may not hang a worker for ever.
     ai_task_timeout_seconds: int = 600
+    # Run the model half of a research request on the worker instead of inside the
+    # HTTP request. Two model calls do not fit inside a proxy's patience, and a
+    # 504 is not an answer (docs/26 C10). False keeps the inline path, which the
+    # test suite uses so that no broker is needed to exercise the same pipeline.
+    ai_research_async: bool = True
 
     default_currency: str = "USD"
     default_timezone: str = "UTC"

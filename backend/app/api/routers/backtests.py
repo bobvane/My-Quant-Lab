@@ -2,12 +2,14 @@
 
 Every run stores: strategy version, dataset (series + hash), parameters, engine
 version and feature version. Results are never overwritten.
+
+The run itself is executed and persisted by :mod:`app.data.backtest_service`, which
+``POST /experiments`` shares: an experiment that ran a backtest must leave behind exactly
+the same artifact as ``POST /backtests`` does, not a second implementation of it.
 """
 
 from __future__ import annotations
 
-import datetime as dt
-import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,256 +18,44 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import BacktestCreate, BacktestOut, BacktestSummaryOut
 from app.core.db import get_db
-from app.data.market_data_repo import load_bars, resolve_series, series_content_hash
-from app.data.strategy_service import load_spec, record_audit
-from app.domain.models import (
-    BacktestMetric,
-    BacktestResult,
-    BacktestRun,
-    BacktestTrade,
-    MarketDataSeries,
-    StrategyVersion,
+from app.data.backtest_service import (
+    COMPARE_METRICS,
+    BacktestFailed,
+    BacktestRequestError,
+    load_backtest_inputs,
+    store_backtest,
 )
-from app.features.engine import FEATURE_VERSION
-from app.research.engine import ENGINE_VERSION, run_backtest
-from app.strategies.dsl import merge_spec_overrides
+from app.domain.models import BacktestRun
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/backtests", tags=["backtests"])
-
-
-def _resolve_series(db: Session, payload: BacktestCreate) -> MarketDataSeries:
-    """Which stored series this request means (ADR-119, ``resolve_series``).
-
-    The timeframe is only checked against an explicit ``series_id`` when the caller
-    actually sent one: it has a default, so treating the default as a demand would
-    reject a request that only names a series.
-    """
-
-    timeframe = payload.timeframe if "timeframe" in payload.model_fields_set else None
-    return resolve_series(
-        db, symbol=payload.symbol, series_id=payload.series_id, timeframe=timeframe
-    )
 
 
 @router.post("", response_model=BacktestOut, summary="Run a backtest")
 def create_backtest(payload: BacktestCreate, db: Session = Depends(get_db)) -> BacktestOut:
-    strategy_version = db.get(StrategyVersion, payload.strategy_version_id)
-    if strategy_version is None:
-        raise HTTPException(status_code=404, detail="strategy version not found")
-    if strategy_version.validation_status != "valid":
-        raise HTTPException(
-            status_code=422,
-            detail=f"strategy version is '{strategy_version.validation_status}', not 'valid'",
+    try:
+        inputs = load_backtest_inputs(
+            db,
+            strategy_version_id=payload.strategy_version_id,
+            symbol=payload.symbol,
+            series_id=payload.series_id,
+            timeframe=payload.timeframe,
+            timeframe_explicit="timeframe" in payload.model_fields_set,
+            start=payload.start,
+            end=payload.end,
+            execution_overrides=payload.execution_overrides,
         )
-
-    series = _resolve_series(db, payload)
-    frame = load_bars(db, series, start=payload.start, end=payload.end, only_closed=True)
-    if len(frame) < 60:
-        raise HTTPException(
-            status_code=422,
-            detail=f"need at least 60 closed bars, series has {len(frame)}",
-        )
-
-    spec = load_spec(strategy_version)
-    if payload.execution_overrides:
-        # merge_spec_overrides (not model_copy) so a nested override such as
-        # {"sizing": {...}} is validated instead of silently kept as a dict.
-        spec = merge_spec_overrides(spec, {"execution": payload.execution_overrides})
-
-    dataset_hash = series_content_hash(frame)
-
-    run = BacktestRun(
-        strategy_version_id=strategy_version.id,
-        dataset_version_id=series.id,
-        engine_version=ENGINE_VERSION,
-        feature_version=FEATURE_VERSION,
-        parameters_json=payload.parameters,
-        execution_model_json=spec.execution.model_dump(),
-        dataset_hash=dataset_hash,
-        status="running",
-        started_at=dt.datetime.now(tz=dt.UTC),
-    )
-    db.add(run)
-    db.flush()
+    except BacktestRequestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
     try:
-        outcome = run_backtest(
-            spec,
-            frame,
-            strategy_version=f"{strategy_version.strategy_id}@{strategy_version.version}",
-            timeframe=payload.timeframe,
-            parameters=payload.parameters,
+        execution = store_backtest(
+            db, inputs, parameters=payload.parameters, timeframe=payload.timeframe
         )
-    except Exception as exc:  # pragma: no cover - defensive
-        run.status = "failed"
-        run.error_message = str(exc)[:500]
-        run.finished_at = dt.datetime.now(tz=dt.UTC)
-        db.commit()
-        logger.exception("backtest failed")
+    except BacktestFailed as exc:
         raise HTTPException(status_code=500, detail="backtest execution failed") from exc
 
-    run.feature_version = outcome.feature_version
-    run.status = "completed"
-    run.finished_at = dt.datetime.now(tz=dt.UTC)
-
-    result = BacktestResult(
-        backtest_run_id=run.id,
-        summary_json=_summary(outcome, series),
-        equity_curve_json=outcome.equity_curve,
-        metrics_json=outcome.metrics,
-        warnings_json=list(outcome.warnings),
-        result_hash=outcome.result_hash,
-    )
-    db.add(result)
-    db.flush()
-
-    for group, name, value in _metric_rows(outcome.metrics):
-        db.add(
-            BacktestMetric(
-                backtest_result_id=result.id,
-                metric_group=group,
-                metric_name=name,
-                metric_value=value,
-                is_available=value is not None,
-                metric_text=None if value is not None else "N/A",
-            )
-        )
-
-    for trade in outcome.trades:
-        db.add(
-            BacktestTrade(
-                backtest_run_id=run.id,
-                symbol=trade["symbol"],
-                direction=trade["direction"],
-                entry_time=_as_datetime(trade["entry_time"]),
-                entry_price=trade["entry_price"],
-                exit_time=_as_datetime(trade["exit_time"]),
-                exit_price=trade["exit_price"],
-                quantity=trade["quantity"],
-                fees=trade["fees"],
-                slippage=trade["slippage"],
-                pnl=trade["pnl"],
-                pnl_pct=trade["pnl_pct"],
-                r_multiple=trade["r_multiple"],
-                mae=trade["mae"],
-                mfe=trade["mfe"],
-                entry_reason="entry_long",
-                exit_reason=trade["exit_reason"],
-                ambiguous_fill=trade["ambiguous_fill"],
-                strategy_version=trade["strategy_version"],
-            )
-        )
-
-    record_audit(
-        db,
-        event_type="backtest_completed",
-        entity_type="backtest_run",
-        entity_id=str(run.id),
-        action="create",
-        payload={
-            "strategy_version_id": strategy_version.id,
-            "dataset_version_id": series.id,
-            "dataset_hash": dataset_hash,
-            "result_hash": outcome.result_hash,
-            "engine_version": outcome.engine_version,
-            "feature_version": outcome.feature_version,
-        },
-    )
-    db.commit()
-    db.refresh(run)
-
-    # Resource event: window peaks come from the monitor's samples when they cover
-    # the run; a task shorter than one collection cycle leaves them null rather than
-    # invented.
-    #
-    # This is optional monitoring, so it runs *after* the backtest is committed and
-    # in its own transaction. `record_resource_event` flushes, so a failure here
-    # leaves the session rollback-pending: previously the exception was swallowed
-    # without a rollback, which poisoned the request and turned a perfectly good
-    # backtest into a 500 (PendingRollbackError). Committing first means the
-    # rollback can only ever discard the monitoring row, never the result.
-    try:
-        from app.infrastructure.resource_store import record_resource_event
-
-        record_resource_event(
-            db,
-            event_key=f"backtest:{run.id}",
-            event_type="backtest_completed",
-            started_at=run.started_at,
-            ended_at=run.finished_at,
-            payload={
-                "backtest_run_id": run.id,
-                "strategy_version_id": run.strategy_version_id,
-                "dataset_version_id": run.dataset_version_id,
-                "trade_count": len(outcome.trades),
-                "result_hash": outcome.result_hash,
-            },
-        )
-        db.commit()
-    except Exception:  # pragma: no cover - monitoring must never break backtests
-        logger.warning("resource event recording failed", exc_info=True)
-        db.rollback()
-
+    run, outcome = execution.run, execution.outcome
     return _to_out(run, outcome.metrics, outcome.equity_curve, outcome.trades, outcome.warnings)
-
-
-def _as_datetime(value: Any) -> dt.datetime | None:
-    """Accept ISO strings / datetimes and return an aware UTC datetime."""
-
-    if value is None:
-        return None
-    if isinstance(value, dt.datetime):
-        return value if value.tzinfo else value.replace(tzinfo=dt.UTC)
-    import pandas as pd
-
-    stamp = pd.Timestamp(value)
-    if stamp.tz is None:
-        stamp = stamp.tz_localize("UTC")
-    return stamp.to_pydatetime()
-
-
-def _summary(outcome: Any, series: MarketDataSeries) -> dict[str, Any]:
-    return {
-        "dataset_version_id": series.id,
-        "dataset_version": series.dataset_version,
-        # Which provider the data came from. A run is only reproducible against the
-        # same series, so the source has to travel with the result (ADR-119).
-        "source": series.source.name if series.source is not None else None,
-        "initial_capital": outcome.initial_capital,
-        "final_equity": outcome.final_equity,
-        "total_return": outcome.metrics.get("total_return"),
-        "max_drawdown": outcome.metrics.get("max_drawdown"),
-        "sharpe": outcome.metrics.get("sharpe"),
-        "win_rate": outcome.metrics.get("win_rate"),
-        "number_of_trades": outcome.metrics.get("number_of_trades"),
-        "timeframe": outcome.timeframe,
-    }
-
-
-def _metric_rows(metrics: dict[str, Any]) -> list[tuple[str, str, Any]]:
-    groups = {
-        "return": ("total_return", "cagr", "final_equity", "initial_capital"),
-        "risk": ("max_drawdown", "annualized_volatility", "max_drawdown_duration_bars"),
-        "risk_adjusted": ("sharpe", "sortino"),
-        "trade": (
-            "number_of_trades",
-            "win_rate",
-            "avg_win",
-            "avg_loss",
-            "profit_factor",
-            "expectancy",
-            "average_holding_bars",
-            "max_consecutive_losses",
-        ),
-        "position": ("exposure", "turnover"),
-    }
-    rows: list[tuple[str, str, Any]] = []
-    for group, names in groups.items():
-        for name in names:
-            if name in metrics:
-                rows.append((group, name, metrics[name]))
-    return rows
 
 
 @router.get("", response_model=list[BacktestSummaryOut], summary="List backtests")
@@ -296,7 +86,7 @@ def compare_backtests(
         raise HTTPException(status_code=422, detail="at least two backtest ids are required")
 
     runs = db.scalars(select(BacktestRun).where(BacktestRun.id.in_(run_ids))).all()
-    metrics = ("total_return", "max_drawdown", "sharpe", "win_rate", "number_of_trades")
+    metrics = COMPARE_METRICS
     rows = []
     for run in runs:
         summary = dict(run.result.summary_json) if run.result else {}
@@ -380,6 +170,9 @@ def delete_backtest(run_id: int, db: Session = Depends(get_db)) -> dict:
 
     # Resource events are observational, safe to keep even after deletion.
     # The cascade on BacktestResult and BacktestTrade handles the rest.
+    #
+    # An experiment_result that points at this run is NOT cascade deleted (ADR-174):
+    # the experiment keeps the historical record of which run it used.
     db.delete(run)
 
     from app.data.strategy_service import record_audit

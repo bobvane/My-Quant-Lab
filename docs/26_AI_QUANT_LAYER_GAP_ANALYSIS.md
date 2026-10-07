@@ -9,7 +9,7 @@
 > 阶段边界：本阶段只做 Read / Audit / Gap Analysis / Architecture clarification / Documentation（计划 §七十二、§七十三、§七十四）。
 > **本文件完成后停止，不进入 v1.9.7。**
 >
-> **版本归属声明（后续追加，读本文件前先读这一段）**：本文件表格里的「v1.9.7 / v1.9.8 / v1.9.9 / v2.0.0」是**写作当时的规划目标版本**，不是承诺。其中一批目标**从未按那个版本交付**：Strategy Compiler（Draft → StrategySpec 1.0）、Tool Gateway / `ai_tool_calls`、`strategy_experiments`、异步研究工作流 + 人工确认、四个 AI 面板门控与完整 `/lab`。这些条目后来被逐版顺延（v1.9.9 → v2.0.0 → v2.1.0），最终由 **ADR-167**（`docs/17_DECISIONS.md`）收口：**v2.1.0 = Source Ingestion / Snapshot（已交付）**，**v2.2.0 = Strategy Compiler（Phase 5）**。因此本文件 §17 / §20 / §21 / §22 的版本列**一律读作「旧目标版本、未交付」**；当前唯一正式的版本归属与编译器契约见 `docs/17_DECISIONS.md` 的 ADR-167 与 `docs/29_STRATEGY_COMPILER_CONTRACT.md`，现状审计见 `docs/28_STRATEGY_COMPILER_GAP_ANALYSIS.md`。滚动状态见 §23（v1.9.9）、§24（v2.0.0）、§25（v2.1.0）与 **§26（v2.2.0）**。
+> **版本归属声明（后续追加，读本文件前先读这一段）**：本文件表格里的「v1.9.7 / v1.9.8 / v1.9.9 / v2.0.0」是**写作当时的规划目标版本**，不是承诺。其中一批目标**从未按那个版本交付**：Strategy Compiler（Draft → StrategySpec 1.0）、Tool Gateway / `ai_tool_calls`、`strategy_experiments`、异步研究工作流 + 人工确认、四个 AI 面板门控与完整 `/lab`。这些条目后来被逐版顺延（v1.9.9 → v2.0.0 → v2.1.0），最终由 **ADR-167**（`docs/17_DECISIONS.md`）收口：**v2.1.0 = Source Ingestion / Snapshot（已交付）**，**v2.2.0 = Strategy Compiler（Phase 5）**。因此本文件 §17 / §20 / §21 / §22 的版本列**一律读作「旧目标版本、未交付」**；当前唯一正式的版本归属与编译器契约见 `docs/17_DECISIONS.md` 的 ADR-167 与 `docs/29_STRATEGY_COMPILER_CONTRACT.md`，现状审计见 `docs/28_STRATEGY_COMPILER_GAP_ANALYSIS.md`。滚动状态见 §23（v1.9.9）、§24（v2.0.0）、§25（v2.1.0）与 **§26（v2.2.0）**。**修订（v2.4.x 切片 C，ADR-174）**：上面这批「从未按那个版本交付」的目标里，**`strategy_experiments` 实体已经交付**——表 `strategy_experiments` / `experiment_results`（迁移 `backend/alembic/versions/0016_strategy_experiments.py`）与 `/api/v1/experiments` 五个端点，走的是**非 AI** 路径（不调模型、不花 AI 预算），落地状态见 `docs/25_AI_QUANT_RESEARCH_LAYER_PLAN.md` 的 v2.4.x 切片 C 一条与 §26 的后记之二；本段其余目标（Tool Gateway / `ai_tool_calls`、异步研究工作流 + 人工确认、四个 AI 面板门控与完整 `/lab`）仍未交付。
 
 ---
 
@@ -17,7 +17,7 @@
 
 1. **`StrategySpec` 名字与契约已被占用**：`backend/app/strategies/dsl.py:255`，`extra="forbid"`（`backend/app/strategies/dsl.py:258`），全仓 104 处引用。→ 正式采用 A 方案：**DSL 1.0 不动**，新增研究层实体（计划 §八、§七、§四十二）。
 2. **AI 层只有 2 条解释链、3 个源文件**，不是 5 个角色：`backend/app/ai/{__init__.py,provider.py,explain.py}`；`signal_explain@1.0.0`（`backend/app/ai/explain.py:291`）与 `backtest_explain@1.0.0`（`backend/app/ai/explain.py:323`）。计划 §四十九 的"保留现有 5 角色"应按**新建**估。
-3. **没有 Capability Registry、没有 tool calling、没有 experiment 实体、没有 GitHub 以外的研究源抽象、没有 URL/PDF 摄取**（全仓零命中）。计划 §十九、§二十四、§四十三、§二十三 全部是**新建**。
+3. **没有 Capability Registry、没有 tool calling、没有 experiment 实体、没有 GitHub 以外的研究源抽象、没有 URL/PDF 摄取**（全仓零命中）。计划 §十九、§二十四、§四十三、§二十三 全部是**新建**。**修订（v2.4.x 切片 C，ADR-174）**：其中「没有 experiment 实体」**已不再成立**——`strategy_experiments` / `experiment_results` 已建表，`/api/v1/experiments` 提供记录、历史、回读、对比、删除五个端点（见 §22 表与 §26 后记之二）；本切片未触碰其余四项。
 4. **缓存 key 不含 provider / model**：`AIRequest.input_hash`（`backend/app/ai/provider.py:79-89`）只有 task + `name@version` + facts。计划 §三十八 要求扩展，且换模型必须 miss。
 5. **Prompt 有三套潜在来源**：markdown（计划 §五 要新建）、DB `ai_prompts`（`backend/app/domain/models.py:635-648`，唯一写入方是 `backend/app/api/routers/ai.py:320-355`）、硬编码常量（`backend/app/ai/explain.py:75-90`）。必须收敛为"文件为唯一人工源"（计划 §十六）。
 6. **预算有三套说法**：实际生效的 `ai_providers.daily_budget_usd`（`backend/app/domain/models.py:609`，默认 2.0 USD）、无读取方的 `Settings.ai_daily_budget_usd`（`backend/app/core/config.py:147`）、文档里的 ¥2/5/10（`docs/06_AI_LAYER.md:126-131`）。计划 §六十五 的 CRITICAL/IMPORTANT/OPTIONAL 需落成代码常量。
@@ -126,7 +126,7 @@
 | 表 | `backend/app/domain/models.py:731-753 github_sources`、`:754-776 github_snapshots`（commit 固化） |
 | 静态分析与净化 | `backend/app/importer/sanitize.py`、`backend/app/importer/extract.py:80 UNSAFE_ATTRS`（`system/popen/exec/spawn/get/post/request/urlopen` 黑名单）、`backend/app/importer/extract.py:106-135 Evidence` dataclass |
 | DSL 构建 | `backend/app/importer/dsl_builder.py`（`:5` 注释提 confidence、`:191` 提 provenance） |
-| **不存在** | `ResearchSource` 通用抽象、URL 摄取、PDF 摄取、`experiment` 实体（`backend/app/domain/models.py` 全部 31 张表里没有） |
+| **不存在** | `ResearchSource` 通用抽象、URL 摄取、PDF 摄取、`experiment` 实体（`backend/app/domain/models.py` 当时 31 张表里没有；**修订（v2.4.x 切片 C，ADR-174）**：`experiment` 实体已不再是缺口——`strategy_experiments` / `experiment_results` 两张表随迁移 `0016_strategy_experiments` 建立，本行其余三项仍不存在） |
 
 ### 1.8 测试与护栏（计划 §六十二、§六十三）
 
@@ -189,8 +189,8 @@
 | Strategy Hypothesis / Draft | 无 | 三态规则、证据绑定、能力缺口、待确认项 | §七、§九、§十、§十一、§十二 | v1.9.8 |
 | Strategy Compiler | 无（只有 `backend/app/importer/dsl_builder.py` 的确定性构建） | `StrategyDraft → StrategySpec 1.0` + 过 validator；禁止 AI→Python | §十七、§六十一 | v1.9.9 |
 | Tool Gateway | 无（全仓无 tool calling） | 读/重/写三档 + 配额 + 超时 + 审计 | §二十四、§二十五、§五十七、§五十八 | v1.9.9 |
-| 异步研究工作流 | 有轮询模式可复用（`backend/app/api/routers/ai.py:201-215`） | Celery 阶段状态机 + 人工确认暂停 | §五十九、§六十、§十二（用户决策 C10） | v1.9.9 |
-| 实验实体 | 无 | `strategy_experiments` + V1→V2 不可变迭代 | §十三、§四十三、§四十二 | v1.9.9 |
+| 异步研究工作流 | **已实现（v2.5.0）**：`POST /api/v1/ai/research` 请求内只做校验与落库（`prepare_research`），立即返回 **202** + `status="queued"` / `current_step="queued"`，真正的 researcher → architect 两步由 Celery 任务 `quantlab.run_research` 在 worker 里跑 `execute_research`（`backend/app/workers/tasks.py`）；前端轮询既有 `GET /api/v1/ai/research/{run_id}`，没有再靠调大 nginx 超时；**人工确认门**同批落地——未经人工 `confirmed` 的草案编译一律 409 `draft_not_confirmed` 且零写入（`backend/app/ai/confirmation.py` 的 `require_confirmation`，服务端强制、绕过页面直接调 API 同样被拒）。仍缺：Tool Gateway、阶段暂停（NEEDS_INPUT / NEEDS_REVIEW 的更细阶段机）| Celery 阶段状态机 + 人工确认暂停（**主体已交付**）| §五十九、§六十、§十二（用户决策 C10） | v1.9.9（**实际交付：v2.5.0**） |
+| 实验实体 | **已实现（v2.4.x 切片 C，ADR-174）**：`strategy_experiments` + `experiment_results`（迁移 `0016_strategy_experiments`）与 `/api/v1/experiments` 五个端点（记录 / 历史 / 回读 / 对比 / 删除），五种 kind 全部复用既有引擎函数 | `strategy_experiments` + V1→V2 不可变迭代（**实际落库的是「一次可回读的实验」，不是 V1→V2 迭代**，形状见 §22 表的修订行） | §十三、§四十三、§四十二 | v1.9.9（实际交付：v2.4.x 切片 C） |
 | 前端 `/lab` | 无（`frontend/src/main.ts:16-35`） | 研究台（分阶段状态、资料、假设、草案、确认、结论） | §四十、§四十一、§六十九、§七十 | v1.9.9–v2.0.0 |
 | 新指标 | `backend/app/research/metrics.py:40-51` | Calmar / Recovery / VaR / CVaR（**先定义后实现**） | §十四、§二十七、§十五 | Future |
 
@@ -261,7 +261,7 @@
 | `strategy_hypotheses` | AI 对材料的理解（Layer B） | `hypothesis_json`, `status`, `provider/model/role/prompt_version`, `confidence_self_reported`, `ai_task_id` | §七 Layer B、§十、§十四 | v1.9.8 |
 | `strategy_hypothesis_rules` | 逐条规则的来源与能力状态 | `hypothesis_id`, `rule_key`, `statement`, `origin`(EXPLICIT/INFERRED/ASSUMED/UNKNOWN), `confidence`, `capability_status`, `evidence_fragment_ids` | §九、§十、§十八、§十三 | v1.9.8 |
 | `strategy_drafts` | 可编译但不可执行的中间结构（Layer C 之前） | `draft_json`, `capability_report_json`, `status`(DRAFT/NEEDS_INPUT/NEEDS_REVIEW/READY/REJECTED), `is_experimental_of`(AI 替代实验标记), `compiled_strategy_version_id` | §八、§十一、§十二、§六十 | v1.9.8 |
-| `strategy_experiments` | V1 → 实验 → V2 的迭代记录 | `base_strategy_version_id`, `hypothesis`, `change_json`, `produced_strategy_version_id`, `status` | §十三、§四十三、§四十二 | v1.9.9 |
+| `strategy_experiments` | V1 → 实验 → V2 的迭代记录（**修订（v2.4.x 切片 C，ADR-174）**：实际交付的是「一次可回读的实验」，**不是** V1→V2 迭代） | **实际建表列**：`name`(120), `notes`, `status`(running/completed/failed), `kind`(backtest/sensitivity/monte_carlo/walk_forward/oos), `strategy_version_id`, `series_id`, `symbol`, `timeframe`, `parameters_json`, `request_json`, `summary_json`, `error_message`, `created_at`, `started_at`, `completed_at`——**没有** `base_strategy_version_id` / `hypothesis` / `change_json` / `produced_strategy_version_id`（V1→V2 不可变迭代仍未实现）；配套 `experiment_results`（`experiment_id`, `kind`, `label`, `parameters_json` = 参数↔结果对, `backtest_run_id` → `backtest_runs.id`, `metrics_json`, `payload_json`） | §十三、§四十三、§四十二 | v1.9.9（实际：v2.4.x 切片 C） |
 | `ai_tool_calls` | 工具调用审计 | `ai_task_id`, `research_run_id`, `tool_name`, `args_hash`, `args_json`(脱敏), `result_hash`, `status`, `duration_ms`, `error_message` | §二十四、§五十七、§五十八、§十八 | v1.9.9 |
 | `ai_source_snapshots` | URL/PDF 抓取快照（对标 `github_snapshots`） | `url`, `final_url`, `status_code`, `content_type`, `content_hash`, `bytes`, `fetched_at`, `robots_ok`, `stored_ref` | §二十三、§十九 | v1.9.8 |
 
@@ -275,7 +275,7 @@
 | --- | --- | --- | --- |
 | `0012_ai_role_contracts` | 新建 `ai_role_contracts`；`ai_tasks` 加可空列 `role` / `output_hash` / `research_run_id` / `strategy_version_id` / `source_ids_json` | v1.9.7 | 只加列，不删不改既有列（先例：`backend/alembic/versions/0006_resource_pk_sqlite.py` 的 SQLite 兼容处理） |
 | `0013_research_layer` | 新建 `research_artifacts` / `research_artifact_fragments` / `strategy_hypotheses` / `strategy_hypothesis_rules` / `strategy_drafts` / `ai_source_snapshots` | v1.9.8 | 新增表，`down_revision = "0012_ai_role_contracts"` |
-| `0014_ai_workflow_audit` | 新建 `ai_research_runs` / `ai_tool_calls` / `strategy_experiments`；`ai_usage` 加可空 `research_run_id` | v1.9.9 | 同上 |
+| `0014_ai_workflow_audit` | 新建 `ai_research_runs` / `ai_tool_calls` / `strategy_experiments`；`ai_usage` 加可空 `research_run_id` | v1.9.9 | 同上。**修订（v2.4.x 切片 C，ADR-174）**：`0014` 实际是 `0014_artifact_source_hash`（纯加列），`0015` 是来源快照——两张实验表由**新的** `backend/alembic/versions/0016_strategy_experiments.py` 建立（`down_revision = "0015_source_snapshots"`），`0014` / `0015` 的迁移体一字未动；`ai_research_runs` / `ai_tool_calls` 的缺口与 `ai_usage.research_run_id` 仍未关闭 |
 | （条件）`0015_metrics_*` | Calmar / Recovery / VaR / CVaR 若需新列（例如 `backtest_metrics` 扩展） | Future | **必须先有指标定义与测试规范**（计划 §十五） |
 
 通用要求：
@@ -294,16 +294,16 @@
 | `GET /ai/capabilities` | Capability Registry（含 `SUPPORTED / PARTIALLY_SUPPORTED / UNSUPPORTED` 与缺失项） | §十九、§五十一、§五十二 | v1.9.7 | 只读；由代码生成 |
 | `GET /ai/roles` | 角色契约列表 + `required_capabilities` + 当前是否满足 | §五、§三十二 | v1.9.7 | 只读 |
 | `GET /ai/audit/{task_id}` | provider/model/role/prompt_version/input_hash/output_hash/source_ids/tool_calls | §十八、§三十七 | v1.9.7 | 不返回密钥；不返回 source 全文 |
-| `POST /ai/research` | 创建研究（异步，返回 run id） | §五十三（用户决策 C10、§十二） | v1.9.9 | 复用 `ai_tasks` + `/ai/tasks/{id}/status` 模式 |
+| `POST /ai/research` | 创建研究（异步，返回 run id） | §五十三（用户决策 C10、§十二） | v1.9.9（**实际交付：v2.5.0**） | **已交付**：请求内 `prepare_research()` 落库后返回 202 + `status="queued"`，执行在 Celery 任务 `quantlab.run_research`；`AI_RESEARCH_ASYNC=false` 时仍走原同步内联路径（`AIResearchRun` 就是那个 run id 的句柄，没有另造 `ai_tasks` 包装）|
 | `GET /ai/research/{run_id}` | 阶段状态（Researching → … → Completed） | §十二、§三十九 | v1.9.9 | 轮询 |
 | `GET /ai/research/{run_id}/artifacts`、`/hypothesis`、`/draft` | 分层结果 | §七、§三十九 | v1.9.9 | 普通模式给摘要，高级模式给原始 |
-| `POST /ai/research/{run_id}/confirm` | 人工确认假设 / 歧义选项 | §十二、§六十 | v1.9.9 | 唯一的"模型不能自己跨过"的点 |
-| `POST /ai/sources/text`、`/ai/sources/url`、`/ai/sources/pdf` | 资料摄取（GitHub 走既有 importer） | §二十三、§十九 | v1.9.8 | URL/PDF 受 SSRF/大小/超时约束 |
+| `POST /ai/research/{run_id}/confirm` | 人工确认假设 / 歧义选项 | §十二、§六十 | v1.9.9 | 唯一的"模型不能自己跨过"的点。**修订（v2.5.0）**：实际交付的确认面是 `POST /api/v1/ai/strategy/drafts/{draft_id}/confirmations`（决定 `confirmed` / `rejected` / `needs_revision` 写在 `audit_logs`，`record_confirmation` 明写 `strategy_version_created: False`），并且它从 v2.5.0 起是**编译的前置门**：没有确认答复就编译 → 409 `draft_not_confirmed`、零写入 |
+| `POST /ai/sources/text`、`/ai/sources/url`、`/ai/sources/pdf` | 资料摄取（GitHub 走既有 importer） | §二十三、§十九 | v1.9.8 | URL/PDF 受 SSRF/大小/超时约束。**修订（实际交付）**：这三个独立端点**没有**建；摄取在 **v2.1.0** 收口为 `POST /api/v1/ai/research` 的 `sources[]`（kind ∈ `user_input` / `text` / `github_file` / `url` / `pdf`，见 `backend/app/ai/research.py:81-92` 的 `ARTIFACT_KINDS` / `INGESTIBLE_KINDS` / `FETCHED_KINDS`，落库为 `ai_source_snapshots` + 片段），前端 `/lab` 目前只暴露 `user_input` |
 | `POST /ai/strategy/formalize` | 思想/资料 → `StrategyDraft` | §五十四 | v1.9.8 | 不产出可直接执行的 DSL |
-| `POST /ai/strategy/drafts/{id}/compile` | Draft → DSL 1.0（过 validator）→ 创建新版本 | §十七、§四十二 | v1.9.9 | **需人工批准**；写库走既有 `strategy_service` |
+| `POST /ai/strategy/drafts/{id}/compile` | Draft → DSL 1.0（过 validator）→ 创建新版本 | §十七、§四十二 | v1.9.9（**实际交付：v2.2.0；确认门 v2.5.0**） | **需人工批准**——自 v2.5.0 起由服务端强制（`require_confirmation` 在编译器之前；未确认 → 409 `draft_not_confirmed` 且什么都不写），写库走既有 `strategy_service` |
 | `POST /ai/backtests/{run_id}/analyze` | Backtest Analyst（在既有 explain 之上扩展） | §二十六、§五十五 | v1.9.9 | 数字只能来自已存结果 |
 | `POST /ai/explain` | 统一解释入口（signal / strategy / backtest / risk / paper / research） | §五十六、§二十八 | v1.9.9 | 既有 3 个端点保留兼容（`backend/app/api/routers/ai.py:73,95,163`） |
-| `POST /ai/experiments` | 创建实验（V1 → V2） | §十三、§四十三 | v1.9.9 | 写库需人工批准 |
+| `POST /ai/experiments` | 创建实验（V1 → V2） | §十三、§四十三 | v1.9.9 | 写库需人工批准。**修订（v2.4.x 切片 C，ADR-174）**：这条 **AI** 端点仍未实现（AI 依旧只解释、不计算）；「实验」已作为**非 AI** 端点落地为 `POST /api/v1/experiments`（另有列表 / 对比 / 详情 / 删除），由用户或前端发起 |
 
 **明确不改动**：`/api/v1/research/*`（量化研究）、前端 `/research`、既有 AI 解释端点（向后兼容）。
 
@@ -478,7 +478,7 @@ CI 必须失败的三类情形：
 | --- | --- | --- | --- | --- | --- | --- |
 | **v1.9.7** 基础 Role Contract + Runtime | §四、§五、§六、§三十二、§三十六、§三十七、§三十八、§十九（Registry 骨架）、§三十三、§三十五 | `backend/app/ai/contracts/*.md`、Contract Loader/Registry、Capability Registry 骨架 + drift test、缓存 key 修正、审计列、预算分层常量、`ai_role_contracts` | `0012` | `GET /ai/capabilities`、`/ai/roles`、`/ai/audit/{task_id}` | 无新页面（解释链行为不变；错误文案与配额提示） | 补丁版：不部署 NAS（ADR-086） |
 | **v1.9.8** Research Layer + Hypothesis + Draft + Capability Registry 完整 | §七、§九、§十、§十一、§十二、§十八、§二十、§二十三、§五十、§五十一、§五十二、§六十一 | `ResearchSource` 抽象（text/url/pdf/github）、`ResearchArtifact`+片段、`StrategyHypothesis`+逐条规则三态、`StrategyDraft`、能力判定（`SUPPORTED/PARTIALLY_SUPPORTED/UNSUPPORTED`）、`POST /ai/sources/*`、`POST /ai/strategy/formalize` | `0013` | 见 §8 | `/lab` 第一版（资料 + 假设 + 草案，只读态） | 补丁版 |
-| **v1.9.9** Compiler + Tool Gateway + Audit + Security + Workflow | §十七、§二十四、§二十五、§五十七、§五十八、§五十九、§六十、§六十二、§六十三、§六十四、§六十五、§五十三–§五十六、§四十三 | `StrategyCompiler`（Draft→DSL 1.0）、Tool Gateway（读/重/写三档 + 配额 + 审计）、`ai_research_runs`/`ai_tool_calls`/`strategy_experiments`、异步研究工作流 + 人工确认、统一解释入口 | `0014` | 见 §8 | `/lab` 完整阶段状态机；普通/高级分层与隐藏清单守卫 | 补丁版 |
+| **v1.9.9** Compiler + Tool Gateway + Audit + Security + Workflow | §十七、§二十四、§二十五、§五十七、§五十八、§五十九、§六十、§六十二、§六十三、§六十四、§六十五、§五十三–§五十六、§四十三 | `StrategyCompiler`（Draft→DSL 1.0）、Tool Gateway（读/重/写三档 + 配额 + 审计）、`ai_research_runs`/`ai_tool_calls`/`strategy_experiments`、异步研究工作流 + 人工确认、统一解释入口 | `0014` | 见 §8 | `/lab` 完整阶段状态机；普通/高级分层与隐藏清单守卫 | 补丁版。**修订（读取须知）**：这一行的版本号是写作当时的**计划**，实际拆分交付为 —— `StrategyCompiler` = **v2.2.0**（`0014_artifact_source_hash` / `0015_source_snapshots` 之外单独落地，见 docs/29）；**异步研究工作流 + 人工确认门** = **v2.5.0**（202 + `quantlab.run_research`；确认门为编译前置门）；**`strategy_experiments`** = **v2.4.x 切片 C（ADR-174，迁移 `0016_strategy_experiments`）**；**Tool Gateway / `ai_tool_calls`** 与**完整 `/lab` 阶段机**仍未交付 |
 | **v2.0.0** AI Quant Research Layer 里程碑 | §四十、§四十一、§四十二、§四十四、§四十五–§四十八、§四十九、§六十六、§六十九、§七十、§七十七、§七十八、§八十二（Scenario 1–7 + Martin 场景） | 完整研究 UI + 溯源视图、实验与版本迭代闭环、验收场景全部可演示、文档同步、V1.1 docx + markdown 镜像 | — | — | 完整 | **部署 NAS 并验收**（ADR-086） |
 | **Future** | §十四/§二十七 的 Calmar / Recovery / VaR / CVaR；§十一/§四十五–§四十七 的 Portfolio / Universe / Rebalance；§三十一 Vision；§六十七 RAG | 先定义后实现 | 视需要 | 视需要 | 视需要 | — |
 
@@ -523,7 +523,7 @@ CI 必须失败的三类情形：
 8. **C7**：先 Gap Analysis 再写代码；本文件即交付物；完成即停。
 9. **C8**：V1.0 docx 不修改；新建 V1.1 docx + markdown 镜像（记录 V1.0 已完成内容、v1.9.6 现状、AI 研究层规划、v1.9.7–v2.0.0、已确认边界、被修正的原计划内容）；不覆盖历史。
 10. **C9**：`/research` 与 `/api/v1/research/*` 不动；AI 研究台 `/lab`，API `/api/v1/ai/research*`。
-11. **C10**：AI Research 走异步（创建 AITask → Celery → 阶段状态 → `GET /api/v1/ai/research/{id}`），前端显示阶段流水线。
+11. **C10**：AI Research 走异步（创建 AITask → Celery → 阶段状态 → `GET /api/v1/ai/research/{id}`），前端显示阶段流水线。**（v2.5.0 已按此落地：`AIResearchRun` 行自身就是 AITask 的句柄，请求内 `prepare_research()` → 202 `queued`，执行在 `quantlab.run_research`；前端在 `/lab` 轮询 `GET /api/v1/ai/research/{id}`。未另建 `ai_tasks` 包装。）**
 12. **新增产品原则（计划 §十三）**：AI 可以创建"策略"，但不能伪造"策略能力"；能力不足必须 `PARTIALLY_SUPPORTED` 并列出 unsupported；替代实验必须标 `Experimental` 且声明"不等于原始策略"。
 13. **Martin 场景（计划 §十四）**：成为正式验收场景，必须可追溯「原始资料 → AI 理解 → EXPLICIT/INFERRED/ASSUMED/UNKNOWN → Draft → DSL 1.0 → 回测结果」。
 14. **指标分期（计划 §十五）**：Existing / Missing / Planned 分列并归档到版本；Calmar / Recovery / VaR / CVaR 先定义后实现。
@@ -644,4 +644,4 @@ v2.1.0 是 **Phase 4 的第一步**，只关掉上面那条里的「统一研究
 - **本文件相应条目的状态**：§17 版本映射里的 Compiler 行 → **代码层已关闭**（`backend/app/compiler/` 已存在、编译端点已挂载、Martin 场景按契约被拒绝），**发布层未关闭**（工作区尚未 commit / tag / push / release / deploy），归属仍记 v2.2.0；§12 的工具网关与 `ai_tool_calls` → **仍未关闭**（顺延更后）；§13 的四个 AI 面板门控与完整 `/lab` → **仍未关闭**；§22 里标注 v1.9.9 的「工具滥用防护」等其他条目 → 仍未关闭。以上都不在 v2.2.0 的编译器范围内。
 - **本轮（Step 2B–2D）已经落地的东西**：`backend/app/compiler/` 六个模块（`compiler.py` / `mapping.py` / `models.py` / `errors.py` / `hashing.py` / `__init__.py`；纯函数——只读 `draft.draft_json` 与 `capability_report_json`，不查库、不联网、不调模型、不建 `Strategy` 行）；`POST /api/v1/ai/strategy/drafts/{draft_id}/compile`（`COMPILED` 才创建 `StrategyVersion`、写 `evidence_json.compile_report` 并回写 `StrategyDraft.compiled_strategy_version_id`，`NEEDS_USER_DECISION` / `REJECTED` 返回 422 且不写任何行，未知 draft / strategy 返回 404，草案已绑定 / 版本号不可自增 / 版本号被占用返回 409，且 409 走项目的 `error` 信封、不带伪造的 `report`）；capability 报告按**真实落库形状**读取（`backend/app/compiler/compiler.py:682` 起：`.missing` 非空 / `.partial` 非空 / `verdict ∈ ("NEEDS_CAPABILITY","UNSUPPORTED")` 三条独立判定，API 层不做 `assess()`）；三份守卫共 **80 例**（`test_compiler_contract.py` 16 + `test_compiler_core.py` 49 + `test_compiler_api.py` 15），全仓 `scripts\Invoke-Tests.ps1` = **1361 passed / 4 skipped**（4 个 skip 是 `TEST_POSTGRES_URL` 未设的 PostgreSQL 触发器用例）。工作区的六处版本镜像已置为 **v2.2.0**。
 - **仍然没有发生的事**：没有新增 migration（下一个可用编号仍是 `0016`，`0014` / `0015` 未动）、没有改 `StrategySpec 1.0`（ADR-155 继续有效）、没有改 `backend/app/features` / `research` / `simulation` / `ai`、没有改前端、没有在 API 层加 capability 预判、没有把 `is_current` 激活路径接上 `validation_status` 门（**已登记、另立切片**）、没有 commit / tag / push / Release / NAS 部署。新增的还有：`docs/28`、`docs/29`、ADR-167 / ADR-169 / ADR-170 与各文档的版本归属与状态声明。
-- **后记（v2.2.0 发布 → v2.2.1 → v2.3.0）**：上面 §26 记的是**工作区状态**，此后三件事已经发生——① v2.2.0 已发布（commit `53a166748`、tag `v2.2.0`），补丁版 v2.2.1（commit `ac486b3d1`）打磨了部署验收脚本与 compile 端点的 404/409 声明；② 当时「已登记、另立切片」的 **`is_current` 激活有效性门已由 v2.3.0 收口**（ADR-171：`ACTIVATABLE_VALIDATION_STATUSES` 只含 `valid`，激活端点拒绝非 valid 版本并写 `strategy_version_activation_rejected` 审计，编译端点显式 `make_current=False`，`scan_all` / `scan_and_persist` 两条查询同时要求 `is_current AND validation_status = 'valid'`），落地状态见 `docs/19` §5.5；③ v2.3.0 已在 NAS 上**只读实机验收通过**（Overall READY、Critical Findings = 0，读数见 `docs/15_ROADMAP_ACCEPTANCE.md` 的「v2.3.0 的读数」段）。**仍未关闭**：工具网关与 `ai_tool_calls`、异步研究工作流 + 人工确认、`strategy_experiments`、四个 AI 面板门控与完整 `/lab`、统一 `/ai/explain`、RAG / 向量库、自动研究与自动优化。
+- **后记（v2.2.0 发布 → v2.2.1 → v2.3.0）**：上面 §26 记的是**工作区状态**，此后三件事已经发生——① v2.2.0 已发布（commit `53a166748`、tag `v2.2.0`），补丁版 v2.2.1（commit `ac486b3d1`）打磨了部署验收脚本与 compile 端点的 404/409 声明；② 当时「已登记、另立切片」的 **`is_current` 激活有效性门已由 v2.3.0 收口**（ADR-171：`ACTIVATABLE_VALIDATION_STATUSES` 只含 `valid`，激活端点拒绝非 valid 版本并写 `strategy_version_activation_rejected` 审计，编译端点显式 `make_current=False`，`scan_all` / `scan_and_persist` 两条查询同时要求 `is_current AND validation_status = 'valid'`），落地状态见 `docs/19` §5.5；③ v2.3.0 已在 NAS 上**只读实机验收通过**（Overall READY、Critical Findings = 0，读数见 `docs/15_ROADMAP_ACCEPTANCE.md` 的「v2.3.0 的读数」段）。**仍未关闭**：工具网关与 `ai_tool_calls`、异步研究工作流 + 人工确认、四个 AI 面板门控与完整 `/lab`、统一 `/ai/explain`、RAG / 向量库、自动研究与自动优化。**后记之二（v2.4.x 切片 C，ADR-174）**：原先列在这里的 `strategy_experiments` **已关闭「实体」那一半**——`strategy_experiments` + `experiment_results` 两张表（迁移 `0016_strategy_experiments`，`down_revision = "0015_source_snapshots"`）与 `/api/v1/experiments` 五个端点（记录 201 / 历史 / 对比 / 回读 / 删除 204，删除级联结果行但不删底层 `BacktestRun`）已落地，五种 kind 全部复用既有引擎函数（`run_backtest` / `run_sensitivity` + `expand_grid` / `run_monte_carlo` / `run_walk_forward` / `run_holdout`），**没有重实现任何量化算法**，也没有新增 Celery 任务、服务、容器、依赖或设置项；仍然**未实现**的是 `POST /ai/experiments`（AI 提议实验）与 V1→V2 不可变迭代。

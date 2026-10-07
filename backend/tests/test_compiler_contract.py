@@ -578,17 +578,24 @@ def test_compiler_never_runs_a_backtest_or_writes_rows() -> None:
 
 
 def test_the_http_contract_uses_the_projects_error_envelope_for_conflicts() -> None:
-    """§16.7 + ADR-169: a 409 is an input-boundary error with no compile report."""
+    """§16.7 + ADR-169: a 409 carries no compile report, whatever its reason."""
 
     section = _section(
         contract_text(), "### 16.7 HTTP 契约（冻结）", "## 17. Martin 场景的契约结论"
     )
 
     conflicts = [line for line in section.splitlines() if line.startswith("409 ")]
-    assert len(conflicts) == 3, conflicts
+    # Four since v2.5.0: the three input-boundary conflicts plus the human gate,
+    # which refuses before the compiler is called at all.
+    assert len(conflicts) == 4, conflicts
     for line, code in zip(
         conflicts,
-        ("draft_already_compiled", "version_unassignable", "version_conflict"),
+        (
+            "draft_already_compiled",
+            "draft_not_confirmed",
+            "version_unassignable",
+            "version_conflict",
+        ),
         strict=True,
     ):
         assert f'409  {{"error": {{"code": "{code}"' in line, line
@@ -597,6 +604,7 @@ def test_the_http_contract_uses_the_projects_error_envelope_for_conflicts() -> N
         assert '"report"' not in line, line
     assert "绝不带 `report`" in section
     assert "`version_conflict` 不可由编译器产生" in section
+    assert "`draft_not_confirmed`" in section
 
 
 def test_the_capability_report_shape_is_the_stored_one() -> None:

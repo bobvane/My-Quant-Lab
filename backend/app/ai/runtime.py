@@ -331,6 +331,10 @@ def run_task(
         task_type=request.task_type,
         provider_id=provider.id,
         model_id=model.id if model else None,
+        # Name snapshots: the configuration these ids point at is deletable, the
+        # task row is not (ADR-177).
+        provider_name=provider_name,
+        model_name=model_name,
         prompt_name=request.prompt_name,
         prompt_version=request.prompt_version,
         role=request.role or None,
@@ -419,6 +423,8 @@ def run_task(
         in_tokens=in_tokens,
         out_tokens=out_tokens,
         cost_usd=cost,
+        provider_name=provider_name,
+        model_name=model_name,
     )
     db.commit()
     return {

@@ -116,33 +116,47 @@ def test_update_missing_provider_404(client) -> None:
     assert response.status_code == 404
 
 
-def test_delete_is_refused_when_task_history_exists(client, db_session) -> None:
-    from app.domain.models import AITask
+def test_delete_is_allowed_when_task_history_exists(client, db_session) -> None:
+    """A provider with history still deletes; the history keeps its names (ADR-177).
+
+    Configuration and history have separate lifecycles: the provider row (and its
+    models) go away, and the task row survives with the provider/model names it
+    used snapshotted onto it.
+    """
+    from sqlalchemy import select
+
+    from app.domain.models import AIModel, AITask
 
     created = client.post("/api/v1/settings/ai/providers", json=_create_payload()).json()
     provider_id = created["id"]
-    db_session.add(
-        AITask(
-            task_type="signal_explanation",
-            provider_id=provider_id,
-            prompt_name="signal_explain",
-            prompt_version="1.0.0",
-            input_hash="h" * 64,
-            status="completed",
-        )
+    model = db_session.scalar(select(AIModel).where(AIModel.provider_id == provider_id))
+    task = AITask(
+        task_type="signal_explanation",
+        provider_id=provider_id,
+        model_id=model.id,
+        prompt_name="signal_explain",
+        prompt_version="1.0.0",
+        input_hash="h" * 64,
+        status="completed",
     )
+    db_session.add(task)
     db_session.commit()
+    task_id = task.id
 
-    refused = client.delete(f"/api/v1/settings/ai/providers/{provider_id}")
-    assert refused.status_code == 409
-    assert "deactivate" in refused.json()["detail"]
+    deleted = client.delete(f"/api/v1/settings/ai/providers/{provider_id}")
+    assert deleted.status_code == 200
+    assert client.get("/api/v1/settings/ai/providers").json()["providers"] == []
 
-    # Deactivating keeps the audit trail intact.
-    deactivated = client.put(
-        f"/api/v1/settings/ai/providers/{provider_id}", json={"is_active": False}
-    )
-    assert deactivated.status_code == 200
-    assert deactivated.json()["is_active"] is False
+    db_session.expire_all()
+    history = db_session.get(AITask, task_id)
+    assert history is not None, "the AI task history must survive the delete"
+    assert history.provider_id is None and history.model_id is None
+    assert history.provider_name == "openai-main"
+    assert history.model_name == "gpt-4o-mini"
+
+    detail = client.get(f"/api/v1/ai/tasks/{task_id}").json()
+    assert detail["provider_name"] == "openai-main"
+    assert detail["model_name"] == "gpt-4o-mini"
 
 
 def test_delete_removes_unused_provider(client) -> None:
@@ -184,35 +198,52 @@ def test_a_deactivated_provider_without_history_still_deletes(client) -> None:
     assert client.get("/api/v1/settings/ai/providers").json()["providers"] == []
 
 
-def test_a_refused_delete_keeps_the_provider_model_and_history(client, db_session) -> None:
-    """The 409 must be a refusal, not a partial delete that dropped the audit trail."""
-    from sqlalchemy import func, select
+def test_deleting_a_model_row_keeps_its_history_readable(client, db_session) -> None:
+    """A model is deletable even when calls were made with it (ADR-177).
+
+    The row leaves the catalogue, the provider stays, and the task that used the
+    model keeps the model name instead of a dangling id.
+    """
+    from sqlalchemy import select
 
     from app.domain.models import AIModel, AITask
 
     created = client.post("/api/v1/settings/ai/providers", json=_create_payload()).json()
     provider_id = created["id"]
-    db_session.add(
-        AITask(
-            task_type="signal_explanation",
-            provider_id=provider_id,
-            prompt_name="signal_explain",
-            prompt_version="1.0.0",
-            input_hash="h" * 64,
-            status="completed",
-        )
+    model = db_session.scalar(select(AIModel).where(AIModel.provider_id == provider_id))
+    model_id = model.id
+    task = AITask(
+        task_type="signal_explanation",
+        provider_id=provider_id,
+        model_id=model_id,
+        prompt_name="signal_explain",
+        prompt_version="1.0.0",
+        input_hash="h" * 64,
+        status="completed",
     )
+    db_session.add(task)
     db_session.commit()
+    task_id = task.id
 
-    assert client.delete(f"/api/v1/settings/ai/providers/{provider_id}").status_code == 409
+    deleted = client.delete(f"/api/v1/settings/ai/models/{model_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["model_name"] == "gpt-4o-mini"
 
+    db_session.expire_all()
+    assert db_session.get(AIModel, model_id) is None
+    history = db_session.get(AITask, task_id)
+    assert history is not None
+    assert history.model_id is None
+    assert history.provider_id == provider_id, "the provider is untouched"
+    assert history.model_name == "gpt-4o-mini"
+
+    # Deleting the provider's default_model also clears that pointer, so the
+    # runtime catalogue cannot synthesise the deleted model back into routing.
     listed = client.get("/api/v1/settings/ai/providers").json()["providers"]
-    assert [p["id"] for p in listed] == [provider_id]
-    assert db_session.scalar(select(AIModel).where(AIModel.provider_id == provider_id)) is not None
-    tasks = db_session.scalar(
-        select(func.count()).select_from(AITask).where(AITask.provider_id == provider_id)
-    )
-    assert tasks == 1
+    assert listed[0]["default_model"] is None
+
+    detail = client.get(f"/api/v1/ai/tasks/{task_id}").json()
+    assert detail["model_name"] == "gpt-4o-mini"
 
 
 def test_audit_records_provider_changes_without_secrets(client) -> None:

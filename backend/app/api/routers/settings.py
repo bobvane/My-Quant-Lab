@@ -119,6 +119,7 @@ def create_ai_provider(payload: dict[str, Any], db: Session = Depends(get_db)) -
     from app.data.ai_provider_service import (
         ProviderConfigError,
         create_provider,
+        parse_model_entry,
         serialize_provider,
     )
 
@@ -126,6 +127,9 @@ def create_ai_provider(payload: dict[str, Any], db: Session = Depends(get_db)) -
         spec = AIProviderCreate.model_validate(payload)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    declared = [m.model_dump(exclude_unset=True) for m in spec.models]
+    declared.extend(parse_model_entry(text) for text in spec.manual_models if str(text).strip())
 
     try:
         provider = create_provider(
@@ -137,7 +141,7 @@ def create_ai_provider(payload: dict[str, Any], db: Session = Depends(get_db)) -
             default_model=spec.default_model,
             daily_budget_usd=spec.daily_budget_usd,
             is_active=spec.is_active,
-            models=[m.model_dump() for m in spec.models],
+            models=declared,
         )
     except ProviderConfigError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -199,8 +203,18 @@ def update_ai_provider(
     return serialize_provider(db, provider)
 
 
-@router.delete("/ai/providers/{provider_id}", summary="Delete an unused AI provider")
+@router.delete(
+    "/ai/providers/{provider_id}",
+    summary="Delete an AI provider (its history is kept)",
+)
 def delete_ai_provider(provider_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Remove a provider configuration, keeping the history that used it (ADR-177).
+
+    Configuration and history are decoupled: the provider row (and its model
+    rows) disappear, while every AI task and usage row survives with the
+    provider/model names snapshotted onto it.
+    """
+
     from app.data.ai_provider_service import ProviderConfigError, delete_provider
 
     try:
@@ -218,6 +232,65 @@ def delete_ai_provider(provider_id: int, db: Session = Depends(get_db)) -> dict[
     )
     db.commit()
     return {"deleted": provider_id, "name": name}
+
+
+@router.put(
+    "/ai/providers/{provider_id}/models",
+    summary="Save an explicit model selection for one provider",
+)
+def update_ai_provider_models(
+    provider_id: int, payload: dict[str, Any], db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    """Save the model catalogue of one provider (ADR-176).
+
+    Entries arrive verbatim from the discovery list (or the existing catalogue);
+    free-text entries are parsed with MQL's own field format only, so an id like
+    ``google/gemma-4-31b-it:free`` keeps its colon. Names missing from the
+    selection are switched off, never deleted.
+    """
+
+    from app.api.schemas import AIProviderModelsUpdate
+    from app.data.ai_provider_service import (
+        ProviderConfigError,
+        save_provider_models,
+        serialize_provider,
+    )
+    from app.domain.models import AIProvider
+
+    try:
+        spec = AIProviderModelsUpdate.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    provider = db.get(AIProvider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="provider not found")
+
+    try:
+        save_provider_models(
+            db,
+            provider_id,
+            models=[m.model_dump(exclude_unset=True) for m in spec.models],
+            manual_models=spec.manual_models,
+        )
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="ai_provider_models_updated",
+        entity_type="ai_provider",
+        entity_id=str(provider_id),
+        action="update",
+        # Model ids are public configuration; no key or base URL is included.
+        payload={
+            "models": [m.model_name for m in spec.models][:50],
+            "manual_models": list(spec.manual_models)[:50],
+        },
+    )
+    db.commit()
+    db.refresh(provider)
+    return serialize_provider(db, provider)
 
 
 @router.put("/ai/models/{model_id}", summary="Enable or disable an AI model")
@@ -266,6 +339,34 @@ def update_ai_model(
     return serialize_model(db, model)
 
 
+@router.delete("/ai/models/{model_id}", summary="Delete an AI model (its history is kept)")
+def delete_ai_model(model_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Remove one model from the current catalogue (ADR-177).
+
+    The row leaves the catalogue, but AI task and usage rows that used it stay
+    readable because they keep the model name snapshot. Deleting the provider's
+    ``default_model`` also clears that pointer.
+    """
+
+    from app.data.ai_provider_service import ProviderConfigError, delete_model
+
+    try:
+        model_name = delete_model(db, model_id)
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    record_audit(
+        db,
+        event_type="ai_model_deleted",
+        entity_type="ai_model",
+        entity_id=str(model_id),
+        action="delete",
+        payload={"model_name": model_name},
+    )
+    db.commit()
+    return {"deleted": model_id, "model_name": model_name}
+
+
 @router.post("/ai/providers/{provider_id}/test", summary="Test a stored provider")
 def test_stored_provider(provider_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     from app.data.ai_provider_service import ProviderConfigError, test_connection
@@ -276,7 +377,12 @@ def test_stored_provider(provider_id: int, db: Session = Depends(get_db)) -> dic
     if provider is None:
         raise HTTPException(status_code=404, detail="provider not found")
     if not provider.api_key_encrypted:
-        return {"ok": False, "detail": "no API key stored for this provider", "models_found": []}
+        return {
+            "ok": False,
+            "detail": "no API key stored for this provider",
+            "models_found": [],
+            "models_total": 0,
+        }
     try:
         api_key = decrypt_secret(provider.api_key_encrypted)
     except Exception as exc:

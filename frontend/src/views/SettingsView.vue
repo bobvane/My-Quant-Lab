@@ -198,7 +198,6 @@ const baseUrl = ref('')
 const apiKey = ref('')
 const defaultModel = ref('')
 const budget = ref(2)
-const modelsCsv = ref('')
 const saving = ref(false)
 const testingNew = ref(false)
 const testResult = ref<ProviderTestResult | null>(null)
@@ -217,6 +216,23 @@ const modelBusyId = ref<number | null>(null)
 // 「当前实际路由」只能由后端回答：它要看供应商与模型两层开关叠加后的结果，
 // 前端自己推会出现「目录写着启用、实际没在用」这类误读（ADR-173）。
 const aiRoute = ref<AIStatus | null>(null)
+
+// --- AI 模型发现与选择（ADR-176）---------------------------------------------
+// 「读取/加载模型」把 GET {base_url}/models 的**全量**结果拿回来（后端不再截断 40
+// 条），用户搜索、勾选、再保存。勾选才是入库的唯一入口：发现到 500 个模型不等于
+// 建 500 条记录。手动添加的条目按原始文本交给服务端解析，因为真实模型 ID 里就有
+// 冒号（`openrouter/free`、`google/gemma-4-31b-it:free`），前端 split(':') 会改名。
+//
+// discoveryTargetId：0 = 还没保存的新 provider 表单，>0 = 某个已保存 provider。
+const discoveryTargetId = ref<number | null>(null)
+const discovered = ref<string[]>([])
+const discoverySearch = ref('')
+const discoveryPicked = ref<string[]>([])
+const manualEntries = ref<string[]>([])
+const manualDraft = ref('')
+const discoveryNotice = ref('')
+const loadingModels = ref(false)
+const savingModels = ref(false)
 
 // --- Temporary remote access (ADR-125) ---------------------------------------
 // A Cloudflare Quick Tunnel the operator opens on purpose. The API owns the
@@ -464,20 +480,123 @@ async function testNotification() {
   }
 }
 
-function modelList(): Array<Record<string, unknown>> {
-  // "model" or "model:capability" or "model:capability:inCost:outCost".
-  return modelsCsv.value
-    .split(',')
-    .map((m) => m.trim())
-    .filter(Boolean)
-    .map((entry) => {
-      const parts = entry.split(':').map((p) => p.trim())
-      const out: Record<string, unknown> = { model_name: parts[0] }
-      if (parts[1]) out.capability_tier = parts[1]
-      if (parts[2]) out.input_cost_per_mtok = Number(parts[2])
-      if (parts[3]) out.output_cost_per_mtok = Number(parts[3])
-      return out
-    })
+// 发现面板当前对准的 provider（null = 面板关闭，0 表示还没保存的新表单）。
+const discoveryProvider = computed(() =>
+  discoveryTargetId.value ? providers.value.find((p) => p.id === discoveryTargetId.value) ?? null : null,
+)
+
+// 可选列表 = 这次读回来的模型 ∪ 该 provider 已有的条目。并集是必要的：已有条目即使
+// 不在这次的 /models 结果里（比如供应商下架了它），也必须能看见、能被重新勾选。
+const discoveryOptions = computed(() => {
+  const existing = discoveryProvider.value?.models.map((m) => m.model_name) ?? []
+  const all = [...new Set([...discovered.value, ...existing])]
+  const q = discoverySearch.value.trim().toLowerCase()
+  return q ? all.filter((name) => name.toLowerCase().includes(q)) : all
+})
+
+// 已勾选但不在当前搜索结果里的，也要在「已选」计数里算上，否则用户搜完一轮就以为
+// 选择丢了。
+const pickedCount = computed(() => discoveryPicked.value.length)
+
+function isPicked(name: string): boolean {
+  return discoveryPicked.value.includes(name)
+}
+
+function togglePick(name: string) {
+  discoveryPicked.value = isPicked(name)
+    ? discoveryPicked.value.filter((n) => n !== name)
+    : [...discoveryPicked.value, name]
+}
+
+function pickAllVisible() {
+  discoveryPicked.value = [...new Set([...discoveryPicked.value, ...discoveryOptions.value])]
+}
+
+function clearVisible() {
+  const visible = new Set(discoveryOptions.value)
+  discoveryPicked.value = discoveryPicked.value.filter((n) => !visible.has(n))
+}
+
+function addManualEntry() {
+  const text = manualDraft.value.trim()
+  if (!text) return
+  // 原样保留：`google/gemma-4-31b-it:free` 必须一字不改地进库（ADR-176）。
+  if (!discoveryPicked.value.includes(text) && !manualEntries.value.includes(text)) {
+    manualEntries.value = [...manualEntries.value, text]
+  }
+  manualDraft.value = ''
+}
+
+function dropManualEntry(text: string) {
+  manualEntries.value = manualEntries.value.filter((t) => t !== text)
+}
+
+/** 打开发现面板。target 为 null 表示对准「还没保存」的新表单。 */
+function openDiscovery(target: AIProviderRecord | null) {
+  discoveryTargetId.value = target ? target.id : 0
+  discovered.value = []
+  discoverySearch.value = ''
+  manualEntries.value = []
+  manualDraft.value = ''
+  discoveryNotice.value = ''
+  // 已有的 active 模型预先勾上：保存就是「当前目录」的样子，取消勾选 = 停用。
+  discoveryPicked.value = target
+    ? target.models.filter((m) => m.is_active).map((m) => m.model_name)
+    : []
+}
+
+function closeDiscovery() {
+  discoveryTargetId.value = null
+}
+
+async function loadModels() {
+  error.value = ''
+  discoveryNotice.value = ''
+  const target = discoveryTargetId.value
+  if (!target && (!baseUrl.value.trim() || !apiKey.value.trim())) {
+    discoveryNotice.value = '请先填写 base_url 与 API Key 再读取模型'
+    return
+  }
+  loadingModels.value = true
+  try {
+    const result = target
+      ? await api.testAiProvider(target)
+      : await api.testNewAiProvider(baseUrl.value.trim(), apiKey.value.trim())
+    discovered.value = result.models_found
+    discoveryNotice.value = result.ok
+      ? `读取到 ${result.models_total} 个模型：搜索后勾选，再点「保存模型选择」。`
+      : `读取失败：${result.detail}`
+  } catch (e) {
+    discoveryNotice.value = (e as Error).message
+  } finally {
+    loadingModels.value = false
+  }
+}
+
+function selectionPayload(): { models: Array<Record<string, unknown>>; manual: string[] } {
+  return {
+    models: discoveryPicked.value.map((name) => ({ model_name: name })),
+    manual: manualEntries.value,
+  }
+}
+
+async function saveModels() {
+  const target = discoveryTargetId.value
+  if (!target) return
+  error.value = ''
+  discoveryNotice.value = ''
+  savingModels.value = true
+  try {
+    const { models, manual } = selectionPayload()
+    await api.saveAiProviderModels(target, { models, manual_models: manual })
+    discoveryNotice.value = `已保存：${pickedCount.value} 个勾选模型已启用，未勾选的保留为停用（不会删除）`
+    await load()
+    closeDiscovery()
+  } catch (e) {
+    discoveryNotice.value = (e as Error).message
+  } finally {
+    savingModels.value = false
+  }
 }
 
 async function testBeforeSave() {
@@ -506,21 +625,23 @@ async function save() {
   }
   saving.value = true
   try {
+    const { models, manual } = selectionPayload()
     const created = await api.createAiProvider({
       name: providerName.value.trim(),
       base_url: baseUrl.value.trim(),
       api_key: apiKey.value.trim(),
       default_model: defaultModel.value.trim() || undefined,
       daily_budget_usd: budget.value,
-      models: modelList(),
+      models,
+      manual_models: manual,
     })
     info.value = `已添加 provider「${created.name}」，密钥已加密存储（${created.key_masked}）`
     // The key only ever lives on the server: clear it from the form immediately.
     apiKey.value = ''
     providerName.value = ''
     defaultModel.value = ''
-    modelsCsv.value = ''
     testResult.value = null
+    closeDiscovery()
     await load()
   } catch (e) {
     error.value = (e as Error).message
@@ -596,7 +717,7 @@ const routeSummary = computed(() => {
 
 async function remove(row: AIProviderRecord) {
   const ok = window.confirm(
-    `确定删除 provider「${row.name}」？它的模型配置会一并删除，且不可恢复；有 AI 调用记录时后端会拒绝，请改为停用。`,
+    `确定删除 provider「${row.name}」？它的模型配置会一并删除，且不可恢复。已有的 AI 调用记录、用量与成本历史不会被删除，历史页面仍会显示「${row.name}」。`,
   )
   if (!ok) return
   error.value = ''
@@ -606,17 +727,34 @@ async function remove(row: AIProviderRecord) {
   busyId.value = row.id
   try {
     await api.deleteAiProvider(row.id)
-    providerNotice.value = `已删除 provider「${row.name}」及其模型配置`
+    providerNotice.value = `已删除 provider「${row.name}」及其模型配置；历史 AI 任务与用量记录保留`
     await load()
   } catch (e) {
-    // 409 = 这个 provider 或者它名下的模型出现在 AI 任务 / 用量历史里。后端拒绝是设计
-    // 行为（ADR-083），这里必须把「改用停用」说在按钮旁边，而不是让用户以为按钮坏了。
-    providerError.value =
-      e instanceof ApiError && e.status === 409
-        ? `不能删除 provider「${row.name}」：它已经有 AI 调用记录，历史必须保留；请改用「停用」。`
-        : (e as Error).message
+    providerError.value = (e as Error).message
   } finally {
     busyId.value = null
+  }
+}
+
+// 模型行的删除：删掉的只是当前配置。历史 AI 任务 / 用量里那个模型名称会被保留
+// （ADR-177），所以这里不再有「有调用记录就删不掉」的说法。
+async function removeModel(row: Record<string, any>) {
+  const name = String(row.model_name)
+  const ok = window.confirm(
+    `确定删除模型「${name}」？只删除当前模型配置；历史 AI 任务与用量记录会保留这个模型名称。`,
+  )
+  if (!ok) return
+  modelError.value = ''
+  modelNotice.value = ''
+  modelBusyId.value = Number(row.id)
+  try {
+    await api.deleteAiModel(Number(row.id))
+    modelNotice.value = `已删除模型「${name}」（历史记录保留）`
+    await load()
+  } catch (e) {
+    modelError.value = (e as Error).message
+  } finally {
+    modelBusyId.value = null
   }
 }
 
@@ -729,18 +867,18 @@ onUnmounted(() => {
       </div>
       <div class="row" style="margin-bottom: 8px">
         <input v-model="defaultModel" style="max-width: 200px" placeholder="默认模型（可选）" />
-        <input v-model="modelsCsv" style="max-width: 280px" placeholder="其他模型，逗号分隔（可选）" />
         <input v-model.number="budget" type="number" step="0.5" min="0" style="max-width: 130px" />
         <button class="ghost" :disabled="testingNew" @click="testBeforeSave">
           {{ testingNew ? '测试中…' : '测试连接' }}
         </button>
+        <button class="ghost" @click="openDiscovery(null)">读取/加载模型</button>
         <button :disabled="saving" @click="save">{{ saving ? '保存中…' : '添加' }}</button>
       </div>
 
       <p v-if="testResult" :class="testResult.ok ? 'notice' : 'error'">
         {{ testResult.ok ? '连接成功' : '连接失败' }}：{{ testResult.detail }}
-        <span v-if="testResult.models_found.length" class="muted">
-          （可用模型：{{ testResult.models_found.slice(0, 6).join('、') }}…）
+        <span v-if="testResult.models_total" class="muted">
+          （实际 {{ testResult.models_total }} 个模型；点「读取/加载模型」可搜索并勾选）
         </span>
       </p>
 
@@ -768,6 +906,7 @@ onUnmounted(() => {
               <button class="ghost" :disabled="testingId === p.id" @click="testStored(p.id)">
                 {{ testingId === p.id ? '测试中…' : '测试' }}
               </button>
+              <button class="ghost" @click="openDiscovery(p)">模型</button>
               <button class="ghost" :disabled="busyId === p.id" @click="toggleActive(p)">
                 {{ p.is_active ? '停用' : '启用' }}
               </button>
@@ -783,9 +922,82 @@ onUnmounted(() => {
       <p v-if="providerError" class="error" style="margin-top: 8px">{{ providerError }}</p>
       <p v-if="providerNotice" class="notice" style="margin-top: 8px">{{ providerNotice }}</p>
 
+      <div v-if="discoveryTargetId !== null" class="card" style="margin-top: 12px">
+        <h4 style="margin: 0 0 6px">
+          模型发现与选择 ——
+          {{ discoveryProvider ? discoveryProvider.name : '新 provider（保存时一并写入）' }}
+        </h4>
+        <div class="row" style="margin-bottom: 8px">
+          <button class="ghost" :disabled="loadingModels" @click="loadModels">
+            {{ loadingModels ? '读取中…' : '读取/加载模型' }}
+          </button>
+          <input v-model="discoverySearch" style="max-width: 220px" placeholder="搜索模型（如 gemma）" />
+          <span class="muted">已选择 {{ pickedCount }}</span>
+          <button class="ghost" @click="pickAllVisible">全选当前搜索结果</button>
+          <button class="ghost" @click="clearVisible">取消当前搜索结果</button>
+        </div>
+        <p v-if="discoveryNotice" class="muted" style="margin: 4px 0">{{ discoveryNotice }}</p>
+
+        <div
+          style="
+            max-height: 260px;
+            overflow: auto;
+            border: 1px solid rgba(127, 127, 127, 0.25);
+            border-radius: 6px;
+            padding: 6px 10px;
+          "
+        >
+          <label
+            v-for="name in discoveryOptions"
+            :key="name"
+            style="display: block; font-size: 13px; padding: 2px 0"
+          >
+            <input
+              type="checkbox"
+              :checked="isPicked(name)"
+              style="width: auto; margin-right: 6px"
+              @change="togglePick(name)"
+            />
+            <code>{{ name }}</code>
+          </label>
+          <p v-if="!discoveryOptions.length" class="muted">
+            还没有可选模型：先点「读取/加载模型」，或者用下面的输入框手动添加。
+          </p>
+        </div>
+
+        <div class="row" style="margin-top: 8px; margin-bottom: 8px">
+          <input
+            v-model="manualDraft"
+            style="max-width: 320px"
+            placeholder="手动添加模型 ID（如 google/gemma-4-31b-it:free）"
+            @keyup.enter="addManualEntry"
+          />
+          <button class="ghost" @click="addManualEntry">+</button>
+        </div>
+        <p v-if="manualEntries.length" class="muted" style="margin: 4px 0">
+          手动添加（保存后写入）：
+          <span v-for="entry in manualEntries" :key="entry" style="margin-right: 10px">
+            <code>{{ entry }}</code>
+            <button class="ghost" @click="dropManualEntry(entry)">×</button>
+          </span>
+        </p>
+
+        <div class="row" style="margin-top: 8px">
+          <button :disabled="savingModels" @click="saveModels">
+            {{ savingModels ? '保存中…' : '保存模型选择' }}
+          </button>
+          <button class="ghost" @click="closeDiscovery">取消</button>
+        </div>
+        <p class="muted" style="margin-top: 6px">
+          只有勾选（或手动添加）的模型会进入目录并启用；取消勾选只会把已有模型设为停用，不会删除。
+        </p>
+      </div>
+
       <p class="muted" style="margin-top: 8px">
-        模型可用 <code>模型名:能力档:输入价:输出价</code> 填写（如
-        <code>gpt-4o-mini:cheap:0.15:0.6</code>）；路由按任务能力档 + 成本 + 预算选模型。
+        模型 ID 原样保存，含 <code>:</code> 也保留（如 <code>openrouter/free</code>、
+        <code>google/gemma-4-31b-it:free</code>）。手动添加时可选带上 MQL 字段
+        <code>模型名:能力档:输入价:输出价</code>（如 <code>gpt-4o-mini:cheap:0.15:0.6</code>）；
+        路由按任务能力档 + 成本 + 预算选模型。
       </p>
     </div>
 
@@ -823,6 +1035,9 @@ onUnmounted(() => {
               >
                 {{ m.is_active ? '停用' : '启用' }}
               </button>
+              <button class="ghost" :disabled="modelBusyId === Number(m.id)" @click="removeModel(m)">
+                删除
+              </button>
             </td>
           </tr>
         </tbody>
@@ -831,7 +1046,7 @@ onUnmounted(() => {
       <p v-if="modelError" class="error" style="margin-top: 8px">{{ modelError }}</p>
       <p v-if="modelNotice" class="notice" style="margin-top: 8px">{{ modelNotice }}</p>
       <p class="muted" style="margin-top: 8px">
-        一个模型要真正参与路由，需要它自己启用、它的供应商也启用，并且供应商的 API Key 可用；停用不会删除模型，历史 AI 任务与用量都保留。
+        一个模型要真正参与路由，需要它自己启用、它的供应商也启用，并且供应商的 API Key 可用；停用不会删除模型，历史 AI 任务与用量都保留。删除只移除当前模型配置，历史记录里的模型名称同样保留。
       </p>
     </div>
 
@@ -866,6 +1081,7 @@ onUnmounted(() => {
           <tr>
             <th>日期</th>
             <th>供应商</th>
+            <th>模型</th>
             <th>任务</th>
             <th>调用</th>
             <th>Tokens</th>
@@ -875,7 +1091,8 @@ onUnmounted(() => {
         <tbody>
           <tr v-for="u in aiUsage" :key="String(u.id)">
             <td>{{ String(u.usage_date).slice(0, 10) }}</td>
-            <td>{{ u.provider_id ?? '—' }}</td>
+            <td>{{ u.provider_name || u.provider_id || '—' }}</td>
+            <td>{{ u.model_name || '—' }}</td>
             <td>{{ u.task_type }}</td>
             <td>{{ u.call_count }}</td>
             <td>{{ u.total_tokens }}</td>
@@ -939,7 +1156,9 @@ onUnmounted(() => {
             </tr>
             <tr>
               <td class="muted">Provider / 模型</td>
-              <td>{{ taskDetail.provider_id ?? '—' }} / {{ taskDetail.model_id ?? '—' }}</td>
+              <td>
+                {{ taskDetail.provider_name ?? '—' }} / {{ taskDetail.model_name ?? '—' }}
+              </td>
             </tr>
             <tr>
               <td class="muted">输入哈希</td>

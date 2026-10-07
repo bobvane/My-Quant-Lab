@@ -763,6 +763,11 @@ class AITask(Base):
     task_type: Mapped[str] = mapped_column(String(48), nullable=False)
     provider_id: Mapped[int | None] = mapped_column(ForeignKey("ai_providers.id"))
     model_id: Mapped[int | None] = mapped_column(ForeignKey("ai_models.id"))
+    # Name snapshots taken while the task runs. Provider/model configuration is
+    # deletable (ADR-177), so history must be able to name what it used without
+    # the configuration row still existing.
+    provider_name: Mapped[str | None] = mapped_column(String(64))
+    model_name: Mapped[str | None] = mapped_column(String(128))
     prompt_name: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(16), nullable=False)
     role: Mapped[str | None] = mapped_column(String(48))
@@ -792,6 +797,10 @@ class AIUsage(Base):
     usage_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
     provider_id: Mapped[int | None] = mapped_column(ForeignKey("ai_providers.id"))
     model_id: Mapped[int | None] = mapped_column(ForeignKey("ai_models.id"))
+    # Name snapshots; see AITask above. A deleted provider/model leaves the
+    # historical name behind so cost reports stay readable.
+    provider_name: Mapped[str | None] = mapped_column(String(64))
+    model_name: Mapped[str | None] = mapped_column(String(128))
     task_type: Mapped[str] = mapped_column(String(48), nullable=False)
     call_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

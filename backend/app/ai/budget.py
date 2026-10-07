@@ -198,8 +198,14 @@ def record_usage(
     in_tokens: int,
     out_tokens: int,
     cost_usd: float,
+    provider_name: str | None = None,
+    model_name: str | None = None,
 ) -> None:
-    """Add one call to today's counter for ``(provider, model, task)``."""
+    """Add one call to today's counter for ``(provider, model, task)``.
+
+    The provider/model names are stored alongside the ids so the row stays
+    readable after that configuration is deleted (ADR-177).
+    """
 
     from app.domain.models import AIUsage
 
@@ -220,6 +226,10 @@ def record_usage(
             task_type=task_type,
         )
         db.add(row)
+    if provider_name and not row.provider_name:
+        row.provider_name = provider_name
+    if model_name and not row.model_name:
+        row.model_name = model_name
     row.call_count = int(row.call_count or 0) + 1
     row.total_tokens = int(row.total_tokens or 0) + in_tokens + out_tokens
     row.total_cost_usd = Decimal(str(float(row.total_cost_usd or 0) + cost_usd))

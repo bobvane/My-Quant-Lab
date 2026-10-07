@@ -484,6 +484,15 @@ export interface ExplainResult {
   cost_usd_estimated: number
 }
 
+export interface AIModelRecord {
+  id: number
+  model_name: string
+  capability_tier: string
+  input_cost_per_mtok: number
+  output_cost_per_mtok: number
+  is_active: boolean
+}
+
 export interface AIProviderRecord {
   id: number
   name: string
@@ -494,13 +503,15 @@ export interface AIProviderRecord {
   daily_budget_usd: number
   api_key_set: boolean
   key_masked: string
-  models: Array<Record<string, unknown>>
+  models: AIModelRecord[]
 }
 
 export interface ProviderTestResult {
   ok: boolean
   detail: string
   models_found: string[]
+  /** 真实数量：`/models` 全量返回，不再被 40 条截断（ADR-176）。 */
+  models_total: number
 }
 
 export interface NotificationChannelRecord {
@@ -1470,6 +1481,12 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ is_active: isActive }),
     }),
+  // 删除当前模型配置：允许即使这个模型已经产生过 AI 调用记录（ADR-177）。删掉的只是
+  // 配置，历史 AI Task / Usage 保留当时的模型名称，不会被一起删除。
+  deleteAiModel: (id: number) =>
+    request<{ deleted: number; model_name: string }>(`/settings/ai/models/${id}`, {
+      method: 'DELETE',
+    }),
   aiPrompts: () => request<{ prompts: Array<Record<string, any>> }>('/ai/prompts'),
   aiTasksList: (limit = 50) => request<Array<Record<string, any>>>(`/ai/tasks?limit=${limit}`),
   // Read-only audit detail of one AI task: structured output, token usage and
@@ -1556,6 +1573,16 @@ export const api = {
   deleteExperiment: (id: number) => request<void>(`/experiments/${id}`, { method: 'DELETE' }),
   updateAiProvider: (id: number, payload: Record<string, unknown>) =>
     request<AIProviderRecord>(`/settings/ai/providers/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  // 保存「发现 + 手动添加」的模型选择：勾选的进目录并置为 active，取消勾选的只置为
+  // inactive（从不删除），全新模型只有被勾选才会创建（ADR-176）。
+  saveAiProviderModels: (
+    id: number,
+    payload: { models?: Array<Record<string, unknown>>; manual_models?: string[] },
+  ) =>
+    request<AIProviderRecord>(`/settings/ai/providers/${id}/models`, {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),

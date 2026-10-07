@@ -772,6 +772,17 @@ class AIProviderCreate(BaseModel):
     daily_budget_usd: float = Field(default=2.0, ge=0, le=1000)
     is_active: bool = True
     models: list[AIModelIn] = Field(default_factory=list)
+    #: Raw model entries typed by the user; parsed with MQL's own field format so
+    #: an id like ``google/gemma-4-31b-it:free`` survives verbatim (ADR-176).
+    manual_models: list[str] = Field(default_factory=list, max_length=200)
+
+    @field_validator("manual_models")
+    @classmethod
+    def _bounded_manual_entries(cls, value: list[str]) -> list[str]:
+        for text in value:
+            if len(str(text).strip()) > 128:
+                raise ValueError("each manual model entry must be 128 characters or fewer")
+        return value
 
     @field_validator("base_url")
     @classmethod
@@ -821,6 +832,32 @@ class AIProviderTestOut(BaseModel):
     ok: bool
     detail: str
     models_found: list[str] = Field(default_factory=list)
+    #: Real number of models the provider reported; ``models_found`` is the full
+    #: list, never truncated by MQL (ADR-176).
+    models_total: int = 0
+
+
+class AIProviderModelsUpdate(BaseModel):
+    """An explicit model selection for one provider (ADR-176).
+
+    ``models`` carry verbatim model ids (from the discovery list or the existing
+    catalogue); ``manual_models`` carry raw text typed by the user, which the
+    backend parses with MQL's own field format. Nothing is deleted here: a name
+    missing from the selection is only switched off.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    models: list[AIModelIn] = Field(default_factory=list)
+    manual_models: list[str] = Field(default_factory=list, max_length=200)
+
+    @field_validator("manual_models")
+    @classmethod
+    def _bounded_manual_entries(cls, value: list[str]) -> list[str]:
+        for text in value:
+            if len(str(text).strip()) > 128:
+                raise ValueError("each manual model entry must be 128 characters or fewer")
+        return value
 
 
 class AIProviderTestRequest(BaseModel):

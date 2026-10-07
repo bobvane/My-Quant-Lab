@@ -27,8 +27,11 @@ __all__ = [
     "ModelConfigError",
     "ProviderConfigError",
     "create_provider",
+    "delete_model",
     "delete_provider",
     "list_providers",
+    "parse_model_entry",
+    "save_provider_models",
     "serialize_model",
     "serialize_provider",
     "test_connection",
@@ -37,8 +40,11 @@ __all__ = [
 ]
 
 TEST_TIMEOUT_SECONDS = 10.0
-MAX_MODELS_RETURNED = 40
 _MAX_DETAIL_CHARS = 300
+#: Capability tiers MQL itself understands. A user-typed entry is only split
+#: into fields when it uses one of these, so model ids that merely contain a
+#: colon (``google/gemma-4-31b-it:free``) survive verbatim (ADR-176).
+CAPABILITY_TIERS = ("cheap", "standard", "high")
 
 
 class ProviderConfigError(ValueError):
@@ -73,12 +79,20 @@ def _validate_base_url(base_url: str) -> str:
 
 
 def test_connection(base_url: str, api_key: str) -> dict[str, Any]:
-    """Probe ``GET {base_url}/models`` and report what came back."""
+    """Probe ``GET {base_url}/models`` and report what came back.
+
+    The whole ``data`` array is returned: MQL does not cap how many models a
+    provider may report (an OpenRouter key reports hundreds), and the count in
+    ``detail`` is the real number, not a truncated one (ADR-176).
+    """
+
+    def _failure(detail: str) -> dict[str, Any]:
+        return {"ok": False, "detail": detail, "models_found": [], "models_total": 0}
 
     try:
         url = _validate_base_url(base_url)
     except ProviderConfigError as exc:
-        return {"ok": False, "detail": str(exc), "models_found": []}
+        return _failure(str(exc))
 
     import httpx
 
@@ -94,46 +108,81 @@ def test_connection(base_url: str, api_key: str) -> dict[str, Any]:
     except Exception as exc:
         # Never include the key in the message; `exc` from httpx only carries
         # the URL, but strip anything long or brace-y to be safe.
-        return {
-            "ok": False,
-            "detail": _sanitize_detail(f"{type(exc).__name__}: {exc}"),
-            "models_found": [],
-        }
+        return _failure(_sanitize_detail(f"{type(exc).__name__}: {exc}"))
 
     if response.status_code == 401:
-        return {"ok": False, "detail": "401 unauthorized — check the API key", "models_found": []}
+        return _failure("401 unauthorized — check the API key")
     if response.status_code == 404:
-        return {
-            "ok": False,
-            "detail": (
-                "404 — the base_url has no /models endpoint. "
-                "Use the API root (e.g. https://api.openai.com/v1), not the chat path."
-            ),
-            "models_found": [],
-        }
+        return _failure(
+            "404 — the base_url has no /models endpoint. "
+            "Use the API root (e.g. https://api.openai.com/v1), not the chat path."
+        )
     if response.status_code >= 400:
-        return {
-            "ok": False,
-            "detail": f"HTTP {response.status_code} from {url}/models",
-            "models_found": [],
-        }
+        return _failure(f"HTTP {response.status_code} from {url}/models")
 
     try:
         payload = response.json()
     except Exception:
-        return {"ok": False, "detail": "response was not JSON", "models_found": []}
+        return _failure("response was not JSON")
 
     ids: list[str] = []
     data = payload.get("data") if isinstance(payload, dict) else None
     if isinstance(data, list):
-        for item in data[:MAX_MODELS_RETURNED]:
+        for item in data:
             if isinstance(item, dict) and isinstance(item.get("id"), str):
                 ids.append(item["id"])
     return {
         "ok": True,
         "detail": f"connected — {len(ids)} model(s) reported",
         "models_found": ids,
+        "models_total": len(ids),
     }
+
+
+def parse_model_entry(text: str) -> dict[str, Any]:
+    """Split one user-typed model entry into a name plus optional MQL fields.
+
+    Only MQL's own documented shapes are parsed — ``name:tier`` or
+    ``name:tier:input_cost:output_cost`` with ``tier`` in :data:`CAPABILITY_TIERS`
+    and numeric costs. Everything else is kept verbatim as the model name,
+    because real model ids contain colons (``openrouter/free``,
+    ``google/gemma-4-31b-it:free``). The old ``entry.split(':')`` behaviour
+    silently renamed such a model to ``google/gemma-4-31b-it`` (ADR-176).
+    """
+
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    parts = raw.split(":")
+    if (
+        len(parts) >= 4
+        and parts[-3] in CAPABILITY_TIERS
+        and _is_number(parts[-2])
+        and _is_number(parts[-1])
+    ):
+        name = ":".join(parts[:-3]).strip()
+        if name:
+            return {
+                "model_name": name,
+                "capability_tier": parts[-3],
+                "input_cost_per_mtok": float(parts[-2]),
+                "output_cost_per_mtok": float(parts[-1]),
+            }
+    elif len(parts) >= 2 and parts[-1] in CAPABILITY_TIERS:
+        name = ":".join(parts[:-1]).strip()
+        if name:
+            return {"model_name": name, "capability_tier": parts[-1]}
+    return {"model_name": raw}
+
+
+def _is_number(text: str) -> bool:
+    if not str(text).strip():
+        return False
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
 
 
 def _sanitize_detail(text: str) -> str:
@@ -172,6 +221,7 @@ def serialize_provider(db: Session, provider: AIProvider) -> dict[str, Any]:
                 "capability_tier": m.capability_tier,
                 "input_cost_per_mtok": float(m.input_cost_per_mtok),
                 "output_cost_per_mtok": float(m.output_cost_per_mtok),
+                "is_active": bool(m.is_active),
             }
             for m in models
         ],
@@ -258,6 +308,92 @@ def create_provider(
         )
     db.flush()
     return provider
+
+
+def save_provider_models(
+    db: Session,
+    provider_id: int,
+    *,
+    models: list[dict[str, Any]] | None = None,
+    manual_models: list[str] | None = None,
+) -> list[AIModel]:
+    """Reconcile a provider's model catalogue with an explicit selection.
+
+    ``models`` are verbatim entries (from the discovery list or the existing
+    catalogue); ``manual_models`` are raw strings typed by the user and parsed
+    with :func:`parse_model_entry`. A selected name is created when it is new and
+    set active; the provider's other rows are only switched off — this call never
+    deletes a model row, so history keeps resolving (ADR-176, ADR-177).
+    """
+
+    provider = db.get(AIProvider, provider_id)
+    if provider is None:
+        raise ProviderConfigError(f"provider {provider_id} not found")
+
+    desired: dict[str, dict[str, Any]] = {}
+    for item in models or []:
+        spec = _entry_spec(item)
+        name = str(spec.get("model_name") or "")
+        if name:
+            desired[name] = spec
+    for text in manual_models or []:
+        spec = parse_model_entry(text)
+        name = str(spec.get("model_name") or "")
+        if name:
+            desired[name] = {**desired.get(name, {}), **spec}
+
+    rows = db.scalars(
+        select(AIModel).where(AIModel.provider_id == provider.id).order_by(AIModel.id)
+    ).all()
+    by_name = {row.model_name: row for row in rows}
+
+    for name, spec in desired.items():
+        row = by_name.get(name)
+        if row is None:
+            db.add(
+                AIModel(
+                    provider_id=provider.id,
+                    model_name=name,
+                    capability_tier=str(spec.get("capability_tier") or "standard"),
+                    input_cost_per_mtok=float(spec.get("input_cost_per_mtok") or 0),
+                    output_cost_per_mtok=float(spec.get("output_cost_per_mtok") or 0),
+                    is_active=True,
+                )
+            )
+            continue
+        row.is_active = True
+        if spec.get("capability_tier"):
+            row.capability_tier = str(spec["capability_tier"])
+        if spec.get("input_cost_per_mtok") is not None:
+            row.input_cost_per_mtok = float(spec["input_cost_per_mtok"])
+        if spec.get("output_cost_per_mtok") is not None:
+            row.output_cost_per_mtok = float(spec["output_cost_per_mtok"])
+
+    for row in rows:
+        if row.model_name not in desired:
+            row.is_active = False
+
+    db.flush()
+    return list(
+        db.scalars(
+            select(AIModel).where(AIModel.provider_id == provider.id).order_by(AIModel.id)
+        ).all()
+    )
+
+
+def _entry_spec(item: Any) -> dict[str, Any]:
+    """Normalise one catalogue entry without inventing fields it did not carry."""
+
+    if isinstance(item, dict):
+        spec: dict[str, Any] = {"model_name": str(item.get("model_name") or "").strip()}
+        tier = item.get("capability_tier")
+        if tier:
+            spec["capability_tier"] = str(tier)
+        for key in ("input_cost_per_mtok", "output_cost_per_mtok"):
+            if item.get(key) is not None:
+                spec[key] = float(item[key])
+        return spec
+    return {"model_name": str(item or "").strip()}
 
 
 def update_provider(
@@ -347,32 +483,90 @@ def update_model(db: Session, model_id: int, *, is_active: bool) -> AIModel:
 
 
 def delete_provider(db: Session, provider_id: int) -> str:
+    """Delete a provider configuration, leaving its history intact.
+
+    Configuration and history have separate lifecycles (ADR-177): the provider
+    and its models go away, while every AI task and usage row is kept — with the
+    provider/model names snapshotted onto it and the foreign keys cleared — so
+    old runs and cost reports stay readable instead of turning into orphans.
+    """
+
     provider = db.get(AIProvider, provider_id)
     if provider is None:
         raise ProviderConfigError(f"provider {provider_id} not found")
 
-    # Refuse to delete a provider that history still references, so the audit
-    # trail keeps pointing at something real. Both history tables count: a task
-    # and a usage row are written independently, and the provider's models
-    # cascade away with it, so usage of one of those models blocks the delete
-    # too (ADR-083).
     from app.domain.models import AITask, AIUsage
 
-    if db.scalar(select(AITask.id).where(AITask.provider_id == provider_id).limit(1)) is not None:
-        raise ProviderConfigError(
-            "this provider has AI task history; deactivate it instead of deleting"
-        )
-    model_ids = select(AIModel.id).where(AIModel.provider_id == provider_id)
-    usage = db.scalar(
-        select(AIUsage.id)
-        .where(or_(AIUsage.provider_id == provider_id, AIUsage.model_id.in_(model_ids)))
-        .limit(1)
-    )
-    if usage is not None:
-        raise ProviderConfigError(
-            "this provider has AI usage history; deactivate it instead of deleting"
-        )
     name = provider.name
+    model_names = {
+        row.id: row.model_name
+        for row in db.scalars(select(AIModel).where(AIModel.provider_id == provider.id)).all()
+    }
+    # A history row may point at this provider, at one of its models, or at both
+    # (a usage row can name a model without naming the provider), so both links
+    # have to be collected before the models cascade away with the provider.
+    task_filter = [AITask.provider_id == provider.id]
+    usage_filter = [AIUsage.provider_id == provider.id]
+    if model_names:
+        task_filter.append(AITask.model_id.in_(model_names))
+        usage_filter.append(AIUsage.model_id.in_(model_names))
+
+    for task in db.scalars(select(AITask).where(or_(*task_filter))).all():
+        if task.provider_id == provider.id:
+            task.provider_name = task.provider_name or name
+            task.provider_id = None
+        if task.model_id is not None and task.model_id in model_names:
+            # The model only ever belonged to this provider, so naming it here is
+            # how a row that reached us through the model alone gets its name.
+            task.model_name = task.model_name or model_names[task.model_id]
+            task.provider_name = task.provider_name or name
+            task.model_id = None
+
+    for usage in db.scalars(select(AIUsage).where(or_(*usage_filter))).all():
+        if usage.provider_id == provider.id:
+            usage.provider_name = usage.provider_name or name
+            usage.provider_id = None
+        if usage.model_id is not None and usage.model_id in model_names:
+            usage.model_name = usage.model_name or model_names[usage.model_id]
+            usage.provider_name = usage.provider_name or name
+            usage.model_id = None
+
+    db.flush()
     db.delete(provider)
+    db.flush()
+    return name
+
+
+def delete_model(db: Session, model_id: int) -> str:
+    """Delete one model row, leaving its task/usage history readable (ADR-177)."""
+
+    model = db.get(AIModel, model_id)
+    if model is None:
+        raise ProviderConfigError(f"model {model_id} not found")
+
+    from app.domain.models import AITask, AIUsage
+
+    provider = db.get(AIProvider, model.provider_id)
+    provider_name = provider.name if provider is not None else None
+    name = model.model_name
+
+    for task in db.scalars(select(AITask).where(AITask.model_id == model.id)).all():
+        task.model_name = task.model_name or name
+        task.provider_name = task.provider_name or provider_name
+        task.model_id = None
+
+    for usage in db.scalars(select(AIUsage).where(AIUsage.model_id == model.id)).all():
+        usage.model_name = usage.model_name or name
+        usage.provider_name = usage.provider_name or provider_name
+        usage.model_id = None
+
+    if provider is not None and (provider.default_model or None) == name:
+        # A dangling default_model would be synthesised back into a routable
+        # option by the runtime catalogue fallback, resurrecting the row we just
+        # removed from the catalogue.
+        provider.default_model = None
+
+    db.flush()
+    db.delete(model)
     db.flush()
     return name

@@ -42,7 +42,11 @@ GIT = shutil.which("git")
 needs_bash = pytest.mark.skipif(BASH is None, reason="bash is required to exercise release.yml")
 needs_git = pytest.mark.skipif(GIT is None, reason="git is required to choose the highest tag")
 
-RELEASED = "v2.4.4"  # what version.txt says while a candidate is being published
+# The released version the synthetic workspaces below publish *after* their candidate.
+# It is a pinned fixture rather than a read of the real `version.txt`: the candidate has
+# to be ahead of the released version, so a moving value would silently rewrite the
+# offsets each of those cases asserts (a real release bump must not change them).
+RELEASED = "v2.4.4"
 CANDIDATE = "v2.5.0-rc.1"
 
 # Steps sit six spaces deep under `jobs.<id>.steps`; a step ends where the next begins.
@@ -255,6 +259,12 @@ def test_a_candidate_is_published_as_a_pre_release_and_never_rewrites_the_versio
     assert "> version.txt" not in text and ">> version.txt" not in text, (
         "the release pipeline writes version.txt; that file is moved by scripts/version.sh"
     )
-    assert VERSION_FILE.read_text(encoding="utf-8").strip() == RELEASED, (
-        "this guard assumes the candidate is published without moving version.txt"
+    # The invariant the candidate flow depends on: `version.txt` names a *released*
+    # version (no suffix) and nothing in the pipeline writes it — `scripts/version.sh`
+    # is the only writer, and it never writes a candidate. Asserting the exact string
+    # would turn every release into a failing guard, so the shape is what is checked.
+    released = VERSION_FILE.read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"v\d+\.\d+\.\d", released), (
+        f"version.txt names {released!r}, which is not a released version; a candidate is "
+        "published without moving that file, so it must still name the release it follows"
     )

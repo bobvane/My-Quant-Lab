@@ -295,11 +295,14 @@ def get_ai_task(task_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     row = db.get(AITask, task_id)
     if row is None:
         raise HTTPException(status_code=404, detail="ai task not found")
+    provider_name, model_name = _history_names(db, row)
     return {
         "id": row.id,
         "task_type": row.task_type,
         "provider_id": row.provider_id,
         "model_id": row.model_id,
+        "provider_name": provider_name,
+        "model_name": model_name,
         "prompt_name": row.prompt_name,
         "prompt_version": row.prompt_version,
         "status": row.status,
@@ -313,6 +316,27 @@ def get_ai_task(task_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
 
+def _history_names(db: Session, row: Any) -> tuple[str | None, str | None]:
+    """Name an AI task/usage row, snapshot first, live configuration second.
+
+    Migration 0017 backfills the snapshots and the runtime writes them from now
+    on, so a deleted provider/model still has a name here (ADR-177); the fallback
+    only serves rows written before that.
+    """
+
+    from app.domain.models import AIModel, AIProvider
+
+    provider_name = getattr(row, "provider_name", None)
+    model_name = getattr(row, "model_name", None)
+    if not provider_name and row.provider_id is not None:
+        provider = db.get(AIProvider, row.provider_id)
+        provider_name = provider.name if provider is not None else None
+    if not model_name and row.model_id is not None:
+        model = db.get(AIModel, row.model_id)
+        model_name = model.model_name if model is not None else None
+    return provider_name, model_name
+
+
 @router.get("/ai/usage-today", summary="Today's AI spend (UTC)")
 def usage_today(db: Session = Depends(get_db)) -> dict[str, Any]:
     from app.domain.models import AIProvider, AIUsage
@@ -321,8 +345,10 @@ def usage_today(db: Session = Depends(get_db)) -> dict[str, Any]:
     rows = db.scalars(select(AIUsage).where(AIUsage.usage_date == today)).all()
     by_provider: dict[str, Any] = {}
     for row in rows:
-        provider = db.get(AIProvider, row.provider_id) if row.provider_id else None
-        name = provider.name if provider else "unknown"
+        name, _ = _history_names(db, row)
+        if not name:
+            provider = db.get(AIProvider, row.provider_id) if row.provider_id else None
+            name = provider.name if provider else "unknown"
         entry = by_provider.setdefault(
             name, {"calls": 0, "tokens_estimated": 0, "cost_usd_estimated": 0.0}
         )
@@ -361,21 +387,24 @@ def ai_usage(
     if provider_id is not None:
         stmt = stmt.where(AIUsage.provider_id == provider_id)
     rows = db.scalars(stmt.limit(limit)).all()
-    return {
-        "usage": [
+    usage: list[dict[str, Any]] = []
+    for r in rows:
+        provider_name, model_name = _history_names(db, r)
+        usage.append(
             {
                 "id": r.id,
                 "usage_date": r.usage_date,
                 "provider_id": r.provider_id,
                 "model_id": r.model_id,
+                "provider_name": provider_name,
+                "model_name": model_name,
                 "task_type": r.task_type,
                 "call_count": r.call_count,
                 "total_tokens": r.total_tokens,
                 "total_cost_usd": float(r.total_cost_usd),
             }
-            for r in rows
-        ]
-    }
+        )
+    return {"usage": usage}
 
 
 def _seed_builtin_prompts(db: Session) -> None:

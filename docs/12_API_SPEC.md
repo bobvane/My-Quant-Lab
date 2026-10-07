@@ -461,16 +461,18 @@ Deterministic, evidence-gated promotion/degradation. No AI is involved.
 ## AI Providers
 
 `GET /settings/ai/providers` [已实现] —— 列出 AI 供应商（key 永不返回）。
-`POST /settings/ai/providers` [已实现] —— 创建 AI 供应商（key 加密存储、永不返回）。
+`POST /settings/ai/providers` [已实现] —— 创建 AI 供应商（key 加密存储、永不返回；`manual_models` 逐字保存完整模型 ID）。
 `PUT /settings/ai/providers/{provider_id}` [已实现] —— 更新一个 AI 供应商。
-`DELETE /settings/ai/providers/{provider_id}` [已实现] —— 删除一个未被使用的 AI 供应商。
+`DELETE /settings/ai/providers/{provider_id}` [已实现] —— 删除一个 AI 供应商（历史 AI 任务与用量保留，并保留其名称快照）。
+`PUT /settings/ai/providers/{provider_id}/models` [已实现] —— 保存该供应商的模型选择（body `{"models": [...], "manual_models": [...]}`；被选中的启用、缺失的创建、未选中的置为停用，从不删除）。
 `POST /settings/ai/providers/test` [已实现] —— 保存前先测试凭据。
-`POST /settings/ai/providers/{provider_id}/test` [已实现] —— 测试一个已存储的供应商。
+`POST /settings/ai/providers/{provider_id}/test` [已实现] —— 测试一个已存储的供应商（`models_total` 是 `/models` 返回的真实数量，不做截断）。
 
 ## AI Models
 
 `GET /ai/models` [已实现] —— 跨供应商的 AI 模型；按供应商过滤用 `provider_id` query 参数。
 `PUT /settings/ai/models/{model_id}` [已实现] —— 启用/停用一个模型（body `{"is_active": true|false}`；停用不删除任何行，供应商最后一个可路由的 `default_model` 会被 409 拒绝）。
+`DELETE /settings/ai/models/{model_id}` [已实现] —— 删除一个模型配置（历史 AI 任务与用量保留，并保留其名称快照）。
 
 ## AI Tasks
 

@@ -6,6 +6,10 @@ it -- signals point at a version, paper accounts point at the strategy -- and
 none of those columns carries ``ON DELETE``, so the delete reached the database,
 hit a foreign-key violation and reached the user as a generic 500. The guard has
 to count what points at the row, not the one referrer we happened to remember.
+
+AI providers and models are the deliberate exception (ADR-177): they are current
+configuration, so they always delete and the history keeps the names it used
+instead of blocking the row. The AI cases below assert that behaviour.
 """
 
 from __future__ import annotations
@@ -13,11 +17,10 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import select
 
 from app.api.schemas import MarketDataSyncRequest, StrategyVersionCreate
-from app.data.ai_provider_service import ProviderConfigError, create_provider, delete_provider
+from app.data.ai_provider_service import create_provider, delete_provider
 from app.domain.models import AIModel, AIUsage, Asset, PaperAccount, Signal
 
 DSL: dict = {
@@ -131,8 +134,8 @@ def test_a_strategy_nobody_points_at_still_deletes(client, db_session) -> None:
     assert client.get(f"/api/v1/strategies/{strategy_id}").status_code == 404
 
 
-def test_ai_usage_blocks_deleting_its_provider(db_session) -> None:
-    """A usage row without an AI task is still history (the old guard asked tasks only)."""
+def test_deleting_a_provider_keeps_a_usage_row_that_has_no_ai_task(db_session) -> None:
+    """A usage row without an AI task is still history — and deletion keeps it (ADR-177)."""
 
     provider = create_provider(
         db_session,
@@ -142,24 +145,29 @@ def test_ai_usage_blocks_deleting_its_provider(db_session) -> None:
         default_model="m1",
         daily_budget_usd=1.0,
     )
-    db_session.add(
-        AIUsage(
-            usage_date=dt.date(2026, 1, 1),
-            provider_id=provider.id,
-            task_type="explain",
-            call_count=1,
-            total_tokens=10,
-            total_cost_usd=Decimal("0.001"),
-        )
+    usage = AIUsage(
+        usage_date=dt.date(2026, 1, 1),
+        provider_id=provider.id,
+        task_type="explain",
+        call_count=1,
+        total_tokens=10,
+        total_cost_usd=Decimal("0.001"),
     )
+    db_session.add(usage)
     db_session.flush()
+    usage_id = usage.id
 
-    with pytest.raises(ProviderConfigError, match="usage history"):
-        delete_provider(db_session, provider.id)
+    delete_provider(db_session, provider.id)
+
+    row = db_session.get(AIUsage, usage_id)
+    assert row is not None, "cost history must survive the provider delete"
+    assert row.provider_id is None
+    assert row.provider_name == "svc"
+    assert row.call_count == 1 and float(row.total_cost_usd) == 0.001
 
 
-def test_ai_usage_of_a_model_alone_blocks_the_provider(db_session) -> None:
-    """The provider's models cascade away with it, so their usage blocks it too."""
+def test_a_usage_row_pointing_only_at_a_model_survives_the_provider(db_session) -> None:
+    """The provider's models cascade away with it; the usage row keeps the names."""
 
     provider = create_provider(
         db_session,
@@ -171,17 +179,22 @@ def test_ai_usage_of_a_model_alone_blocks_the_provider(db_session) -> None:
     )
     model = db_session.scalar(select(AIModel).where(AIModel.provider_id == provider.id))
     assert model is not None, "creating a provider registers its default model"
-    db_session.add(
-        AIUsage(
-            usage_date=dt.date(2026, 1, 1),
-            model_id=model.id,
-            task_type="explain",
-            call_count=1,
-            total_tokens=10,
-            total_cost_usd=Decimal("0.001"),
-        )
+    usage = AIUsage(
+        usage_date=dt.date(2026, 1, 1),
+        model_id=model.id,
+        task_type="explain",
+        call_count=1,
+        total_tokens=10,
+        total_cost_usd=Decimal("0.001"),
     )
+    db_session.add(usage)
     db_session.flush()
+    usage_id = usage.id
 
-    with pytest.raises(ProviderConfigError, match="usage history"):
-        delete_provider(db_session, provider.id)
+    delete_provider(db_session, provider.id)
+
+    row = db_session.get(AIUsage, usage_id)
+    assert row is not None
+    assert row.model_id is None
+    assert row.model_name == "m1"
+    assert row.provider_name == "svc", "the provider is named from the model it owned"

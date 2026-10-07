@@ -17,6 +17,15 @@ __all__ = [
     "AIProviderTestOut",
     "AIProviderTestRequest",
     "AIProviderUpdate",
+    "AnalysisBenchmarkOut",
+    "AnalysisCaveatOut",
+    "AnalysisDerivedOut",
+    "AnalysisOut",
+    "AnalysisPerformanceOut",
+    "AnalysisRiskOut",
+    "AnalysisSampleOut",
+    "AnalysisWindowOut",
+    "AnalysisWorstTradeOut",
     "AssetCreate",
     "AssetOut",
     "BacktestCreate",
@@ -251,6 +260,108 @@ class BacktestOut(BacktestSummaryOut):
     parameters: dict[str, Any] | None = None
     execution_model: dict[str, Any] | None = None
     warnings: list[str] | None = Field(default_factory=list)
+
+
+class AnalysisWindowOut(BaseModel):
+    start: dt.datetime | None = None
+    end: dt.datetime | None = None
+    bars: int = 0
+
+
+class AnalysisDerivedOut(BaseModel):
+    """Numbers Phase C derives from the stored curve, kept apart from the engine's own."""
+
+    calmar: float | None = None
+    downside_deviation: float | None = None
+    excess_return: float | None = None
+    final_equity_gap: float | None = None
+    worst_bar_return: float | None = None
+
+
+class AnalysisPerformanceOut(BaseModel):
+    # `stored` is the engine's metric block verbatim; `derived` is everything Phase C
+    # adds. Keeping them apart is what lets a reader tell a measured number from a
+    # number computed afterwards (ADR-188).
+    stored: dict[str, Any] = Field(default_factory=dict)
+    derived: AnalysisDerivedOut
+
+
+class AnalysisWorstTradeOut(BaseModel):
+    pnl: float | None = None
+    exit_time: dt.datetime | None = None
+    direction: str | None = None
+
+
+class AnalysisRiskOut(BaseModel):
+    max_drawdown: float | None = None
+    max_drawdown_duration_bars: int | None = None
+    max_drawdown_duration_days: float | None = None
+    recovery_bars: int | None = None
+    recovered: bool | None = None
+    recovery_text: str | None = None
+    worst_bar_return: float | None = None
+    worst_month_return: float | None = None
+    worst_trade: AnalysisWorstTradeOut | None = None
+    max_consecutive_losses: int | None = None
+    downside_deviation: float | None = None
+
+
+class AnalysisCurvePointOut(BaseModel):
+    """One bar of the comparison, in the same money as the strategy's own curve."""
+
+    timestamp: dt.datetime | None = None
+    equity: float
+
+
+class AnalysisBenchmarkOut(BaseModel):
+    """The buy-and-hold comparison. Named `benchmark` in the payload, 「对照」 in the UI.
+
+    「基准」 already means the deposit denominator in this project (ADR-066), so the
+    comparison is never called that.
+    """
+
+    label: str
+    kind: str
+    source: str
+    fees_included: bool = False
+    window_matched: bool
+    bars_matched: int
+    # The drawable comparison path, so the browser never has to rebuild it from
+    # the closes (ADR-188: one computation path, in the analysis layer).
+    curve: list[AnalysisCurvePointOut] = Field(default_factory=list)
+    total_return: float | None = None
+    cagr: float | None = None
+    annualized_volatility: float | None = None
+    sharpe: float | None = None
+    max_drawdown: float | None = None
+    final_equity: float | None = None
+
+
+class AnalysisSampleOut(BaseModel):
+    trades: int
+    bars: int
+    years: float | None = None
+    tier: Literal["insufficient", "preliminary", "enough"]
+    tier_text: str
+
+
+class AnalysisCaveatOut(BaseModel):
+    code: str
+    message: str
+
+
+class AnalysisOut(BaseModel):
+    """One read-only view over an immutable result: performance, risk, comparison."""
+
+    run_id: int
+    result_hash: str | None = None
+    analysis_version: str
+    window: AnalysisWindowOut
+    performance: AnalysisPerformanceOut
+    risk: AnalysisRiskOut
+    benchmark: AnalysisBenchmarkOut | None = None
+    sample: AnalysisSampleOut
+    caveats: list[AnalysisCaveatOut] = Field(default_factory=list)
 
 
 class WalkForwardRequest(BaseModel):

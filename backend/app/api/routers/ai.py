@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.ai.explain import (
     AI_UNCONFIGURED,
     explain_backtest,
+    explain_performance,
     explain_signal,
     get_active_provider,
     spent_today_usd,
@@ -241,6 +242,37 @@ def explain_preview(payload: dict[str, Any], db: Session = Depends(get_db)) -> E
 def explain_backtest_endpoint(run_id: int, db: Session = Depends(get_db)) -> ExplainOut:
     try:
         result = explain_backtest(db, run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if str(exc) == AI_UNCONFIGURED:
+            raise HTTPException(
+                status_code=503,
+                detail=NOT_CONFIGURED_DETAIL,
+            ) from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except BudgetExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    return ExplainOut(**result)
+
+
+@router.post(
+    "/backtests/{run_id}/explain-performance",
+    response_model=ExplainOut,
+    summary="Explain a completed backtest's performance, risk and buy-and-hold comparison",
+)
+def explain_performance_endpoint(run_id: int, db: Session = Depends(get_db)) -> ExplainOut:
+    """Phase C explanation (docs/30 §8): words on top of the stored analysis.
+
+    The numbers are already computed; this endpoint never becomes the source of a
+    figure. A rejected explanation (an unsupported number, a promise about the
+    future) is answered with 502 so the page falls back to numbers alone.
+    """
+
+    try:
+        result = explain_performance(db, run_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

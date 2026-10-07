@@ -516,6 +516,7 @@ _TASK_CAPABILITY = {
     "strategy_explanation": "cheap",
     "signal_explanation": "cheap",
     "backtest_analysis": "standard",
+    "performance_explanation": "standard",
     "strategy_review": "high",
     "research_report": "high",
     "repository_analysis": "high",

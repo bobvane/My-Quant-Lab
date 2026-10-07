@@ -28,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.budget import record_usage, spent_today_usd
+from app.ai.explanation_guard import check_explanation
 from app.ai.provider import (
     SIGNAL_EXPLANATION_SCHEMA,
     AIRequest,
@@ -36,7 +37,8 @@ from app.ai.provider import (
 )
 from app.ai.role_contracts import contract_for_role, system_contract
 from app.ai.runtime import estimate_tokens, run_task
-from app.domain.models import AIModel, AIProvider, BacktestRun, Signal
+from app.data.backtest_service import analysis_for_run
+from app.domain.models import AIModel, AIProvider, BacktestRun, Signal, StrategyVersion
 from app.infrastructure.secrets import decrypt_secret
 
 logger = logging.getLogger(__name__)
@@ -45,11 +47,15 @@ __all__ = [
     "AI_UNCONFIGURED",
     "BACKTEST_EXPLANATION_SCHEMA",
     "EXPLAINER_ROLE",
+    "PERFORMANCE_EXPLANATION_SCHEMA",
+    "ExplanationRejected",
     "SIGNAL_EXPLANATION_SCHEMA",
     "build_backtest_facts",
+    "build_performance_facts",
     "build_signal_facts",
     "estimate_tokens",
     "explain_backtest",
+    "explain_performance",
     "explain_signal",
     "explain_signal_facts",
     "explainer_prompt",
@@ -79,6 +85,40 @@ BACKTEST_EXPLANATION_SCHEMA: dict[str, Any] = {
         "plain_language": {"type": "string"},
     },
 }
+
+#: Phase C explanation (docs/30 §8). Like the schema above it has no numeric
+#: field, because every figure it may mention is already in the facts.
+PERFORMANCE_EXPLANATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": [
+        "conclusion",
+        "drivers",
+        "risks",
+        "confidence",
+        "next_step",
+    ],
+    "properties": {
+        "conclusion": {"type": "string"},
+        "drivers": {"type": "array", "items": {"type": "string"}},
+        "risks": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "string"},
+        "next_step": {"type": "string"},
+    },
+}
+
+
+class ExplanationRejected(RuntimeError):
+    """The explanation claimed something the analysis does not support.
+
+    Raised instead of returning text that carries a number nobody computed or a
+    promise about the future. The caller shows the numbers alone; the task row
+    keeps the model's words for audit (ADR-189).
+    """
+
+    def __init__(self, violations: list[dict[str, str]]) -> None:
+        self.violations = violations
+        detail = ", ".join(f"{item['code']}: {item['detail']}" for item in violations)
+        super().__init__(f"explanation rejected: {detail}")
 
 
 def explainer_prompt(task_type: str) -> tuple[str, str, str, str]:
@@ -305,6 +345,108 @@ def explain_backtest(
         router_factory=router_factory,
         prompt_hash=prompt_hash,
     )
+
+
+def build_performance_facts(
+    db: Session, run: BacktestRun, analysis: dict[str, Any]
+) -> dict[str, Any]:
+    """The facts an explainer may use: the stored analysis, and nothing else.
+
+    The blocks are passed through unchanged so the numbers the model is allowed
+    to mention are exactly the numbers the page shows. ``result_hash`` is left
+    out on purpose: its hex digits are not a figure, and feeding them to the
+    number check would only widen what counts as "supported".
+    """
+
+    version = db.get(StrategyVersion, run.strategy_version_id)
+    series = run.dataset
+    asset = series.asset if series is not None else None
+    window = analysis.get("window") or {}
+    benchmark = analysis.get("benchmark")
+    if isinstance(benchmark, dict):
+        # The comparison curve is a chart, not a fact: sending hundreds of equity
+        # points would bury the figures the model is supposed to restate, and the
+        # design keeps raw curves out of the fact pack (§8.2).
+        benchmark = {key: value for key, value in benchmark.items() if key != "curve"}
+    return {
+        "kind": "performance_analysis",
+        "run_id": run.id,
+        "strategy": {
+            "name": version.strategy.name if version is not None and version.strategy else None,
+            "version": version.version if version is not None else None,
+            "symbol": asset.symbol if asset is not None else None,
+            "asset_class": asset.asset_class if asset is not None else None,
+            "timeframe": series.timeframe if series is not None else None,
+            "window_start": window.get("start"),
+            "window_end": window.get("end"),
+            "bars": window.get("bars"),
+        },
+        "performance": analysis.get("performance"),
+        "risk": analysis.get("risk"),
+        "benchmark": benchmark,
+        "sample": analysis.get("sample"),
+        "caveats": analysis.get("caveats"),
+        "notes": [
+            "Every figure above was computed by the deterministic engine.",
+            "The buy-and-hold comparison excludes fees and slippage.",
+            "Past results do not predict future returns.",
+        ],
+    }
+
+
+def explain_performance(
+    db: Session,
+    run_id: int,
+    *,
+    analysis: dict[str, Any] | None = None,
+    router_factory: Callable[[dict[str, OpenAICompatibleProvider], float], AIRouter] | None = None,
+) -> dict[str, Any]:
+    """Explain the Phase C analysis of a completed run, cache and budget shared.
+
+    ``analysis`` may be handed in by a caller that already computed it (the
+    analysis endpoint does), otherwise it is assembled once here. An explanation
+    that fails the numeric-admission or prediction check is refused outright.
+    """
+
+    run = db.get(BacktestRun, run_id)
+    if run is None:
+        raise LookupError(f"backtest run {run_id} not found")
+    if run.status != "completed" or run.result is None:
+        raise ValueError(f"backtest run {run_id} is '{run.status}', not completed")
+
+    providers = get_active_providers(db)
+    if not providers:
+        raise RuntimeError(AI_UNCONFIGURED)
+
+    stored_analysis = analysis if analysis is not None else analysis_for_run(db, run)
+    facts = build_performance_facts(db, run, stored_analysis)
+    system_prompt, prompt_name, prompt_version, prompt_hash = explainer_prompt(
+        "performance_explanation"
+    )
+    request = AIRequest(
+        task_type="performance_explanation",
+        prompt_name=prompt_name,
+        prompt_version=prompt_version,
+        role=EXPLAINER_ROLE,
+        system_prompt=system_prompt,
+        user_prompt=(
+            "Explain this run's performance, risk and buy-and-hold comparison in plain language."
+        ),
+        structured_facts=facts,
+        schema=PERFORMANCE_EXPLANATION_SCHEMA,
+        model=None,  # the router picks provider/model by capability + cost
+    )
+    result = run_task(
+        db,
+        request,
+        providers=providers,
+        router_factory=router_factory,
+        prompt_hash=prompt_hash,
+    )
+    violations = check_explanation(result["explanation"], facts)
+    if violations:
+        raise ExplanationRejected(violations)
+    return result
 
 
 def _num(value: Any) -> float | None:

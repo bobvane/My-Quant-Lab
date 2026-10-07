@@ -79,12 +79,14 @@ API base: `/api/v1`
 
 `GET /backtests` [已实现] —— 列出回测运行。
 `GET /backtests/{run_id}` [已实现] —— 取一次回测结果（`BacktestOut`）。
+`GET /backtests/{run_id}/analysis` [已实现] —— 一次回测的绩效 / 风险 / 买入持有对照（`AnalysisOut`）。
 `GET /backtests/{run_id}/trades` [已实现] —— 列出一次回测的成交。
 `GET /backtests/compare` [已实现] —— 并排对比若干次回测运行（`?ids=1,2`）。
 `GET /backtests/comparisons/{comparison_id}` [计划] —— 对比为无状态即时计算，不持久化快照，v1.0 不做。
 `POST /backtests` [已实现] —— 运行一次回测。
 `DELETE /backtests/{run_id}` [已实现] —— 删除一次回测运行及其结果。
 `POST /backtests/{run_id}/explain` [已实现] —— 解释一次已完成的回测。
+`POST /backtests/{run_id}/explain-performance` [已实现] —— 用普通人语言解释一次已完成回测的绩效 / 风险 / 买入持有对照（Phase C，`ExplainOut`）。数字全部来自 `GET /backtests/{run_id}/analysis`；AI 未配置、预算耗尽或被守卫拒绝（编造数字 / 预测措辞）时该端点返回错误，数字块照常显示。
 
 回测摘要除指标外还返回 `dataset_version_id` / `symbol` / `timeframe`：只有 id 无法判断两次
 回测是否可比（同一策略在不同标的/周期上的结果本就不同），集成对比表读这两个字段来标记
@@ -137,6 +139,37 @@ API base: `/api/v1`
   引擎的错误原文逐字写进 `error_message`，绝不留下半截结果（warnings 口径不变，ADR-054）。
 
 **没有取消端点**：本轮不实现取消，接口里也不会预先写一个不存在的动作。
+
+### 回测分析（Phase C）
+
+绩效 / 风险 / 对照的唯一入口是上表那条分析端点，它**只读、零写入、零重算**：
+它读的是这次运行已经落库的逐 bar 权益曲线（`backtest_results.equity_curve_json`）与指标块
+（`metrics_json`），不读行情、不落新表、不改 `result_hash`（ADR-187、ADR-188）。
+
+- `performance.stored` 是引擎那份指标快照**逐字原样**（引擎仍是唯一的比率计算处），
+  `performance.derived` 是 Phase C 事后派生的数字（`calmar` / `downside_deviation` /
+  `excess_return` / `final_equity_gap` / `worst_bar_return`）。两者分列，读者能分清哪个是
+  「跑出来的」、哪个是「事后算的」。
+- `risk` 给最大回撤、最长回撤持续（bar 数 + 折算天数）、恢复期（窗口结束仍未回本时
+  `recovery_bars = null` 且 `recovered = false`）、最差单 bar / 最差自然月、最差一笔交易、
+  最长连亏、下行波动。
+- `benchmark` 是**买入持有对照**（`kind = "buy_and_hold"`，中文一律称「对照」——「基准」在本
+  项目已指净入金分母，ADR-066）。主路径直接用曲线里每根 bar 已经存下的 `close`：
+  `对照权益_t = 初始资金 × close_t / close_0`，与策略**同一批 bar、同一窗口、同一日历**，
+  所以时间区间公平性不是一条约定而是结构性的（`source = "equity_curve_close"`）。只有曲线里
+  没有可用收盘价时，才按曲线首尾时间戳回读该运行自己的序列（`source = "series_bars"`，
+  `only_closed=true`），K 线对不齐时 `window_matched = false` 并给
+  `caveat: benchmark_partial_window`。对照**不计手续费**（`fees_included = false`），这一点对
+  策略是保守的，所以必须显式写出而不是藏着。
+- `sample` 说明样本量（交易数 / bar 数 / 年数）与结论强度档位（`insufficient` /
+  `preliminary` / `enough`），阈值就是项目已有的两道证据闸门（交易数 10 与 20），不新造。
+- `caveats` 是机器可读的 `{code, message}` 列表：任何一项无法计算时，对应字段是 `null`
+  **而不是 0**，并在这里说明原因。
+
+状态码：运行不存在 → **404**；运行还没完成（或失败）导致没有结果行 → **409**
+（`only a completed run can be analysed`）；**权益曲线为空不是错误** —— 返回 **200**，比率字段
+为 `null` 并给出 `caveat: no_equity_curve`。实验侧不新增端点：`ExperimentSummaryOut` 已经带
+`backtest_run_id`，实验详情复用同一个端点。
 
 ## Backtest Metrics
 

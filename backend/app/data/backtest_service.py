@@ -38,6 +38,7 @@ from app.domain.models import (
     StrategyVersion,
 )
 from app.features.engine import FEATURE_VERSION
+from app.research.analysis import analyse_run, curve_has_closes, curve_window
 from app.research.engine import ENGINE_VERSION, run_backtest
 from app.strategies.dsl import StrategySpec, merge_spec_overrides
 
@@ -52,12 +53,15 @@ __all__ = [
     "BacktestInputs",
     "BacktestRequestError",
     "advance_backtest",
+    "analysis_fallback_bars",
+    "analysis_for_run",
     "execute_backtest",
     "fail_backtest",
     "load_backtest_inputs",
     "prepare_backtest",
     "rebuild_backtest_inputs",
     "store_backtest",
+    "trade_dicts",
 ]
 
 #: Fewer closed bars than this cannot produce a meaningful run.
@@ -544,3 +548,80 @@ def _metric_rows(metrics: dict[str, Any]) -> list[tuple[str, str, Any]]:
             if name in metrics:
                 rows.append((group, name, metrics[name]))
     return rows
+
+
+def trade_dicts(run: BacktestRun) -> list[dict[str, Any]]:
+    """The stored trades in the engine's own shape.
+
+    Phase C analysis and the backtest API both read trades in this shape, so it is
+    built once here instead of once per caller: a difference between the two would
+    be a difference between the numbers and the explanation of the numbers.
+    """
+
+    return [
+        {
+            "direction": t.direction,
+            "entry_time": t.entry_time,
+            "entry_price": float(t.entry_price),
+            "exit_time": t.exit_time,
+            "exit_price": float(t.exit_price) if t.exit_price is not None else None,
+            "quantity": float(t.quantity),
+            "fees": float(t.fees),
+            "slippage": float(t.slippage),
+            "pnl": float(t.pnl) if t.pnl is not None else None,
+            "pnl_pct": float(t.pnl_pct) if t.pnl_pct is not None else None,
+            "r_multiple": float(t.r_multiple) if t.r_multiple is not None else None,
+            "mae": float(t.mae) if t.mae is not None else None,
+            "mfe": float(t.mfe) if t.mfe is not None else None,
+            "exit_reason": t.exit_reason,
+            "ambiguous_fill": t.ambiguous_fill,
+        }
+        for t in run.trades
+    ]
+
+
+def analysis_fallback_bars(
+    db: Session, run: BacktestRun, curve: list[dict[str, Any]]
+) -> list[dict[str, Any]] | None:
+    """Bars for the comparison, read only when the stored curve cannot supply a close.
+
+    The window is the curve's own first/last timestamp and ``only_closed`` matches the
+    engine's own input, so a fallback comparison cannot silently gain a bar the
+    strategy never saw (docs/30 §6.2).
+    """
+
+    if curve_has_closes(curve):
+        return None
+    series = run.dataset
+    if series is None:
+        return None
+    start, end = curve_window(curve)
+    frame = load_bars(db, series, start=start, end=end, only_closed=True)
+    if frame.empty:
+        return []
+    return [{"timestamp": moment, "close": float(row["close"])} for moment, row in frame.iterrows()]
+
+
+def analysis_for_run(db: Session, run: BacktestRun) -> dict[str, Any]:
+    """The Phase C view of one stored run: read-only and deterministic.
+
+    The evidence is what the engine already persisted — ``metrics_json``,
+    ``equity_curve_json`` and the trade rows — so the same stored run always
+    produces the same analysis and nothing is written or re-run (docs/30 §17).
+    """
+
+    result = run.result
+    curve = list(result.equity_curve_json or []) if result is not None else []
+    series = run.dataset
+    return analyse_run(
+        run_id=run.id,
+        result_hash=result.result_hash if result is not None else None,
+        metrics=result.metrics_json if result is not None else None,
+        equity_curve=curve,
+        trades=trade_dicts(run),
+        timeframe=series.timeframe if series is not None else "1d",
+        asset_class=(
+            series.asset.asset_class if series is not None and series.asset is not None else None
+        ),
+        fallback_bars=analysis_fallback_bars(db, run, curve),
+    )

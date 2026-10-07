@@ -229,13 +229,14 @@ def task_output_schemas() -> dict[str, dict[str, Any]]:
     import here would be circular.
     """
 
-    from app.ai.explain import BACKTEST_EXPLANATION_SCHEMA
+    from app.ai.explain import BACKTEST_EXPLANATION_SCHEMA, PERFORMANCE_EXPLANATION_SCHEMA
     from app.ai.provider import SIGNAL_EXPLANATION_SCHEMA
     from app.ai.research_schemas import FORMALIZATION_SCHEMA, RESEARCH_SCHEMA
 
     return {
         "signal_explanation": SIGNAL_EXPLANATION_SCHEMA,
         "backtest_analysis": BACKTEST_EXPLANATION_SCHEMA,
+        "performance_explanation": PERFORMANCE_EXPLANATION_SCHEMA,
         "strategy_research": RESEARCH_SCHEMA,
         "strategy_formalization": FORMALIZATION_SCHEMA,
     }

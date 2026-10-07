@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router'
 import {
   api,
   type AIStatus,
+  type BacktestAnalysis,
   type BacktestSummary,
   type ExperimentSummaryOut,
   type ExplainResult,
@@ -430,6 +431,7 @@ async function loadRecentExperiments() {
   try {
     const response = await api.experiments(20)
     recentExperiments.value = response.experiments ?? []
+    await loadComparisonLine()
   } catch (e) {
     recentExperiments.value = []
     experimentError.value = `实验列表加载失败：${(e as Error).message}。这张卡片暂时没有内容，页面其余部分仍然可用。`
@@ -437,6 +439,39 @@ async function loadRecentExperiments() {
     experimentsLoading.value = false
   }
 }
+
+/**
+ * Phase C：首页只多说一句话——「最近实验：策略 X% vs 对照 Y%」（docs/30 §9.2）。
+ *
+ * 只问**一条**实验的分析（最近那条有回测的），不在列表上做 N+1：列表页永远是列表页。
+ * 分析和数字由服务端算好，这一页只显示；拿不到就干脆不说这一句，不猜、也不用 0 顶替。
+ */
+const recentComparison = ref<BacktestAnalysis | null>(null)
+
+async function loadComparisonLine() {
+  recentComparison.value = null
+  const candidate = recentExperiments.value.find(
+    (item) => item.backtest_run_id !== null && item.backtest_run_id !== undefined,
+  )
+  if (!candidate || candidate.backtest_run_id === null || candidate.backtest_run_id === undefined) {
+    return
+  }
+  try {
+    recentComparison.value = await api.backtestAnalysis(candidate.backtest_run_id)
+  } catch {
+    recentComparison.value = null
+  }
+}
+
+/** 这句话的两半都来自服务端：策略总收益（实验行）与对照总收益（分析端点）。 */
+const comparisonLine = computed(() => {
+  const analysis = recentComparison.value
+  if (!analysis || !analysis.benchmark || analysis.benchmark.total_return == null) return ''
+  const strategy = analysis.performance.stored.total_return
+  const other = analysis.benchmark.total_return
+  const strategyText = strategy == null ? '未知' : formatPercent(strategy)
+  return `最近有回测的实验：这个策略 ${strategyText}，同期${analysis.benchmark.label} ${formatPercent(other)}。`
+})
 
 const recentExperiment = computed<ExperimentSummaryOut | null>(() => recentExperiments.value[0] ?? null)
 
@@ -562,6 +597,11 @@ onMounted(load)
         </div>
         <p class="muted" style="margin: 8px 0 0">
           「最高」= 最近 20 条里已存总收益最高的一条（只比大小，这一页不重算）；完整读数在「实验」页里。
+        </p>
+        <!-- Phase C：一句话说清「比简单持有好吗」（docs/30 §9.2）。两个数字都来自服务端。 -->
+        <p v-if="comparisonLine" class="answer-main" style="margin: 8px 0 0">
+          {{ comparisonLine }}
+          <span class="muted">对照不含手续费与滑点。</span>
         </p>
       </template>
       <p v-else class="muted" style="margin: 8px 0 0">

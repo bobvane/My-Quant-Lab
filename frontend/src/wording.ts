@@ -215,6 +215,11 @@ const METRIC_WORDING: Record<string, MetricWording> = {
   max_consecutive_losses: { label: '最长连续亏损' },
   exposure: { label: '持仓时间占比', alias: '实际持有仓位的时间比例' },
   turnover: { label: '换手率' },
+  // Phase C additions, all derived by backend/app/research/analysis.py (ADR-188).
+  calmar: { label: '卡玛比率', alias: '年化收益 ÷ 最大回撤' },
+  downside_deviation: { label: '下行波动率', alias: '只算下跌那部分的起伏' },
+  recovery_bars: { label: '回撤恢复（根）', alias: '从最低点爬回前高用了几根' },
+  worst_month_return: { label: '最差单月' },
 }
 
 /** Aliases for labels that are already Chinese (they have no engine key to hang off). */

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   api,
   type Asset,
+  type BacktestAnalysis,
   type BacktestDetail,
   type BacktestRun,
   type BacktestSummary,
@@ -766,10 +767,17 @@ const drawdownSeries = computed(() => {
 
 const metricRows = computed(() => {
   const metrics = detail.value?.metrics ?? {}
-  return Object.entries(metrics as Record<string, number | null>).map(([key, value]) => ({
-    key,
-    value,
-  }))
+  const rows: Array<{ key: string; value: number | null }> = Object.entries(
+    metrics as Record<string, number | null>,
+  ).map(([key, value]) => ({ key, value }))
+  // Phase C 的派生读数（卡玛比率、下行波动率）由分析层给出：同一个数字只有一个出口，
+  // 引擎没算过的东西不在前端补算，只把服务端给的读数接在引擎读数后面。
+  const derived = analysis.value?.performance.derived
+  if (derived) {
+    rows.push({ key: 'calmar', value: derived.calmar })
+    rows.push({ key: 'downside_deviation', value: derived.downside_deviation })
+  }
+  return rows
 })
 
 const compareIds = ref<number[]>([])
@@ -1012,6 +1020,14 @@ async function open(id: number) {
     stopElapsedTicker()
     prefillAccount(loaded)
     btExplanation.value = null
+    // 分析只对「已经有结果」的运行有意义；还在跑的那一支下面会把 detail 置空，
+    // 分析块也就自然不出现（Phase C，docs/30 §9）。
+    if (loaded.status === 'completed' && loaded.metrics != null) {
+      await loadAnalysis(loaded.id)
+    } else {
+      analysis.value = null
+      perfExplanation.value = null
+    }
   } catch (e) {
     // 这一次可能只是「还没跑完」，不是错误：问一次它的状态，还在跑就接着问，
     // 真的问不到才把话说出来（ADR-180；ADR-088）。
@@ -1020,6 +1036,8 @@ async function open(id: number) {
       startRunPolling(run)
       detail.value = null
       btExplanation.value = null
+      analysis.value = null
+      perfExplanation.value = null
     } else {
       error.value = (e as Error).message
     }
@@ -1156,6 +1174,8 @@ async function runNew() {
     )
     runs.value = [result, ...runs.value]
     btExplanation.value = null
+    analysis.value = null
+    perfExplanation.value = null
     if (runInFlight(result)) {
       // 服务端把这次回测交给 worker 跑了：POST 回来的是一条还没有结果的运行，
       // 不是失败，也不是成功。接着问它，直到它给出结果（ADR-180）。
@@ -1291,6 +1311,167 @@ async function explainCurrent() {
     explainingBt.value = false
   }
 }
+
+/**
+ * Phase C 分析：绩效 / 风险 / 买入持有对照（docs/30，ADR-188）。
+ *
+ * 这些数字**全部由后端分析层算好**（`GET /backtests/{id}/analysis`）；这一页只负责摆放，
+ * 不重算、不求和、不四舍五入出新的数字。所以分析拿不到（还在跑、没有曲线、老数据）时，
+ * 只是这张卡不出现——结论卡、下面的曲线与交易明细照常显示。AI 解释也一样是加法：
+ * 它失败只意味着少几句话（docs/30 §8.3）。
+ */
+const analysis = ref<BacktestAnalysis | null>(null)
+const perfExplanation = ref<ExplainResult | null>(null)
+const explainingPerf = ref(false)
+
+async function loadAnalysis(id: number) {
+  analysis.value = null
+  perfExplanation.value = null
+  try {
+    analysis.value = await api.backtestAnalysis(id)
+  } catch {
+    // 还在跑 / 没有可分析的曲线：不是错误，只是这次没有分析可看。
+    analysis.value = null
+  }
+}
+
+async function explainPerformanceCurrent() {
+  if (!detail.value) return
+  explainingPerf.value = true
+  error.value = ''
+  try {
+    perfExplanation.value = await api.explainPerformance(detail.value.id)
+  } catch (e) {
+    // 解释被拒（数字准入）/ 供应商没配 / 预算用尽，都只影响这段话。
+    error.value = (e as Error).message
+    perfExplanation.value = null
+  } finally {
+    explainingPerf.value = false
+  }
+}
+
+/** 策略权益 vs 买入持有对照，两条线共用同一时间轴（对照曲线由服务端给出）。 */
+const benchmarkSeries = computed(() => {
+  const benchmark = analysis.value?.benchmark
+  const points = detail.value?.equity_curve ?? []
+  if (!benchmark || !benchmark.curve.length || !points.length) return []
+  return [
+    {
+      name: '策略权益',
+      emphasis: true,
+      points: points.map((p) => ({ ts: p.timestamp, value: p.equity })),
+    },
+    {
+      name: benchmark.label,
+      points: benchmark.curve.map((p) => ({ ts: p.timestamp ?? '', value: p.equity })),
+    },
+  ]
+})
+
+/** 一张「策略 vs 对照」的表：两列都读服务端的数，缺值写「未知」。 */
+const comparisonRows = computed(() => {
+  const benchmark = analysis.value?.benchmark
+  const stored = analysis.value?.performance.stored ?? {}
+  if (!benchmark) return []
+  return [
+    { name: '总收益', strategy: stored.total_return ?? null, other: benchmark.total_return },
+    { name: '年化收益', strategy: stored.cagr ?? null, other: benchmark.cagr },
+    {
+      name: '年化波动率',
+      strategy: stored.annualized_volatility ?? null,
+      other: benchmark.annualized_volatility,
+    },
+    { name: '夏普比率', strategy: stored.sharpe ?? null, other: benchmark.sharpe },
+    { name: '最大回撤', strategy: stored.max_drawdown ?? null, other: benchmark.max_drawdown },
+    { name: '期末权益', strategy: stored.final_equity ?? null, other: benchmark.final_equity },
+  ]
+})
+
+/** 一句话结论：先说到手多少，再说有没有跑赢对照，最后说样本够不够。 */
+const analysisHeadline = computed(() => {
+  const result = analysis.value
+  if (!result) return ''
+  const parts: string[] = []
+  const total = result.performance.stored.total_return
+  parts.push(total == null ? '这段区间的总收益未知' : `这段区间赚了 ${formatPercent(total)}`)
+  const benchmark = result.benchmark
+  const excess = result.performance.derived.excess_return
+  if (benchmark && benchmark.total_return != null) {
+    const other = formatPercent(benchmark.total_return)
+    if (excess == null) parts.push(`对照${benchmark.label}是 ${other}`)
+    else if (excess >= 0) parts.push(`跑赢了同期${benchmark.label}（${other}）`)
+    else parts.push(`但没跑赢同期${benchmark.label}（${other}）`)
+  } else {
+    parts.push('这次没有可用的对照（缺少同区间行情）')
+  }
+  const drawdown = result.risk.max_drawdown
+  const otherDrawdown = benchmark?.max_drawdown ?? null
+  if (drawdown != null && otherDrawdown != null) {
+    parts.push(
+      drawdown >= otherDrawdown
+        ? `最大回撤 ${formatPercent(drawdown)}，比对照的 ${formatPercent(otherDrawdown)} 小`
+        : `最大回撤 ${formatPercent(drawdown)}，比对照的 ${formatPercent(otherDrawdown)} 大`,
+    )
+  } else if (drawdown != null) {
+    parts.push(`最大回撤 ${formatPercent(drawdown)}`)
+  }
+  parts.push(result.sample.tier_text)
+  return `${parts.join('；')}。`
+})
+
+/** 对照块里所有需要「先说说怎么读」的数字都在这里（口径来自后端 caveats）。 */
+const analysisCaveats = computed(() => analysis.value?.caveats ?? [])
+
+interface RiskRow {
+  name: string
+  value: number | null
+  kind: 'ratio' | 'money' | 'count'
+  note?: string
+}
+
+const riskRows = computed<RiskRow[]>(() => {
+  const risk = analysis.value?.risk
+  if (!risk) return []
+  const worstTrade = risk.worst_trade
+  return [
+    { name: '最大回撤', value: risk.max_drawdown, kind: 'ratio' },
+    { name: '回撤持续（根）', value: risk.max_drawdown_duration_bars, kind: 'count' },
+    {
+      name: '回撤恢复（根）',
+      value: risk.recovery_bars,
+      kind: 'count',
+      note: risk.recovered === false ? '到区间结束仍未恢复' : (risk.recovery_text ?? ''),
+    },
+    { name: '最差单月', value: risk.worst_month_return, kind: 'ratio' },
+    {
+      name: '最差一笔',
+      value: worstTrade?.pnl ?? null,
+      kind: 'money',
+      note: worstTrade?.exit_time ? formatDateTime(worstTrade.exit_time) : '',
+    },
+    { name: '最长连续亏损', value: risk.max_consecutive_losses, kind: 'count' },
+    { name: '下行波动率', value: risk.downside_deviation, kind: 'ratio' },
+  ]
+})
+
+function riskText(kind: 'ratio' | 'money' | 'count', value: number | null | undefined): string {
+  if (value == null) return '未知'
+  if (kind === 'ratio') return formatPercent(value)
+  if (kind === 'money') return formatNumber(value, 2)
+  return formatNumber(value, 0)
+}
+
+/**
+ * 这次回测到底属于哪个策略版本——结论卡上的策略名与版本号要来自这一次运行，
+ * 不是下拉框里碰巧选中的那个（Phase C 事实包用同样一条线）。
+ */
+const analysisStrategyName = computed(() => {
+  const versionId = detail.value?.strategy_version_id
+  const version = versions.value.find((v) => v.id === versionId) ?? ensAllVersions.value.find((v) => v.id === versionId)
+  if (!version) return null
+  const strategy = strategies.value.find((s) => s.id === version.strategy_id)
+  return { name: strategy?.name ?? null, version: version.version ?? null }
+})
 
 // 回测结果的第一屏先说结论，再说细节（评审 §9、§10、§13；ADR-128、ADR-129）。
 //
@@ -1853,6 +2034,146 @@ onMounted(async () => {
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- Phase C：赚了多少 / 冒了多大风险 / 比简单持有好吗（docs/30 §9，ADR-188）。
+         每一个数字都由后端分析层算好（GET /backtests/{id}/analysis），这一页只摆放：
+         不重算、不求和、缺值写「未知」。分析拿不到时整块不出现，其余卡片照常。 -->
+    <div v-if="detail && hasResult && analysis" class="card" style="margin-top: 14px">
+      <h3>赚了多少、冒了多大风险、比简单持有好吗？</h3>
+      <p v-if="analysisHeadline" class="conclusion-sentence">{{ analysisHeadline }}</p>
+      <p class="muted">
+        <span v-if="analysisStrategyName">
+          {{ analysisStrategyName.name ?? '策略' }}
+          <template v-if="analysisStrategyName.version"> {{ analysisStrategyName.version }}</template>
+          ·
+        </span>
+        区间 {{ formatDateTime(analysis.window.start) }} ~ {{ formatDateTime(analysis.window.end) }}
+        （{{ analysis.window.bars }} 个数据点）· 分析口径 {{ analysis.analysis_version }}
+      </p>
+
+      <h4 style="margin: 12px 0 4px">收益</h4>
+      <div class="grid cols-4">
+        <StatCard
+          label="总收益率"
+          :value="formatPercent(analysis.performance.stored.total_return)"
+          :tone="toneOf(analysis.performance.stored.total_return)"
+        />
+        <StatCard
+          label="年化复合收益率"
+          :value="formatPercent(analysis.performance.stored.cagr)"
+          :tone="toneOf(analysis.performance.stored.cagr)"
+          sub="按年折算的复合增长"
+        />
+        <StatCard
+          label="年化波动率"
+          :value="formatPercent(analysis.performance.stored.annualized_volatility)"
+          sub="收益的起伏程度，越小越稳"
+        />
+        <StatCard
+          label="期末权益"
+          :value="formatNumber(analysis.performance.stored.final_equity)"
+          sub="这段区间结束时的账户金额"
+        />
+      </div>
+
+      <h4 style="margin: 14px 0 4px">风险</h4>
+      <table>
+        <thead>
+          <tr>
+            <th>怎么看</th>
+            <th>读数</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in riskRows" :key="row.name">
+            <td>{{ row.name }}</td>
+            <td>{{ riskText(row.kind, row.value) }}</td>
+            <td class="muted">{{ row.note ?? '' }}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h4 style="margin: 14px 0 4px">对照：同样的钱、同一段区间，只是买入并一直拿着</h4>
+      <div v-if="analysis.benchmark">
+        <table>
+          <thead>
+            <tr>
+              <th>指标</th>
+              <th>这个策略</th>
+              <th>{{ analysis.benchmark.label }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in comparisonRows" :key="row.name">
+              <td>{{ row.name }}</td>
+              <td>{{ riskText('ratio', row.strategy) }}</td>
+              <td>{{ riskText('ratio', row.other) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="muted" style="margin: 8px 0 0">
+          超额收益：<b>{{ riskText('ratio', analysis.performance.derived.excess_return) }}</b>
+          = 这个策略 − {{ analysis.benchmark.label }}。
+          <template v-if="!analysis.benchmark.fees_included">
+            对照不含手续费与滑点，所以它是一把偏乐观的尺子。
+          </template>
+          <template v-if="!analysis.benchmark.window_matched">
+            对照只匹配到 {{ analysis.benchmark.bars_matched }} 个数据点，区间并非完全一致。
+          </template>
+        </p>
+      </div>
+      <p v-else class="muted" style="margin: 8px 0 0">
+        这次没有可用的对照：这条回测的曲线里没有收盘价，也没有同一区间、同一数据版本的行情可取。
+        没有对照比编一个对照好，所以这里如实写「不可用」。
+      </p>
+
+      <p v-if="analysisCaveats.length" class="muted" style="margin: 10px 0 0">
+        <b>口径提醒：</b>
+        <span v-for="(caveat, index) in analysisCaveats" :key="caveat.code">
+          {{ caveat.message }}<template v-if="index < analysisCaveats.length - 1">；</template>
+        </span>
+      </p>
+      <p class="muted" style="margin: 10px 0 0">
+        这些数字全部由后端确定性计算，AI 不参与运算；下方「AI 用大白话解释」只是把它们翻译成人话，
+        它不可用时上面的数字一个都不会少。
+      </p>
+      <div class="row" style="margin-top: 8px">
+        <button :disabled="explainingPerf" @click="explainPerformanceCurrent">
+          {{ explainingPerf ? '解释中…' : 'AI 用大白话解释这次分析' }}
+        </button>
+        <span class="muted">只解释上面已经算好的结果，不自己算、也不预测。</span>
+      </div>
+      <div v-if="perfExplanation" style="margin-top: 10px">
+        <p><b>结论：</b>{{ perfExplanation.explanation.conclusion }}</p>
+        <p v-if="perfExplanation.explanation.drivers?.length">
+          <b>原因：</b>{{ perfExplanation.explanation.drivers.join('；') }}
+        </p>
+        <p v-if="perfExplanation.explanation.risks?.length">
+          <b>风险：</b>{{ perfExplanation.explanation.risks.join('；') }}
+        </p>
+        <p v-if="perfExplanation.explanation.confidence">
+          <b>可信程度：</b>{{ perfExplanation.explanation.confidence }}
+        </p>
+        <p v-if="perfExplanation.explanation.next_step">
+          <b>下一步：</b>{{ perfExplanation.explanation.next_step }}
+        </p>
+        <p class="muted" style="margin-bottom: 0">
+          模型 {{ perfExplanation.model ?? '未知' }}；这段话是解释，不是新的计算。
+        </p>
+      </div>
+    </div>
+
+    <!-- 策略权益与买入持有对照画在同一张图上：两条线都由服务端给出（ADR-188），
+         时间轴就是这次回测的逐 bar 时间戳。 -->
+    <div v-if="analysis && benchmarkSeries.length === 2" class="card" style="margin-top: 14px">
+      <h3>对照曲线：这个策略 vs 一直拿着</h3>
+      <p class="muted">
+        同一笔初始资金、同一段区间。蓝线是这个策略的账户权益，绿线是同期买入并持有的对照，
+        两条线都以相同起点归一化。
+      </p>
+      <MultiLineChart :series="benchmarkSeries" height="240px" />
     </div>
 
     <!-- 评审 §10 的三级分析：OOS 分割、滚动 Walk-Forward、参数敏感性、Monte Carlo、

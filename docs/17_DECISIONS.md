@@ -3377,3 +3377,44 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：①「审计动作能不能写进去」是可被断言的事实，不该靠人记着「这个字符串长一点」；②守卫分成模型/字面量/运行时/迁移链四层，任一层漂移都会红；③回归必须在 PostgreSQL 上跑，SQLite 永远抓不到这一类缺陷（ADR-064 的教训已经写在 `backend/tests/test_postgres_triggers.py` 的模块 docstring 里）。
 - 影响与兼容：纯加宽，旧数据可读、写入不变形；`downgrade` 在存在超长行时会**明确报错**而不是静默截断（宁可失败也不毁证据）；`audit_logs` 的两个索引 `ix_audit_logs_created`/`ix_audit_logs_entity` 在 SQLite 重建表后由迁移重建，行与索引都在（实测 `0019 → 0020 → 0019 → 0020` 往返后两行审计原样保留）。`event_type`（`String(64)`，最长 36）与 `entity_type`/`entity_id`（`String(48)`）本次不动。
 - 测试：`backend/tests/test_audit_action_length.py`（4 例）、`backend/tests/test_postgres_triggers.py::test_adopting_a_run_fits_the_audit_action_column`、`backend/tests/test_experiment_adoption.py::test_adopting_a_run_writes_the_full_ledger_action`（收养后审计里恰好一行、action 逐字 41 字符）。
+
+## ADR-187：绩效与风险是已存证据的纯函数，不落库、不加表
+
+- 背景：Phase C 要让界面回答「我赚了多少、风险多大、比简单持有好吗、结果可靠吗」。而引擎已经算过总收益、年化、波动率、夏普、索提诺、最大回撤与交易类指标（`backend/app/research/metrics.py`），逐 bar 权益曲线（`timestamp`/`equity`/`cash`/`position_value`/`close`）也已随 `backtest_results.equity_curve_json` 落库并被不可变触发器钉住。缺的是引擎不算的那些：卡玛比率、下行波动率、回撤持续天数与恢复期、最差单月、样本档位、与买入持有的对照。第一反应当然是「新建一张 `performance_snapshots` / `risk_snapshots` 表把这些算好存下来」。
+- 决策：
+  1. 新增纯计算模块 `backend/app/research/analysis.py`（`ANALYSIS_VERSION = "1.0.0"`），唯一公共入口 `analyse_run(*, run_id=None, result_hash=None, metrics=None, equity_curve=None, trades=None, timeframe="1d", asset_class=None, fallback_bars=None) -> dict[str, Any]`：无 session、无 SQLAlchemy、无网络、无随机性，输入就是已存的行，输出就是响应体。
+  2. **零写入、零迁移、零新表**。`GET /api/v1/backtests/{run_id}/analysis`（`backend/app/api/routers/backtests.py:156 def get_backtest_analysis`）只读：从 `backtest_runs` 取已完成的 run 与 `backtest_results`，交给 `analyse_run`，用 `AnalysisOut` 序列化返回。同一条 run 请求一百次得到逐字相同的结果，数据库一个字节都不变。
+  3. 引擎已算过的指标**一律读存储值**（`stored = dict(metrics)`），只有派生读数由本模块现算；`DERIVED_METRICS` 元组逐字列出本层新增的十个名字（`calmar`/`downside_deviation`/`excess_return`/`final_equity_gap`/`max_drawdown_duration_days`/`recovery_period`/`sample_tier`/`worst_bar_return`/`worst_month_return`/`worst_trade`），`backend/app/capabilities.py:181` 的 `analysis_metrics` 组**import 这个元组而不是抄一遍**，所以 AI 角色读到的能力清单不可能比实现更宽。
+  4. **绝不碰 `metrics.py` 的语义，也绝不往 `metrics.as_dict()` 加键**：`result_hash` 由 `engine.py:524-537` 的规范化 JSON 覆盖到 `metrics`，加一个键就等于让所有新回测的 `result_hash` 变化（并让「同一条 run 的哈希」在不同版本间不可比）。新的派生值只活在分析层的响应里。
+  5. 算不出来就是 `null`，并同时给出一句人话：`_Caveats` 收集 `no_equity_curve`/`curve_too_short`/`non_positive_initial_capital`/`non_finite_value`/`no_closed_trades`/`drawdown_not_recovered`/`benchmark_unavailable`，`_finite()` 把 NaN/Inf 变成 `None`（不是 0），前端显示「未知」。
+  6. 样本档位复用既有门槛而不是新发明：`MIN_TRADES_ENOUGH = MIN_TRADES_FOR_CONFIDENCE`（导入 `app.research.monte_carlo`）、`MIN_TRADES_PRELIMINARY = 10`（镜像 `app/strategies/lifecycle.py:96` 的 `LifecycleThresholds.min_backtest_trades`，测试把两者钉在一起）。
+- 理由：①已经存在的证据足够算出这些数，存一份副本只会带来「回测页与实验页的数字不一致」这一类问题；②纯函数可以脱离 HTTP 与数据库测试，边界条件（空曲线、单点、非正初始资金、NaN）能用构造数据穷举；③不可变触发器保证了输入不会变，所以「不落库」不等于「不可复现」，反而比缓存更可靠；④个人 NAS 上少两张只会越长越大的表，查询也不需要 N+1 预计算任务。
+- 影响与兼容：新增模块与新端点，`docs/12_API_SPEC.md` 已登记；`docs/11_DATA_MODEL.md` 增「派生视图」一节说明这些读数为什么没有表。旧回测（曲线里没有 `close` 的行）仍可用：`fallback_bars` 允许调用方按同一时间区间补一次行情。`ANALYSIS_VERSION` 随口径变化递增，让「换了公式」在响应里可见。
+- 测试：`backend/tests/test_phase_c_analysis.py` 覆盖正常正/负收益、无交易、单点曲线、非正初始资金、NaN、`drawdown_not_recovered`、样本档位与 `MIN_TRADES_PRELIMINARY` 的对齐；同文件 :368 起断言 `GET /api/v1/backtests/{run_id}/analysis` 只读、两次请求逐字相同（:390/:391）、未知 run 404（:405）、未完成的 run 被拒绝（:425）。
+
+## ADR-188：对照是「买入并一直拿着」，从这次回测自己的证据里推导
+
+- 背景：界面必须回答「比简单持有好吗」。仓库里此前没有任何市场基准能力——全仓 `benchmark|buy.?and.?hold|基准` 的命中只有两类：SSRF 保留地址段 `198.18.0.0/15`，以及中文「基准」在本项目里既有的含义**收益率分母（净入金）**（ADR-066）。因此这一版既要发明对照，又要避免与「净入金基准」撞词。
+- 决策：
+  1. 第一版只有一种对照：`BENCHMARK_KINDS = ("buy_and_hold",)`。口径是同一段区间、同一笔初始资金、**不含手续费与滑点**地把第一根收盘价买入并持到最后：`initial_capital × close_t / close_0`（`_benchmark_curve_from_closes`）。界面上写明它是一把偏乐观的尺子，不假装它和策略同成本。
+  2. 数据来自**这次回测自己的权益曲线**：逐 bar 的 `close` 已经在 `equity_curve_json` 里（`engine.py:477-485`），所以对照不需要任何新查询、不需要新数据服务、也不可能与策略的区间错位。曲线没有 `close` 列（旧行）时才走 `fallback_bars`——由调用方用 `load_bars(db, series, start=..., end=..., only_closed=True)` 按**同一序列、同一时间区间**补一次行情。
+  3. 时间区间公平性靠「同一次运行的窗口」这件事本身保证：起点是 `curve_window()` 给出的该 run 的首个可用点，`bars_matched` 记录真正匹配上的根数。若只匹配到部分数据点，响应里带 `window_matched: false`，界面写「区间并非完全一致」而不是悄悄当一个公平对照。
+  4. 对照自己也过一遍 `compute_metrics`（同一 `timeframe`），所以总收益/年化/波动率/夏普/最大回撤/期末权益与超额的比较是**同一套公式**算出来的；`excess_return` 与 `final_equity_gap` 在 `performance.derived` 里，与策略的存储读数相减而来。（`docs/30` §11 的示意 JSON 把 `excess_return` 画在 `benchmark` 块内，实现放在 `performance.derived`，以此处为准。）
+  5. 对照曲线随响应返回（`benchmark.curve` = `[{"timestamp", "equity"}, …]`），前端**不重算**；但它**不进 AI 的事实包**（`build_performance_facts` 明确剔除 `curve` 键）：几百个权益点属于图，不属于模型该复述的数字。
+  6. 拿不到对照就如实说：`benchmark_unavailable` 配套「没有可用的对照」文案，而不是用 0 或策略自己的曲线顶替。
+- 理由：①「同一段区间、同一笔钱」是唯一不需要交易日历也能成立的公平定义，而本项目**没有节假日日历**（ADR 层面刻意不引入），任何按「年」或「交易日」对齐的复杂方案都会在 Crypto 7×24 与股票非交易日上先崩掉；②复用已存 `close` 让对照与策略严格同源，比再查一次行情更不容易错，也更快；③把「不含费用」写进界面，比把对照做得好看更重要——用户据此判断的正是「这套策略值不值得」。
+- 影响与兼容：新增响应块与一个新键，无迁移、无新表、无新服务；`capabilities.py:191` 的 `comparisons` 组 import `BENCHMARK_KINDS`，未实现的对照（等权组合、指数等）留在 `UNSUPPORTED_CAPABILITIES` 里。中文界面一律用「对照」/「买入持有对照」，不复用「基准」二字。
+- 测试：`backend/tests/test_phase_c_analysis.py` 断言主路径曲线逐字（closes 200/190/220、initial 10000 → `[{2024-01-01, 10000.0}, {2024-01-02, 9500.0}, {2024-01-03, 11000.0}]`）、兜底路径只含匹配到的根且时间戳逐字、部分窗口 `window_matched is False`、没有 close 又没给 bars 时 `benchmark_unavailable` 且 `curve == []`。
+
+## ADR-189：AI 只能解释已算好的分析，数字进不来、也出不去
+
+- 背景：Phase C 的最后一步是「用普通人能懂的语言解释」。既有机制（ADR-150–153）已经定下：一切调用走 `backend/app/ai/runtime.py` 的 `run_task()`，提示词只存在于角色契约文件，解释类输出 schema **零数值字段**——「AI never owns numbers」是靠结构保证的，不是靠字段黑名单（`backend/app/ai/provider.py:72-79`）。新的绩效解释必须落进这套机制，而不能因为「这次要解释的是图表和比率」就开口子。
+- 决策：
+  1. 新增任务类型 `performance_explanation`：契约段写在 `backend/app/ai/contracts/EXPLAINER.md`（`## Task: performance_explanation`），schema 是 `PERFORMANCE_EXPLANATION_SCHEMA`（`backend/app/ai/explain.py:91`），**不含任何数值字段**；注册进 `task_output_schemas()`（`role_contracts.py:239`），因此 `## Task:` 段与任务类型的一一对应约束（`role_contracts.py:157/162`）自动生效。
+  2. 事实装配 `build_performance_facts(db, run, *, analysis=None)`（`explain.py:350`）**只复述分析层已经算好的结构化结果**：`kind: "performance_analysis"` + 存储指标 + 派生读数 + 样本档位 + 对照块（剔除 `curve`）。调用方没传 `analysis` 时它自己调一次 `analysis_for_run(db, run)`（`explain.py:421`）——**同一条计算路径**，不是第二份实现；由此保证「AI 解释里的数」与「页面上的数」不可能来自两套公式。
+  3. 端点 `POST /backtests/{run_id}/explain-performance`（`backend/app/api/routers/ai.py:261 def explain_performance_endpoint`，同步，无 worker），走 `run_task()`：缓存身份、预算闸门、`AITask` 审计与用量全部照旧；供应商未配置 503、预算用尽 429、被守卫拒绝 502（页面退回只有数字，不显示那句解释）。
+  4. 数字方向的三重封堵：**存不进去**——schema 里没有数值字段，模型想报数也没有字段可放；**进不来**——事实包里没有原始曲线（只有已算好的标量与文字），模型无法「顺手算一个」；**说出去也要过闸**——新增 `backend/app/ai/explanation_guard.py`（`check_explanation`，由 `explain.py:31` 导入并在返回前调用）：文本里每一个数字 token 都必须能在事实包里找到同值、按模型写的位数四舍五入后的值、或它的百分数形式（`0.182` 可以写成 `18.2%`），否则整句解释被拒；同时按 `PREDICTION_PATTERN` 拒绝预测性措辞（`预计`/`预期`/`必将`/`forecast`/`guarantee` …），因为解释描述的是已存结果而不是未来。宽容只用于**呈现**（四舍五入、千分位、百分号），严格只用于**存在性**。
+  5. 拿不到分析就不编：若该 run 没有可用曲线，事实包里就是 `null` + 人话原因，模型的输出只能是「这些指标为什么算不出来」。
+- 理由：①用户要的是「普通人能懂」，不是「多一个会算数的模型」——项目的铁律是数字只能来自确定性引擎（`docs/00_README.md` §7），开一个数值字段就等于把这句承诺变成一个提示词请求；②schema 只管住「字段」，管不住「句子里顺手写的数」，而读者信的恰恰是句子，所以出口还需要一道逐 token 的准入检查；③复用 `analysis_for_run` 让「解释」与「页面」共享同一个事实来源，任何口径改动只需要改一处；④解释是加法：AI 未配置/超预算/超时/校验失败/被守卫拒绝时，页面上的数字一个都不会少，这也是它必须同步且可失败的原因。
+- 影响与兼容：新增一个任务类型、一个 schema、一个守卫模块、一个端点与契约段，`docs/12_API_SPEC.md`（:82/:89/:143）与 `docs/13_UI_UX.md` 已登记；`capabilities.py` 的 AI 相关声明随契约文件派生，不手抄。既有 `backtest_analysis`（回测解释）行为不变。
+- 测试：`backend/tests/test_phase_c_explanation.py` 断言事实包逐字等于分析结果减去 `curve`、`curve` 不在事实包里、响应 schema 无数值字段、缓存身份区分不同 run 的分析、预算闸门在 `AITask` 建行之前生效，以及守卫：真实数字的百分数/四舍五入形式放行、凭空数字被拒、预测措辞被拒（:398 未知 run 404、:404/:410 成功与缓存、:422 未配置 503、:440 守卫拒绝 502）；`backend/tests/test_ai_provider_boundary.py:37/47` 把 `ai/explanation_guard.py` 钉进「不问模型、不发网络」的模块名单，保证守卫本身永远不是第二个 AI 客户端。

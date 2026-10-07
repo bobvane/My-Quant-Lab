@@ -342,3 +342,12 @@ legacy 的 `strategy_id` 保留不变。
 5. Paper data cannot alter real portfolio data。
 6. All timestamps stored UTC; UI converts to user timezone.
 7. Source snapshots are append-only observations：同一 URL 抓两次写两行，不覆盖旧行；`research_artifacts.snapshot_id` 只指向本次实际使用的那一行，且第三方全文没有可写的列（ADR-166）。
+
+## 派生视图（Phase C：不改表、不加表）
+
+绩效 / 风险 / 对照**没有自己的表**，它们是 `backtest_results` 的**派生视图**（ADR-187、ADR-188）：
+
+- 输入就是已经存下来的东西——`backtest_results.metrics_json`、`equity_curve_json`（逐 bar 的 `timestamp/equity/cash/position_value/close`）与 `backtest_trades`；对照那一列由同一段曲线的 `close` 推导（`initial_capital × close_t / close_0`），或在曲线没有收盘价时按同一 `dataset_version_id` 与同一时间区间读一次行情。
+- 计算发生在 `backend/app/research/analysis.py` 的纯函数里（`ANALYSIS_VERSION` 标出口径版本），结果**只进响应、不落库**：`GET /api/v1/backtests/{run_id}/analysis` 是只读端点，零写入。因此同一条 run 反复请求得到逐字相同的数，`result_hash` 不受影响，`Metrics` 的语义与哈希组成也不动。
+- 引擎已经算过的指标（总收益、年化、波动率、夏普、索提诺、最大回撤、交易类指标）一律读存储值，分析层只补引擎没有的那些（卡玛比率、下行波动率、回撤持续天数、恢复期、最差单月、样本档位）；**同一个数字只有一个出口**，前端不重算。
+- 派生读数在 `backend/app/capabilities.py` 里登记为 `analysis_metrics` 与 `comparisons` 两组（能力清单必须能从代码派生，不许手抄），未实现的缺口（VaR/CVaR 等）仍留在 `UNSUPPORTED_CAPABILITIES` 里。

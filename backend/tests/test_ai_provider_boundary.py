@@ -33,12 +33,18 @@ HTTP_CALLERS = frozenset({"ai/provider.py", "data/ai_provider_service.py"})
 #: anything (it only writes an audit event about a draft), and it lives here
 #: because the artifact it decides about -- ``strategy_drafts`` -- belongs to
 #: this layer, next to the ``research_schemas`` that describe it.
+#:
+#: ``explanation_guard.py`` joined for Phase C (ADR-189). It asks no model
+#: anything either: it reads an explanation and the facts it was built from, and
+#: refuses text that carries a number nobody computed. Putting it here keeps the
+#: check next to the contract it enforces.
 AI_MODULES = frozenset(
     {
         "ai/__init__.py",
         "ai/budget.py",
         "ai/confirmation.py",
         "ai/explain.py",
+        "ai/explanation_guard.py",
         "ai/provider.py",
         "ai/research.py",
         "ai/research_schemas.py",

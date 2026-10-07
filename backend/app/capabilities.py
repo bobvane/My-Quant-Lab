@@ -23,6 +23,7 @@ from typing import Any, Literal, get_args
 from app.data.providers import PROVIDER_NAMES
 from app.features.catalogue import FEATURE_CATALOGUE
 from app.features.engine import SUPPORTED_INDICATOR_TYPES
+from app.research.analysis import BENCHMARK_KINDS, DERIVED_METRICS
 from app.research.metrics import BARRS_PER_YEAR, Metrics
 from app.strategies.dsl import (
     ComparisonOp,
@@ -81,6 +82,7 @@ def _module_items(root: str, names: tuple[str, ...]) -> tuple[str, ...]:
 
 _ENGINE_MODULES: tuple[str, ...] = (
     "research/engine",
+    "research/analysis",
     "research/walk_forward",
     "research/sensitivity",
     "research/monte_carlo",
@@ -176,6 +178,23 @@ GROUPS: tuple[CapabilityGroup, ...] = (
         ),
     ),
     CapabilityGroup(
+        key="analysis_metrics",
+        label="Performance and risk metrics the analysis layer derives",
+        source="backend/app/research/analysis.py DERIVED_METRICS",
+        items=DERIVED_METRICS,
+        note=(
+            "Computed on demand from the stored equity curve and trades by a pure "
+            "function; the engine's own stored metrics are the 'metrics' group."
+        ),
+    ),
+    CapabilityGroup(
+        key="comparisons",
+        label="Comparison series the analysis layer can build",
+        source="backend/app/research/analysis.py BENCHMARK_KINDS",
+        items=BENCHMARK_KINDS,
+        note="Buy and hold is derived from the closes the stored equity curve carries.",
+    ),
+    CapabilityGroup(
         key="timeframe_annualisation",
         label="Timeframes with an annualisation factor",
         source="backend/app/research/metrics.py:18-26 (BARRS_PER_YEAR)",
@@ -251,12 +270,10 @@ UNSUPPORTED_CAPABILITIES: tuple[UnsupportedCapability, ...] = (
     UnsupportedCapability(
         token="var_cvar",
         label="VaR / CVaR",
-        reason="risk metrics stop at volatility, drawdown and Sortino",
-    ),
-    UnsupportedCapability(
-        token="calmar",
-        label="Calmar and recovery factor",
-        reason="not computed yet; max drawdown duration and recovery are also missing",
+        reason=(
+            "the analysis layer stops at volatility, downside deviation, drawdown, "
+            "recovery and Calmar; quantile loss estimates are not computed"
+        ),
     ),
     UnsupportedCapability(
         token="fundamentals",

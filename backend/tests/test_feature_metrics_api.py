@@ -27,10 +27,11 @@ def test_feature_catalogue_and_ai_registries(client) -> None:
         for task_type in contract.task_types
     }
     assert {(p["name"], p["version"]) for p in prompts} == expected
-    # The two explanation prompts keep the names the rest of the code calls them by.
+    # The explanation prompts keep the names the rest of the code calls them by.
     assert {p["name"] for p in prompts if p["name"].endswith("_explain")} == {
         "signal_explain",
         "backtest_explain",
+        "performance_explain",
     }
 
 

@@ -21,16 +21,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.schemas import BacktestCreate, BacktestOut, BacktestSummaryOut
+from app.api.schemas import AnalysisOut, BacktestCreate, BacktestOut, BacktestSummaryOut
 from app.core.config import settings
 from app.core.db import get_db
 from app.data.backtest_service import (
     COMPARE_METRICS,
     BacktestFailed,
     BacktestRequestError,
+    analysis_for_run,
     load_backtest_inputs,
     prepare_backtest,
     store_backtest,
+    trade_dicts,
 )
 from app.domain.models import BacktestRun
 
@@ -137,33 +139,42 @@ def get_backtest(run_id: int, db: Session = Depends(get_db)) -> BacktestOut:
         # `error_message` says why it stopped. The result fields stay absent so a client
         # cannot mistake an empty curve for a flat backtest (ADR-180).
         return _to_out(run, None, None, None, None)
-    trades = [
-        {
-            "direction": t.direction,
-            "entry_time": t.entry_time,
-            "entry_price": float(t.entry_price),
-            "exit_time": t.exit_time,
-            "exit_price": float(t.exit_price) if t.exit_price is not None else None,
-            "quantity": float(t.quantity),
-            "fees": float(t.fees),
-            "slippage": float(t.slippage),
-            "pnl": float(t.pnl) if t.pnl is not None else None,
-            "pnl_pct": float(t.pnl_pct) if t.pnl_pct is not None else None,
-            "r_multiple": float(t.r_multiple) if t.r_multiple is not None else None,
-            "mae": float(t.mae) if t.mae is not None else None,
-            "mfe": float(t.mfe) if t.mfe is not None else None,
-            "exit_reason": t.exit_reason,
-            "ambiguous_fill": t.ambiguous_fill,
-        }
-        for t in run.trades
-    ]
     return _to_out(
         run,
         run.result.metrics_json,
         run.result.equity_curve_json,
-        trades,
+        trade_dicts(run),
         list(run.result.warnings_json or []),
     )
+
+
+@router.get(
+    "/{run_id}/analysis",
+    response_model=AnalysisOut,
+    summary="Performance, risk and buy-and-hold comparison of a backtest",
+)
+def get_backtest_analysis(run_id: int, db: Session = Depends(get_db)) -> AnalysisOut:
+    """Derive the Phase C view of one run, without touching anything.
+
+    Nothing is written and nothing is recomputed from market data: the per-bar equity
+    curve the engine stored already carries the close of every bar, so the comparison
+    is built from the same bars, the same window and the same calendar as the strategy.
+    A market-data read happens only for a stored curve that has no usable closes.
+    The assembly itself lives in :mod:`app.data.backtest_service` so the AI explanation
+    reads the same analysis the API returns, not a second copy of it.
+    """
+
+    run = db.get(BacktestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+    if run.status != "completed" or run.result is None:
+        # An analysis of a run that has not finished (or that failed) would be a
+        # statement about an unfinished experiment. `GET /backtests/{id}` still answers
+        # with the run itself so a poller can watch it (ADR-180); this endpoint is only
+        # meaningful once there is a result.
+        raise HTTPException(status_code=409, detail="only a completed run can be analysed")
+
+    return AnalysisOut.model_validate(analysis_for_run(db, run))
 
 
 @router.get("/{run_id}/trades", summary="List trades of a backtest")

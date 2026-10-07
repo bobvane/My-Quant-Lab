@@ -184,6 +184,87 @@ export interface BacktestDetail extends BacktestSummary {
   warnings: string[]
 }
 
+/**
+ * Phase C analysis of one completed run (docs/30, ADR-188): performance, risk and
+ * the buy-and-hold comparison, derived server-side from the stored curve. Every
+ * field the server could not compute is `null` — the page renders 「未知」, never 0.
+ */
+export interface AnalysisCurvePoint {
+  timestamp: string | null
+  equity: number
+}
+
+export interface AnalysisDerived {
+  calmar: number | null
+  downside_deviation: number | null
+  excess_return: number | null
+  final_equity_gap: number | null
+  worst_bar_return: number | null
+}
+
+export interface AnalysisWorstTrade {
+  pnl: number | null
+  exit_time: string | null
+  direction: string | null
+}
+
+export interface AnalysisRisk {
+  max_drawdown: number | null
+  max_drawdown_duration_bars: number | null
+  max_drawdown_duration_days: number | null
+  recovery_bars: number | null
+  recovered: boolean | null
+  recovery_text: string | null
+  worst_bar_return: number | null
+  worst_month_return: number | null
+  worst_trade: AnalysisWorstTrade | null
+  max_consecutive_losses: number | null
+  downside_deviation: number | null
+}
+
+export interface AnalysisBenchmark {
+  label: string
+  kind: string
+  source: string
+  fees_included: boolean
+  window_matched: boolean
+  bars_matched: number
+  curve: AnalysisCurvePoint[]
+  total_return: number | null
+  cagr: number | null
+  annualized_volatility: number | null
+  sharpe: number | null
+  max_drawdown: number | null
+  final_equity: number | null
+}
+
+export type AnalysisSampleTier = 'insufficient' | 'preliminary' | 'enough'
+
+export interface AnalysisSample {
+  trades: number
+  bars: number
+  years: number | null
+  tier: AnalysisSampleTier
+  tier_text: string
+}
+
+export interface AnalysisCaveat {
+  code: string
+  message: string
+}
+
+export interface BacktestAnalysis {
+  run_id: number
+  result_hash: string | null
+  analysis_version: string
+  window: { start: string | null; end: string | null; bars: number }
+  performance: { stored: Record<string, number | null>; derived: AnalysisDerived }
+  risk: AnalysisRisk
+  benchmark: AnalysisBenchmark | null
+  sample: AnalysisSample
+  caveats: AnalysisCaveat[]
+}
+
 /** What the importer actually read, and what it never looked at (docs/05 §4.1). */
 export interface GithubCoverage {
   analysis_version: string
@@ -498,6 +579,13 @@ export interface AIExplanation {
   what_could_invalidate?: string[]
   what_to_watch_next: string[]
   plain_language: string
+  // Phase C 的解释任务（performance_explanation）回答的是另一组问题：结论 / 原因 /
+  // 风险 / 可信程度 / 下一步。信封（cached、task_id、model、cost）完全一样，
+  // 所以字段在这里是可选的，而不是另造一个信封（docs/30 §8）。
+  conclusion?: string
+  drivers?: string[]
+  confidence?: string
+  next_step?: string
 }
 
 export interface ExplainResult {
@@ -1263,6 +1351,12 @@ export const api = {
    * would be a lie about what came back (ADR-180).
    */
   backtestRun: (id: number) => request<BacktestRun>(`/backtests/${id}`),
+  /**
+   * Phase C: performance, risk and the buy-and-hold comparison of a finished run.
+   * Read-only and computed from the stored curve, so calling it changes nothing
+   * (docs/30 §11). A run that is still executing answers 409.
+   */
+  backtestAnalysis: (id: number) => request<BacktestAnalysis>(`/backtests/${id}/analysis`),
   // Every strategy version across all strategies. The ensemble needs to vote with
   // versions of *different* strategies, so scoping candidates to one strategy (as
   // `/strategies/{id}/versions` does) would make cross-strategy voting unreachable.
@@ -1618,6 +1712,13 @@ export const api = {
     request<ExplainResult>(`/signals/${signalId}/explain`, { method: 'POST' }),
   explainBacktest: (runId: number) =>
     request<ExplainResult>(`/backtests/${runId}/explain`, { method: 'POST' }),
+  /**
+   * Phase C explanation: the plain-language reading of the analysis above. The
+   * numbers do not come from here — they come from `backtestAnalysis`, and this
+   * call failing only means the page shows fewer words (docs/30 §8.3).
+   */
+  explainPerformance: (runId: number) =>
+    request<ExplainResult>(`/backtests/${runId}/explain-performance`, { method: 'POST' }),
   aiModels: () => request<{ models: Array<Record<string, any>> }>('/ai/models'),
   // 模型级开关：停用不删除，历史 AI Task / Usage 保留（ADR-173）。409 = 该模型是
   // 供应商当前唯一可用模型，后端拒绝而不是偷偷改 default_model。

@@ -39,6 +39,10 @@ const RATIO_METRICS = new Set([
   'win_rate',
   'annualized_volatility',
   'exposure',
+  // Phase C 的派生读数里也有「比例」：下行波动率与最差单月和波动率同单位。
+  // 卡玛比率是比率本身（年化收益 ÷ 回撤），换成百分号反而是错的，所以不在这一组。
+  'downside_deviation',
+  'worst_month_return',
 ])
 
 /** Money and per-trade money: four decimals of a dollar amount are noise. */

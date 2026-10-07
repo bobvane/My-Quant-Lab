@@ -15,6 +15,7 @@ import {
   ApiError,
   api,
   type Asset,
+  type BacktestAnalysis,
   type ExperimentCompareOut,
   type ExperimentCreatePayload,
   type ExperimentDetailOut,
@@ -23,7 +24,7 @@ import {
   type Strategy,
   type StrategyVersion,
 } from '../api'
-import { formatDateTime, formatMetric, formatNumber, toneOf } from '../format'
+import { formatDateTime, formatMetric, formatNumber, formatPercent, toneOf } from '../format'
 import { isAdvanced } from '../mode'
 import { metricKeyLabel, timeframeLabel } from '../wording'
 
@@ -416,6 +417,7 @@ async function openDetail(id: number) {
   accountNotice.value = ''
   try {
     detail.value = await api.experiment(id)
+    await loadRunAnalysis(detail.value)
   } catch (e) {
     detail.value = null
     detailError.value =
@@ -424,6 +426,26 @@ async function openDetail(id: number) {
         : `读不到这条实验：${messageOf(e)}`
   } finally {
     detailLoading.value = false
+  }
+}
+
+/**
+ * Phase C：这条实验背后的那条回测的绩效 / 风险 / 对照（docs/30 §9.2）。
+ *
+ * 实验自己不算任何东西：收养来的实验只是逐字复制了那条回测的结果（ADR-183），
+ * 所以「比简单持有好吗」这个问题要去问那条回测的分析端点。拿不到分析（老数据、
+ * 敏感性 / Walk-Forward 型实验没有回测）就什么都不显示，不猜、也不拿 0 顶替。
+ */
+const analysis = ref<BacktestAnalysis | null>(null)
+
+async function loadRunAnalysis(current: ExperimentDetailOut | null) {
+  analysis.value = null
+  const runId = current?.backtest_run_id
+  if (runId === null || runId === undefined) return
+  try {
+    analysis.value = await api.backtestAnalysis(runId)
+  } catch {
+    analysis.value = null
   }
 }
 
@@ -1176,6 +1198,51 @@ onMounted(async () => {
         <p v-if="totalFeesMissing" class="muted" style="margin-top: 6px">
           「手续费」写「未知」，是因为这条实验存下来的手续费是空的（服务端给 null 时这一页不拿 0 顶替）。
           服务端算的是这次回测已经存下来的逐笔成交费用之和，这一页只显示，不重算、也不拿别的数字凑一个合计。
+        </p>
+
+        <!-- Phase C：实验背后那条回测的对照（docs/30 §9.2）。数字来自分析端点，
+             这一页不重算；没有回测（敏感性 / Walk-Forward 型）就不显示。 -->
+        <div v-if="analysis && analysis.benchmark" class="grid cols-4" style="margin-top: 8px">
+          <div class="stat small">
+            <div class="muted" style="font-size: 12px">
+              对照收益（{{ analysis.benchmark.label }}）
+            </div>
+            <div>
+              {{
+                analysis.benchmark.total_return == null
+                  ? '未知'
+                  : formatPercent(analysis.benchmark.total_return)
+              }}
+            </div>
+          </div>
+          <div class="stat small">
+            <div class="muted" style="font-size: 12px">超额收益（策略 − 对照）</div>
+            <div :class="toneOf(analysis.performance.derived.excess_return)">
+              {{
+                analysis.performance.derived.excess_return == null
+                  ? '未知'
+                  : formatPercent(analysis.performance.derived.excess_return)
+              }}
+            </div>
+          </div>
+          <div class="stat small">
+            <div class="muted" style="font-size: 12px">对照最大回撤</div>
+            <div>
+              {{
+                analysis.benchmark.max_drawdown == null
+                  ? '未知'
+                  : formatPercent(analysis.benchmark.max_drawdown)
+              }}
+            </div>
+          </div>
+          <div class="stat small">
+            <div class="muted" style="font-size: 12px">样本是否够</div>
+            <div>{{ analysis.sample.tier_text }}</div>
+          </div>
+        </div>
+        <p v-if="analysis && analysis.benchmark" class="muted" style="margin-top: 6px">
+          对照是同一段区间、同样初始资金的「买入并一直拿着」，不含手续费与滑点，所以它是一把偏乐观的尺子。
+          <RouterLink v-if="backtestLink" :to="backtestLink">到「回测」页看绩效 / 风险 / 对照明细</RouterLink>
         </p>
 
         <h4>逐条结果</h4>

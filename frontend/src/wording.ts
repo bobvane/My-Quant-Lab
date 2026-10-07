@@ -196,7 +196,7 @@ interface MetricWording {
 
 const METRIC_WORDING: Record<string, MetricWording> = {
   total_return: { label: '总收益率' },
-  cagr: { label: '年化复合收益率', alias: '按年折算的复合增长' },
+  cagr: { label: '年化收益', alias: '按年折算的复合增长' },
   final_equity: { label: '期末权益' },
   initial_capital: { label: '初始资金' },
   max_drawdown: { label: '最大回撤' },
@@ -210,6 +210,7 @@ const METRIC_WORDING: Record<string, MetricWording> = {
   avg_loss: { label: '平均每次亏损' },
   profit_factor: { label: '盈亏效率', alias: '赚的钱是亏的钱的几倍' },
   expectancy: { label: '每笔交易期望收益', alias: '平均每笔交易的期望结果' },
+  total_fees: { label: '手续费' },
   average_holding_bars: { label: '平均持仓（根）' },
   max_consecutive_losses: { label: '最长连续亏损' },
   exposure: { label: '持仓时间占比', alias: '实际持有仓位的时间比例' },

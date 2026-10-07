@@ -9,6 +9,12 @@ drift apart).
 
 Nothing here implements a quant algorithm: ``app.research.engine.run_backtest`` remains
 the only engine.
+
+The steps are separate functions — :func:`prepare_backtest`, :func:`execute_backtest`,
+:func:`fail_backtest` — because the engine no longer has to run inside the request that
+asked for it: with ``BACKTEST_ASYNC`` on, a worker in another process drives the same two
+steps by run id, and the row it finds is the row a polling client reads for ``progress``
+and ``current_step`` (ADR-180).
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -40,11 +46,17 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "COMPARE_METRICS",
     "MIN_BACKTEST_BARS",
+    "PROGRESS_LADDER",
     "BacktestExecution",
     "BacktestFailed",
     "BacktestInputs",
     "BacktestRequestError",
+    "advance_backtest",
+    "execute_backtest",
+    "fail_backtest",
     "load_backtest_inputs",
+    "prepare_backtest",
+    "rebuild_backtest_inputs",
     "store_backtest",
 ]
 
@@ -55,6 +67,24 @@ MIN_BACKTEST_BARS = 60
 #: /backtests/compare`` and ``GET /experiments/compare``). Defined once so an experiment
 #: history cannot end up showing a different set of columns than a run history does.
 COMPARE_METRICS = ("total_return", "max_drawdown", "sharpe", "win_rate", "number_of_trades")
+
+#: The rungs an executing run climbs, and the percentage each one means (ADR-180). One
+#: table so the route, the worker and a client cannot disagree about what "45" is, and so
+#: the API can draw a bar without knowing the engine.
+#:
+#: ``run_backtest`` is a single call (ADR-174 keeps it the only engine) and reports no
+#: boundary between computing features, walking the strategy and evaluating exits, so a run
+#: jumps from ``computing features`` to ``computing metrics``. ``running strategy`` and
+#: ``evaluating exits`` are listed because they are the engine's own phases, but nothing
+#: commits them: a percentage for a phase nobody can observe would be invented.
+PROGRESS_LADDER: dict[str, int] = {
+    "loading data": 5,
+    "computing features": 20,
+    "running strategy": 45,
+    "evaluating exits": 70,
+    "computing metrics": 90,
+    "completed": 100,
+}
 
 
 class BacktestRequestError(Exception):
@@ -155,37 +185,128 @@ def load_backtest_inputs(
     )
 
 
-def store_backtest(
+def prepare_backtest(
     db: Session,
+    *,
+    strategy_version_id: int,
+    symbol: str | None = None,
+    series_id: int | None = None,
+    timeframe: str = "1d",
+    timeframe_explicit: bool = False,
+    start: dt.datetime | None = None,
+    end: dt.datetime | None = None,
+    execution_overrides: dict[str, Any] | None = None,
+    parameters: dict[str, Any] | None = None,
+    version: StrategyVersion | None = None,
+    series: MarketDataSeries | None = None,
+    frame: pd.DataFrame | None = None,
+    inputs: BacktestInputs | None = None,
+) -> tuple[BacktestRun, BacktestInputs]:
+    """Resolve the inputs and create the ``status="running"`` run row.
+
+    It COMMITS, and that is the point: with ``BACKTEST_ASYNC`` on the next step is another
+    process, which opens its own session and looks the run up by id. A row still sitting in
+    an uncommitted transaction would not exist for that worker — it would report the run as
+    missing and the run would sit at ``progress=0`` for ever. Committing here is also what
+    makes the run watchable: ``0``/``loading data`` is a durable answer to a poll, not a
+    value that disappears with the request.
+
+    The request's own shape is stored too (``parameters_json``, ``execution_model_json``)
+    because the worker gets nothing but the run id: whatever it must replay has to be on
+    the row.
+
+    ``inputs`` is for an in-process caller that has already resolved them —
+    :func:`store_backtest`, and ``POST /experiments`` through it. Re-resolving there would
+    drop the request's ``execution_overrides`` and record the execution model of the strategy
+    version instead of the one the run is about to use.
+    """
+
+    if inputs is None:
+        inputs = load_backtest_inputs(
+            db,
+            strategy_version_id=strategy_version_id,
+            symbol=symbol,
+            series_id=series_id,
+            timeframe=timeframe,
+            timeframe_explicit=timeframe_explicit,
+            start=start,
+            end=end,
+            execution_overrides=execution_overrides,
+            version=version,
+            series=series,
+            frame=frame,
+        )
+
+    run = BacktestRun(
+        strategy_version_id=inputs.version.id,
+        dataset_version_id=inputs.series.id,
+        engine_version=ENGINE_VERSION,
+        feature_version=FEATURE_VERSION,
+        parameters_json=parameters or {},
+        execution_model_json=inputs.spec.execution.model_dump(),
+        dataset_hash=inputs.dataset_hash,
+        status="running",
+        started_at=dt.datetime.now(tz=dt.UTC),
+        progress=0,
+        current_step="loading data",
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run, inputs
+
+
+def rebuild_backtest_inputs(
+    db: Session,
+    run: BacktestRun,
+    *,
+    timeframe: str | None = None,
+    start: dt.datetime | None = None,
+    end: dt.datetime | None = None,
+) -> BacktestInputs:
+    """Resolve a run's inputs again from the row alone, for a caller in another process.
+
+    Only the row survives the handover, so this reverses the request from what the row
+    keeps: the bound dataset fixes the series, and the stored ``execution_model_json`` is
+    replayed as an override so the engine runs the execution model the request was answered
+    with, not the one the strategy version would pick on its own. ``start``/``end`` are not
+    on the row, so a caller that still has the request's window passes it; without a window
+    the run covers the whole series, which is what a request that sent none asked for.
+    """
+
+    return load_backtest_inputs(
+        db,
+        strategy_version_id=run.strategy_version_id,
+        series_id=run.dataset_version_id,
+        timeframe=timeframe or (run.dataset.timeframe if run.dataset is not None else "1d"),
+        start=start,
+        end=end,
+        execution_overrides=run.execution_model_json or None,
+    )
+
+
+def execute_backtest(
+    db: Session,
+    run: BacktestRun,
     inputs: BacktestInputs,
     *,
     parameters: dict[str, Any] | None = None,
     timeframe: str = "1d",
 ) -> BacktestExecution:
-    """Run the engine and persist run, result, metric rows, trade rows and the audit event.
+    """Run the engine on a prepared run and persist everything it produced.
 
-    Raises :class:`BacktestFailed` after committing a ``status="failed"`` run row, so the
-    failure is never swallowed and never lost with the request.
+    Writes the result, the metric rows, the trade rows and the ``backtest_completed`` audit
+    event, stepping ``progress``/``current_step`` and committing as it goes so a polling
+    client sees movement instead of one jump at the end. A run whose engine raises is
+    recorded by :func:`fail_backtest`, which commits and re-raises :class:`BacktestFailed`,
+    so the caller's transaction is never the only copy of a failure.
     """
 
     parameters = parameters or {}
     version = inputs.version
     series = inputs.series
 
-    run = BacktestRun(
-        strategy_version_id=version.id,
-        dataset_version_id=series.id,
-        engine_version=ENGINE_VERSION,
-        feature_version=FEATURE_VERSION,
-        parameters_json=parameters,
-        execution_model_json=inputs.spec.execution.model_dump(),
-        dataset_hash=inputs.dataset_hash,
-        status="running",
-        started_at=dt.datetime.now(tz=dt.UTC),
-    )
-    db.add(run)
-    db.flush()
-
+    advance_backtest(db, run, "computing features")
     try:
         outcome = run_backtest(
             inputs.spec,
@@ -195,16 +316,17 @@ def store_backtest(
             parameters=parameters,
         )
     except Exception as exc:
-        run.status = "failed"
-        run.error_message = str(exc)[:500]
-        run.finished_at = dt.datetime.now(tz=dt.UTC)
-        db.commit()
-        logger.exception("backtest failed")
-        raise BacktestFailed(run) from exc
+        fail_backtest(db, run, exc)
+
+    advance_backtest(db, run, "computing metrics")
 
     run.feature_version = outcome.feature_version
     run.status = "completed"
     run.finished_at = dt.datetime.now(tz=dt.UTC)
+    # 100 lands in the same commit as the result rows: a client that reads "completed"
+    # must find the result it is told to expect, never a completed run with no result.
+    run.progress = PROGRESS_LADDER["completed"]
+    run.current_step = "completed"
 
     result = BacktestResult(
         backtest_run_id=run.id,
@@ -275,6 +397,62 @@ def store_backtest(
     _record_resource_event(db, run, outcome)
 
     return BacktestExecution(run=run, outcome=outcome)
+
+
+def store_backtest(
+    db: Session,
+    inputs: BacktestInputs,
+    *,
+    parameters: dict[str, Any] | None = None,
+    timeframe: str = "1d",
+) -> BacktestExecution:
+    """Prepare and immediately execute a run — the synchronous behaviour, in one call.
+
+    This is what a caller that owns the request wants; it stays exactly the sequence the
+    route used to run inline, including the committed ``status="failed"`` row behind
+    :class:`BacktestFailed`.
+    """
+
+    run, _ = prepare_backtest(
+        db,
+        strategy_version_id=inputs.version.id,
+        timeframe=timeframe,
+        parameters=parameters,
+        inputs=inputs,
+    )
+    return execute_backtest(db, run, inputs, parameters=parameters, timeframe=timeframe)
+
+
+def fail_backtest(db: Session, run: BacktestRun, error: BaseException) -> NoReturn:
+    """Record *error* on the run row, commit it, then raise :class:`BacktestFailed`.
+
+    The commit is not an implementation detail: the exception unwinds the caller's
+    transaction, and a run that failed while nobody was watching still has to be readable —
+    a client polling the run must find the reason, not a run frozen at "running". The rung
+    is left where it was (``current_step="failed"``, ``progress`` below 100), because a run
+    that died in ``computing metrics`` did get that far.
+    """
+
+    run.status = "failed"
+    run.error_message = str(error)[:500]
+    run.finished_at = dt.datetime.now(tz=dt.UTC)
+    run.current_step = "failed"
+    db.commit()
+    logger.exception("backtest failed")
+    raise BacktestFailed(run) from error
+
+
+def advance_backtest(db: Session, run: BacktestRun, step: str) -> None:
+    """Move the run to *step* and commit, so a poller sees the move immediately.
+
+    Public because the worker drives a step the engine cannot see: rebuilding its inputs
+    from the row alone is real work in a second process, and without a commit at that point
+    a queued run would show no sign of life until the engine call returned.
+    """
+
+    run.current_step = step
+    run.progress = PROGRESS_LADDER[step]
+    db.commit()
 
 
 def _record_resource_event(db: Session, run: BacktestRun, outcome: Any) -> None:

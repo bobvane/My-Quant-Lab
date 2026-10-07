@@ -101,6 +101,16 @@ unique(strategy_id, version)
 - status
 - result_summary_json
 - result_hash
+- progress（整数 0–100，默认 0；给界面看的粗刻度，不是精确百分比）
+- current_step（短句，可空；就是下面刻度里的那一档名字）
+
+`progress` 与 `current_step` 描述的是一次运行**正在做什么**，所以它们**不进** `result_hash`
+（ADR-180，迁移 `0018_run_progress_paper_binding`）：哈希只覆盖策略版本、数据集、引擎版本、
+特征版本、参数、指标与交易数，把运行过程元数据算进去会让同策略、同数据、同参数的重跑得到不同哈希，
+ADR-081 的「数据集 + 哈希即可复现」随即失效。刻度是 `loading data` 5 → `computing features` 20 →
+`running strategy` 45 → `evaluating exits` 70 → `computing metrics` 90 → `completed` 100
+（`backend/app/data/backtest_service.py` 的 `PROGRESS_LADDER`）；`running strategy` 与
+`evaluating exits` 是引擎自己的阶段、但没有可提交的边界，所以没有为它们编造百分比。
 
 ## BacktestTrade
 
@@ -118,6 +128,54 @@ unique(strategy_id, version)
 - r_multiple
 - reason
 
+## StrategyExperiment
+
+把一次量化研究存成**可回读的实体**（表 `strategy_experiments`）。`kind` 决定复用哪一种既有引擎，
+实验层只负责记录与回读，不重实现任何量化算法。
+
+- id
+- name
+- notes
+- status（`draft` / `running` / `completed` / `failed` / `archived`）
+- kind（`backtest` / `sensitivity` / `monte_carlo` / `walk_forward` / `oos`）
+- strategy_version_id（FK `strategy_versions`，NOT NULL —— 血缘的起点）
+- series_id（FK `market_data`）
+- symbol
+- timeframe
+- parameters_json（**快照**：创建时写死）
+- request_json（**快照**：创建时的完整请求，`POST /experiments/{experiment_id}/run` 用它重放；
+  由旧回测收养时额外带 `adopted_from_backtest_run`）
+- summary_json（标签、结果计数、`backtest_run_id`；收养时还逐字带上回测的 `result_hash` /
+  `engine_version` / `feature_version` / `dataset_hash`）
+- error_message（失败原因，引擎原文）
+- created_at
+- started_at
+- completed_at
+- updated_at
+- archived_at
+- initial_capital（**快照**：迁移 `0019_experiment_lifecycle` 新增）
+- start_date（**快照**：迁移 `0019_experiment_lifecycle` 新增）
+- end_date（**快照**：迁移 `0019_experiment_lifecycle` 新增）
+
+`parameters_json` / `initial_capital` / `start_date` / `end_date` 是**快照列：只写一次**，之后不随
+策略改动变化 —— 改策略版本的默认参数、改 `strategy_parameters` 行、或发布一个资金不同的新版本，
+回读实验拿到的仍是当时那份配置。实验记录的是「当时用什么跑出来的」，不是「现在拿它会怎么跑」。
+迁移 `0019_experiment_lifecycle` 给这张表加了 `updated_at` / `archived_at` / `initial_capital` /
+`start_date` / `end_date` 五列，全部可空，所以已有的实验行照常可读。
+
+## ExperimentResult
+
+- id
+- experiment_id（FK `strategy_experiments`，级联删除）
+- kind
+- label
+- parameters_json（**快照**：该结果行自己那份参数）
+- backtest_run_id（FK `backtest_runs`，可空 —— 经它建立 Experiment→StrategyVersion→BacktestResult
+  血缘，删除实验不删除底层回测）
+- metrics_json
+- payload_json
+- created_at
+
 ## PaperAccount
 
 - id
@@ -128,6 +186,15 @@ unique(strategy_id, version)
 - cash
 - status
 - created_at
+- strategy_version_id（nullable，FK → `strategy_versions.id`）
+- backtest_run_id（nullable，FK → `backtest_runs.id`，`ondelete="SET NULL"`）
+- parameters_json（JSON，默认 `{}`）
+
+`strategy_id` 单独回答不了「这个账户在验证哪个版本、哪套参数」，所以 ADR-181 加了上面三列
+（迁移 `0018_run_progress_paper_binding`）：被验证的策略版本、建账户时复制的那次回测、以及当时的
+参数快照。`backtest_run_id` 是 `SET NULL`——退役一次回测不能让一个复制了它结果的模拟账户消失，
+账户里已经发生的成交也不会因为版本或回测被删而改变。三列都可空：手工建的账户不必绑定任何东西，
+legacy 的 `strategy_id` 保留不变。
 
 ## PaperPosition
 

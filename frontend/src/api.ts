@@ -140,6 +140,10 @@ export interface BacktestSummary {
   /** Which series the run used — needed to tell whether two runs are comparable. */
   symbol: string | null
   timeframe: string | null
+  /** 0-100. A run walks this while it executes, so the UI can say how far it is. */
+  progress?: number
+  /** Which step that percentage refers to, e.g. `computing metrics`. */
+  current_step?: string | null
 }
 
 export interface EquityPoint {
@@ -150,7 +154,27 @@ export interface EquityPoint {
   close: number
 }
 
+/**
+ * A run as it exists *before* it has a result. `POST /backtests` answers with this
+ * shape: when execution is offloaded the run is still running and has no result
+ * row yet, so every result field is absent rather than empty (ADR-180).
+ */
+export interface BacktestRun extends BacktestSummary {
+  progress: number
+  current_step: string | null
+  error_message?: string | null
+  result_hash?: string | null
+  metrics?: Record<string, number | null>
+  equity_curve?: EquityPoint[]
+  trades?: Array<Record<string, unknown>>
+  parameters?: Record<string, unknown>
+  execution_model?: Record<string, unknown>
+  warnings?: string[]
+}
+
 export interface BacktestDetail extends BacktestSummary {
+  progress: number
+  current_step: string | null
   metrics: Record<string, number | null>
   equity_curve: EquityPoint[]
   trades: Array<Record<string, unknown>>
@@ -657,6 +681,17 @@ export interface PaperAccount {
   name: string
   /** The strategy this account is bound to, if any: attribution is per account (ADR-114). */
   strategy_id: number | null
+  /**
+   * The *version* (and parameters) the account was opened from. A strategy id alone
+   * cannot say which parameters the paper result belongs to, so an account opened
+   * from a backtest keeps both (ADR-181).
+   */
+  strategy_version_id?: number | null
+  /** The backtest it was copied from, if it was. Never a cascade: the run may be retired. */
+  backtest_run_id?: number | null
+  parameters?: Record<string, unknown>
+  /** Display name of the bound strategy, resolved server-side. */
+  strategy_name?: string | null
   /** Money the account was funded with: deposits minus withdrawals (ADR-066). */
   net_deposits: number
   cash: number
@@ -665,6 +700,15 @@ export interface PaperAccount {
    * position has spent the cash, so a full-size buy would read as -100% (ADR-124).
    */
   realized_pnl: number
+  /** Open positions marked at the latest closed bar; null when no bar qualifies. */
+  market_value?: number | null
+  unrealized_pnl?: number | null
+  total_equity?: number | null
+  /** Realized + unrealized. Rates stay null while net deposits are <= 0 (ADR-066). */
+  total_pnl?: number | null
+  total_pnl_pct?: number | null
+  /** Why a metric is missing, e.g. no closed bar to mark the position with. */
+  metric_notes?: string[]
   base_currency: string
   status: string
   reset_count: number
@@ -675,9 +719,17 @@ export interface PaperPosition {
   id: number
   account_id: number
   asset_id: number
+  symbol?: string
   quantity: number
   avg_cost: number
   realized_pnl: number
+  /** Close of the latest *closed* bar. Never an intraday or invented price (ADR-007). */
+  mark_price?: number | null
+  mark_time?: string | null
+  mark_note?: string | null
+  market_value?: number | null
+  unrealized_pnl?: number | null
+  unrealized_pnl_pct?: number | null
 }
 
 export interface PaperExecution {
@@ -1015,6 +1067,13 @@ export interface ExperimentCreatePayload {
   name: string
   kind: ExperimentKind
   strategy_version_id: number
+  /**
+   * `true` = 只把这次研究的配置冻结成一条草稿（status=draft），不跑任何量化代码（ADR-182）。
+   *
+   * **只在真的要存草稿时才发这个键**：服务端 `extra="forbid"`，而且「有没有这个键」
+   * 本身就是「要不要现在跑」的意思，多发一个 `draft: false` 是无害的，但少发才是默认语义。
+   */
+  draft?: boolean
   notes?: string
   symbol?: string
   series_id?: number
@@ -1063,6 +1122,34 @@ export interface ExperimentSummaryOut {
   started_at: string | null
   completed_at: string | null
   error_message: string | null
+  // ---- Phase B（ADR-182/183）：以下字段可空，旧服务端不返回时按「未知」处理 ----
+  /** 实验建立时冻结的初始资金；未知就是 null，不拿回测默认值冒充。 */
+  initial_capital?: number | null
+  /** 实验冻结的行情区间（服务端存的是那一刻的输入，不是当前策略的默认值）。 */
+  start_date?: string | null
+  end_date?: string | null
+  updated_at?: string | null
+  /** 归档时间；非 null 说明这条实验已被收纳（归档不是删除，列表默认仍包含它）。 */
+  archived_at?: string | null
+  strategy_id?: number | null
+  strategy_name?: string | null
+  version?: string | null
+  /** 这条实验涉及的所有标的（一次实验可以扫多个标的）。 */
+  symbols?: string[]
+  /** `true` = 由一条已有的回测收养而来（ADR-183）。 */
+  is_adopted?: boolean
+}
+
+/** `PATCH /experiments/{id}`：只改标签，改不了配置——状态只能经由 run/archive 迁移。 */
+export interface ExperimentUpdatePayload {
+  name?: string
+  notes?: string
+}
+
+/** `POST /experiments/from-backtest/{run_id}`：收养一条已有回测，两个字段都可省。 */
+export interface ExperimentAdoptPayload {
+  name?: string
+  notes?: string
 }
 
 /** 详情 = 列表投影 + 请求原文 + 引擎摘要 + 逐条结果。 */
@@ -1082,6 +1169,13 @@ export interface ExperimentListOut {
 export interface ExperimentCompareOut {
   metrics: string[]
   experiments: Array<Record<string, unknown>>
+  /**
+   * 服务端对「这些实验的条件是否相同」的结论（ADR-184），由**存储值**比较得出：
+   * 前端只负责把它显示出来，绝不在本地重算——否则网页和 API 会给出两种结论。
+   */
+  comparability?: 'same-config' | 'different-config'
+  /** 人类可读的差异维度，例如 `参数不同`、`标的不同`、`初始资金不同`。 */
+  differences?: string[]
 }
 
 export const api = {
@@ -1163,6 +1257,12 @@ export const api = {
       `/backtests${strategyVersionId ? `?strategy_version_id=${strategyVersionId}` : ''}`,
     ),
   backtest: (id: number) => request<BacktestDetail>(`/backtests/${id}`),
+  /**
+   * The same run read as "may not have a result yet". Polling uses this one: a run
+   * that is still executing has no result row, and asking for `BacktestDetail`
+   * would be a lie about what came back (ADR-180).
+   */
+  backtestRun: (id: number) => request<BacktestRun>(`/backtests/${id}`),
   // Every strategy version across all strategies. The ensemble needs to vote with
   // versions of *different* strategies, so scoping candidates to one strategy (as
   // `/strategies/{id}/versions` does) would make cross-strategy voting unreachable.
@@ -1184,7 +1284,7 @@ export const api = {
     start?: string,
     end?: string,
   ) =>
-    request<BacktestDetail>('/backtests', {
+    request<BacktestRun>('/backtests', {
       method: 'POST',
       body: JSON.stringify({
         strategy_version_id: strategyVersionId,
@@ -1286,11 +1386,20 @@ export const api = {
         execution_overrides: executionOverrides,
       }),
     }),
-  signals: (state?: string, limit = 100, symbol?: string, offset = 0) =>
+  // One strategy version can be asked about directly (ADR-181): an account bound to a
+  // version must not have to filter the newest N signals client-side, which would
+  // silently drop the older ones.
+  signals: (
+    state?: string,
+    limit = 100,
+    symbol?: string,
+    offset = 0,
+    strategyVersionId?: number,
+  ) =>
     request<SignalRecord[]>(
       `/signals?limit=${limit}&offset=${offset}${state ? `&state=${encodeURIComponent(state)}` : ''}${
         symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
-      }`,
+      }${strategyVersionId ? `&strategy_version_id=${strategyVersionId}` : ''}`,
     ),
   acknowledgeSignal: (id: number) =>
     request<Record<string, unknown>>(`/signals/${id}/acknowledge`, { method: 'POST' }),
@@ -1332,6 +1441,8 @@ export const api = {
       { method: 'POST' },
     ),
   paperAccounts: () => request<PaperAccount[]>('/paper/accounts'),
+  /** One account with its money totals (cash, market value, unrealized, total equity). */
+  paperAccount: (accountId: number) => request<PaperAccount>(`/paper/accounts/${accountId}`),
   paperPerformance: (accountId: number) =>
     request<Record<string, any>>(`/paper/accounts/${accountId}/performance`),
   // The curve is a history: its last point is net deposits + realized P&L, and a deposit
@@ -1355,10 +1466,23 @@ export const api = {
     request<Array<Record<string, any>>>(
       `/paper/trades?limit=${limit}${accountId ? `&account_id=${accountId}` : ''}`,
     ),
-  executePaperSignal: (accountId: number, signalId: number) =>
+  /**
+   * Execute a signal on a paper account. `quantity` and `notional` are optional and
+   * mutually exclusive: without them the account keeps sizing by `max_position_pct`,
+   * with them the fill is exactly what was asked for (ADR-181).
+   */
+  executePaperSignal: (
+    accountId: number,
+    signalId: number,
+    sizing: { quantity?: number; notional?: number } = {},
+  ) =>
     request<PaperExecution>(`/paper/accounts/${accountId}/execute`, {
       method: 'POST',
-      body: JSON.stringify({ signal_id: signalId }),
+      body: JSON.stringify({
+        signal_id: signalId,
+        ...(sizing.quantity != null ? { quantity: sizing.quantity } : {}),
+        ...(sizing.notional != null ? { notional: sizing.notional } : {}),
+      }),
     }),
   closePaperAccount: (accountId: number) =>
     request<{ account_id: number; status: string }>(`/paper/accounts/${accountId}/close`, {
@@ -1386,10 +1510,31 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ amount }),
     }),
-  createPaperAccount: (name: string, initialCash: number) =>
+  /**
+   * Open an account. Passing `backtest_run_id` copies that run's strategy version and
+   * parameters into the account, which is what makes the paper result comparable with
+   * the backtest that motivated it (ADR-181).
+   */
+  createPaperAccount: (
+    name: string,
+    initialCash: number,
+    binding: {
+      strategyVersionId?: number
+      backtestRunId?: number
+      parameters?: Record<string, unknown>
+    } = {},
+  ) =>
     request<PaperAccount>('/paper/accounts', {
       method: 'POST',
-      body: JSON.stringify({ name, initial_cash: initialCash }),
+      body: JSON.stringify({
+        name,
+        initial_cash: initialCash,
+        ...(binding.strategyVersionId != null
+          ? { strategy_version_id: binding.strategyVersionId }
+          : {}),
+        ...(binding.backtestRunId != null ? { backtest_run_id: binding.backtestRunId } : {}),
+        ...(binding.parameters != null ? { parameters: binding.parameters } : {}),
+      }),
     }),
   settings: () => request<AppSettings>('/settings'),
   updateSetting: (key: string, value: string) =>
@@ -1560,13 +1705,31 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-  experiments: (limit = 20, strategyVersionId?: number) =>
+  experiments: (limit = 20, strategyVersionId?: number, status?: string) =>
     request<ExperimentListOut>(
       `/experiments?limit=${limit}${
         strategyVersionId ? `&strategy_version_id=${strategyVersionId}` : ''
-      }`,
+      }${status ? `&status=${status}` : ''}`,
     ),
   experiment: (id: number) => request<ExperimentDetailOut>(`/experiments/${id}`),
+  // 草稿（或失败重跑）→ running → completed/failed；状态冲突由服务端回 409（ADR-182）。
+  runExperiment: (id: number) =>
+    request<ExperimentDetailOut>(`/experiments/${id}/run`, { method: 'POST' }),
+  // 归档 = 收纳：实验仍在列表里，只是标成 archived，随时还能回读（ADR-182）。
+  archiveExperiment: (id: number) =>
+    request<ExperimentDetailOut>(`/experiments/${id}/archive`, { method: 'POST' }),
+  // 只能改名称与备注：配置在实验建立那一刻就冻结了（ADR-182）。
+  patchExperiment: (id: number, payload: ExperimentUpdatePayload) =>
+    request<ExperimentDetailOut>(`/experiments/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+  // 把一条已有回测收养成实验：结果逐字复制该 run 已存的值，绝不重算（ADR-183）。
+  experimentFromBacktest: (runId: number, payload: ExperimentAdoptPayload = {}) =>
+    request<ExperimentDetailOut>(`/experiments/from-backtest/${runId}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   compareExperiments: (ids: number[]) =>
     request<ExperimentCompareOut>(`/experiments/compare?ids=${ids.join(',')}`),
   // 204 无正文：删掉的只是这条实验记录，它产生的 BacktestRun 是另一个产物。

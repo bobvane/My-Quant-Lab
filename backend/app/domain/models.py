@@ -306,6 +306,12 @@ class BacktestRun(Base):
     execution_model_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     dataset_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    # Progress is a percentage plus the human-readable step the run is on, so a
+    # client that only has the run id can say "running -- computing metrics"
+    # instead of a bare spinner (ADR-180). A synchronous run walks the same
+    # steps and finishes on them; an asynchronous one is polled.
+    progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_step: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -454,6 +460,20 @@ class StrategyExperiment(Base):
     )
     started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Housekeeping timestamps: when the row was last touched, and when it left the
+    # active history. Both nullable -- a row created before the lifecycle columns
+    # existed never gets a backfilled value it could not have had.
+    updated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+    archived_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # The capital and the window the experiment ran on. These are SNAPSHOT columns:
+    # they are written once, from the validated request, and never re-derived from
+    # the strategy's current parameters -- so re-reading an old experiment keeps
+    # showing the numbers it actually ran with.
+    initial_capital: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    start_date: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    end_date: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
     results: Mapped[list[ExperimentResult]] = relationship(
         back_populates="experiment", cascade="all, delete-orphan"
@@ -576,6 +596,15 @@ class PaperAccount(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     strategy_id: Mapped[int | None] = mapped_column(ForeignKey("strategies.id"))
+    # An account may be opened *from* a finished backtest. Keeping the version and
+    # the exact parameter set (not just the strategy) is what makes the paper
+    # result comparable with the backtest that motivated it (ADR-181). The run id
+    # is nullable and never cascades: deleting a run must not delete an account.
+    strategy_version_id: Mapped[int | None] = mapped_column(ForeignKey("strategy_versions.id"))
+    backtest_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("backtest_runs.id", ondelete="SET NULL")
+    )
+    parameters_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     base_currency: Mapped[str] = mapped_column(String(8), default="USD", nullable=False)
     initial_cash: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
     cash: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)

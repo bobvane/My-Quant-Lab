@@ -12,6 +12,7 @@ import SettingsView from './views/SettingsView.vue'
 import ResourcesView from './views/ResourcesView.vue'
 import StrategyDetailView from './views/StrategyDetailView.vue'
 import LabView from './views/LabView.vue'
+import ExperimentsView from './views/ExperimentsView.vue'
 import './style.css'
 
 const router = createRouter({
@@ -21,6 +22,7 @@ const router = createRouter({
     { path: '/research', name: 'research', component: ResearchView },
     { path: '/strategies', name: 'strategies', component: StrategiesView },
     { path: '/backtest', name: 'backtest', component: BacktestView },
+    { path: '/experiments', name: 'experiments', component: ExperimentsView },
     { path: '/paper', name: 'paper', component: PaperView },
     { path: '/signals', name: 'signals', component: SignalsView },
     { path: '/data', name: 'data', component: DataView },

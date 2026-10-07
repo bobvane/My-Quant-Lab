@@ -162,6 +162,19 @@ class Settings(BaseSettings):
     # 504 is not an answer (docs/26 C10). False keeps the inline path, which the
     # test suite uses so that no broker is needed to exercise the same pipeline.
     ai_research_async: bool = True
+    # Run the engine half of a backtest on the worker instead of inside the POST
+    # request, so the run row is durable and a client can watch `progress` /
+    # `current_step` while it executes (ADR-180). False keeps the inline path every
+    # existing caller and the test suite use: a backtest is seconds of CPU on data
+    # that is already in the database, and a 200 that already carries the result is
+    # the smaller change. Both spellings resolve because this repository reads the
+    # bare field name (`BACKTEST_ASYNC`, see `.env.example`) while the setting is
+    # documented as `MQL_BACKTEST_ASYNC`; silently ignoring one of them would leave
+    # an operator believing they had turned it on.
+    backtest_async: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BACKTEST_ASYNC", "MQL_BACKTEST_ASYNC"),
+    )
 
     default_currency: str = "USD"
     default_timezone: str = "UTC"

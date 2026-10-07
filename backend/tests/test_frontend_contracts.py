@@ -604,6 +604,7 @@ def test_the_navigation_splits_research_from_the_strategy_library() -> None:
         "研究策略",
         "我的策略",
         "回测",
+        "实验",
         "模拟验证",
         "信号",
         "数据",
@@ -616,6 +617,7 @@ def test_the_navigation_splits_research_from_the_strategy_library() -> None:
         "/research",
         "/strategies",
         "/backtest",
+        "/experiments",
         "/paper",
         "/signals",
         "/data",
@@ -632,7 +634,7 @@ def test_the_navigation_splits_research_from_the_strategy_library() -> None:
     assert 'to="/resources"' in gated
     assert 'to="/settings"' not in gated
 
-    # The old address keeps working without becoming an eleventh navigation row.
+    # The old address keeps working without becoming a navigation row of its own.
     assert "{ path: '/market', redirect: '/strategies' }" in MAIN_TS
     assert "{ path: '/research'" in MAIN_TS
     assert "{ path: '/data'" in MAIN_TS

@@ -23,6 +23,9 @@ os.environ.setdefault("APP_ENVIRONMENT", "test")
 # the inline path is the same prepare/execute pair the queue drives. The async
 # lifecycle has its own tests, which turn this back on and watch the seam instead.
 os.environ.setdefault("AI_RESEARCH_ASYNC", "false")
+# Same reasoning for backtests: the request executes the run inline, which is what almost
+# every test asserts. test_backtest_status.py switches it on to watch the handover.
+os.environ.setdefault("BACKTEST_ASYNC", "false")
 
 import datetime as dt  # noqa: E402
 

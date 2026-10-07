@@ -16,6 +16,13 @@ Accounting contract:
 * SELL : proceeds = qty * fill - fee ; cash += proceeds ; the open PaperTrade is
   closed with ``pnl = proceeds - (qty * avg_cost + buy_fee)`` — i.e. the realised
   P&L already nets both sides' fees. A SELL with no open position is refused.
+
+Sizing: by default an order is all-in — a BUY deploys the whole cash balance (times
+``max_position_pct``) and a SELL closes the whole position. A caller may instead name
+an exact ``quantity`` or a ``notional`` (gross trade value), because "always all-in" is
+not a decision a manual trade can express (ADR-181). Explicit sizing is filled as
+asked; the cash guard still binds, because a size the account cannot pay for is not a
+size.
 """
 
 from __future__ import annotations
@@ -94,18 +101,29 @@ def execute_signal(
     *,
     settings: PaperExecutionSettings | None = None,
     now: dt.datetime | None = None,
+    quantity: Decimal | None = None,
+    notional: Decimal | None = None,
 ) -> dict[str, Any]:
-    """Execute ``signal`` against ``account`` and persist the result."""
+    """Execute ``signal`` against ``account`` and persist the result.
+
+    ``quantity`` (units) and ``notional`` (gross trade value) ask for an exact size and
+    are mutually exclusive; both default to ``None``, which keeps the historical all-in
+    sizing so every existing caller behaves exactly as before (ADR-181).
+    """
 
     limits = settings or PaperExecutionSettings()
     moment = _fill_moment(signal, now)
 
+    # The refusals below keep their order and wording: callers (and the API's 422
+    # messages) already depend on them, so a new reason to refuse must come after them.
     if account.status != "active":
         raise PaperError("paper account is not active")
     if signal.state not in {"BUY", "SELL"}:
         raise PaperError(f"signal state {signal.state} is not executable")
     if signal.price_reference is None:
         raise PaperError("signal has no price_reference to fill at")
+    if quantity is not None and notional is not None:
+        raise PaperError("specify either quantity or notional, not both")
 
     base_price = _dec(signal.price_reference)
     slip = _fee_rate(limits.slippage_bps)
@@ -122,10 +140,31 @@ def execute_signal(
 
     if signal.state == "BUY":
         result = _open_long(
-            db, account, signal, base_price, slip, fee_rate, limits, moment, version_label
+            db,
+            account,
+            signal,
+            base_price,
+            slip,
+            fee_rate,
+            limits,
+            moment,
+            version_label,
+            quantity=quantity,
+            notional=notional,
         )
     else:
-        result = _close_long(db, account, signal, base_price, slip, fee_rate, moment, position)
+        result = _close_long(
+            db,
+            account,
+            signal,
+            base_price,
+            slip,
+            fee_rate,
+            moment,
+            position,
+            quantity=quantity,
+            notional=notional,
+        )
     record_audit(
         db,
         event_type="paper_order_executed",
@@ -146,6 +185,34 @@ def execute_signal(
     return result
 
 
+def _requested_quantity(
+    quantity: Decimal | None, notional: Decimal | None, price: Decimal
+) -> Decimal | None:
+    """The units an explicit order asks for, or ``None`` for the engine's own sizing.
+
+    ``notional`` is converted at the *fill* price, so the caller's amount is what the
+    order is worth rather than what the signal's close was worth — the difference is the
+    slippage the fill actually pays. Both paths round down at the ledger's scale
+    (Numeric(24, 10)) before anything is priced: a size the ledger cannot store is a size
+    the account cannot hold, and rounding *after* the cash guard is how the guard used to
+    reject orders the balance could cover (ADR-122).
+    """
+
+    if price <= 0:
+        raise PaperError("invalid fill price")
+    if quantity is not None:
+        requested = _dec(quantity).quantize(_QUANTITY_SCALE, rounding=ROUND_DOWN)
+        if requested <= 0:
+            raise PaperError("quantity must be positive")
+        return requested
+    if notional is not None:
+        requested = (_dec(notional) / price).quantize(_QUANTITY_SCALE, rounding=ROUND_DOWN)
+        if requested <= 0:
+            raise PaperError("notional is too small to fill")
+        return requested
+    return None
+
+
 def _open_long(
     db: Session,
     account: PaperAccount,
@@ -156,6 +223,9 @@ def _open_long(
     limits: PaperExecutionSettings,
     moment: dt.datetime,
     version_label: str | None,
+    *,
+    quantity: Decimal | None = None,
+    notional: Decimal | None = None,
 ) -> dict[str, Any]:
     # A closed position keeps its row (quantity 0) so its realised P&L survives;
     # a later BUY must reuse that row, never insert a second one for the same
@@ -170,12 +240,22 @@ def _open_long(
         raise PaperError("already holding this asset (V1 is long-only)")
 
     fill_price = base_price * (1 + slip)
-    budget = _dec(account.cash) * _dec(limits.max_position_pct)
     if fill_price <= 0:
         raise PaperError("invalid fill price")
-    quantity = (budget / (fill_price * (1 + fee_rate))).quantize(
-        _QUANTITY_SCALE, rounding=ROUND_DOWN
-    )
+    explicit = _requested_quantity(quantity, notional, fill_price)
+    if explicit is None:
+        budget = _dec(account.cash) * _dec(limits.max_position_pct)
+        quantity = (budget / (fill_price * (1 + fee_rate))).quantize(
+            _QUANTITY_SCALE, rounding=ROUND_DOWN
+        )
+    else:
+        # An explicit size is filled as asked and is deliberately not scaled by
+        # `max_position_pct`: the caller named the size, and quietly shrinking it would
+        # persist a different order than the one confirmed. The cash guard below still
+        # binds — a size the account cannot pay for is not a size (ADR-181).
+        if notional is not None and _dec(notional) > _dec(account.cash):
+            raise PaperError("notional exceeds available cash")
+        quantity = explicit
     if quantity <= 0:
         raise PaperError("insufficient cash")
     fees = quantity * fill_price * fee_rate
@@ -248,13 +328,23 @@ def _close_long(
     fee_rate: Decimal,
     moment: dt.datetime,
     position: PaperPosition | None,
+    *,
+    quantity: Decimal | None = None,
+    notional: Decimal | None = None,
 ) -> dict[str, Any]:
     if position is None or _dec(position.quantity) <= 0:
         raise PaperError("no open position to sell")
 
-    quantity = _dec(position.quantity)
+    held = _dec(position.quantity)
     avg_cost = _dec(position.avg_cost)
     fill_price = base_price * (1 - slip)
+    explicit = _requested_quantity(quantity, notional, fill_price)
+    # Without explicit sizing the whole position is sold, which is what a signal exit
+    # means; a manual SELL may name a smaller size (ADR-181).
+    quantity = held if explicit is None else explicit
+    if quantity > held:
+        raise PaperError("cannot sell more than the open position")
+    partial = quantity < held
     gross = quantity * fill_price
     fees = gross * fee_rate
     proceeds = gross - fees
@@ -268,12 +358,23 @@ def _close_long(
         )
         .order_by(PaperTrade.id.desc())
     )
-    buy_fee = _dec(open_trade.fees) if open_trade is not None else Decimal(0)
+    entry_quantity = _dec(open_trade.quantity) if open_trade is not None else Decimal(0)
+    # The open trade carries the entry's fees for the *whole* position. A partial close
+    # realises only its slice of that entry, so the slice is charged the share of the
+    # buy fee it used: charging the whole entry fee to the first slice would make every
+    # partial exit look worse than the position really was, and would leave the
+    # remaining slice carrying no entry cost at all. A full close keeps the whole fee,
+    # exactly as before.
+    slice_share = quantity / entry_quantity if partial and entry_quantity > 0 else Decimal(1)
+    buy_fee = (_dec(open_trade.fees) if open_trade is not None else Decimal(0)) * slice_share
+    entry_slippage = (
+        _dec(open_trade.slippage) if open_trade is not None else Decimal(0)
+    ) * slice_share
     pnl = proceeds - (quantity * avg_cost + buy_fee)
 
     account.cash = _dec(account.cash) + proceeds
     position.realized_pnl = _dec(position.realized_pnl) + pnl
-    position.quantity = Decimal(0)
+    position.quantity = held - quantity
 
     order = PaperOrder(
         account_id=account.id,
@@ -290,7 +391,34 @@ def _close_long(
     )
     db.add(order)
     db.flush()
-    if open_trade is not None:
+    if open_trade is not None and partial:
+        # A partial close realises a slice, so the closed row is the slice and the open
+        # row keeps the rest of the entry. Trades then still sum to the position's
+        # realised P&L instead of the slice vanishing from the trade history. Without an
+        # open trade row there is no entry to attribute (a position may exist without
+        # one), so the order and `position.realized_pnl` carry the slice alone.
+        db.add(
+            PaperTrade(
+                account_id=account.id,
+                order_id=order.id,
+                asset_id=signal.asset_id,
+                direction="LONG",
+                entry_time=open_trade.entry_time,
+                entry_price=open_trade.entry_price,
+                exit_time=moment,
+                exit_price=fill_price,
+                quantity=quantity,
+                fees=buy_fee + fees,
+                slippage=entry_slippage,
+                pnl=pnl,
+                reason=open_trade.reason,
+                strategy_version=open_trade.strategy_version,
+            )
+        )
+        open_trade.quantity = entry_quantity - quantity
+        open_trade.fees = _dec(open_trade.fees) - buy_fee
+        open_trade.slippage = _dec(open_trade.slippage) - entry_slippage
+    elif open_trade is not None:
         open_trade.exit_time = moment
         open_trade.exit_price = fill_price
         open_trade.pnl = pnl

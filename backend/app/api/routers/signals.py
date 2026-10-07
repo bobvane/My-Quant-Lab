@@ -36,6 +36,7 @@ def list_signals(
     state: str | None = None,
     asset_id: int | None = None,
     symbol: str | None = None,
+    strategy_version_id: int | None = None,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> list[SignalOut]:
@@ -44,6 +45,10 @@ def list_signals(
         stmt = stmt.where(Signal.state == state)
     if asset_id:
         stmt = stmt.where(Signal.asset_id == asset_id)
+    if strategy_version_id is not None:
+        # ADR-181: a paper account bound to a strategy version needs that version's
+        # signals; filtering client-side over the newest N rows loses them silently.
+        stmt = stmt.where(Signal.strategy_version_id == strategy_version_id)
     if symbol:
         asset = db.scalar(select(Asset).where(Asset.symbol == symbol))
         if asset is None:

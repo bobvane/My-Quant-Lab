@@ -3269,6 +3269,102 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 影响与兼容：改动面＝`frontend/src/views/SettingsView.vue`（`saveModels()` 的 `!target` 分支改为调用 `save()` 并按选择数量写提示、`save()` 返回 `Promise<boolean>`、新增 `discoveryForNewProvider` 与 `discoverySaveLabel` 两个 computed、发现面板保存按钮的文案与 `:disabled="savingModels || saving"`）与本 ADR。**不改** `frontend/src/api.ts`、后端任何文件（含 schema、路由、服务、迁移）、数据库、AI runtime、Research、Compiler、Strategy、Backtest、Experiment、Paper Trading、Dashboard、Docker、CI、release workflow 与 NAS 部署。已保存 provider 的 `PUT` 路径与 ADR-176 逐字兼容；`POST /settings/ai/providers` 的请求体形状不变（仍沿用 ADR-176 的 `models` + `manual_models`，只是现在发现面板也会走它）。已知代价：新 provider 场景的按钮语义依赖表单的必填校验（名称/base_url/API Key），因此在表单未填完时点击会得到必填提示而不是创建——这是有意的（校验失败不产生半成品 provider）。
 - 测试：本次是前端交互缺陷，按仓库既有约束**不引入新的 JS 测试框架**，用浏览器级回归看守（本地可控栈：假 OpenAI 兼容 `/models` 服务 + 本地后端 + 修复后构建的 SPA，CDP 驱动真实 Chrome 并逐条记录请求/响应）——①PATH A：已有 Provider → 发现 → 勾选 →「保存模型选择」→ 恰好一个 `PUT .../providers/{id}/models` 200，且**不出现** `POST /settings/ai/providers`；②PATH B：新建 Provider → 发现 → 勾选 3 个 →「创建 Provider 并保存模型」→ 一个 `POST /settings/ai/providers` 201，body 同时含 `models`(3) 与 `manual_models`，面板关闭、Provider 列表与「AI 模型目录」刷新、提示 `Provider 已创建，并保存 3 个模型`；③PATH C：新建 Provider 且不选模型 → `POST` 201、`models=[]`、`manual_models=[]`、提示恰为 `Provider 已创建`；④PATH D：3 个 discovered + 2 个 manual → 最终 5 个模型全部存在、互不覆盖，`manual/added-beta:cheap:1:2` 的 `model_name` 逐字保留而 `:cheap:1:2` 解析为 `capability_tier=cheap`；⑤空表单点该按钮 → 0 个请求但**必有**必填提示且面板保持打开（原静默空操作消除）。后端全量测试（`pytest` 1552 通过、`ruff check`/`ruff format --check` 干净）与前端 `vue-tsc --noEmit`/`vite build` 保持通过。
 
+## ADR-179：异步任务的状态只能问出来——统一轮询器把「问不到」与「运行失败」分开
+
+- 背景：这个项目里有两类「服务端要跑一会儿」的动作——AI 研究（`POST /api/v1/ai/research` 返回 202，前端轮询到结束，`frontend/src/views/LabView.vue:56-57/509-589` 内联实现了 `POLL_MS = 2000`、`POLL_FAILURE_LIMIT = 3`、`stopPolling`/`startPolling`/`tick`/`applyRun`）与回测（同步 HTTP，`BacktestView.vue` 只有一个 `running` 布尔）。轮询逻辑只存在于一个视图里，于是第二个需要它的视图只有两条路：把那一套复制一遍（两份语义随后必然漂移），或者用「一个布尔 + 一次 `try/catch`」草草了事——后者会把**问不到状态**渲染成**运行失败**，也就是把网络抖动写成策略失败。ADR-088 已经要求「一个模块失败不能让整页空白，每个请求自带 catch 并按模块名报错」，但那条规则管的是「页面别空白」，没说清「任务状态拿不到」和「任务本身失败」在界面上必须是两件事。
+- 决策：
+  1. **新增 `frontend/src/polling.ts` 的 `createPoller<T>()`**：调用方只回答三件事——怎么问（`fetch`）、什么算结束（`isDone`）、拿到之后怎么办（`onUpdate`/`onError`/`onSettled`）。间隔默认 2000 ms、连续失败上限默认 3 次，两者都可覆盖。
+  2. **停止之后到达的响应一律丢弃**：每次 `stop()` 递增一个 generation 令牌，`tick` 在 await 前后都比对令牌。否则一次已经结束（或被用户取消）的运行会被上一次的迟到响应覆盖回去。
+  3. **连续失败不是失败**：达到上限时停止并回调 `onSettled(null)`，视图必须显示「无法获取状态」这一类独立的文案，而**不得**显示运行失败。任何一次成功都会把失败计数清零。
+  4. **销毁即停**：`createPoller` 在组件作用域内自动注册 `onScopeDispose(stop)`（用 `getCurrentScope()` 判断，作用域外调用不报错、不注册）。
+  5. **不重写已经能工作的地方**：`LabView.vue` 的既有轮询保持原样，本次只让新用例（回测运行状态）使用统一实现；「能工作就别动」优先于「全都统一」。
+  6. **不新增依赖、不改后端契约**：轮询只是 HTTP GET，不引入 SSE / WebSocket / 事件总线。
+- 理由：①任务状态是**问出来的**，不是猜出来的——没有推送通道时，唯一诚实的做法是定期问并如实展示问的结果。②「问不到」与「失败」是两个不同的事实，混在一起会让用户以为策略跑挂了，而其实只是浏览器到服务端的这一跳出了问题（ADR-088 的同一条立场）。③一份实现胜过两份：复制粘贴的轮询器在第二处只会演化出不同的失败语义，而这类差异没有任何测试会拦住。④generation 令牌是防止迟到响应复活已结束状态的最小实现，比引入状态机库更简单确定（ADR-AGENTS 的「简单确定优于聪明晦涩」）。⑤不做 SSE：它要多一条长连接、多一层容器/代理配置（NAS 上是 Nginx 静态 + 反代），换来的只是把 2 秒粒度变成即时，收益与代价不成比例。
+- 影响与兼容：改动面＝新增 `frontend/src/polling.ts`、`frontend/src/views/BacktestView.vue` 使用它、本 ADR。**不改** `frontend/src/api.ts` 的请求层、`LabView.vue` 的既有轮询、后端任何文件、数据库、依赖、容器与部署。已知代价：轮询有 2 秒量级的显示延迟；页面在后台标签页里会继续问（浏览器节流定时器，实际频率更低）；连续失败上限被写死在调用方，若某个任务需要更长容忍度必须显式覆盖。
+- 测试：仓库没有前端测试框架（`frontend/package.json` 只有 dev/build/preview/typecheck，ADR-178 已就此设过立场），因此由浏览器级回归看守——在本地可控栈里真实跑一次回测，断言：①运行中能看到 `progress` 与当前步骤文案；②结束后状态变成成功且结果区出现；③后端返回失败时页面逐字显示 `error_message`（而不是空白或「运行失败」以外的猜测）；④轮询连续失败时显示的是「无法获取状态」而非失败。`vue-tsc --noEmit` 与 `vite build` 保持通过。
+
+## ADR-180：回测运行有状态——状态要能被查询，进度不进结果哈希
+
+- 背景：`POST /api/v1/backtests` 在请求内同步跑完（`backend/app/api/routers/backtests.py:34` 内联 `store_backtest`）。`BacktestRun` 早就有 `status`/`started_at`/`finished_at`/`error_message` 这些列，但前端只有一个 `running` 布尔：请求挂着的这段时间里，页面既看不到进行到哪一步，刷新一次就再也找不回这个运行；更糟的是如果进程中途死掉，这条运行会永远停在 `running`，而没人会去把它标成失败。AI 研究已经建立了「返回 202 + 前端轮询到结束」的先例（`POST /api/v1/ai/research` → `quantlab.run_research`），回测却没有。
+- 决策：
+  1. `backtest_runs` 增加 `progress`（Integer，0–100，默认 0）与 `current_step`（String(64)，nullable）两列（迁移 0018）。**progress 是展示用的粗粒度刻度，不是精确百分比**；它由运行步骤决定（`loading data` 5 → `computing features` 20 → `running strategy` 45 → `evaluating exits` 70 → `computing metrics` 90 → `completed` 100）。
+  2. **progress 与 current_step 不参与 `result_hash`**。ADR-040 的哈希只覆盖策略版本、数据集、引擎版本、特征版本、参数、指标与交易数——如果把运行过程元数据也算进去，同一策略、同一份数据、同一套参数会得到不同的 `result_hash`，ADR-081 的「数据集+哈希即可复现」就此失效。
+  3. `backend/app/data/backtest_service.py` 拆出 `prepare_backtest`（校验输入、建 run、置 running）/`execute_backtest`（跑引擎并把 result/metric/trade 落库）/`fail_backtest`（写 `status="failed"` 与 `error_message`）；`store_backtest` 保留为「同步跑完」的组合入口，对外行为不变。
+  4. 新增设置 `backtest_async`（env `MQL_BACKTEST_ASYNC`，默认 **false**）：false 时 POST 保持同步（本地、测试、CI 都不需要 Redis 与 worker）；true 时 POST 建 run 后交给 Celery（`quantlab.run_backtest`）并立刻返回该 run（`status="running"`，尚无 result），由前端轮询。新增设置必须同步 `.env.example` 与 `docker-compose.yml`（`test_no_dead_settings.py`）。
+  5. **`GET /api/v1/backtests/{run_id}` 对尚无 result 的运行也必须可读**（返回 status/progress/current_step/error_message），否则「查看状态」无从谈起——先能读，才谈得上异步。
+  6. 失败就是失败：引擎抛错时把 run 标为 `failed` 并写入逐字错误信息，不留下半截 result；warnings 口径（ADR-054）不变。
+  7. 本轮**不实现取消**：没有的东西不写进接口（宁缺勿假）。
+- 理由：①「运行到哪一步」是用户能看见的事实，不该只活在一条 HTTP 连接的寿命里；②默认同步保住了本地与 CI 的零依赖（ADR-174 对实验的同类立场），异步是部署时的显式选择而不是所有人的默认负担；③进度不进哈希，才能在「过程可观测」与「结果可复现」之间两全；④先保证 GET 在没有 result 时能回答，是异步化的前提而不是附加项。
+- 影响与兼容：迁移 0018 加两列（有 server_default，旧行读作 0/null，不需要回填）；`POST /backtests` 的响应形状不变（仍是 run 对象），只是异步时 `result` 为 null；同步路径与既有 golden fixtures 行为完全不变；不引入新的外部依赖。已知代价：异步模式下必须真的有人跑 worker，否则运行会停在 `running` 直到被下一次健康检查发现（因此该 flag 默认关闭，只在明确部署了 worker 的环境打开）。
+- 测试：新增 `backend/tests/test_backtest_status.py`（progress/current_step 落库并可读、无 result 时 GET 仍可读、引擎失败时 `status="failed"` 且 `error_message` 逐字落库、flag 关闭时 POST 仍同步返回完整结果）；`backend/tests/test_migrations_sqlite.py`/`test_migration_revisions.py` 保持通过；既有回测与实验测试不得修改期望值。
+
+## ADR-181：模拟账户要记住它在验证哪一个策略版本与哪一次回测
+
+- 背景：`paper_accounts` 只有 `strategy_id`（指向策略，不指向版本），而策略版本不可变（ADR-005）、一次回测绑定的是 `strategy_version_id` + 数据集快照 + 参数 + `result_hash`（ADR-081）。于是最自然的一条链路断在这里：「这次回测看起来不错 → 用同一版本、同一套参数开一个模拟账户继续观察」。`POST /api/v1/paper/accounts` 只收 `name` 与 `initial_cash`（`frontend/src/api.ts:1389`），账户建出来之后无法回答「它在验证哪一版、哪套参数」，界面上的「回测 vs 模拟」也就只能靠人眼对齐。同时持仓表只有数量与成本价，没有最新收盘价、市值与未实现盈亏——「总资产」这个账户最基础的数字在界面上根本不存在。
+- 决策：
+  1. `paper_accounts` 增加 `strategy_version_id`（FK `strategy_versions.id`，nullable）、`backtest_run_id`（FK `backtest_runs.id`，`ondelete="SET NULL"`，nullable）、`parameters_json`（JSON，默认 `{}`，non-null）（迁移 0018）。
+  2. `POST /api/v1/paper/accounts` 接受这三个字段：给了 `backtest_run_id` 时校验该运行**已完成且成功**（否则 422），并从它推导策略版本与参数（显式传入的版本/参数优先）；legacy 的 `strategy_id` 仍然接受，由策略的当前版本反推，保证旧调用方与既有测试不受影响。
+  3. `GET /api/v1/paper/accounts/{account_id}` 返回账户总额：`cash`、`market_value`（持仓按最新**已收盘**收盘价估值）、`total_equity`、`unrealized_pnl`、`realized_pnl`、`net_deposits`、`total_pnl`、`total_pnl_pct` 与 `metric_notes`；`GET .../positions` 的每一行增加 `symbol`/`mark_price`/`mark_time`/`mark_note`/`market_value`/`unrealized_pnl`/`unrealized_pnl_pct`。
+  4. 标记价一律取**最新已收盘 bar**；取不到就返回 null 并在 `metric_notes`/`mark_note` 里说明，**绝不造数**。盈亏只能由「数量 × 标记价」得出，不得从现金变动倒推（ADR-124）；取钱不是亏钱（ADR-066）——`net_deposits` 的对称更新规则不变。
+  5. `POST /api/v1/paper/accounts/{account_id}/execute` 增加可选 `quantity` 与 `notional`（两者互斥、必须为正数、`notional` 不得超过账户当前现金）；都不传时保持 ADR-030 的默认行为（由 `max_position_pct` 决定的整仓）。数量与金额是用户对「买多少」的最小控制权，默认值不变是为了不动既有语义。
+  6. `reset` 一并删除该账户的 `PaperOrder`（否则重置之后 `/orders` 仍会返回一批已经不属于任何账本的孤儿委托，审计与界面自相矛盾）；`initial_cash` 传 0 按「显式传入 0」处理，不再被 `or` 当成未传。
+  7. 与 Ghostfolio 的隔离不变：以上字段与端点只读写 `paper_*` 表；真实持仓、交易、账户仍然只读（ADR-001/ADR-006/ADR-033）。本轮**不实现自动按信号执行**——模拟盘依然只能由人点击执行（ADR-030），守住「不自动交易」这条红线。
+- 理由：①「在验证哪一版」本身就是可复现证据的一部分，账户丢掉版本号等于把回测与模拟之间的血缘丢掉；②总资产只能由 `cash + Σ(数量 × 最新收盘价)` 得到，任何从现金倒推盈亏的做法都会把入金/出金算成盈亏（ADR-066 已经为此立过规矩）；③重置必须是一次真正的账本清空，否则用户会看到「已重置」却仍有委托；④数量/金额入口是模拟盘从「演示」走向「可验证」的最小一步，而默认整仓保证了旧行为不变。
+- 影响与兼容：迁移 0018 加三列（nullable 或有默认值，旧账户读作「未绑定」，`回测 vs 模拟` 在未绑定时按策略比较而不是报错）；新增字段全部可选，旧客户端与既有 API 测试不受影响；不改 `paper_trades`（已实现盈亏的唯一真值仍在交易记录里）。已知代价：标记价需要一次行情查询（每个账户一次），行情不可用时未实现盈亏会显示为「未知」而不是 0——这是刻意的，0 会被误读成「不赚不亏」。
+- 测试：新增 `backend/tests/test_paper_account_binding.py`（从回测运行绑定的账户落库版本/参数、未完成的运行被拒 422、legacy `strategy_id` 仍可用、`reset` 清空委托、`initial_cash=0` 被尊重、`quantity`/`notional` 互斥与上限校验）与 `backend/tests/test_paper_isolation.py`（隔离守卫：模拟盘子包不得导入 Ghostfolio 客户端、不得存在向真实持仓写入的路径）；`backend/tests/test_paper_engine.py` 等既有测试的期望值保持通过。
+
+## ADR-182：实验要有生命周期（草稿先冻结配置，归档而不是删除）
+
+- 背景：实验层（ADR-174，迁移 0016）只有 `running`/`completed`/`failed` 三个状态，`POST /api/v1/experiments` 一提交就同步开跑（`backend/app/api/routers/experiments.py`）。这留下两个洞：①用户想先「把这次研究的配置存下来」、稍后再决定要不要花算力跑，没有入口；②实验历史想收尾时只有 `DELETE` 一条路（`experiments.py:673`，级联删结果行），而研究历史的价值恰恰在于**留着**——删掉之后「当时用哪套参数、跑出什么」就永久消失了，且被删的结果行可能正是某个模拟账户的血缘来源（ADR-181）。
+- 决策：
+  1. `status` 取值集合扩为 `draft`/`running`/`completed`/`failed`/`archived`（列是 `String(16)`，无需为取值集合迁移；取值在服务端校验，非法 422）。生命周期：`draft → running → completed|failed`，`draft|completed|failed → archived`。
+  2. `POST /api/v1/experiments` 增加 `draft: bool = False`。`draft=True` 时**只写行**：冻结 `parameters_json`/`request_json`/`initial_capital`/`start_date`/`end_date`，`status="draft"`，不跑任何量化代码、不写结果行、不写 `started_at`。`draft=False` 保持既有行为（同步执行，201）。
+  3. 新增 `POST /api/v1/experiments/{experiment_id}/run`：把已存的 `request_json` 重新通过 `ExperimentCreate` 校验后执行，`draft|failed → running → completed|failed`；重跑前清掉上一次的结果行，避免同一实验里出现两代互相矛盾的数字。
+  4. 新增 `POST /api/v1/experiments/{experiment_id}/archive`：`draft|completed|failed → archived` 并写 `archived_at`；`running` 与已归档一律 **409**。列表默认仍包含归档行——归档是收纳，不是删除。
+  5. 新增 `PATCH /api/v1/experiments/{experiment_id}`，**只允许改 `name` 与 `notes`**。状态不是普通字段：它只能经由 `run`/`archive` 迁移，不给 PATCH 留后门，否则状态机会退化成「谁都能写的一列」，也就无法被测试穷举。
+  6. 执行实现只有一份：抽到 `backend/app/data/experiment_service.py`，路由只负责 HTTP 与状态码映射（404 未知 / 409 状态冲突 / 422 校验失败，每种状态码只有一个响应形状）。
+- 理由：①研究配置是用户资产，**先冻结再运行**才让「同一配置重跑」这句话有意义；②归档保住历史又让列表干净，删除不应当是默认收尾动作；③「保存草稿后再运行」与「提交即运行」必须走同一份执行代码，否则会出现「手工重跑」与「实验重跑」两套数字；④状态机只留两个入口，才能把每条非法迁移都写成一个断言。
+- 影响与兼容：迁移 0019 给 `strategy_experiments` 加 5 列（`updated_at`/`archived_at`/`initial_capital`/`start_date`/`end_date`，全部 nullable），旧行读作 null，无需回填；既有 `POST`/`GET`/`DELETE` 的路径、状态码与响应形状不变，`LabView` 的既有实验面板不受影响。已知代价：草稿在运行前仍可改 `name`/`notes`，但**量化配置在创建草稿时就已冻结，且 `run` 只读 `request_json`、不接受请求体覆盖**——即「可改的是标签，不可改的是配置」。
+- 测试：新增 `backend/tests/test_experiment_lifecycle.py`（`draft=True` 不跑量化代码且没有结果行、草稿运行后的指标与非草稿同参数实验**完全一致**、completed 再 run 409、running 归档 409、已归档再归档 409、PATCH 空体 422、非法 status 422、失败实验逐字保留 `error_message` 且仍可回读、策略默认参数被改后历史实验的 `parameters` 不变、归档行仍在列表里）。
+
+## ADR-183：已有的回测可以被「收养」成实验，但只收养一次
+
+- 背景：Phase A 之后，库里已经有大量已完成的回测运行（带 `strategy_version_id`、参数、`result_hash`、指标与交易）。实验层要成为研究历史，可 `POST /api/v1/experiments` 只会**新跑一次**；于是 Phase A 的历史回测在实验列表里完全不可见，成了孤儿数据。让用户照着旧回测手抄参数再跑一遍，既费时，也会因为数据/参数已经漂移而产出**第二份不同的数字**——那正好摧毁「研究可复现」这件事。
+- 决策：
+  1. 新增 `POST /api/v1/experiments/from-backtest/{run_id}`（201）：把一条 `status="completed"` 的 `BacktestRun` 收养为一条 `kind="backtest"`、`status="completed"` 的实验。
+  2. 结果值（`metrics`/`summary`/`result_hash`/`engine_version`/`feature_version`/`dataset_hash`）**逐字复制该 run 已存的值，绝不重算**（ADR-081：可复现证据就是那条 run 的 `result_hash`，重算等于伪造第二份证据）。
+  3. 血缘复用既有 `ExperimentResult.backtest_run_id`（迁移 0016 已有该列，**不新增表也不新增列**）；实验的 `request_json` 额外记录 `adopted_from_backtest_run`，让「它是收养来的、来自哪条 run」可被机器读出，而不是靠命名猜。
+  4. 错误语义：run 不存在 **404**；run 未完成或没有结果 **409**；**该 run 已经被收养过**（`experiment_results.backtest_run_id == run_id` 已存在）**409，并在 detail 里给出已有实验 id**。同一份执行证据只对应一条研究记录，避免双胞胎与「到底哪条才算」的歧义。失败的回测不允许收养（409）：它没有结果可引用，要保留失败事实应当看回测记录本身（ADR-180）。
+  5. `DELETE /api/v1/experiments/{experiment_id}` 只删实验与它的结果行，**绝不动被收养的 `BacktestRun`**——否则从实验列表点删除就会顺手摧毁回测历史。
+- 理由：①收养而不是复制，才让「实验 → 回测 → 结果」三处天然是同一行数据，指标不可能对不上；②不重算=不制造第二份真相；③显式拒绝重复收养（409 + 已有 id）比静默新建第二条更难骗人，也让「一个 run 一份研究记录」成为可断言的契约；④不新增表，Experiment 继续是**研究层对象**，执行层仍然只有 `backtest_runs`（ADR-174 的立场不变）。
+- 影响与兼容：新路由必须在 `docs/12_API_SPEC.md` 登记（`backend/tests/test_api_spec_truth.py` 双向绑定）；`POST /experiments/from-backtest/{run_id}` 必须注册在 `/experiments/{experiment_id}` 之前，否则会被路径参数吃掉；不引入新依赖、不新增 worker（实验仍同步执行）。
+- 测试：新增 `backend/tests/test_experiment_adoption.py`（真实跑一条回测后收养：指标与 run 存储值逐字相同、`result_hash` 一致、`results[0].backtest_run_id == run_id`、`is_adopted` 为真；重复收养 409 且 detail 含已有实验 id；未完成 run 409；不存在的 run 404；删除实验后 `BacktestRun` 仍存在）。
+
+## ADR-184：比较实验时必须显示「条件不同」，不许偷偷当成同条件
+
+- 背景：`GET /api/v1/experiments/compare` 已经能把多个实验的**已存**指标并排返回（ADR-174，不重算）。但它只返回数字，不返回「这些数字是在什么条件下得到的」。两个实验若一个跑 AAPL 2024–2026、另一个跑 DEMO-BTC 2020–2021，界面上仍然是一个漂亮的对照表——用户很容易把「参数不同」之外的差异（标的不同、时间范围不同、初始资金不同）读成策略优劣。比较页的真正价值是回答「为什么 A 比 B 好」，而这个问题在条件不同时**根本无法回答**。
+- 决策：
+  1. `ExperimentCompareOut` 增加 `comparability`（`"same-config"` / `"different-config"`）与 `differences: list[str]`（人类可读的差异维度：`策略版本不同`/`参数不同`/`标的不同`/`周期不同`/`时间范围不同`/`初始资金不同`），并且每个实验行追加 `config`（实验 id/名称/策略/版本/状态/标的/周期/起止/初始资金/参数/kind）。
+  2. `differences` 与 `comparability` 一律**由服务端比较实验的存储值**得出，不在前端拼装——否则同一份数据在网页与 API 上会给出两种结论，且无法被测试。
+  3. 前端比较页必须把 `differences` 渲染成显著警示（「这些实验的条件并不相同，指标高低不能直接当成策略优劣」）；`same-config` 时才显示「配置相同，可以直接比较」。
+  4. 比较仍然**允许**条件不同的实验（用户有权这么做），只是不允许它看起来像同条件实验。
+- 理由：①比较的前提是条件可解释，先摆条件再摆数字，才符合本项目「结论先行、但结论必须能被追问」的界面原则；②差异计算放在服务端，才能被一条断言覆盖、也才能在别的客户端复用；③「允许但必须标注」比「禁止比较」更实用：用户常常正想知道换个标的会怎样。
+- 影响与兼容：`comparability`/`differences`/`config` 都是**追加**字段，既有调用方按原样读取 `metrics`/`experiments` 仍然可用；指标列名沿用既有 `COMPARE_METRICS`，不发明新指标名；不重算任何量化值（继续满足「比较只读已存数据」）。
+- 测试：并入 `backend/tests/test_experiment_lifecycle.py`（同配置两实验 → `same-config` 且 `differences == []`；只换参数 → `different-config` 且含 `参数不同`；换标的/时间/初始资金各有对应项；每行 `config` 字段齐全且与各自存储值一致）。
+
+## ADR-185：实验的结果页要能印全「最终资产 / 年化 / 手续费」
+
+- 背景：Phase B 要求实验详情页展示基本信息 + 结果（最终资产/总收益/年化/最大回撤/Sharpe/胜率/交易次数/手续费）+ 交易 + 权益曲线。但实验对外发布的 `metrics` 只有 `COMPARE_METRICS` 这五个（`_comparable`，`backend/app/data/experiment_service.py:139`），而引擎其实算过 `final_equity` 与 `cagr`（`backend/app/research/metrics.py:35`、`backend/app/research/metrics.py:37`），`_summary` 也在顶层存过 `final_equity`（`backend/app/data/backtest_service.py:514`）；**手续费更没有任何合计值**——它只逐笔躺在 `backtest_trades.fees`（`backend/app/domain/models.py:406`）。于是结果页只能把「最终资产/年化/手续费」写成「未知」，或者要用户自己去回测页翻成交明细。
+- 决策：
+  1. 新增 `EXPERIMENT_METRICS = (*COMPARE_METRICS, "final_equity", "cagr", "total_fees")`（`backend/app/data/experiment_service.py:119`）。实验发布的 `metrics`、`GET /experiments/compare` 的指标列与 `metrics` 名单一律用这八个键；没有存到值的键是 `null`，**不许拿 0 顶替**——「手续费是 0」与「不知道手续费」是两件事。
+  2. `final_equity`/`cagr` 逐字读引擎已存的指标，不重算（`cagr` 依赖 `bars_per_year`，重算就是换口径）。
+  3. `total_fees` 是本层唯一派生的键，而且它仍然是**读已存证据**：运行路径把引擎刚写下的逐笔 `fees` 求和（`_total_fees`，`backend/app/data/experiment_service.py:122`），收养路径对该 run 在 `backtest_trades` 里的行求和（`_fees_of_run`，`backend/app/data/experiment_service.py:128`）。两条路径都不重跑引擎。
+  4. `COMPARE_METRICS` 本身**不动**：它同时是 `GET /backtests/compare` 的列集（`backend/app/data/backtest_service.py:69`），回测对比的响应形状不因实验页的需要而变。
+  5. 前端按这八个键渲染（最终资产/总收益/年化/最大回撤/Sharpe/胜率/交易次数/手续费），`null` 显示「未知」并写出它为什么未知；`frontend/src/wording.ts` 为 `cagr`/`total_fees` 补标签。
+- 理由：①研究记录要能独立回答「这次跑完赚了多少、贵不贵」，否则每读一个数字都要跳去回测页；②手续费是策略可行性的关键成本，逐笔存了却没人合计，等于白存；③派生值只允许来自已存行，才不会出现「同一个 run 在实验页与回测页显示两个手续费」。
+- 影响与兼容：`ExperimentResult.metrics_json` 对**新**的实验行多一个派生键 `total_fees`；收养行同样在逐字复制之外只多这一个键（引擎产出的键仍然逐字不动）。此变更**不需要迁移、不回填**：变更前创建的行没有这个键，发布投影给出 `null`、界面显示「未知」——如实表达「这条实验创建时还没人合计过手续费」，而不是假装它是 0。
+- 测试：`backend/tests/test_experiment_lifecycle.py` 断言运行路径发布的 `metrics` 八键齐全、`total_fees` 等于该 run 已存逐笔 `fees` 之和、`final_equity`/`cagr` 与 run 的存储值逐字相同；`backend/tests/test_experiment_adoption.py` 断言收养路径八键与 run 存储值一致、收养只多 `total_fees` 这一个键（`body["metrics"] == stored_metrics` 一类断言按八键形状更新）；compare 的 `metrics` 名单是这八个。
+
 
 
 

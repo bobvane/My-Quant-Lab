@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   api,
   type Asset,
   type BacktestDetail,
+  type BacktestRun,
   type BacktestSummary,
   type EnsembleMemberRun,
   type EnsembleResult,
@@ -25,6 +26,7 @@ import StatCard from '@/components/StatCard.vue'
 import ThresholdSweepChart from '@/components/ThresholdSweepChart.vue'
 import { formatDateTime, formatMetric, formatNumber, formatPercent, toneOf } from '@/format'
 import { isAdvanced } from '@/mode'
+import { createPoller } from '@/polling'
 // 引擎的指标键名与术语在这一页出现过三次（明细、敏感性表头、对比表头），
 // 三处都走同一个翻译表，否则同一个键会写出三种中文（ADR-127）。
 import {
@@ -180,6 +182,179 @@ const ensMemberMetrics = ref<
  * whole point of an ensemble, and scoping it made that unreachable in the UI.
  */
 const ensAllVersions = ref<StrategyVersion[]>([])
+
+// ------------------------------------------------------------------ run ----
+// 一次回测有四种诚实的说法，缺一个都会让界面说假话（ADR-180）：
+//   运行中（`pending` / `running`，带进度、当前步与已用时间）
+//   成功（`completed`，下面照旧是第一屏结论）
+//   失败（`failed`，`error_message` 原样照抄，并且能原样重试）
+//   无法获取状态（连续几次都没问到进度）
+// 最后一种与「失败」必须分开：问不到不代表跑挂了，把网络抖动画成运行失败，
+// 用户会去查一个根本不存在的问题（ADR-088）。
+const RUN_STATE_LABELS: Record<string, string> = {
+  pending: '排队中',
+  running: '运行中',
+  completed: '成功',
+  failed: '失败',
+  unobservable: '无法获取状态',
+}
+
+/**
+ * 引擎的分步名（`current_step`）是人话，但仍然是一串英文短句；先查表，查不到就
+ * 原样显示——照抄一个不认识的步骤，比替它编一个中文名诚实。
+ */
+const RUN_STEP_LABELS: Record<string, string> = {
+  pending: '排队中',
+  queued: '排队中',
+  'loading data': '正在读取行情数据',
+  'computing features': '正在计算特征',
+  'running strategy': '正在跑策略规则',
+  'evaluating exits': '正在判定出场',
+  'computing metrics': '正在汇总指标',
+  completed: '已完成',
+  failed: '已失败',
+}
+
+function runStepLabel(step: string | null | undefined): string {
+  if (!step) return ''
+  return RUN_STEP_LABELS[step] ?? step
+}
+
+function runStateLabel(run: BacktestRun, unobservable: boolean): string {
+  if (unobservable) return RUN_STATE_LABELS.unobservable
+  return RUN_STATE_LABELS[run.status] ?? run.status
+}
+
+/** 这一行该怎么读：运行中给「进度 · 当前步」，其余给状态名（失败就说失败）。 */
+function statusText(run: BacktestSummary): string {
+  if (run.status === 'pending' || run.status === 'running') {
+    const parts: string[] = []
+    if (typeof run.progress === 'number') parts.push(`${Math.round(run.progress)}%`)
+    const step = runStepLabel(run.current_step)
+    if (step) parts.push(step)
+    // 服务端还没给出进度时不能编一个：进度未知也是状态信息（0% 会被读成「卡住了」）。
+    return parts.length ? parts.join(' · ') : '运行中（还没有进度读数）'
+  }
+  if (run.status === 'completed') return '成功'
+  if (run.status === 'failed') return '失败'
+  return run.status
+}
+
+/**
+ * 正在显示的那一次回测。有结果时它就是 `detail`（下面第一屏的来源），
+ * 还在跑时它是轮询拿回来的 `BacktestRun` —— 两种形状共用一个入口，
+ * 界面就不必在「假装它不存在」和「把它当已完成」之间二选一。
+ */
+const activeRun = ref<BacktestRun | null>(null)
+const pollGaveUp = ref(false)
+// 「问一次状态」是这一页自己的动作，不能借用 `busy`：那个开关会让整页的按钮
+// 一起变灰，把一次状态查询画成「页面在忙」。
+const statusChecking = ref(false)
+const activeStartedAt = ref<number | null>(null)
+const elapsedMs = ref(0)
+let elapsedTicker: ReturnType<typeof setInterval> | null = null
+
+function stopElapsedTicker() {
+  if (elapsedTicker !== null) {
+    clearInterval(elapsedTicker)
+    elapsedTicker = null
+  }
+}
+
+function startElapsedTicker() {
+  stopElapsedTicker()
+  elapsedMs.value = 0
+  elapsedTicker = setInterval(() => {
+    if (activeStartedAt.value === null) return
+    elapsedMs.value = Date.now() - activeStartedAt.value
+  }, 1000)
+}
+
+/** 已用时间只在「还在跑」时有意义，所以只报这个读数，不替运行做任何估计。 */
+const elapsedText = computed(() => {
+  if (activeStartedAt.value === null) return ''
+  const total = Math.floor(elapsedMs.value / 1000)
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+})
+
+function runInFlight(run: BacktestRun | null): boolean {
+  return run !== null && (run.status === 'pending' || run.status === 'running')
+}
+
+/**
+ * 列表里的状态列跟着服务端在跑的行一起走；`progress` 缺省时不写 0%，
+ * 因为「还不知道进度」和「一点都没跑」在屏幕上必须是两件事。
+ */
+function listStatusText(run: BacktestSummary): string {
+  const inFlight = run.status === 'pending' || run.status === 'running'
+  if (inFlight && run.progress == null) return '运行中（进度未知）'
+  return statusText(run)
+}
+
+const runState = computed(() => {
+  const run = activeRun.value
+  if (!run) return null
+  const unobservable = pollGaveUp.value && runInFlight(run)
+  const inFlight = runInFlight(run)
+  const phase = unobservable
+    ? 'unobservable'
+    : inFlight
+      ? 'running'
+      : run.status === 'completed'
+        ? 'completed'
+        : 'failed'
+  let text = ''
+  if (phase === 'unobservable') {
+    text = '已经停止询问这次回测的进度：连续几次都没问到。它本身可能还在服务端跑，稍后刷新这一页再问一次。'
+  } else if (phase === 'running') {
+    const step = runStepLabel(run.current_step)
+    text = step || '运行中：正在执行这次回测。'
+  } else if (phase === 'failed') {
+    text = '这次回测失败了，下面原样照抄引擎给出的原因。'
+  } else {
+    text = '这次回测已经完成。'
+  }
+  return { label: runStateLabel(run, unobservable), phase, inFlight, text }
+})
+
+const poller = createPoller<BacktestRun>({
+  fetch: () => api.backtestRun(activeRun.value!.id),
+  isDone: (run) => run.status === 'completed' || run.status === 'failed',
+  onUpdate: (run) => {
+    activeRun.value = run
+    // 列表里那一行也要跟着走，否则用户在下面看到的状态会停在「运行中 0%」。
+    runs.value = runs.value.map((r) => (r.id === run.id ? { ...r, ...run } : r))
+  },
+  onSettled: (last) => {
+    stopElapsedTicker()
+    if (last === null) {
+      // 问不到 ≠ 失败：保留在跑的读数，只把状态改成「无法获取状态」（polling.ts 的约定）。
+      pollGaveUp.value = true
+      return
+    }
+    activeRun.value = last
+    runs.value = runs.value.map((r) => (r.id === last.id ? { ...r, ...last } : r))
+    if (last.status === 'completed') void open(last.id)
+  },
+})
+
+/**
+ * 为一次还没跑完的回测开始问进度。刷新页面时最新的那次可能正在跑，
+ * 这时不能当它不存在（ADR-180 §2）；用户从「回测记录」里点开也是同一条路。
+ */
+function startRunPolling(run: BacktestRun) {
+  activeRun.value = run
+  pollGaveUp.value = false
+  activeStartedAt.value = Date.now()
+  startElapsedTicker()
+  poller.start()
+}
+
+onBeforeUnmount(() => {
+  stopElapsedTicker()
+})
 
 /** Candidates grouped by strategy, so the picker reads as "which strategies agree". */
 const ensCandidateGroups = computed(() => {
@@ -565,6 +740,19 @@ function exportTradesCsv() {
   URL.revokeObjectURL(url)
 }
 
+/**
+ * 这次运行到底有没有结果。
+ *
+ * `GET /backtests/{id}` 从 ADR-180 起对「还在跑」和「失败」的运行也返回 200，那种载荷里的
+ * `metrics` / `equity_curve` / `trades` 是 **null**（不是空数组：空数组会被读成「平盘」）。
+ * 所以「有没有结果」要显式判断，不能拿 `detail` 的真假当代理——否则一条失败的记录就会让
+ * 结论卡和交易明细去读 null 的 `.length`，整页白屏。
+ *
+ * 模板里写成 `v-if="detail && hasResult"`：`detail` 那一半是给类型收窄用的（下面这些卡要直接
+ * 读 `detail.total_return` 之类的字段），`hasResult` 才是业务判断。
+ */
+const hasResult = computed(() => detail.value != null && detail.value.metrics != null)
+
 const drawdownSeries = computed(() => {
   const points = detail.value?.equity_curve ?? []
   let peak = -Infinity
@@ -752,7 +940,20 @@ async function load() {
       symbol.value = defaultSymbolFor(marketProvider.value)
     }
     if (runs.value.length) {
-      detail.value = await api.backtest(runs.value[0].id)
+      // 最新那次可能还在跑（刷新后仍在跑，ADR-180）：那就接着问它的进度，
+      // 而不是假装它不存在，也不是拿一个还没有结果的 run 去要 BacktestDetail。
+      // 这一段自己兜住失败：问不到最新一次的状态，不该让整页连策略与行情源都读不出来。
+      const newest = await api.backtestRun(runs.value[0].id).catch(() => null)
+      if (newest) {
+        runs.value = runs.value.map((r) => (r.id === newest.id ? { ...r, ...newest } : r))
+        if (newest.status === 'pending' || newest.status === 'running') {
+          startRunPolling(newest)
+        } else {
+          await open(newest.id)
+        }
+      } else {
+        await open(runs.value[0].id)
+      }
     }
     if (strategies.value.length && strategyId.value === null) {
       strategyId.value = strategies.value[0].id
@@ -783,7 +984,13 @@ async function removeRun(id: number) {
   try {
     await api.deleteBacktest(id)
     runs.value = runs.value.filter((r) => r.id !== id)
-    if (detail.value?.id === id) {
+    if (detail.value?.id === id || activeRun.value?.id === id) {
+      // 删掉的正好是屏幕上这一次：先把还在问进度的循环停掉，否则它会一直问一个
+      // 已经不存在的 id，把 404 画成「问不到状态」。
+      poller.stop()
+      stopElapsedTicker()
+      activeRun.value = null
+      pollGaveUp.value = false
       detail.value = runs.value.length ? await api.backtest(runs.value[0].id) : null
     }
   } catch (e) {
@@ -795,13 +1002,29 @@ async function removeRun(id: number) {
 
 async function open(id: number) {
   error.value = ''
+  statusChecking.value = true
   busy.value = true
   try {
-    detail.value = await api.backtest(id)
+    const loaded = await api.backtest(id)
+    detail.value = loaded
+    activeRun.value = loaded
+    pollGaveUp.value = false
+    stopElapsedTicker()
+    prefillAccount(loaded)
     btExplanation.value = null
   } catch (e) {
-    error.value = (e as Error).message
+    // 这一次可能只是「还没跑完」，不是错误：问一次它的状态，还在跑就接着问，
+    // 真的问不到才把话说出来（ADR-180；ADR-088）。
+    const run = await api.backtestRun(id).catch(() => null)
+    if (run && runInFlight(run)) {
+      startRunPolling(run)
+      detail.value = null
+      btExplanation.value = null
+    } else {
+      error.value = (e as Error).message
+    }
   } finally {
+    statusChecking.value = false
     busy.value = false
   }
 }
@@ -844,15 +1067,55 @@ function dayEnd(value: string): string {
 
 // Why the run button is not clickable yet (review report P0-4): a disabled button
 // with no explanation is a dead end for a reader who does not know the dependency.
+// 正在跑的那一次也算一条理由：再点一次只会排队第二次回测（ADR-180）。
 const runBlockedReason = computed(() => {
   if (running.value) return ''
+  if (activeRun.value && runInFlight(activeRun.value)) {
+    return '上一次回测还在跑：等它给出结果（或失败）之后再开下一次，避免同时排两次回测。'
+  }
   if (versionId.value === null) return '左边还差一个策略版本：先在「我的策略」里建一个，再回到这里选它。'
   if (!symbol.value.trim()) return '还差一个标的代码：填一个代码（例如 SPY），按钮才能点。'
   return ''
 })
 
+/**
+ * 「重试」用的输入：失败之后表单可能已经被改掉，甚至刷新过，
+ * 所以把这一次真正提交过的输入留下来，重试时原样放回表单。
+ */
+interface RunInputs {
+  versionId: number
+  symbol: string
+  timeframe: string
+  sizeMode: 'strategy' | 'fixed_fraction' | 'risk_per_trade' | 'atr_risk'
+  sizeFraction: number
+  sizeRiskPct: number
+  startDate: string
+  endDate: string
+}
+
+const lastInputs = ref<RunInputs | null>(null)
+
+function retryFailedRun() {
+  const saved = lastInputs.value
+  if (!saved) return
+  versionId.value = saved.versionId
+  symbol.value = saved.symbol
+  symbolTouched.value = true
+  timeframe.value = saved.timeframe
+  sizeMode.value = saved.sizeMode
+  sizeFraction.value = saved.sizeFraction
+  sizeRiskPct.value = saved.sizeRiskPct
+  startDate.value = saved.startDate
+  endDate.value = saved.endDate
+  void runNew()
+}
+
 async function runNew() {
   error.value = ''
+  if (activeRun.value && runInFlight(activeRun.value)) {
+    error.value = '上一次回测还在跑，等它结束再开下一次。'
+    return
+  }
   if (versionId.value === null || !symbol.value.trim()) {
     error.value = '请先选择策略版本并填写标的代码'
     return
@@ -872,6 +1135,16 @@ async function runNew() {
     }
   }
   running.value = true
+  lastInputs.value = {
+    versionId: versionId.value,
+    symbol: symbol.value.trim(),
+    timeframe: timeframe.value,
+    sizeMode: sizeMode.value,
+    sizeFraction: sizeFraction.value,
+    sizeRiskPct: sizeRiskPct.value,
+    startDate: startDate.value,
+    endDate: endDate.value,
+  }
   try {
     const result = await api.runBacktest(
       versionId.value,
@@ -882,12 +1155,123 @@ async function runNew() {
       endDate.value ? dayEnd(endDate.value) : undefined,
     )
     runs.value = [result, ...runs.value]
-    detail.value = result
     btExplanation.value = null
+    if (runInFlight(result)) {
+      // 服务端把这次回测交给 worker 跑了：POST 回来的是一条还没有结果的运行，
+      // 不是失败，也不是成功。接着问它，直到它给出结果（ADR-180）。
+      startRunPolling(result)
+    } else {
+      await open(result.id)
+    }
   } catch (e) {
     error.value = (e as Error).message
   } finally {
     running.value = false
+  }
+}
+
+// -------------------------------------------------- 回测 → 模拟账户 ----
+// 回测的用处是把策略推进到模拟验证，所以这一步就长在结论下面，不是一个弹窗、
+// 也不是另一个页面（ADR-181）。只有已经完成的回测能建账户：服务端会拒绝
+// 没有结果的运行，拒绝理由原样显示，界面不替它翻译。
+const accountName = ref('')
+const accountCash = ref(10000)
+const accountNameTouched = ref(false)
+const accountBusy = ref(false)
+const accountError = ref('')
+const accountNotice = ref<{ id: number; name: string } | null>(null)
+
+/** 这次回测真正用过的参数；没有就交一个空的，绝不替它编一套。 */
+function accountParameters(run: BacktestDetail): Record<string, unknown> {
+  return run.parameters ?? {}
+}
+
+function prefillAccount(run: BacktestDetail) {
+  accountError.value = ''
+  accountNotice.value = null
+  // 换了一条回测，上一条的「已经保存为实验」提示与错误都不该跟过来。
+  resetAdopt()
+  if (!accountNameTouched.value) {
+    const symbolPart = run.symbol ? ` · ${run.symbol}` : ''
+    accountName.value = `回测 #${run.id}${symbolPart}`
+  }
+}
+
+/** 用户改过名字之后就不再自动预填：覆盖一个人刚敲进去的字是最糟的自动行为。 */
+function setAccountName(event: Event) {
+  accountName.value = (event.target as HTMLInputElement).value
+  accountNameTouched.value = true
+}
+
+async function createAccountFromRun() {
+  const run = detail.value
+  if (!run) return
+  const name = accountName.value.trim()
+  if (!name) {
+    accountError.value = '先给模拟账户起一个名字。'
+    return
+  }
+  if (!(accountCash.value > 0)) {
+    accountError.value = '初始资金要大于 0。'
+    return
+  }
+  accountBusy.value = true
+  accountError.value = ''
+  accountNotice.value = null
+  try {
+    const created = await api.createPaperAccount(name, accountCash.value, {
+      backtestRunId: run.id,
+      strategyVersionId: run.strategy_version_id,
+      parameters: accountParameters(run),
+    })
+    accountNotice.value = { id: created.id, name: created.name }
+    // 建完就去看它 —— 这一步的产物是账户，不是这一页的一条通知。
+    await router.push({ path: '/paper', query: { account: String(created.id) } })
+  } catch (e) {
+    // 服务端拒绝的理由（例如这次回测还没跑完）原样照抄，不改成自己的说法。
+    accountError.value = (e as Error).message
+  } finally {
+    accountBusy.value = false
+  }
+}
+
+// ---- 把这次回测保存为实验（E6 / ADR-183）：逐字复制已存结果，不重跑引擎 ----------
+
+const adoptBusy = ref(false)
+const adoptError = ref('')
+/** 记着是哪一条回测被收养的，免得换了回测之后上一条的提示还挂在这儿。 */
+const adoptNotice = ref<{ runId: number; id: number; name: string } | null>(null)
+
+/** 只有「跑完」的回测能收养：别的状态点了必然被服务端拒，所以这一块根本不出现。 */
+const canAdopt = computed(() => detail.value != null && detail.value.status === 'completed')
+
+const adoptedAlready = computed(
+  () => adoptNotice.value != null && detail.value != null && adoptNotice.value.runId === detail.value.id,
+)
+
+function resetAdopt() {
+  adoptError.value = ''
+  adoptNotice.value = null
+}
+
+async function adoptAsExperiment() {
+  const run = detail.value
+  if (!run) return
+  if (run.status !== 'completed') {
+    adoptError.value = '只有跑完的回测才能保存为实验。'
+    return
+  }
+  adoptBusy.value = true
+  adoptError.value = ''
+  try {
+    // 不带 name / notes：收养用服务端自己起的名字；也不会在这里算任何数字。
+    const created = await api.experimentFromBacktest(run.id, {})
+    adoptNotice.value = { runId: run.id, id: created.id, name: created.name }
+  } catch (e) {
+    // 例如「这条回测已经保存为实验了」这种 409：服务端的话原样照抄，不改写不翻译。
+    adoptError.value = (e as Error).message
+  } finally {
+    adoptBusy.value = false
   }
 }
 
@@ -1151,6 +1535,69 @@ onMounted(async () => {
 
     <p v-if="error" class="error">{{ error }}</p>
 
+    <!-- 正在跑 / 失败 / 问不到状态的那一次回测：说清楚现在是哪一种，
+         并且只给这一种状态下真实可用的按钮（ADR-138、ADR-180）。 -->
+    <div v-if="runState && runState.phase !== 'completed'" class="card card-quiet" style="margin-top: 14px">
+      <div class="row" style="justify-content: space-between; align-items: baseline">
+        <h3 style="margin: 0">本次回测</h3>
+        <span class="verdict" :class="runState.phase === 'failed' ? 'bad' : 'warn'">
+          {{ runState.label }}
+        </span>
+      </div>
+      <p class="muted" style="margin: 6px 0 0">
+        回测 #{{ activeRun?.id }}
+        <template v-if="activeRun?.symbol"> · {{ activeRun?.symbol }}</template>
+        <template v-if="activeRun?.timeframe"> · {{ timeframeLabel(activeRun?.timeframe) }}</template>
+        · 版本 #{{ activeRun?.strategy_version_id }}
+        <template v-if="elapsedText"> · 已用时间 {{ elapsedText }}</template>
+      </p>
+
+      <template v-if="runState.phase === 'running'">
+        <p class="muted" style="margin: 8px 0 0">
+          <template v-if="runStepLabel(activeRun?.current_step)">
+            {{ runStepLabel(activeRun?.current_step) }}
+          </template>
+          <template v-else>{{ runState.text }}</template>
+          <template v-if="typeof activeRun?.progress === 'number'">
+            · {{ Math.round(activeRun.progress) }}%
+          </template>
+          <template v-else> · 还没有进度读数</template>
+        </p>
+        <progress
+          v-if="typeof activeRun?.progress === 'number'"
+          :value="activeRun.progress"
+          max="100"
+          style="width: 100%; max-width: 420px"
+        />
+        <p class="muted" style="margin: 8px 0 0">
+          它在服务端跑，关掉这一页也不会停下；刷新回来这一行还在。跑完之前不能开第二次：
+          同时排两次回测只会让两份结果互相干扰。
+        </p>
+      </template>
+
+      <template v-else-if="runState.phase === 'unobservable'">
+        <p class="muted" style="margin: 8px 0 0">{{ runState.text }}</p>
+        <div class="row" style="margin-top: 8px">
+          <button :disabled="statusChecking" @click="activeRun && open(activeRun.id)">再问一次状态</button>
+          <span class="muted">只是问不到，不代表这次回测失败了。</span>
+        </div>
+      </template>
+
+      <template v-else>
+        <p class="muted" style="margin: 8px 0 0">{{ runState.text }}</p>
+        <p class="error" style="margin: 8px 0 0">
+          {{ activeRun?.error_message || '这次回测失败了，但服务端没有给出原因。' }}
+        </p>
+        <div class="row" style="margin-top: 8px">
+          <button v-if="lastInputs" :disabled="runInFlight(activeRun) || busy" @click="retryFailedRun">
+            用同样的输入重试
+          </button>
+          <span v-if="lastInputs" class="muted">按当初那套输入再跑一次：版本、标的、周期、仓位与日期都是原样。</span>
+          <span v-else class="muted">这一页不知道它当时的输入（可能是刷新后点开的），到下面「回测记录」里选它再来一次。</span>
+        </div>
+      </template>
+    </div>
+
     <div class="card card-quiet">
       <h3>运行新回测</h3>
       <div class="row">
@@ -1177,8 +1624,11 @@ onMounted(async () => {
         <select v-model="timeframe" style="max-width: 110px">
           <option value="1d">日线</option>
         </select>
-        <button :disabled="running || versionId === null || !symbol.trim()" @click="runNew">
-          {{ running ? '计算中…' : '开始回测' }}
+        <button
+          :disabled="running || runInFlight(activeRun) || versionId === null || !symbol.trim()"
+          @click="runNew"
+        >
+          {{ running || runInFlight(activeRun) ? '计算中…' : '开始回测' }}
         </button>
       </div>
 
@@ -1262,7 +1712,7 @@ onMounted(async () => {
 
     <!-- 第一屏：这套策略历史上表现怎么样、最坏能坏到哪里、这份结论有多可信、下一步做什么
          （评审 §9；ADR-128）。全部读数来自引擎与生命周期证据。 -->
-    <div v-if="detail" class="card conclusion-card" style="margin-top: 14px">
+    <div v-if="detail && hasResult" class="card conclusion-card" style="margin-top: 14px">
       <h3>历史回测结论</h3>
       <p class="verdict-line">
         <span class="verdict" :class="verdict.tone">{{ verdict.label }}</span>
@@ -1321,9 +1771,67 @@ onMounted(async () => {
         </RouterLink>
         <span v-if="nextStep.reason" class="muted">（{{ nextStep.reason }}）</span>
       </p>
+
+      <!-- 回测的下一步就是模拟验证：就地建一个绑着这次回测的账户（ADR-181）。
+           普通与高级模式都有，因为这一步就是这一页的用处，不是研究者专属。 -->
+      <div class="paper-from-run">
+        <h4>用这次回测创建模拟账户</h4>
+        <p class="muted">
+          新账户会绑上这次回测（#{{ detail.id }}）、它的策略版本 #{{ detail.strategy_version_id }} 与当时的参数，
+          以后「回测 vs 模拟」两份记录才能对着看。
+        </p>
+        <div class="row">
+          <label class="muted" style="display: flex; align-items: center; gap: 6px">
+            账户名称
+            <input :value="accountName" style="max-width: 240px" @input="setAccountName" />
+          </label>
+          <label class="muted" style="display: flex; align-items: center; gap: 6px">
+            初始资金
+            <input v-model.number="accountCash" type="number" min="1" step="1000" style="max-width: 120px" />
+          </label>
+          <button :disabled="accountBusy || !accountName.trim()" @click="createAccountFromRun">
+            {{ accountBusy ? '创建中…' : '创建模拟账户' }}
+          </button>
+        </div>
+        <p v-if="!accountName.trim()" class="muted" style="margin-bottom: 0">
+          账户名不能为空，所以按钮现在是灰的：这个名字以后一直用来认这个账户。
+        </p>
+        <p v-if="accountError" class="error" style="margin: 8px 0 0">{{ accountError }}</p>
+        <p v-if="accountNotice" class="muted" style="margin: 8px 0 0">
+          已创建模拟账户 #{{ accountNotice.id }}「{{ accountNotice.name }}」。
+          <RouterLink :to="{ path: '/paper', query: { account: String(accountNotice.id) } }">
+            去「模拟验证」看它
+          </RouterLink>
+        </p>
+      </div>
+
+      <!-- E6：把这次回测保存为实验（ADR-183）。实验逐字复制这次回测已存的结果，
+           不重跑引擎、不重算任何数字。只有「跑完」的回测才出现这一块，
+           免得摆一个点下去必然被拒的按钮（ADR-138）。 -->
+      <div v-if="canAdopt" class="paper-from-run">
+        <h4>把这次回测保存为实验</h4>
+        <p class="muted">
+          实验会逐字复制这次回测已经存下来的结果（指标、结果哈希、数据与引擎版本），
+          不重跑引擎、不重算任何数字（ADR-183）。一条回测只能被收养一次，
+          重复保存会被服务端拒绝，并在话里点名已有的那条实验。
+        </p>
+        <div class="row">
+          <button :disabled="adoptBusy || adoptedAlready" @click="adoptAsExperiment">
+            {{ adoptBusy ? '保存中…' : '保存为实验' }}
+          </button>
+        </div>
+        <p v-if="adoptedAlready" class="muted" style="margin-bottom: 0">
+          这条回测已经保存为实验了，所以按钮是灰的：一条回测只能被收养一次，再存一次会被服务端拒绝。
+        </p>
+        <p v-if="adoptError" class="error" style="margin: 8px 0 0">{{ adoptError }}</p>
+        <p v-if="adoptNotice && adoptNotice.runId === detail.id" class="muted" style="margin: 8px 0 0">
+          已保存为实验 #{{ adoptNotice.id }}「{{ adoptNotice.name }}」，里面是这条回测的原样结果。
+          <RouterLink :to="{ path: '/experiments' }">去「实验」页看它</RouterLink>
+        </p>
+      </div>
     </div>
 
-    <div v-if="detail" class="card" style="margin-top: 14px">
+    <div v-if="detail && hasResult" class="card" style="margin-top: 14px">
       <h3>可信程度怎么样？</h3>
       <p class="muted">
         每一层证据是「做过」还是「没做过」，由系统按已存证据判断（生命周期门槛，不涉及模型）。
@@ -2016,19 +2524,20 @@ onMounted(async () => {
       <p v-for="(w, i) in detail.warnings" :key="i" class="notice">{{ w }}</p>
     </div>
 
-    <div v-if="detail" class="card" style="margin-top: 14px">
+    <div v-if="detail && hasResult" class="card" style="margin-top: 14px">
       <h3>权益曲线</h3>
-      <EquityChart :points="detail.equity_curve" />
+      <EquityChart v-if="detail.equity_curve?.length" :points="detail.equity_curve" />
+      <p v-else class="muted">这次运行没有权益曲线：结果里没有可画的点。</p>
     </div>
 
-    <div v-if="detail" class="card" style="margin-top: 14px">
+    <div v-if="detail && hasResult" class="card" style="margin-top: 14px">
       <h3>回撤曲线</h3>
       <MultiLineChart :series="drawdownSeries" height="220px" />
     </div>
 
     <!-- AI 汇总整个研究结果（评审 §13；ADR-129）：结论、原因、风险、可信程度、下一步。
          AI 只解释引擎算出来的事实，所以缺 AI 时这一页的结论照样成立。 -->
-    <div v-if="detail" class="card" style="margin-top: 14px">
+    <div v-if="detail && hasResult" class="card" style="margin-top: 14px">
       <h3>AI 汇总（只解释已有数字，不重新计算）</h3>
       <div class="row" style="margin-bottom: 10px">
         <button :disabled="explainingBt" @click="explainCurrent">
@@ -2118,6 +2627,7 @@ onMounted(async () => {
               <th>选</th>
               <th>#</th>
               <th>时间</th>
+              <th>状态</th>
               <th>收益</th>
               <th>回撤</th>
               <th>夏普</th>
@@ -2130,6 +2640,17 @@ onMounted(async () => {
               <td><input type="checkbox" style="width: auto" :checked="compareIds.includes(r.id)" @change="toggleCompare(r.id)" /></td>
               <td>{{ r.id }}</td>
               <td>{{ formatDateTime(r.created_at) }}</td>
+              <td class="muted">
+                {{ listStatusText(r) }}
+                <button
+                  v-if="r.status === 'pending' || r.status === 'running'"
+                  class="ghost"
+                  style="margin-left: 6px"
+                  @click="open(r.id)"
+                >
+                  看进度
+                </button>
+              </td>
               <td :class="toneOf(r.total_return)">{{ formatPercent(r.total_return) }}</td>
               <td>{{ formatPercent(r.max_drawdown) }}</td>
               <td>{{ formatNumber(r.sharpe) }}</td>
@@ -2155,7 +2676,10 @@ onMounted(async () => {
           <tbody>
             <tr>
               <td>结果哈希</td>
-              <td><code>{{ detail.result_hash }}</code></td>
+              <td>
+                <code v-if="detail.result_hash">{{ detail.result_hash }}</code>
+                <span v-else class="muted">— 这次运行还没有结果哈希（没跑完或失败了）</span>
+              </td>
             </tr>
             <tr>
               <td>数据集哈希</td>
@@ -2180,22 +2704,22 @@ onMounted(async () => {
           <tbody>
             <tr>
               <td>成交模型</td>
-              <td>{{ detail.execution_model.fill_model }}</td>
+              <td>{{ detail.execution_model?.fill_model ?? '未知' }}</td>
             </tr>
             <tr>
               <td>订单类型</td>
               <td>
-                {{ detail.execution_model.entry_order_type || 'market' }}（有效期
-                {{ detail.execution_model.order_valid_bars ?? 1 }} bar）
+                {{ detail.execution_model?.entry_order_type || 'market' }}（有效期
+                {{ detail.execution_model?.order_valid_bars ?? 1 }} bar）
               </td>
             </tr>
             <tr>
               <td>手续费</td>
-              <td>{{ detail.execution_model.fee_bps }} bps</td>
+              <td>{{ detail.execution_model?.fee_bps ?? '未知' }} bps</td>
             </tr>
             <tr>
               <td>滑点</td>
-              <td>{{ detail.execution_model.slippage_bps }} bps</td>
+              <td>{{ detail.execution_model?.slippage_bps ?? '未知' }} bps</td>
             </tr>
           </tbody>
         </table>
@@ -2235,7 +2759,7 @@ onMounted(async () => {
       </table>
     </div>
 
-    <div v-if="detail?.trades.length" id="trades" class="card" style="margin-top: 14px">
+    <div v-if="detail?.trades?.length" id="trades" class="card" style="margin-top: 14px">
       <div class="row" style="justify-content: space-between">
         <h3>交易明细</h3>
         <button class="ghost" @click="exportTradesCsv">导出 CSV</button>
@@ -2290,3 +2814,21 @@ onMounted(async () => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 回测的下一步：从这一次回测开一个模拟账户。它长在结论卡里面，所以用一条
+   分隔线把它和上面的读数分开，而不是再套一层卡片边框（ADR-181）。 */
+.paper-from-run {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* 还在跑的那一次：进度条只表明已经走到哪里，不预测还要多久。 */
+progress {
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 999px;
+  accent-color: var(--accent, #2ea043);
+}
+</style>

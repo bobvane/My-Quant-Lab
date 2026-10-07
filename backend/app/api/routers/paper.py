@@ -2,12 +2,18 @@
 
 Paper accounts are **completely isolated** from the real portfolio: they live in
 their own tables, are funded with virtual cash and can never write to Ghostfolio.
+
+The account view marks open positions at the latest **closed** bar, read through the
+shared market-data loader, so "market value" and "total equity" describe the virtual
+account from paper rows and public bars alone (ADR-006, ADR-119).
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import logging
+import math
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -23,8 +29,19 @@ from app.api.schemas import (
     PaperPositionOut,
 )
 from app.core.db import get_db
+from app.data.market_data_repo import SeriesNotResolved, load_bars, resolve_series
 from app.data.strategy_service import record_audit
-from app.domain.models import AuditLog, PaperAccount, PaperOrder, PaperPosition, PaperTrade, Signal
+from app.domain.models import (
+    AuditLog,
+    BacktestRun,
+    PaperAccount,
+    PaperOrder,
+    PaperPosition,
+    PaperTrade,
+    Signal,
+    Strategy,
+    StrategyVersion,
+)
 from app.simulation.paper_engine import (
     PaperError,
     PaperExecutionSettings,
@@ -52,12 +69,168 @@ def _realized_by_account(db: Session, account_ids: list[int]) -> dict[int, float
     return {int(account_id): float(total or 0.0) for account_id, total in rows}
 
 
+def _account_positions(db: Session, account_id: int) -> list[PaperPosition]:
+    """Every position row of an account, including fully closed ones (quantity 0)."""
+
+    return list(
+        db.scalars(
+            select(PaperPosition)
+            .where(PaperPosition.account_id == account_id)
+            .order_by(PaperPosition.id)
+        ).all()
+    )
+
+
+def _position_mark(
+    db: Session, asset_id: int
+) -> tuple[Decimal | None, dt.datetime | None, str | None]:
+    """Close of the latest *closed* bar for ``asset_id``, or why there is no mark.
+
+    The mark has to come from the one market-data loader rather than a hand-written bar
+    query, so "the latest closed bar" means the same thing here as it does everywhere
+    else (ADR-119). When nothing qualifies the caller gets ``None`` plus a note instead of
+    a price: a position without a mark is a gap to name, while a cost-based, intraday or
+    invented price would be a fabricated fact (ADR-007, ADR-023).
+    """
+
+    try:
+        series = resolve_series(db, asset_id=asset_id)
+    except SeriesNotResolved as exc:
+        return None, None, f"no mark: {exc.detail}"
+    frame = load_bars(db, series, limit=1, only_closed=True)
+    if frame.empty:
+        return None, None, "no mark: no closed bar is stored for this asset yet"
+    close = frame["close"].iloc[-1]
+    if not math.isfinite(float(close)):
+        return None, None, "no mark: the latest closed bar carries no close price"
+    stamp = frame.index[-1]
+    moment = stamp.to_pydatetime() if hasattr(stamp, "to_pydatetime") else stamp
+    return Decimal(str(close)), _aware(moment), None
+
+
+def _position_payload(db: Session, position: PaperPosition) -> PaperPositionOut:
+    """One position row, marked at the latest closed bar of its asset.
+
+    The mark fields stay ``null`` when no bar qualifies so the UI can show "no price
+    yet" rather than a number nobody traded at (ADR-007).
+    """
+
+    symbol = position.asset.symbol if position.asset is not None else None
+    mark_price, mark_time, mark_note = _position_mark(db, position.asset_id)
+    payload = PaperPositionOut.model_validate(position).model_copy(update={"symbol": symbol})
+    if mark_price is None:
+        return payload.model_copy(update={"mark_note": mark_note})
+    quantity = Decimal(str(position.quantity))
+    avg_cost = Decimal(str(position.avg_cost))
+    unrealized = quantity * (mark_price - avg_cost)
+    if not unrealized:
+        # A zero quantity multiplies a negative spread into ``Decimal("-0.0")``, which the
+        # UI then prints as "-0.00": a flat position has no loss to show.
+        unrealized = Decimal(0)
+    # A ratio, not a percentage: `0.05` means +5% (ADR-087). The ratio measures the open
+    # exposure, so it needs a non-zero quantity as well as a non-zero cost: a closed
+    # position has no return left to publish, and the per-share move would report a loss
+    # on a position that is flat.
+    pct = unrealized / (avg_cost * quantity) if quantity > 0 and avg_cost > 0 else None
+    return payload.model_copy(
+        update={
+            "mark_price": float(mark_price),
+            "mark_time": mark_time,
+            "market_value": float(quantity * mark_price),
+            "unrealized_pnl": float(unrealized),
+            "unrealized_pnl_pct": float(pct) if pct is not None else None,
+        }
+    )
+
+
+def _strategy_name(db: Session, account: PaperAccount) -> str | None:
+    """The strategy's display name, from the bound version when there is one.
+
+    The version is what actually produced the result; the legacy ``strategy_id`` column
+    stays as the fallback for accounts created before the binding existed (ADR-181).
+    """
+
+    if account.strategy_version_id is not None:
+        version = db.get(StrategyVersion, account.strategy_version_id)
+        if version is not None:
+            strategy = db.get(Strategy, version.strategy_id)
+            if strategy is not None:
+                return strategy.name
+    if account.strategy_id is not None:
+        strategy = db.get(Strategy, account.strategy_id)
+        if strategy is not None:
+            return strategy.name
+    return None
+
+
+def _account_totals(db: Session, account: PaperAccount, *, realized: float) -> dict:
+    """Cash plus the marked value of what is open, from paper data only.
+
+    Cash and realised P&L alone hide an entire open position: a full-size buy spends the
+    cash, so the account reads as though the money were gone instead of held (ADR-181).
+    Every input is a paper row plus the shared market-data loader, so nothing here can
+    reach the real portfolio (ADR-006).
+
+    When an open position has no mark, the totals could only describe part of the
+    account, so they are published as ``null`` with the reason in ``metric_notes``: a
+    total that silently drops a position is a fabricated total (ADR-007, ADR-023). P&L is
+    never derived by differencing cash (ADR-124), which would report an open position as
+    a loss.
+    """
+
+    positions = [
+        row for row in _account_positions(db, account.id) if Decimal(str(row.quantity)) > 0
+    ]
+    market_value = Decimal(0)
+    unrealized = Decimal(0)
+    notes: list[str] = []
+    unmarked = False
+    for position in positions:
+        mark_price, _mark_time, mark_note = _position_mark(db, position.asset_id)
+        if mark_price is None:
+            unmarked = True
+            label = position.asset.symbol if position.asset is not None else str(position.asset_id)
+            notes.append(f"position {label} is not in the totals: {mark_note}")
+            continue
+        quantity = Decimal(str(position.quantity))
+        market_value += quantity * mark_price
+        unrealized += quantity * (mark_price - Decimal(str(position.avg_cost)))
+
+    cash = Decimal(str(account.cash))
+    net_deposits = Decimal(str(account.initial_cash))
+    if net_deposits <= 0:
+        # ADR-066: return-type metrics divide by net deposits, so an account whose
+        # principal was withdrawn has no denominator — name that instead of dividing.
+        notes.append("initial capital is not positive, so ratio metrics have no denominator")
+    if unmarked:
+        return {
+            "market_value": None,
+            "unrealized_pnl": None,
+            "total_equity": None,
+            "total_pnl": None,
+            "total_pnl_pct": None,
+            "metric_notes": notes,
+        }
+    total_pnl = Decimal(str(realized)) + unrealized
+    return {
+        "market_value": float(market_value),
+        "unrealized_pnl": float(unrealized),
+        "total_equity": float(cash + market_value),
+        "total_pnl": float(total_pnl),
+        "total_pnl_pct": float(total_pnl / net_deposits) if net_deposits > 0 else None,
+        "metric_notes": notes,
+    }
+
+
 def _account_payload(
     db: Session, account: PaperAccount, *, realized: float | None = None
 ) -> PaperAccountOut:
     if realized is None:
         realized = _realized_by_account(db, [account.id]).get(account.id, 0.0)
-    return PaperAccountOut.model_validate(account).model_copy(update={"realized_pnl": realized})
+    payload = PaperAccountOut.model_validate(account).model_copy(
+        update={"realized_pnl": realized, "strategy_name": _strategy_name(db, account)}
+    )
+    return payload.model_copy(update=_account_totals(db, account, realized=realized))
 
 
 @router.get("/accounts", response_model=list[PaperAccountOut], summary="List paper accounts")
@@ -71,9 +244,59 @@ def list_accounts(db: Session = Depends(get_db)) -> list[PaperAccountOut]:
     "/accounts", response_model=PaperAccountOut, status_code=201, summary="Create paper account"
 )
 def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)) -> PaperAccountOut:
+    """Open a paper account, optionally bound to the backtest that produced it.
+
+    The binding records the strategy **version** and the exact parameters the run used,
+    because a strategy id alone cannot answer "which strategy, with which settings" once
+    the strategy has moved on — and a version is immutable, so the answer stays true
+    (ADR-181). Only a completed run has results to bind to.
+    """
+
+    backtest_run_id = payload.backtest_run_id
+    strategy_version_id = payload.strategy_version_id
+    parameters = dict(payload.parameters) if payload.parameters is not None else None
+
+    if backtest_run_id is not None:
+        run = db.get(BacktestRun, backtest_run_id)
+        if run is None:
+            raise HTTPException(status_code=422, detail=f"backtest run {backtest_run_id} not found")
+        if run.status != "completed":
+            # A run that is pending/running/failed has no result to open an account
+            # from; binding to it would record numbers that do not exist yet.
+            raise HTTPException(
+                status_code=422,
+                detail=f"backtest run {backtest_run_id} is '{run.status}', not 'completed'",
+            )
+        if strategy_version_id is None:
+            strategy_version_id = run.strategy_version_id
+        if parameters is None:
+            parameters = dict(run.parameters_json or {})
+
+    strategy_id = payload.strategy_id
+    if strategy_version_id is not None:
+        version = db.get(StrategyVersion, strategy_version_id)
+        if version is None:
+            raise HTTPException(
+                status_code=422, detail=f"strategy version {strategy_version_id} not found"
+            )
+        if strategy_id is not None and strategy_id != version.strategy_id:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"strategy {strategy_id} does not own strategy version "
+                    f"{strategy_version_id}; the version decides the strategy"
+                ),
+            )
+        # Keep the legacy column meaning what it always meant: the strategy this
+        # account trades. The version is the authority, so it wins over the caller.
+        strategy_id = version.strategy_id
+
     account = PaperAccount(
         name=payload.name,
-        strategy_id=payload.strategy_id,
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
+        backtest_run_id=backtest_run_id,
+        parameters_json=parameters or {},
         base_currency=payload.base_currency,
         initial_cash=payload.initial_cash,
         cash=payload.initial_cash,
@@ -87,7 +310,12 @@ def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)) -
         entity_type="paper_account",
         entity_id=str(account.id),
         action="create",
-        payload={"name": account.name, "net_deposits": str(account.initial_cash)},
+        payload={
+            "name": account.name,
+            "net_deposits": str(account.initial_cash),
+            "strategy_version_id": account.strategy_version_id,
+            "backtest_run_id": account.backtest_run_id,
+        },
     )
     db.commit()
     db.refresh(account)
@@ -355,17 +583,13 @@ def account_trades(account_id: int, db: Session = Depends(get_db)) -> list[dict]
     response_model=list[PaperPositionOut],
     summary="List open positions",
 )
-def account_positions(account_id: int, db: Session = Depends(get_db)) -> list[PaperPosition]:
+def account_positions(account_id: int, db: Session = Depends(get_db)) -> list[PaperPositionOut]:
+    """Open positions of an account, each marked at its asset's latest closed bar."""
+
     account = db.get(PaperAccount, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="paper account not found")
-    return list(
-        db.scalars(
-            select(PaperPosition)
-            .where(PaperPosition.account_id == account_id)
-            .order_by(PaperPosition.id)
-        ).all()
-    )
+    return [_position_payload(db, row) for row in _account_positions(db, account_id)]
 
 
 @router.get("/orders", response_model=list[PaperOrderOut], summary="List paper orders")
@@ -462,7 +686,17 @@ def execute(
         ),
     )
     try:
-        result = execute_signal(db, account, signal, settings=settings)
+        # `quantity` / `notional` are passed through untouched: the engine owns the rule
+        # that at most one of them may be given and refuses the rest with a 422, so the
+        # API cannot drift from the engine's sizing (ADR-181).
+        result = execute_signal(
+            db,
+            account,
+            signal,
+            settings=settings,
+            quantity=payload.quantity,
+            notional=payload.notional,
+        )
     except PaperError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return PaperExecutionOut(
@@ -485,7 +719,7 @@ def execute(
 )
 def account_position(
     account_id: int, asset_id: int, db: Session = Depends(get_db)
-) -> PaperPosition:
+) -> PaperPositionOut:
     if db.get(PaperAccount, account_id) is None:
         raise HTTPException(status_code=404, detail="paper account not found")
     position = db.scalar(
@@ -495,7 +729,7 @@ def account_position(
     )
     if position is None:
         raise HTTPException(status_code=404, detail="position not found")
-    return position
+    return _position_payload(db, position)
 
 
 @router.post("/accounts/{account_id}/close", summary="Close (freeze) a paper account")
@@ -583,7 +817,9 @@ def reset_account(
     account = db.get(PaperAccount, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="paper account not found")
-    target = initial_cash or float(account.initial_cash)
+    # `initial_cash or …` treated an explicit 0 as "not given": resetting an account to
+    # an empty balance silently restored the old baseline instead.
+    target = float(account.initial_cash) if initial_cash is None else initial_cash
     account.cash = target
     account.initial_cash = target
     account.reset_count += 1
@@ -592,6 +828,10 @@ def reset_account(
     ).all():
         db.delete(position)
     db.query(PaperTrade).filter(PaperTrade.account_id == account_id).delete()
+    # Reset promises to clear the account's history, and the orders are part of that
+    # history: a P&L that no longer exists must not keep showing up in `GET /paper/orders`
+    # as if the trades behind it were still there.
+    db.query(PaperOrder).filter(PaperOrder.account_id == account_id).delete()
     record_audit(
         db,
         event_type="paper_account_reset",

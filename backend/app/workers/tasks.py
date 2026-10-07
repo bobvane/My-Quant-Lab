@@ -521,3 +521,81 @@ def run_research(run_id: int, model: str | None = None) -> dict:
             db.commit()
             raise
         return {"run_id": run_id, "status": run.status, "step": run.current_step}
+
+
+# --------------------------------------------------------------------------- #
+# Backtests: the engine half of a run, off the request path
+# --------------------------------------------------------------------------- #
+@celery_app.task(name="quantlab.run_backtest")
+def run_backtest(
+    run_id: int,
+    timeframe: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict:
+    """Execute the backtest run that ``POST /backtests`` prepared for the worker.
+
+    The API commits the run row and answers; this task is what turns that row into a
+    ``completed`` or ``failed`` run (ADR-180). The row is the only state that crosses the
+    process boundary, so it is both the input — strategy version, dataset, parameters and
+    the resolved execution model are read back from it — and the lock: a run that already
+    reached a verdict is left exactly as it is, which makes a duplicate delivery a wasted
+    CPU pass instead of a second, conflicting result.
+
+    ``timeframe``/``start``/``end`` are the request's window, carried across the boundary as
+    ISO strings (Celery serialises JSON) because the row does not store it; a caller that
+    has only the run id rebuilds from the dataset's own timeframe and the whole series.
+
+    A failure is recorded on the run and committed *before* the exception is re-raised, so
+    neither ``session_scope``'s rollback nor a Celery retry can leave a run stuck in
+    ``running`` for ever.
+    """
+
+    from app.data import backtest_service
+    from app.domain.models import BacktestRun
+
+    with session_scope() as db:
+        run = db.get(BacktestRun, run_id)
+        if run is None:
+            logger.warning("backtest run %s was queued but does not exist", run_id)
+            return {"run_id": run_id, "status": "missing"}
+        if run.status not in {"pending", "running"}:
+            return {"run_id": run_id, "status": run.status, "skipped": "already decided"}
+
+        try:
+            # The rebuild is real work in this process, so it gets its own committed rung:
+            # without it a queued run would show no sign of life until the engine returned.
+            backtest_service.advance_backtest(db, run, "loading data")
+            inputs = backtest_service.rebuild_backtest_inputs(
+                db,
+                run,
+                timeframe=timeframe,
+                start=_as_utc(start),
+                end=_as_utc(end),
+            )
+            backtest_service.execute_backtest(
+                db,
+                run,
+                inputs,
+                parameters=run.parameters_json or {},
+                timeframe=timeframe or run.dataset.timeframe,
+            )
+        except backtest_service.BacktestFailed:
+            # execute_backtest already recorded and committed the failure on the run.
+            raise
+        except Exception as exc:  # noqa: BLE001 - the worker's last resort, see docstring
+            logger.exception("backtest run %s crashed", run_id)
+            backtest_service.fail_backtest(db, run, exc)
+        return {"run_id": run_id, "status": run.status, "step": run.current_step}
+
+
+def _as_utc(value: str | None) -> dt.datetime | None:
+    """Turn the ISO string the queue carried back into the datetime ``load_bars`` filters on.
+
+    A naive stamp is read as UTC, the same reading ``backtest_service`` gives a stored one.
+    """
+
+    if not value:
+        return None
+    parsed = dt.datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=dt.UTC)

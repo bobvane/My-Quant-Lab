@@ -54,7 +54,11 @@ STAT_CARD = REPO_ROOT / "frontend" / "src" / "components" / "StatCard.vue"
 STYLE = REPO_ROOT / "frontend" / "src" / "style.css"
 VIEWS = REPO_ROOT / "frontend" / "src" / "views"
 
-_NAMED_LABEL = re.compile(r'(?<!:)label="(?P<label>[^"]+)"')
+# A bare `label="…"` in a view is a metric name (the thing ADR-110 wants explained
+# in place). `:label="…"` is a bound prop and `aria-label="…"` is an accessible
+# name — neither is a metric, so both are excluded rather than forced into
+# metrics.ts / NOT_A_METRIC.
+_NAMED_LABEL = re.compile(r'(?<![:\w-])label="(?P<label>[^"]+)"')
 _MEDIA = re.compile(r"@media\s*\(max-width:\s*(?P<width>\d+)px\)\s*\{")
 
 _ROUTE = re.compile(

@@ -50,6 +50,10 @@ x-backend-env: &backend-env
   # Run research in the worker instead of inside the POST /ai/research request.
   # Set to false only for a deployment without quantlab-worker (docs/06 §21).
   AI_RESEARCH_ASYNC: ${AI_RESEARCH_ASYNC:-true}
+  # Run backtests in the worker instead of inside POST /backtests, so a client can
+  # watch progress/current_step while the engine runs (ADR-180). Set to true only for
+  # a deployment with quantlab-worker; false is the inline path every caller had.
+  BACKTEST_ASYNC: ${BACKTEST_ASYNC:-false}
   GHOSTFOLIO_BASE_URL: ${GHOSTFOLIO_BASE_URL:-}
   GHOSTFOLIO_API_KEY: ${GHOSTFOLIO_API_KEY:-}
   # System Resource Monitor (docs/20_RESOURCE_MONITOR.md)

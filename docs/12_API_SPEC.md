@@ -109,6 +109,35 @@ API base: `/api/v1`
 `result_hash` 的输入，所以换一个版本号就等于换一份计算：同一条策略在引擎语义变化后重跑会得到
 另一个哈希，而**已经落库的历史回测保存的是当时的快照**，不受影响。
 
+回测运行是可观察的（ADR-180）：`backtest_runs` 上有 `progress`（整数 0–100，默认 0）与
+`current_step`（短句，可空），单次查询与列表摘要都返回这两个字段；失败的运行还返回
+`error_message`（运行中与成功时为 `null`）。`progress` 是给界面看的粗刻度而不是精确百分比，
+刻度是 `loading data` 5 → `computing features` 20 → `running strategy` 45 →
+`evaluating exits` 70 → `computing metrics` 90 → `completed` 100。本期引擎是一趟调用
+（ADR-174），可观测的跳变只有 `computing features` → `computing metrics`；`running strategy`
+与 `evaluating exits` 是引擎自己的阶段却没有可提交的边界，所以没有为它们编造一个百分比。
+`progress` 与 `current_step` **不进** `result_hash`：哈希只覆盖策略版本、数据集、引擎版本、
+特征版本、参数、指标与交易数，把运行过程元数据算进去会让同策略同数据同参数的重跑得到不同哈希
+（ADR-081 的「数据集 + 哈希即可复现」失效）。
+
+取单次回测（`/backtests/{run_id}`）对**还没有结果的运行不再是 409**：行照常返回，结果字段
+（`metrics` / `equity_curve` / `trades` / `result_hash` / `parameters` / `execution_model`）
+一律**缺省**为 `null`，而不是给一份空结果——空权益曲线会被读成「一次平盘回测」。`status`、
+`progress`、`current_step` 说明它在做什么，`error_message` 说明它为什么停下（ADR-180）。
+
+创建回测有两条路径，由设置 `backtest_async`（环境变量 `BACKTEST_ASYNC`，也接受
+`MQL_BACKTEST_ASYNC` 拼写，默认 `false`，见 `.env.example` 与 `docker-compose.yml`）选择：
+
+- `false`（默认）：在请求内同步跑完，响应就是**已完成**的运行（`status = "completed"`）并直接
+  带上结果字段；既有调用方的响应形状与耗时都不变。
+- `true`：只做校验、写入运行行（`status = "running"`、`progress = 0`、
+  `current_step = "loading data"`）并交给 Celery 任务 `quantlab.run_backtest`，随即返回 **200**
+  且结果字段缺省。这条运行已经被持久化，客户端轮询 `/backtests/{run_id}` 看 `progress` 与
+  `current_step` 前进；该路径需要 `quantlab-worker`。失败时这一行落 `status = "failed"` 并把
+  引擎的错误原文逐字写进 `error_message`，绝不留下半截结果（warnings 口径不变，ADR-054）。
+
+**没有取消端点**：本轮不实现取消，接口里也不会预先写一个不存在的动作。
+
 ## Backtest Metrics
 
 `GET /backtest-metrics/backtest/{backtest_id}` [已实现] —— 一次回测运行的指标。
@@ -282,14 +311,45 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
 ## Strategy Experiments
 
 `POST /experiments` [已实现] —— 创建一个实验（201）：把一次量化研究跑成**可回读的实体**，而
-不只是一次 HTTP 响应；`kind` 决定跑哪一种既有引擎（**不重实现任何量化算法**）。
+不只是一次 HTTP 响应；`kind` 决定跑哪一种既有引擎（**不重实现任何量化算法**）。body 带
+`draft=true` 时建的是**草稿**：校验照做（版本不存在 404、参数非法 422），但只建行
+（status=`draft`）、**不跑任何量化代码、不写结果行**，之后用 run 端点再执行。
 
-`GET /experiments` [已实现] —— 实验历史，最新在前（`?limit=20&strategy_version_id=`）。
+`GET /experiments` [已实现] —— 实验历史，最新在前
+（`?limit=20&strategy_version_id=&status=&kind=`）：`status` 只接受 draft / running / completed /
+failed / archived，其它取值 422；默认**不过滤**归档的实验。
+
+`POST /experiments/from-backtest/{run_id}` [已实现] —— 把一条**已完成**的回测收养成实验（201）：
+参数、指标、`summary` 与复现信息（`result_hash`、`engine_version`、`feature_version`、
+`dataset_hash`）**逐字复制该运行已存的值，绝不重算**，唯一结果行经 `backtest_run_id` 保留血缘；
+body 可选 `{"name"?, "notes"?}`（缺省名 `回测 #{run_id} · {symbol}`）；运行不存在 404，未完成或没有
+结果行 409，**同一运行重复收养也是 409**（detail 给出已有实验 id，同一份证据不分裂成双胞胎）。
 
 `GET /experiments/{experiment_id}` [已实现] —— 单次实验及其全部结果行；POST 结束之后仍可回读。
 
-`GET /experiments/compare` [已实现] —— 逐个实验并排对比**已存**数据（`?ids=1&ids=2`），与回测
-对比端点同形：`{"metrics": [...], "experiments": [...]}`，不重算任何量化值。
+`POST /experiments/{experiment_id}/run` [已实现] —— 执行一个草稿或失败的实验（200）：先用存下来的
+`request_json` 重新校验、再改行（所以校验失败时实验**仍是 draft**），结果行按最新一次运行重建；
+`completed` / `running` / `archived` 再来 run 是 409。
+
+`POST /experiments/{experiment_id}/archive` [已实现] —— 归档实验（200，写 `archived_at`）：running
+仍在跑不能归档、重复归档也是 409；归档只改状态，结果行与底层回测都保留，默认历史列表仍能看到。
+
+`PATCH /experiments/{experiment_id}` [已实现] —— 改名字或备注（200）：只写 `name` / `notes` 与
+`updated_at`，改不动参数、状态与结果（那些是快照）；两个字段都缺失 422，未知字段 422。
+
+`GET /experiments/compare` [已实现] —— 逐个实验并排对比**已存**数据（`?ids=1,2` 或重复参数
+`?ids=1&ids=2`，两种写法都接受），与回测
+对比端点同形：`{"metrics": [...], "experiments": [...]}`，不重算任何量化值；每行**追加** `config`
+（该实验当时那份配置：策略/版本/标的/时间范围/初始资金/参数），整体给出 `comparability`
+（`same-config` / `different-config`）与 `differences`（人类可读的差异维度，由服务端比较**存储值**
+得到）。指标列是 `total_return` / `max_drawdown` / `sharpe` / `win_rate` / `number_of_trades` /
+`final_equity` / `cagr` / `total_fees`（ADR-185）；实验与结果行发布的 `final_equity` / `cagr` 是引擎
+逐字存储值，`total_fees` 是已存逐笔 `fees` 的求和，没存到的列发布 `null`（界面写「未知」），不会
+用 0 顶替。
+
+列表与详情里扁平化的 `metrics` 同样保证带上这八个可比键：存过的逐字发布，没存过的是 `null`
+（ADR-185 之前入库的行因此读作「未知」，而不是缺键或 0）；某个 `kind` 自带的指标键（例如
+monte_carlo 的 `probability_of_profit`）照旧保留在该字段里。
 
 `DELETE /experiments/{experiment_id}` [已实现] —— 204，级联删除该实验的结果行，**不删除底层
 `BacktestRun`**（回测是它自己的产物，删除回测另有其门）。
@@ -347,10 +407,35 @@ ADR-052）。这是**描述性**端点：它展示这个旋钮的台阶形状，
 创建、列表与单账户三个端点的响应字段都是 `net_deposits`（数据库列名 `initial_cash` 保留，
 只是历史命名）。
 
+创建账户时可以（也可以不）绑定这次要验证的对象：请求体新增 `strategy_version_id`、
+`backtest_run_id` 与 `parameters`（ADR-181）。给 `backtest_run_id` 时该运行必须存在，且
+`status = "completed"`，否则 **422**（`backtest run {id} is '{status}', not 'completed'`）；
+版本与参数默认从这次回测推导（显式传入优先），所以「用这次回测创建模拟账户」只需要给一个 id。
+给 `strategy_version_id` 时该版本必须存在（否则 422）；legacy 的 `strategy_id` 仍然接受，但它与
+版本冲突时返回 **422**——版本决定策略，不是反过来（`strategy {strategy_id} does not own
+strategy version {strategy_version_id}; the version decides the strategy`）。`strategy_id` 单独
+回答不了「哪个版本、哪套参数」，所以账户响应与创建响应都带上 `strategy_version_id`、
+`backtest_run_id`、`parameters` 与解析出来的 `strategy_name`；`backtest_run_id` 是
+`ondelete="SET NULL"` 外键——退役一次回测不会连带删掉用它建出来的账户。
+
+账户响应还给出总览口径的一组数字（ADR-181）：`net_deposits`、`cash`、`market_value`（持仓市值）、
+`unrealized_pnl`（未实现盈亏）、`realized_pnl`（已实现盈亏）、`total_equity`（总资产）、
+`total_pnl`（总盈亏）与 `total_pnl_pct`（总收益率，比率不是百分数，ADR-087）。标记价一律取该标的
+**最新一根已收盘 K 线**的收盘价（ADR-119）；任何一笔持仓取不到合格收盘价时，`market_value`、
+`unrealized_pnl`、`total_equity`、`total_pnl`、`total_pnl_pct` **全部**为 `null`，原因逐条写进
+`metric_notes`——**绝不编一个价格**：待标记的持仓不计入总额，半算出来的总资产比没有总资产更糟
+（ADR-006/ADR-007）。恒等式是 `total_equity = cash + market_value`、
+`total_pnl = realized_pnl + unrealized_pnl`；盈亏只能由「数量 × 标记价」得出，**不得从现金变动
+倒推**（ADR-124），`net_deposits ≤ 0` 时总收益率同样没有分母。
+
 入金/提现端点（`/paper/accounts/{account_id}/fund`）的 `amount` 正负都改变基准：入金抬高、
 提现降低，返回 `{account_id, cash, net_deposits}`，审计 payload 同步记录 `net_deposits`。
 于是不变量 `final_equity == net_deposits + 已实现盈亏`（空仓时等于 `cash`）恒成立，
 取钱不会被记成亏钱。重置端点的响应也带 `net_deposits`（重置把基准一并设为期初现金）。
+
+重置账户也会删掉该账户的**模拟订单**（ADR-181）：持仓与成交删掉、订单留着的话，订单列表会继续
+返回一些已经不属于任何盈亏的孤儿委托。`initial_cash` 传 `0` 按**显式传入**处理（过去
+`initial_cash or …` 把 0 当成「没给」，于是重置回不去 0）。
 
 `net_deposits ≤ 0` 时没有收益率的分母：`/paper/accounts/{account_id}/performance`
 的 `metrics.total_return`（以及其它比率类指标）为 `null`，原因写在新增的
@@ -378,6 +463,23 @@ denominator`），前端据此显示「—」而不是 `NaN%`/`-100%`。
 `exit_time` 排序）也不会把它插进历史的中间。调用方仍可显式传入时刻来覆盖它（测试与手工
 补录）。成交数量按 `Numeric(24, 10)` 向下取整后再计算手续费与现金余额，因此一笔用满余额
 的买入不会被 Decimal 末位误差拒成 `insufficient cash`（ADR-122）。
+
+持仓响应每行新增 `symbol`、`mark_price`、`mark_time`、`mark_note`，以及由标记价算出的
+`market_value`、`unrealized_pnl`、`unrealized_pnl_pct`（比率不是百分数，ADR-087）：标记价取该
+资产**最新一根已收盘 K 线**的收盘价（`resolve_series` 解析序列、`load_bars(only_closed=True)`
+取数，ADR-119），`mark_time` 是那根 K 线的时间。取不到合格收盘价（标的没有序列、还没有已收盘
+K 线、或那根 K 线没有收盘价）时，价格与盈亏字段为 `null`，`mark_note` 说明是哪种情况——界面据此
+显示「未知」，而不是把缺失读成 0（ADR-006/ADR-007）。持仓列表与取单个持仓
+（`/paper/accounts/{account_id}/positions/{asset_id}`）两个端点口径一致。持仓数量为 0（已经全部
+平掉）时，`market_value` 与 `unrealized_pnl` 是 0、`unrealized_pnl_pct` 是 `null`：没有敞口就没有
+开仓收益率可发布，用逐股价差顶上只会让一条已清仓的记录显示一笔其实不存在的亏损。
+
+执行信号（`/paper/accounts/{account_id}/execute`）新增两个**可选**且**互斥**的 sizing 字段
+`quantity`（成交数量）与 `notional`（成交金额），都必须 > 0；`notional` 按**成交价**折算成数量，
+超过账户当前现金时返回 **422**（`notional exceeds available cash`），两者同时给出也返回 422
+（`specify either quantity or notional, not both`）。都不传时行为不变：引擎按 ADR-030 的默认整仓
+口径下单，预算按 `成交价 × (1 + 费率)` 折算。
+
 `POST /paper/accounts/{account_id}/close` [已实现] —— 关闭（冻结）一个模拟账户。
 `POST /paper/accounts/{account_id}/reopen` [已实现] —— 重新打开已关闭的模拟账户。
 `POST /paper/accounts/{account_id}/fund` [已实现] —— 入金/提现（有审计）。
@@ -393,7 +495,8 @@ denominator`），前端据此显示「—」而不是 `NaN%`/`-100%`。
 
 ## Signals
 
-`GET /signals` [已实现] —— 列出已落库的信号。
+`GET /signals` [已实现] —— 列出已落库的信号（query `state`、`asset_id`、`symbol`、
+`strategy_version_id`、`limit` 默认 50（上限 500）、`offset` 默认 0）。
 `GET /signals/{signal_id}` [已实现] —— 取单个信号。
 `GET /signals/{signal_id}/evidence` [已实现]  (feature snapshot + portfolio context)
 `GET /signals/evidence/{strategy_version_id}` [已实现] —— 规则命中 + 实证统计 + 模拟统计 + 组合上下文。
@@ -404,6 +507,10 @@ denominator`），前端据此显示「—」而不是 `NaN%`/`-100%`。
 `POST /signals/scan` [已实现] —— 干跑一次扫描；`persist=false`（默认）只算不落库，`persist=true` 才写入信号（去重）。
 `POST /signals/{signal_id}/explain` [已实现] —— 解释一个已落库的信号。
 `POST /signals/{signal_id}/acknowledge` [已实现] —— 确认一个信号；已确认的信号不再被通知任务推送。
+
+信号列表新增查询参数 `strategy_version_id`：绑定策略版本的模拟账户要的正是那个版本的信号，先按
+`limit` 取最新 N 行再在客户端过滤会**静默丢掉**它们（ADR-181）。过滤发生在这条聚合语句里，
+`symbol` 仍然走 `Asset` 的精确匹配（未知标的返回空列表，不是全局结果）。
 
 两种模式共用同一条新鲜度门禁：`NO_SIGNAL` 不是信号，既不落库也不计入 `created`。`persist=true`
 返回的 `created` 是**真的新建**了几行（过去它靠「最老一条 signal 的 id 有没有变」猜，既算错又会在

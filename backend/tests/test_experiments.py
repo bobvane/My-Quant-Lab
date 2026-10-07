@@ -151,10 +151,15 @@ def test_sensitivity_kind_keeps_one_row_per_grid_point(client, db_session) -> No
     assert "mean" in summary["statistics"]
     assert summary["best"]["parameters"]["trend_period"] in (10, 20, 40)
     # The flattened detail metrics are the winning point's stored metrics, not a recompute.
+    # The only keys they add are the comparable columns every experiment publishes; for a sweep
+    # point that never ran the flat engine those are unknown (None), never zero (ADR-185).
     winner = next(
         row for row in body["results"] if row["parameters"] == summary["best"]["parameters"]
     )
-    assert body["metrics"] == winner["metrics"]
+    extra = set(body["metrics"]) - set(winner["metrics"])
+    assert extra == {"final_equity", "total_fees"}
+    assert {name: body["metrics"][name] for name in winner["metrics"]} == winner["metrics"]
+    assert all(body["metrics"][name] is None for name in extra)
 
     rows = db_session.scalars(select(ExperimentResult)).all()
     assert len(rows) == 3
@@ -196,7 +201,12 @@ def test_sensitivity_preserves_warmup_unmet_per_point_and_per_summary(client) ->
         assert by_period[period]["payload"]["objective"] == 0.0
     assert summary["best"]["parameters"]["trend_period"] == 100
     assert by_period[100]["metrics"]["total_return"] < 0
-    assert body["metrics"] == by_period[100]["metrics"]
+    # Same projection rule as the sweep above: the winning point's stored metrics plus the
+    # comparable columns the experiment always publishes (ADR-185).
+    winner_metrics = by_period[100]["metrics"]
+    extra = set(body["metrics"]) - set(winner_metrics)
+    assert extra == {"final_equity", "total_fees"}
+    assert {name: body["metrics"][name] for name in winner_metrics} == winner_metrics
 
 
 def test_monte_carlo_kind_resamples_the_stored_trades(client, db_session) -> None:
@@ -357,6 +367,9 @@ def test_compare_projects_the_stored_metrics_of_two_experiments(client) -> None:
         "sharpe",
         "win_rate",
         "number_of_trades",
+        "final_equity",
+        "cagr",
+        "total_fees",
     ]
     assert [row["id"] for row in body["experiments"]] == [first["id"], second["id"]]
     for row, created in zip(body["experiments"], (first, second), strict=True):
@@ -494,7 +507,7 @@ def test_engine_failure_is_persisted_as_failed(client, db_session, monkeypatch) 
     def boom(*args, **kwargs):
         raise RuntimeError("engine exploded")
 
-    monkeypatch.setattr("app.api.routers.experiments.run_walk_forward", boom)
+    monkeypatch.setattr("app.data.experiment_service.run_walk_forward", boom)
 
     response = _create(client, version_id, name="broken", kind="walk_forward", symbol=_SYMBOL)
     # The created row is the deliverable of the POST: 201, with the failure on it.

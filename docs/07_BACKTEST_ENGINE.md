@@ -174,3 +174,40 @@ Train window
 - 删除失败交易
 - 只展示最优参数而不展示参数稳定性
 - 自动覆盖旧 backtest result
+
+## 14. 运行状态与异步执行（ADR-180）
+
+一次回测在库里就是一行 `backtest_runs`，它同时是**输入**（策略版本、数据集、参数、已解析的执行
+模型都从这一行读回）和**锁**（已经到终局的行不再被重跑，重复投递只浪费一次 CPU）。
+
+`status` 之外还有两个字段描述它正在做什么：`progress`（整数 0–100）与 `current_step`，刻度写在
+`backend/app/data/backtest_service.py` 的 `PROGRESS_LADDER`：
+
+```text
+loading data       5
+computing features 20
+running strategy   45
+evaluating exits   70
+computing metrics  90
+completed          100
+```
+
+`progress` 是给界面看的粗刻度，不是精确百分比。引擎当前是一趟调用（ADR-174），可观测的跳变只有
+`computing features` → `computing metrics`；`running strategy` 与 `evaluating exits` 是引擎自己的
+阶段、没有可提交的边界，所以没有为它们编造百分比。运行行在请求内**创建并提交**（`progress = 0`、
+`current_step = "loading data"`），所以「它在跑」从落库那一刻起就是一个可轮询的事实。
+
+`progress` 与 `current_step` **不进** `result_hash`：哈希只覆盖策略版本、数据集、引擎版本、
+特征版本、参数、指标与交易数；把运行过程元数据算进去会让同策略、同数据、同参数的重跑得到不同哈希，
+ADR-081 的「数据集 + 哈希即可复现」随即失效。
+
+两条执行路径由设置 `BACKTEST_ASYNC`（环境变量也接受 `MQL_BACKTEST_ASYNC` 拼写，默认 `false`）选择：
+
+- `false`（默认）：请求内同步跑完（`prepare_backtest` → `execute_backtest`），响应直接带上结果；
+  `store_backtest` 保留为「同步跑完」的组合入口，对外行为不变。
+- `true`：请求内只 `prepare_backtest`（校验 + 落行）并入队 Celery 任务
+  `quantlab.run_backtest`（`backend/app/workers/tasks.py`）；worker 用 `rebuild_backtest_inputs`
+  从行里重建输入，再 `execute_backtest`。没有 worker 的部署与测试继续用同步路径。
+
+失败就是失败：`status = "failed"`、`error_message` 是引擎给出的**逐字**原因，不留半截 result；
+终局的行被重复投递时原样保留。本轮**不实现取消**。

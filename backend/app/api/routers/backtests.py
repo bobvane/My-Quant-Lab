@@ -6,10 +6,15 @@ version and feature version. Results are never overwritten.
 The run itself is executed and persisted by :mod:`app.data.backtest_service`, which
 ``POST /experiments`` shares: an experiment that ran a backtest must leave behind exactly
 the same artifact as ``POST /backtests`` does, not a second implementation of it.
+
+With ``BACKTEST_ASYNC`` on (default off) this router only *prepares* the run and hands the
+engine to ``quantlab.run_backtest``; the same service drives both halves, so the synchronous
+answer and the watched one cannot drift apart (ADR-180).
 """
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,12 +22,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.schemas import BacktestCreate, BacktestOut, BacktestSummaryOut
+from app.core.config import settings
 from app.core.db import get_db
 from app.data.backtest_service import (
     COMPARE_METRICS,
     BacktestFailed,
     BacktestRequestError,
     load_backtest_inputs,
+    prepare_backtest,
     store_backtest,
 )
 from app.domain.models import BacktestRun
@@ -32,18 +39,34 @@ router = APIRouter(prefix="/backtests", tags=["backtests"])
 
 @router.post("", response_model=BacktestOut, summary="Run a backtest")
 def create_backtest(payload: BacktestCreate, db: Session = Depends(get_db)) -> BacktestOut:
+    # Built once so both paths resolve the request identically: an async run must reject
+    # the same requests a synchronous one rejects, with the same status and detail.
+    lookup: dict[str, Any] = {
+        "strategy_version_id": payload.strategy_version_id,
+        "symbol": payload.symbol,
+        "series_id": payload.series_id,
+        "timeframe": payload.timeframe,
+        "timeframe_explicit": "timeframe" in payload.model_fields_set,
+        "start": payload.start,
+        "end": payload.end,
+        "execution_overrides": payload.execution_overrides,
+    }
+
+    if settings.backtest_async:
+        # prepare_backtest commits the running row before its id is enqueued: the worker is
+        # another process and would not find a row still inside this transaction. The answer
+        # is therefore a run to watch (progress/current_step) rather than a result to wait
+        # for, and the status code stays 200 — a client that only reads `status` is not
+        # broken by being handed work in progress (ADR-180).
+        try:
+            run, _ = prepare_backtest(db, parameters=payload.parameters, **lookup)
+        except BacktestRequestError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        _enqueue_backtest(run.id, payload.timeframe, payload.start, payload.end)
+        return _to_out(run, None, None, None, None)
+
     try:
-        inputs = load_backtest_inputs(
-            db,
-            strategy_version_id=payload.strategy_version_id,
-            symbol=payload.symbol,
-            series_id=payload.series_id,
-            timeframe=payload.timeframe,
-            timeframe_explicit="timeframe" in payload.model_fields_set,
-            start=payload.start,
-            end=payload.end,
-            execution_overrides=payload.execution_overrides,
-        )
+        inputs = load_backtest_inputs(db, **lookup)
     except BacktestRequestError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
@@ -108,7 +131,12 @@ def get_backtest(run_id: int, db: Session = Depends(get_db)) -> BacktestOut:
     if run is None:
         raise HTTPException(status_code=404, detail="backtest run not found")
     if run.result is None:
-        raise HTTPException(status_code=409, detail="backtest has no result yet")
+        # A run that is still executing, or that failed, has no result row yet. This used to
+        # be a 409, which told a poller only that it was too early; the run itself is the
+        # answer — `status`, `progress` and `current_step` say what it is doing and
+        # `error_message` says why it stopped. The result fields stay absent so a client
+        # cannot mistake an empty curve for a flat backtest (ADR-180).
+        return _to_out(run, None, None, None, None)
     trades = [
         {
             "direction": t.direction,
@@ -217,15 +245,18 @@ def _to_summary(run: BacktestRun) -> BacktestSummaryOut:
         or (series.dataset_version if series is not None else None),
         source=summary.get("source")
         or (series.source.name if series is not None and series.source is not None else None),
+        progress=run.progress,
+        current_step=run.current_step,
+        error_message=run.error_message,
     )
 
 
 def _to_out(
     run: BacktestRun,
-    metrics: dict[str, Any],
-    equity_curve: list[dict[str, Any]],
-    trades: list[dict[str, Any]],
-    warnings: list[str],
+    metrics: dict[str, Any] | None,
+    equity_curve: list[dict[str, Any]] | None,
+    trades: list[dict[str, Any]] | None,
+    warnings: list[str] | None,
 ) -> BacktestOut:
     summary = _to_summary(run)
     return BacktestOut(
@@ -233,8 +264,34 @@ def _to_out(
         metrics=metrics,
         equity_curve=equity_curve,
         trades=trades,
-        result_hash=run.result.result_hash if run.result else "",
+        # No result row means no hash. An empty string would be a hash a client could
+        # compare, and every run without a result would appear to share it (ADR-180).
+        result_hash=run.result.result_hash if run.result else None,
         parameters=run.parameters_json,
         execution_model=run.execution_model_json,
-        warnings=warnings,
+        warnings=warnings or [],
+    )
+
+
+def _enqueue_backtest(
+    run_id: int,
+    timeframe: str,
+    start: dt.datetime | None,
+    end: dt.datetime | None,
+) -> None:
+    """Hand a prepared run to Celery.
+
+    The import is inside the function on purpose: only a deployment that turns
+    ``BACKTEST_ASYNC`` on needs the broker, and a test can replace this one seam instead of
+    standing up a worker. The window travels as ISO strings because the task arguments are
+    JSON (``app/workers/celery_app.py``) and a datetime is not.
+    """
+
+    from app.workers.tasks import run_backtest
+
+    run_backtest.delay(
+        run_id,
+        timeframe=timeframe,
+        start=start.isoformat() if start else None,
+        end=end.isoformat() if end else None,
     )

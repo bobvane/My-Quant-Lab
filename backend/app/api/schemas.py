@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = [
     "AIStatusOut",
@@ -22,12 +23,14 @@ __all__ = [
     "BacktestOut",
     "BacktestSummaryOut",
     "BarOut",
+    "ExperimentAdoptRequest",
     "ExperimentCompareOut",
     "ExperimentCreate",
     "ExperimentDetailOut",
     "ExperimentListOut",
     "ExperimentResultOut",
     "ExperimentSummaryOut",
+    "ExperimentUpdate",
     "ExplainOut",
     "GithubAnalyzeRequest",
     "GithubAnalyzeOut",
@@ -227,16 +230,27 @@ class BacktestSummaryOut(BaseModel):
     timeframe: str | None = None
     dataset_version: str | None = None
     source: str | None = None
+    # Where the run is, so a client that only holds an id can say "running — computing
+    # metrics" instead of showing a spinner. `progress` is 0-100 and `current_step` names
+    # the rung that percentage belongs to (ADR-180); `error_message` is what a failed run
+    # has instead of a result, and is null while it is still running.
+    progress: int = 0
+    current_step: str | None = None
+    error_message: str | None = None
 
 
 class BacktestOut(BacktestSummaryOut):
-    metrics: dict[str, Any]
-    equity_curve: list[dict[str, Any]]
-    trades: list[dict[str, Any]]
-    result_hash: str
-    parameters: dict[str, Any]
-    execution_model: dict[str, Any]
-    warnings: list[str] = Field(default_factory=list)
+    # Every result field is optional because a run may legitimately have no result yet: with
+    # BACKTEST_ASYNC on, POST /backtests answers while the engine is still to run, and
+    # GET /backtests/{id} answers a poll for that same run. They are *absent*, never empty —
+    # an empty equity curve would read as a flat backtest (ADR-180).
+    metrics: dict[str, Any] | None = None
+    equity_curve: list[dict[str, Any]] | None = None
+    trades: list[dict[str, Any]] | None = None
+    result_hash: str | None = None
+    parameters: dict[str, Any] | None = None
+    execution_model: dict[str, Any] | None = None
+    warnings: list[str] | None = Field(default_factory=list)
 
 
 class WalkForwardRequest(BaseModel):
@@ -379,6 +393,41 @@ class ExperimentCreate(BaseModel):
     step: int | None = Field(default=None, ge=1)
     oos_pct: float | None = Field(default=0.2, gt=0.0, lt=1.0)
     oos_start: str | None = None
+    # A draft is the same validated request, stored without running anything: the row
+    # freezes what will be executed and the engine runs on ``POST /experiments/{id}/run``.
+    draft: bool = False
+
+
+class ExperimentUpdate(BaseModel):
+    """PATCH body for the two human-facing fields of a stored experiment.
+
+    Each field is individually optional, but a PATCH that changes neither is a client
+    mistake rather than a no-op: it answers 422 instead of silently touching the row.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    notes: str | None = Field(default=None, max_length=4000)
+
+    @model_validator(mode="after")
+    def _require_one_field(self) -> ExperimentUpdate:
+        if self.name is None and self.notes is None:
+            raise ValueError("give at least one of name or notes")
+        return self
+
+
+class ExperimentAdoptRequest(BaseModel):
+    """Optional body of ``POST /experiments/from-backtest/{run_id}``.
+
+    The run already carries the numbers; this only lets the caller name the experiment
+    it becomes. Omit the body entirely to accept the generated default name.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    notes: str | None = Field(default=None, max_length=4000)
 
 
 class ExperimentResultOut(BaseModel):
@@ -411,13 +460,28 @@ class ExperimentSummaryOut(BaseModel):
     timeframe: str
     result_count: int = 0
     backtest_run_id: int | None = None
-    # The five comparable metrics, flattened out of the stored summary so a history row
-    # is readable without loading the experiment. Stored, never recomputed.
+    # The comparable metrics (`EXPERIMENT_METRICS`, ADR-185), flattened out of the stored
+    # summary so a history row is readable without loading the experiment. Stored, never
+    # recomputed; a metric the engine did not store stays missing/None rather than 0.
     metrics: dict[str, Any] = Field(default_factory=dict)
     created_at: dt.datetime
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
     error_message: str | None = None
+    # Lifecycle: when the row was last touched, and when it was archived (if ever).
+    updated_at: dt.datetime | None = None
+    archived_at: dt.datetime | None = None
+    # The run configuration frozen at creation. ``symbols`` is the instrument list the
+    # experiment actually touched, and ``is_adopted`` marks a row that came from a stored
+    # backtest instead of from running an engine here.
+    initial_capital: float | None = None
+    start_date: dt.datetime | None = None
+    end_date: dt.datetime | None = None
+    strategy_id: int | None = None
+    strategy_name: str | None = None
+    version: str | None = None
+    symbols: list[str] = Field(default_factory=list)
+    is_adopted: bool = False
 
 
 class ExperimentDetailOut(ExperimentSummaryOut):
@@ -434,6 +498,11 @@ class ExperimentListOut(BaseModel):
 
 class ExperimentCompareOut(BaseModel):
     metrics: list[str]
+    # Whether the compared rows ran the same configuration, and -- when they did not --
+    # which of the stored dimensions differ. Both come from comparing the STORED
+    # configuration server-side; nothing is guessed from the response shape.
+    comparability: Literal["same-config", "different-config"] = "different-config"
+    differences: list[str] = Field(default_factory=list)
     experiments: list[dict[str, Any]]
 
 
@@ -526,6 +595,12 @@ class PaperAccountCreate(BaseModel):
     initial_cash: float = Field(default=100_000.0, gt=0)
     base_currency: str = "USD"
     strategy_id: int | None = None
+    # The binding: which *version* (and which exact parameters) the paper result
+    # belongs to. A strategy id alone cannot answer that, so an account opened from a
+    # backtest keeps both (ADR-181). Omitted fields are copied from the run.
+    strategy_version_id: int | None = None
+    backtest_run_id: int | None = None
+    parameters: dict[str, Any] | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -535,6 +610,12 @@ class PaperAccountOut(BaseModel):
     id: int
     name: str
     strategy_id: int | None
+    strategy_version_id: int | None = None
+    backtest_run_id: int | None = None
+    # Validated from the ORM column `parameters_json`, published as `parameters`.
+    parameters: dict[str, Any] = Field(default_factory=dict, validation_alias="parameters_json")
+    # Resolved server-side so the panel does not need a second request per account.
+    strategy_name: str | None = None
     base_currency: str
     # The DB column is still called `initial_cash`, but funding moves it in both
     # directions, so what it holds is the account's net deposits (ADR-066).
@@ -544,6 +625,18 @@ class PaperAccountOut(BaseModel):
     # `cash - net_deposits`, which is only the same number while nothing is open: a
     # full-size buy spends the cash and would read as -100% (ADR-124).
     realized_pnl: float = 0.0
+    # Marked-to-market totals of the OPEN positions, from paper data only: the cash is
+    # paper cash and the mark is the close of the latest *closed* bar, so nothing here
+    # reaches the real portfolio (ADR-006). `null` while no bar qualifies to mark with,
+    # because an invented price would be worse than a named gap (ADR-007).
+    market_value: float | None = None
+    unrealized_pnl: float | None = None
+    total_equity: float | None = None
+    total_pnl: float | None = None
+    # A ratio, not a percentage: `0.05` means +5% (ADR-087). `null` while net deposits
+    # are <= 0, where a ratio would have no denominator — `metric_notes` says so.
+    total_pnl_pct: float | None = None
+    metric_notes: list[str] = Field(default_factory=list)
     status: str
     reset_count: int
     created_at: dt.datetime
@@ -553,6 +646,17 @@ class PaperExecuteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     signal_id: int = Field(ge=1)
+    # Explicit sizing: `quantity` is units, `notional` is the gross trade value in the
+    # account currency. Both are optional and mutually exclusive; without them the
+    # engine keeps its all-in sizing, so old callers are unaffected (ADR-181).
+    quantity: Decimal | None = Field(
+        default=None, gt=0, description="Exact units to trade; mutually exclusive with `notional`"
+    )
+    notional: Decimal | None = Field(
+        default=None,
+        gt=0,
+        description="Gross trade value; mutually exclusive with `quantity`",
+    )
     fee_bps: float | None = Field(default=None, ge=0, le=1000)
     slippage_bps: float | None = Field(default=None, ge=0, le=1000)
     max_position_pct: float | None = Field(default=None, gt=0, le=1)
@@ -571,9 +675,21 @@ class PaperPositionOut(BaseModel):
     id: int
     account_id: int
     asset_id: int
+    symbol: str | None = None
     quantity: float
     avg_cost: float
     realized_pnl: float
+    # The mark is the close of the latest *closed* bar for the position's asset, read
+    # through the one market-data loader (ADR-119). When no bar qualifies the mark
+    # fields stay `null` and `mark_note` says why: a position without a mark is a gap
+    # to name, never a price to invent (ADR-007, ADR-023).
+    mark_price: float | None = None
+    mark_time: dt.datetime | None = None
+    mark_note: str | None = None
+    market_value: float | None = None
+    unrealized_pnl: float | None = None
+    # A ratio, not a percentage: `0.05` means +5% (ADR-087).
+    unrealized_pnl_pct: float | None = None
 
 
 class PaperOrderOut(BaseModel):

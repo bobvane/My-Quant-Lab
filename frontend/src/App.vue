@@ -72,6 +72,7 @@ onMounted(async () => {
         <RouterLink to="/research">研究策略</RouterLink>
         <RouterLink to="/strategies">我的策略</RouterLink>
         <RouterLink to="/backtest">回测</RouterLink>
+        <RouterLink to="/experiments">实验</RouterLink>
         <RouterLink to="/paper">模拟验证</RouterLink>
         <RouterLink to="/signals">信号</RouterLink>
         <RouterLink to="/data">数据</RouterLink>

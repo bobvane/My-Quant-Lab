@@ -5,6 +5,7 @@ import {
   api,
   type AIStatus,
   type BacktestSummary,
+  type ExperimentSummaryOut,
   type ExplainResult,
   type PaperAccount,
   type SignalIntent,
@@ -398,6 +399,71 @@ async function explainRow(index: number) {
   }
 }
 
+// ---- 最近实验（Phase B）：只追加一张小卡，不动上面 load() 的请求集合 ------------
+
+/** 服务端 `ExperimentStatus`；wording.ts 里没有实验状态词，这张小卡自己收一份。 */
+const EXPERIMENT_STATUS_LABELS: Record<string, string> = {
+  draft: '草稿',
+  running: '运行中',
+  completed: '已完成',
+  failed: '没有跑完',
+  archived: '已归档',
+}
+
+function experimentStatusLabel(status: string | null | undefined): string {
+  if (!status) return '未知'
+  return EXPERIMENT_STATUS_LABELS[status] ?? '未知'
+}
+
+const recentExperiments = ref<ExperimentSummaryOut[]>([])
+const experimentsLoading = ref(false)
+const experimentError = ref('')
+
+/**
+ * 这张卡自己的请求、自己的失败提示：读不到就只说这张卡没有内容，
+ * 不碰 `error`（那是上面 load() 那批请求的共用提示），也不会拖垮整页。
+ * 窗口 = 最近 20 条（服务端上限就是列表默认口径），「最佳」只在这个窗口里比大小。
+ */
+async function loadRecentExperiments() {
+  experimentsLoading.value = true
+  experimentError.value = ''
+  try {
+    const response = await api.experiments(20)
+    recentExperiments.value = response.experiments ?? []
+  } catch (e) {
+    recentExperiments.value = []
+    experimentError.value = `实验列表加载失败：${(e as Error).message}。这张卡片暂时没有内容，页面其余部分仍然可用。`
+  } finally {
+    experimentsLoading.value = false
+  }
+}
+
+const recentExperiment = computed<ExperimentSummaryOut | null>(() => recentExperiments.value[0] ?? null)
+
+/**
+ * 「最佳」= 刚读回来的这 20 条里，服务端已存的总收益最高的那一条。
+ * 只比大小，不重算任何指标，也不用别的字段凑一个分数。
+ */
+const bestExperiment = computed<ExperimentSummaryOut | null>(() => {
+  let best: ExperimentSummaryOut | null = null
+  let bestValue: number | null = null
+  for (const item of recentExperiments.value) {
+    const value = item.metrics?.total_return
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue
+    if (bestValue === null || value > bestValue) {
+      bestValue = value
+      best = item
+    }
+  }
+  return best
+})
+
+const bestReturnText = computed(() => {
+  const value = bestExperiment.value?.metrics?.total_return
+  return typeof value === 'number' && Number.isFinite(value) ? formatPercent(value) : '未知'
+})
+
+onMounted(loadRecentExperiments)
 onMounted(load)
 </script>
 
@@ -462,6 +528,46 @@ onMounted(load)
       现在这份数据只有 {{ dataSpanYears.toFixed(1) }} 年。
       <RouterLink to="/data">到「数据」同步更长的一段</RouterLink>，结论才更有分量。
     </p>
+
+    <!-- 最近实验（Phase B）：只追加这一张卡；四问与下面既有面板都不动。 -->
+    <div class="card" style="margin-top: 14px">
+      <div class="row" style="justify-content: space-between">
+        <h3 style="margin: 0">最近实验 / 最佳实验</h3>
+        <RouterLink to="/experiments">到「实验」页</RouterLink>
+      </div>
+      <p v-if="experimentError" class="error" style="margin: 8px 0 0">{{ experimentError }}</p>
+      <p v-else-if="experimentsLoading" class="muted" style="margin: 8px 0 0">正在读最近几次实验…</p>
+      <template v-else-if="recentExperiment">
+        <div class="grid cols-2" style="margin-top: 8px">
+          <div>
+            <div class="muted">最近一次</div>
+            <p class="answer-main" style="margin: 2px 0 0">{{ recentExperiment.name }}</p>
+            <p class="muted" style="margin: 2px 0 0">
+              {{ experimentStatusLabel(recentExperiment.status) }} ·
+              {{ formatDateTime(recentExperiment.created_at) }}
+            </p>
+          </div>
+          <div>
+            <div class="muted">最近 20 条里已存总收益最高的一条</div>
+            <template v-if="bestExperiment">
+              <p class="answer-main" style="margin: 2px 0 0">{{ bestExperiment.name }}</p>
+              <p class="muted" style="margin: 2px 0 0">
+                总收益 {{ bestReturnText }} · {{ experimentStatusLabel(bestExperiment.status) }}
+              </p>
+            </template>
+            <p v-else class="muted" style="margin: 2px 0 0">
+              读回来的 {{ recentExperiments.length }} 条实验都还没有服务端存下的总收益，没法说哪条最好。
+            </p>
+          </div>
+        </div>
+        <p class="muted" style="margin: 8px 0 0">
+          「最高」= 最近 20 条里已存总收益最高的一条（只比大小，这一页不重算）；完整读数在「实验」页里。
+        </p>
+      </template>
+      <p v-else class="muted" style="margin: 8px 0 0">
+        还没有实验。到「实验」页跑一次，或者在「回测」页把一条跑完的回测保存为实验。
+      </p>
+    </div>
 
     <div class="grid cols-2" style="margin-top: 14px">
       <StatCard

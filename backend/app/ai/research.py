@@ -654,6 +654,9 @@ def _researcher_prompt(question: str, sources: dict[str, str], failures: list[st
         " idea testable is ASSUMED and must also be disclosed in assumptions; anything"
         " missing has to appear in unknowns, and an unknown that is about one rule names"
         " it in rule_id.",
+        "Every assumption names the rule field it fills in, in applies_to: one or more of"
+        f" {', '.join(gates.RULE_FIELDS)} — the field itself, such as 'indicator', never"
+        " the rule id, such as 'r-oversold'.",
         "Never state a performance figure (return, CAGR, Sharpe, drawdown, win rate):"
         " no backtest has run, so any such number would be invented.",
         f"Available source_ref values: {', '.join(sorted(sources)) or '(none)'}",
@@ -685,6 +688,8 @@ def _architect_prompt(
         " experimental alternative and state what it gives up.",
         "Every rule must keep or weaken the provenance of the hypothesis rule it comes"
         " from; a rule you introduce must be ASSUMED and disclosed in assumptions.",
+        "The same contract as the hypothesis holds for applies_to: it names the rule"
+        f" field, one or more of {', '.join(gates.RULE_FIELDS)} — never the rule id.",
         "An EXPLICIT rule must quote the words it rests on, copied character for character"
         " out of the named source: a citation whose quote is not in that source is refused.",
         "When a hypothesis rule is not formalized, name it in the unknowns entry that"

@@ -58,8 +58,9 @@ only:
   comes from, or null), `parameters`, `required_capabilities`, `evidence`.
 - `unknowns` — what could not be formalized: `field`, `why`,
   `needed_to_formalize`.
-- `assumptions` — every ASSUMED rule: `statement`, `applies_to` (the rule ids),
-  `reason`.
+- `assumptions` — every ASSUMED rule: `statement`, `applies_to` (the rule field —
+  market / universe / timeframe / indicator / entry / exit / risk / sizing /
+  execution / parameter — never the rule id), `reason`.
 - `required_capabilities` — one entry per capability the idea needs and the system
   lacks: `capability`, `affected_rule`, `reason`, and, when a reduced experiment
   is possible, `suggested_alternative` with `alternative_is_experimental: true`.

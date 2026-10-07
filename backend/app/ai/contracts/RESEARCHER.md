@@ -52,8 +52,9 @@ You are given a question and one or more sources. Answer with JSON only:
   readings you considered), `needs_decision`.
 - `unknowns` — what the material does not say: `field`, `why`,
   `needed_to_formalize`.
-- `assumptions` — every rule you marked ASSUMED: `statement`, `applies_to` (the
-  rule ids it affects), `reason`.
+- `assumptions` — every rule you marked ASSUMED: `statement`, `applies_to` (the rule
+  field it fills in — market / universe / timeframe / indicator / entry / exit /
+  risk / sizing / execution / parameter — never the rule id), `reason`.
 - `capability_requests` — anything the idea needs that the Capability Registry
   does not list: `capability`, `statement`, `reason`, `claimed_supported` (false
   unless the registry lists it).

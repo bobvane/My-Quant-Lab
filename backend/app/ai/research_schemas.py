@@ -48,6 +48,7 @@ from app.capabilities import (
 from app.features.engine import normalise_indicator_type
 
 __all__ = [
+    "APPLIES_TO_DESCRIPTION",
     "ARCHITECT_ROLE",
     "CAPABILITY_VERDICTS",
     "CONFIDENCES",
@@ -135,6 +136,17 @@ RuleField = Literal[
     "parameter",
 ]
 RULE_FIELDS: tuple[str, ...] = get_args(RuleField)
+
+#: The one wording of the ``assumptions[].applies_to`` contract. The ``Assumption``
+#: model and both model-facing schemas carry it verbatim, so the vocabulary cannot
+#: drift between them: ``_disclosure_violations`` compares these values with
+#: ``rule.field``, never with a rule id.
+APPLIES_TO_DESCRIPTION = (
+    "The rule field this assumption fills in, from the same vocabulary as "
+    f"rules[].field ({', '.join(RULE_FIELDS)}). Name the field itself, such as "
+    "'indicator' — never the rule id, such as 'r-oversold': an ASSUMED rule whose "
+    "field no assumption names is refused."
+)
 
 #: What a draft may be. There is deliberately no "SUPPORTED_AND_EXECUTABLE": a
 #: draft is never executable, and the missing capabilities are named as such
@@ -256,12 +268,17 @@ class Rule(BaseModel):
 
 
 class Assumption(BaseModel):
-    """What the model had to fill in, and which rule it fills it in for."""
+    """What the model had to fill in, and which rule field it fills it in for.
+
+    ``applies_to`` carries ``rule.field`` values (see :data:`RULE_FIELDS`) — the same
+    vocabulary ``rules[].field`` uses — never a rule ``id``: the disclosure gate
+    matches an ASSUMED rule by its field (ADR-154).
+    """
 
     model_config = _STRICT
 
     statement: str
-    applies_to: list[str] = Field(default_factory=list)
+    applies_to: list[str] = Field(default_factory=list, description=APPLIES_TO_DESCRIPTION)
     reason: str | None = None
 
 
@@ -516,7 +533,11 @@ RESEARCH_SCHEMA: dict[str, Any] = {
                 "required": ["statement"],
                 "properties": {
                     "statement": {"type": "string"},
-                    "applies_to": {"type": "array", "items": {"type": "string"}},
+                    "applies_to": {
+                        "type": "array",
+                        "items": {"enum": list(RULE_FIELDS)},
+                        "description": APPLIES_TO_DESCRIPTION,
+                    },
                     "reason": {"type": "string"},
                 },
             },
@@ -634,7 +655,11 @@ FORMALIZATION_SCHEMA: dict[str, Any] = {
                 "required": ["statement"],
                 "properties": {
                     "statement": {"type": "string"},
-                    "applies_to": {"type": "array", "items": {"type": "string"}},
+                    "applies_to": {
+                        "type": "array",
+                        "items": {"enum": list(RULE_FIELDS)},
+                        "description": APPLIES_TO_DESCRIPTION,
+                    },
                     "reason": {"type": "string"},
                 },
             },
@@ -1052,8 +1077,9 @@ def _disclosure_violations(
                 Violation(
                     code="assumed_not_disclosed",
                     message=(
-                        f"rule '{rule.id}' ({rule.field}) is ASSUMED but no assumption says so; "
-                        "an assumption must be visible in the assumptions list"
+                        f"rule '{rule.id}' ({rule.field}) is ASSUMED but no assumption "
+                        f"names its field; assumptions[].applies_to must contain the rule "
+                        f"field '{rule.field}', never the rule id '{rule.id}'"
                     ),
                     field_name=rule.id,
                 )

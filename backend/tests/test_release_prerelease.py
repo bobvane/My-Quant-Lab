@@ -118,9 +118,11 @@ def _run(
         text=True,
         check=False,
     )
-    written = dict(
-        line.split("=", 1) for line in ledger.read_text(encoding="utf-8").splitlines() if "=" in line
-    )
+    written: dict[str, str] = {}
+    for line in ledger.read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            written[key] = value
     return result, result.stdout, written
 
 
@@ -140,7 +142,9 @@ def test_a_candidate_is_flagged_and_leaves_version_txt_alone(tmp_path: pathlib.P
 
     workspace = _candidate_workspace(tmp_path)
     _, _, candidate = _run(RESOLVE_STEP, cwd=workspace, version=CANDIDATE)
-    assert candidate.get("prerelease") == "true", "a `-rc.N` tag was not recognised as a pre-release"
+    assert candidate.get("prerelease") == "true", (
+        "a `-rc.N` tag was not recognised as a pre-release"
+    )
     _, _, released = _run(RESOLVE_STEP, cwd=workspace, version=RELEASED)
     assert released.get("prerelease") == "false", "a released tag was reported as a pre-release"
 
@@ -231,7 +235,10 @@ def test_the_line_tag_is_moved_only_by_a_released_version() -> None:
     """`2.5` is a pin for a release line; a candidate must not move it."""
 
     text = _text(RELEASE)
-    gated = "type=semver,pattern={{major}}.{{minor}},enable=${{ steps.version.outputs.prerelease == 'false' }}"
+    gated = (
+        "type=semver,pattern={{major}}.{{minor}},"
+        "enable=${{ steps.version.outputs.prerelease == 'false' }}"
+    )
     assert text.count(gated) == 3, "not every published image gates its `X.Y` line tag"
     assert "type=semver,pattern={{major}}.{{minor}}\n" not in text, (
         "an ungated `X.Y` tag line is left, so a candidate would move the release line"

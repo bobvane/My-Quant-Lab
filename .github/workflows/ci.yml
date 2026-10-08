@@ -287,21 +287,30 @@ jobs:
           # One container, four long-lived children. If the merge left only some of
           # them running, every later smoke assertion could still pass while a whole
           # feature is silently missing.
+          #
+          # `ps -eo args=` also prints the shell running this very check, and that
+          # shell's command line carries every needle below -- matching the raw
+          # listing let the check pass by matching itself, and the `worker -B` probe
+          # failed for the same reason on the first run. Keep only the shapes a real
+          # child can have, then assert against that.
           $compose exec -T quantlab-app sh -eu -c '
             ps -eo args= > /tmp/ps.txt
+            grep -E -e "^nginx:" -e "^/usr/local/bin/python" -e "^/bin/bash " /tmp/ps.txt > /tmp/ps.kids || true
             for needle in \
               "nginx: master process" \
               "uvicorn app.api.main:app" \
               "celery -A app.workers.celery_app.celery_app worker" \
               "celery -A app.workers.celery_app.celery_app beat"
             do
-              grep -qF -- "$needle" /tmp/ps.txt || {
+              grep -qF -- "$needle" /tmp/ps.kids || {
                 echo "missing child: $needle"; cat /tmp/ps.txt; exit 1; }
             done
+            grep -qF -- "/bin/bash /usr/local/bin/entrypoint.sh" /tmp/ps.kids || {
+              echo "the launcher is not running the App"; cat /tmp/ps.txt; exit 1; }
             # `celery worker -B` would fold beat into the worker: the four names above
             # would still match, and the scheduler could stop without anyone noticing.
-            if grep -qF -- "worker -B" /tmp/ps.txt; then
-              echo "beat is embedded in the worker (-B)"; cat /tmp/ps.txt; exit 1
+            if grep -qF -- "worker -B" /tmp/ps.kids; then
+              echo "beat is embedded in the worker (-B)"; cat /tmp/ps.kids; exit 1
             fi
             echo "four children present"
           '

@@ -39,6 +39,7 @@ DOCKERFILE = DOCKER / "Dockerfile.app"
 NGINX_CONF = DOCKER / "app.nginx.conf"
 COMPOSE = REPO_ROOT / "docker-compose.yml"
 OVERLAY = REPO_ROOT / "docker-compose.build.yml"
+CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 RETIRED = ("quantlab-api", "quantlab-web", "quantlab-worker", "quantlab-scheduler")
 
@@ -232,6 +233,39 @@ def test_the_published_api_port_can_actually_reach_the_api() -> None:
     # The browser's door still goes through the container loopback, and that is
     # the only place the API is addressed by name.
     assert "proxy_pass http://127.0.0.1:8000" in _text(NGINX_CONF)
+
+
+def test_the_process_check_cannot_match_its_own_command_line() -> None:
+    """The CI process check must read a filtered listing, not raw ``ps`` output.
+
+    ``ps -eo args=`` prints the shell that is running the check too, and that
+    shell's command line carries every needle the check looks for. Matching the
+    raw listing therefore let the step pass by matching itself (it could never
+    fail), while the ``worker -B`` probe failed on its own text -- both on the
+    first run of that step. The listing is filtered to the shapes a real child
+    has, and every needle is matched against that filtered file.
+    """
+
+    ci = _text(CI)
+    step = re.search(
+        r"- name: Container process assertions \(ADR-190\)\n(?P<body>.*?)(?=\n      - name: )",
+        ci,
+        re.S,
+    )
+    assert step is not None, "the container process assertions step is gone"
+    body = step.group("body")
+
+    assert "/tmp/ps.txt > /tmp/ps.kids" in body, "the raw listing is matched unfiltered"
+    assert '-e "^nginx:"' in body and '-e "^/usr/local/bin/python"' in body
+    for needle in (
+        'grep -qF -- "$needle" /tmp/ps.kids',
+        'grep -qF -- "/bin/bash /usr/local/bin/entrypoint.sh" /tmp/ps.kids',
+        'grep -qF -- "worker -B" /tmp/ps.kids',
+    ):
+        assert needle in body, f"the process check no longer reads the filtered listing: {needle}"
+    assert not re.search(r"grep -qF -- (?:\"\$needle\"|.*worker -B).*?/tmp/ps\.txt", body), (
+        "a needle is matched against the raw listing again"
+    )
 
 
 def test_the_retired_services_leave_nothing_behind() -> None:

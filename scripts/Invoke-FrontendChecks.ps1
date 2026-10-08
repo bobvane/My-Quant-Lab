@@ -41,7 +41,11 @@ function Invoke-Robocopy {
     param([string]$From, [string]$To, [string[]]$ExcludeDirs = @())
     # NB: do not name this $args — that is a reserved automatic variable and
     # assigning to it silently breaks the call.
-    $roboArgs = @($From, $To, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:1', '/W:1')
+    # /MIR (not /E): the mirror is persistent, so a file deleted from the repo (e.g.
+    # src/views/ResourcesView.vue, removed in v2.6.0) would otherwise stay behind and
+    # fail the typecheck against code that no longer exists. /XD keeps node_modules
+    # and dist out of the mirror *and* out of the purge.
+    $roboArgs = @($From, $To, '/MIR', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:1', '/W:1')
     if ($ExcludeDirs.Count -gt 0) { $roboArgs += '/XD'; $roboArgs += $ExcludeDirs }
     robocopy @roboArgs | Out-Null
     # robocopy exit codes 0-7 are success (bit flags); >=8 is a real failure.

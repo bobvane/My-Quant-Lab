@@ -99,13 +99,42 @@ def test_the_page_polls_a_live_run_and_stops_on_its_own() -> None:
 
 
 def test_the_page_offers_the_next_step_of_every_stage() -> None:
-    """Compile -> Activate -> Backtest, each reachable from what the page just produced."""
+    """Compile -> Activate -> Backtest, each reachable from what the page just produced.
+
+    v2.7.0 (ADR-191): the last leg carries the instrument too. The lab asks the user
+    to pick one series once (``#lab-backtest-target``) and hands it over with ``run=1``,
+    so the reader does not choose the same thing twice or press "run" again.
+    """
 
     assert "api.compileStrategyDraft(" in LAB_TEXT
     assert "api.activateVersion(" in LAB_TEXT
     assert "compiled_strategy_version_id" in LAB_TEXT
-    assert "query: { strategy_version_id: String(version.id) }" in LAB_TEXT
     assert "/backtest" in LAB_TEXT
+    # The handoff itself: the version, the instrument, and "run it now".
+    assert "strategy_version_id: String(version.id)" in LAB_TEXT
+    assert "symbol: target.symbol" in LAB_TEXT
+    assert "run: '1'" in LAB_TEXT
+    # ... and the instrument comes from stored series, chosen by the user, not invented.
+    assert 'id="lab-backtest-target"' in LAB_TEXT
+    assert "chosenBacktestTarget" in LAB_TEXT
+    assert "api.series()" in LAB_TEXT
+
+
+def test_the_lab_can_take_a_url_as_material() -> None:
+    """The API has ingested url/pdf/github_file since v2.1.0; v2.7.0 wires up ``url``.
+
+    The page must call the ingest endpoint *before* it starts a run (the run then
+    carries ``snapshot_id``), and it must translate the server's refusal codes instead
+    of printing the raw English reason at the reader (ADR-191).
+    """
+
+    assert "api.aiSourceUrl(" in LAB_TEXT
+    assert "snapshot_id" in LAB_TEXT
+    assert 'id="lab-source-url"' in LAB_TEXT or "id='lab-source-url'" in LAB_TEXT
+    # The refusal is a result, and its reason is the server's code, translated here.
+    assert "SOURCE_REFUSAL_TEXT" in LAB_TEXT
+    assert "host_not_allowed" in LAB_TEXT
+    assert "body?.detail" in LAB_TEXT
 
 
 def test_the_page_no_longer_promises_a_dead_end() -> None:
@@ -191,7 +220,19 @@ def test_the_engine_payload_stays_in_a_fold() -> None:
 
 
 def test_the_page_no_longer_claims_it_cannot_read_the_web_or_pdf() -> None:
-    """The API has ingested url/pdf/github_file since v2.1.0; only this page has not."""
+    """The API has ingested url/pdf/github_file since v2.1.0, and ``url`` landed in v2.7.0.
+
+    The old sentence said the backend could fetch material but this page was not wired
+    up to it. That was true then and is false now, so the page states what it does read
+    (a pasted paragraph or a public URL) and keeps the honest limit about the rest
+    (``pdf`` / ``github_file`` still have no field on this page).
+    """
 
     assert "不会去抓网页或解析 PDF" not in LAB_TEXT
-    assert "还没有接到这个页面上" in LAB_TEXT
+    assert "还没有接到这个页面上" not in LAB_TEXT
+    # What the page does now, in the reader's words...
+    assert "给一个网址" in LAB_TEXT
+    assert "也可以给一个公开网页的地址" in LAB_TEXT
+    # ... and what it still does not take, said out loud instead of quietly omitted.
+    assert "PDF" in LAB_TEXT
+    assert "GitHub" in LAB_TEXT

@@ -1088,6 +1088,59 @@ export interface AIResearchSourceMeta {
   license_note?: string | null
 }
 
+/**
+ * 一次抓取的观测记录（`POST /ai/sources/url`）。
+ *
+ * 服务端返回的是**描述**而不是原文：哈希、字节数/字数、解析器身份，加一段被保留的摘要
+ * （ADR-161）。第三方材料默认只保留 500 字，除非调用方声明「这份材料我有权使用」
+ * （`retention: 'full'` + `license_note`），即便如此也仍然有上限。
+ */
+export interface AISourceSnapshot {
+  snapshot_id: number
+  source_kind: string
+  snapshot_status: string
+  parse_status: string
+  source_ref?: string | null
+  label?: string | null
+  original_uri?: string | null
+  final_uri?: string | null
+  status_code?: number | null
+  content_type?: string | null
+  bytes_read?: number
+  chars_read?: number
+  source_hash?: string | null
+  text_hash?: string | null
+  parser?: string | null
+  parser_version?: string | null
+  robots_ok?: boolean | null
+  retention?: { policy?: string | null; retained_chars?: number; truncated?: boolean }
+  excerpt?: string[]
+  warnings?: Array<Record<string, any>>
+  redirects?: string[]
+  error_code?: string | null
+  error_message?: string | null
+  fetched_at?: string | null
+  created_at?: string | null
+}
+
+/**
+ * 交给研究运行的一段材料。
+ *
+ * `text` 是调用方自己贴的原文；`url`/`pdf` 可以用 `uri` 命名（服务端去抓），也可以用
+ * `snapshot_id` 命名（服务端已经看过一次，只读回当时保留的摘要，不再联网）。
+ * 两者都给时以 `text` 为准，运行里会记一条 warning。
+ */
+export interface AIResearchSourceInput {
+  kind?: 'user_input' | 'text' | 'github_file' | 'url' | 'pdf'
+  text?: string
+  source_ref?: string
+  label?: string
+  uri?: string
+  snapshot_id?: number
+  license_note?: string
+  retention?: 'excerpt' | 'full'
+}
+
 /** 一次研究运行的完整载荷（含假设、草案与能力报告）。 */
 export interface AIResearchRun {
   run_id: number
@@ -1714,14 +1767,24 @@ export const api = {
   // 一次 POST 就返回整条链路的结果；没有配置 AI 提供方时后端回答 503。
   aiResearchStart: (payload: {
     question: string
-    sources: Array<{
-      text: string
-      kind?: string
-      source_ref?: string
-      label?: string
-    }>
+    sources: AIResearchSourceInput[]
     model?: string
   }) => request<AIResearchRun>('/ai/research', { method: 'POST', body: JSON.stringify(payload) }),
+  /**
+   * 抓一个网页并把它记下来（v2.1.0 的 `POST /ai/sources/url`）。
+   *
+   * 这一步**不调用模型、不花 AI 预算**，但它是整个 API 里唯一让服务端去访问调用方指定
+   * 地址的地方，所以安全判断都在服务端一层之下：守卫先拒绝地址（私网、robots、不支持的
+   * 协议），再解析、再按上限保留摘要。拒绝是结果而不是崩溃：
+   * 422 = 明确拒绝（`snapshot_status="blocked"`），502 = 连不上或读不懂，两者都会留下记录。
+   */
+  aiSourceUrl: (payload: {
+    uri: string
+    source_ref?: string
+    label?: string
+    retention?: 'excerpt' | 'full'
+    license_note?: string
+  }) => request<AISourceSnapshot>('/ai/sources/url', { method: 'POST', body: JSON.stringify(payload) }),
   aiResearchRuns: (limit = 20) => request<{ runs: AIResearchRunSummary[] }>(`/ai/research?limit=${limit}`),
   aiResearchRun: (runId: number) => request<AIResearchRun>(`/ai/research/${runId}`),
   // 只重跑架构师那一步，给已经存下来的假设再要一份草案。

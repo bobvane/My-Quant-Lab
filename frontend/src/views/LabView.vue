@@ -11,6 +11,7 @@ import {
   type AIResearchHypothesisContent,
   type AIResearchRun,
   type AIResearchRunSummary,
+  type AIResearchSourceInput,
   type AIResearchSourceMeta,
   type AIResearchViolation,
   type AIResearchWarning,
@@ -29,7 +30,7 @@ import {
 import MetricHint from '@/components/MetricHint.vue'
 import { isAdvanced } from '@/mode'
 import { formatDateTime, formatMetric, toneOf } from '@/format'
-import { metricKeyLabel, timeframeLabel, validationLabel } from '@/wording'
+import { metricKeyLabel, qualityLabel, timeframeLabel, validationLabel } from '@/wording'
 
 // 「AI 研究实验室」（§17 + v2.4.0 的编译/激活）：把一条最小但诚实的链路走完——
 // 研究输入 → AI 理解 → 策略假设 → 策略草案 → 人工确认 → 编译 → 策略版本 → 激活 → 回测。
@@ -63,6 +64,16 @@ const router = useRouter()
 const question = ref('')
 const sourceLabel = ref('')
 const sourceText = ref('')
+
+// 材料可以是自己贴的一段文字，也可以是一个网址（ADR-191 之外的另一处「不要假装没有」：
+// 后端从 v2.1.0 起就能抓网页，`POST /ai/sources/url` 带着 SSRF 守卫，只有这一页没接）。
+const materialKind = ref<'text' | 'url'>('text')
+const sourceUri = ref('')
+const ingesting = ref(false)
+const ingestError = ref('')
+const ingestNote = ref('')
+/** 第三方网页默认只把前 500 字交给 AI；声明「我有权使用」才保留全文。 */
+const sourceFullRetention = ref(false)
 
 const run = ref<AIResearchRun | null>(null)
 const runs = ref<AIResearchRunSummary[]>([])
@@ -103,6 +114,57 @@ const compileOutcome = ref<{ result: string; report: Record<string, any> | null 
 /** 已经为哪一份版本发过读回请求：避免每次轮询都重复发一次。 */
 const requestedVersionId = ref<number | null>(null)
 
+// 交接口的标的选择（ADR-191）：标的不是策略内容——DSL 里没有它，编译器把「标的」
+// 归到不可表达那一类（`backend/app/compiler/compiler.py` 的 `not_expressible`），
+// 它属于运行参数。所以这一页在交接口问一次，而不是替用户猜一个。
+const assets = ref<Asset[]>([])
+const seriesList = ref<Array<Record<string, unknown>>>([])
+const loadingSeries = ref(false)
+const backtestSeriesId = ref<number | null>(null)
+
+type BacktestTarget = {
+  symbol: string
+  seriesId: number
+  timeframe: string
+  start: string
+  end: string
+  quality: string
+}
+
+/** 与「研究策略」页第①步同一个来源、同一套映射（那里是 `symbolOptions`）。 */
+const backtestTargets = computed<BacktestTarget[]>(() =>
+  seriesList.value
+    .filter((s) => !s.is_archived)
+    .map((s) => ({
+      symbol: assetSymbol(Number(s.asset_id)),
+      seriesId: Number(s.id),
+      timeframe: String(s.timeframe ?? ''),
+      start: String(s.series_start ?? '').slice(0, 10),
+      end: String(s.series_end ?? '').slice(0, 10),
+      quality: String(s.quality_status ?? 'unknown'),
+    }))
+    .sort((a, b) => a.symbol.localeCompare(b.symbol)),
+)
+
+function assetSymbol(assetId: number): string {
+  const found = assets.value.find((a) => a.id === assetId)
+  return found?.symbol ?? `#${assetId}`
+}
+
+const chosenBacktestTarget = computed<BacktestTarget | null>(
+  () => backtestTargets.value.find((t) => t.seriesId === backtestSeriesId.value) ?? null,
+)
+
+/** 灰按钮必须说明为什么（ADR-138）；没有数据时给一条出口，而不是一个点不动的按钮。 */
+const backtestBlockedReason = computed(() => {
+  if (loadingSeries.value) return '正在读你同步过的行情数据…'
+  if (!backtestTargets.value.length) return ''
+  if (chosenBacktestTarget.value === null) {
+    return '先选一个标的：策略规则里没有「买什么」，得由你指定用哪份数据验证这一版。'
+  }
+  return ''
+})
+
 // --------------------------------------------------------------------------- //
 // 输入校验：把后端会拒绝的情况提前说清楚，而不是等 400 回来
 // --------------------------------------------------------------------------- //
@@ -123,8 +185,22 @@ const sourceProblem = computed(() => {
   return ''
 })
 
-const inputProblem = computed(() => questionProblem.value || sourceProblem.value)
-const canSubmit = computed(() => !inputProblem.value && !busy.value)
+const uriProblem = computed(() => {
+  if (materialKind.value !== 'url') return ''
+  const uri = sourceUri.value.trim()
+  if (!uri) return '贴一个网址：https:// 开头的网页地址。'
+  if (!/^https?:\/\//i.test(uri)) return '网址要以 http:// 或 https:// 开头。'
+  if (uri.length > 2048) return `网址最多 2048 个字符，现在有 ${uri.length} 个。`
+  return ''
+})
+
+/** 当前这一种材料是否已经填好；两种材料一次只用一种。 */
+const materialProblem = computed(() =>
+  materialKind.value === 'url' ? uriProblem.value : sourceProblem.value,
+)
+
+const inputProblem = computed(() => questionProblem.value || materialProblem.value)
+const canSubmit = computed(() => !inputProblem.value && !busy.value && !ingesting.value)
 const blockedReason = computed(() => (busy.value ? '' : inputProblem.value))
 
 // --------------------------------------------------------------------------- //
@@ -504,6 +580,28 @@ async function loadStrategies() {
 }
 
 // --------------------------------------------------------------------------- //
+// 交接用的标的：数据是「研究策略」页和「数据」页的同一份，这里只读不写
+// --------------------------------------------------------------------------- //
+async function loadBacktestTargets() {
+  loadingSeries.value = true
+  try {
+    const [assetRows, seriesRows] = await Promise.all([api.assets(), api.series()])
+    assets.value = assetRows
+    seriesList.value = seriesRows as Array<Record<string, unknown>>
+    // 和 `loadStrategies` 同一条规矩：只有一个候选时才替用户选上；有多个就不猜，
+    // 因为「用哪份数据验证」是用户的决定，猜错会让他拿错标的的结论。
+    if (backtestTargets.value.length === 1 && backtestSeriesId.value === null) {
+      backtestSeriesId.value = backtestTargets.value[0].seriesId
+    }
+  } catch (e) {
+    // 读不到数据不该挡住这一页：研究本身不依赖它，只有交接那一栏会说明「先同步数据」。
+    error.value = error.value || (e as Error).message
+  } finally {
+    loadingSeries.value = false
+  }
+}
+
+// --------------------------------------------------------------------------- //
 // 轮询：POST 只返回 202 + status="queued"，真正的结果要自己读回来
 // --------------------------------------------------------------------------- //
 function stopPolling() {
@@ -608,19 +706,15 @@ async function loadCompiledVersion(versionId: number) {
 // 动作
 // --------------------------------------------------------------------------- //
 async function submit() {
-  if (inputProblem.value || busy.value) return
+  if (inputProblem.value || busy.value || ingesting.value) return
   resetNotices()
   stopPolling()
   busy.value = true
   run.value = null
-  const source: { text: string; kind: string; source_ref: string; label?: string } = {
-    text: sourceText.value,
-    kind: 'user_input',
-    source_ref: 'source_1',
-  }
-  const label = sourceLabel.value.trim()
-  if (label) source.label = label
   try {
+    const source = await buildSource()
+    // 材料没准备好（网址抓不到 / 被拒绝）就到此为止：绝不拿一次失败的抓取去换一次 AI 调用。
+    if (!source) return
     // 后端默认异步：这里拿到的大多是 202 + status="queued"，也可能（异步关闭时）
     // 直接是终态。applyRun 两种都处理：是终态就不轮询。
     applyRun(await api.aiResearchStart({ question: question.value.trim(), sources: [source] }))
@@ -630,6 +724,107 @@ async function submit() {
   } finally {
     busy.value = false
   }
+}
+
+/** 声明「这份材料我有权使用」时随抓取一起交给服务端的说明（最多 2000 字）。 */
+const FULL_RETENTION_NOTE = '用户在页面上声明：这份材料由本人拥有，或已获得保留全文的授权。'
+
+/**
+ * 把当前这一种材料变成交给服务端的一份 source。
+ *
+ * 网址这一步先让服务端去看一眼（`POST /ai/sources/url`）：抓不到就不返回 source，
+ * 于是这次研究连排队都不会排。抓成功之后按 `snapshot_id` 交给研究，服务端只读回当时
+ * 保留的摘要（`source_snapshot_service.material_from_snapshot`）——**不会再联网抓第二次**。
+ */
+async function buildSource(): Promise<AIResearchSourceInput | null> {
+  const label = sourceLabel.value.trim()
+  if (materialKind.value === 'text') {
+    const source: AIResearchSourceInput = {
+      text: sourceText.value,
+      kind: 'user_input',
+      source_ref: 'source_1',
+    }
+    if (label) source.label = label
+    return source
+  }
+
+  const uri = sourceUri.value.trim()
+  ingesting.value = true
+  ingestError.value = ''
+  ingestNote.value = ''
+  try {
+    const snapshot = await api.aiSourceUrl({
+      uri,
+      source_ref: 'source_1',
+      ...(label ? { label } : {}),
+      ...(sourceFullRetention.value
+        ? { retention: 'full' as const, license_note: FULL_RETENTION_NOTE }
+        : {}),
+    })
+    const kept = snapshot.retention?.retained_chars ?? 0
+    ingestNote.value =
+      `已读过 ${snapshot.final_uri || snapshot.original_uri || uri}：全文 ${snapshot.chars_read ?? 0} 个字，` +
+      `服务端保留 ${kept} 个字（${snapshot.retention?.policy === 'full' ? '按你的声明保留全文' : '第三方材料只保留摘要'}）。`
+    const source: AIResearchSourceInput = {
+      kind: 'url',
+      uri,
+      snapshot_id: snapshot.snapshot_id,
+      source_ref: 'source_1',
+    }
+    if (label) source.label = label
+    return source
+  } catch (e) {
+    ingestError.value = ingestProblem(e)
+    return null
+  } finally {
+    ingesting.value = false
+  }
+}
+
+/**
+ * 拒绝码 → 一句人话。
+ *
+ * 服务端的拒绝理由用英文装在 `detail.code` 里（`backend/app/sources/guard.py`、
+ * `backend/app/sources/ingest.py`），这一层把它翻译成用户能照做的说法：
+ * 「地址不能用」和「地址读不回来」是两件事，前者换地址，后者过一会儿再试。
+ */
+const SOURCE_REFUSAL_TEXT: Record<string, string> = {
+  invalid_url: '这个地址不像一个网页地址，检查一下有没有多打空格。',
+  scheme_not_allowed: '只支持 http 或 https 开头的网页地址。',
+  credentials_not_allowed: '地址里不要带账号密码。',
+  host_missing: '这个地址缺少网站名。',
+  port_not_allowed: '这个地址用的端口不允许访问。',
+  host_not_allowed: '这个地址指向本机或局域网，出于安全考虑不能抓。',
+  dns_failed: '找不到这个网站名对应的地址。',
+  dns_no_addresses: '这个网站名没有解析出可用地址。',
+  address_unreadable: '这个网站名解析出来的地址读不到。',
+  address_not_allowed: '这个地址解析后落在局域网内，出于安全考虑不能抓。',
+  robots_disallowed: '这个网站声明不允许自动读取，换一个来源吧。',
+  empty_response: '这个地址返回了空白内容，换一个来源吧。',
+  response_too_large: '这个网页太大，超出了单次读取的上限。',
+}
+
+/** 抓取失败要说清是「这个地址不允许抓」还是「这个地址读不到」（ADR-138 的同一条规矩）。 */
+function ingestProblem(e: unknown): string {
+  // 注意：`/ai/sources/*` 的拒绝是 `{detail: {...}}`，没有 `error` 信封，所以
+  // `ApiError.details` 是空的、`ApiError.message` 是那个对象；原因只能从 `body.detail` 读。
+  const detail = (e instanceof ApiError ? e.body?.detail : null) as Record<string, any> | null
+  const code = typeof detail?.code === 'string' ? detail.code : ''
+  if (code) {
+    const known = SOURCE_REFUSAL_TEXT[code]
+    if (known) return known
+    if (code.startsWith('parse_')) {
+      return '这个地址能打开，但读出来的不是能用的正文（可能是 PDF 或需要脚本的页面）。'
+    }
+  }
+  if (e instanceof ApiError && e.status === 422) {
+    return '这个地址不允许抓：只支持公开网站的 http(s) 地址。'
+  }
+  if (e instanceof ApiError && e.status === 502) {
+    return '这个地址没能读回来：网页打不开，或者没有可读的文字。'
+  }
+  const message = (e as Error)?.message
+  return typeof message === 'string' && message ? message : '抓取这个地址时出了点问题。'
 }
 
 async function openRun(runId: number) {
@@ -809,10 +1004,26 @@ async function activate() {
   }
 }
 
+/**
+ * 交接到「回测」：把版本、标的、周期一次带过去，并要求那边直接跑（ADR-191）。
+ *
+ * 带 `run=1` 是「研究策略」页已经用了很久的做法（`frontend/src/views/ResearchView.vue`）：
+ * 用户在交接口已经选过一次标的，到回测页不该再让他选第二次、更不该让他自己点「开始回测」。
+ * 标的不是策略内容，所以它必须由人在这里指定；没选就按钮点不动（见 `backtestBlockedReason`）。
+ */
 function goToBacktest() {
   const version = compiledVersion.value
-  if (!version) return
-  void router.push({ path: '/backtest', query: { strategy_version_id: String(version.id) } })
+  const target = chosenBacktestTarget.value
+  if (!version || !target) return
+  void router.push({
+    path: '/backtest',
+    query: {
+      strategy_version_id: String(version.id),
+      symbol: target.symbol,
+      timeframe: target.timeframe || '1d',
+      run: '1',
+    },
+  })
 }
 
 // --------------------------------------------------------------------------- //
@@ -1593,6 +1804,7 @@ const nextStep = computed<{ text: string; to: NextStepTarget; linkText: string }
 onMounted(() => {
   void loadRuns()
   void loadStrategies()
+  void loadBacktestTargets()
   void loadExperiments()
   void loadExperimentVersions()
   void loadExperimentBacktests()
@@ -1649,9 +1861,10 @@ onUnmounted(stopPolling)
     <div class="card" style="margin-top: 14px">
       <h3>① 研究输入</h3>
       <p class="muted">
-        一个问句 + 一段材料就够了。材料可以是一段研报摘录、一条公告、或者你自己写下的策略想法。
-        这一页只接收你贴进来的文字：后端本身支持按 URL、PDF、GitHub 文件抓取材料，
-        但还没有接到这个页面上，所以现在只有你贴进来的文字会被读到。
+        一个问句 + 一段材料就够了。材料可以是一段研报摘录、一条公告、或者你自己写下的策略想法；
+        也可以给一个公开网页的地址，让服务端去读那篇正文。
+        后端还支持 PDF 与 GitHub 文件这两种材料，这一步暂时只有「贴文字」和「给网址」两个入口：
+        那两种可以先在别处读出来、再贴成文字（ADR-191）。
       </p>
 
       <label class="muted" for="lab-question">研究问题</label>
@@ -1664,6 +1877,28 @@ onUnmounted(stopPolling)
       ></textarea>
       <p class="muted">{{ question.trim().length }} / {{ QUESTION_MAX }} 字</p>
 
+      <!-- 材料来源：一次只用一种。网址那条会先让服务端去读一次，读不到就不开始研究。 -->
+      <div class="mode-switch" role="group" aria-label="材料来源">
+        <button
+          type="button"
+          class="ghost"
+          :class="{ on: materialKind === 'text' }"
+          :aria-pressed="materialKind === 'text'"
+          @click="materialKind = 'text'"
+        >
+          贴一段文字
+        </button>
+        <button
+          type="button"
+          class="ghost"
+          :class="{ on: materialKind === 'url' }"
+          :aria-pressed="materialKind === 'url'"
+          @click="materialKind = 'url'"
+        >
+          给一个网址
+        </button>
+      </div>
+
       <label class="muted" for="lab-source-label">材料名称（可选）</label>
       <input
         id="lab-source-label"
@@ -1672,20 +1907,49 @@ onUnmounted(stopPolling)
         placeholder="例如：某券商 2024 年均线策略摘要"
       />
 
-      <label class="muted" for="lab-source-text" style="margin-top: 10px">材料正文</label>
-      <textarea
-        id="lab-source-text"
-        v-model="sourceText"
-        placeholder="把材料原文粘贴到这里。"
-      ></textarea>
-      <p class="muted">
-        {{ sourceText.length }} / {{ SOURCE_MAX }} 字 · 后端最多接受 {{ MAX_SOURCES }} 段材料，这一页先支持一段。
+      <template v-if="materialKind === 'text'">
+        <label class="muted" for="lab-source-text" style="margin-top: 10px">材料正文</label>
+        <textarea
+          id="lab-source-text"
+          v-model="sourceText"
+          placeholder="把材料原文粘贴到这里。"
+        ></textarea>
+        <p class="muted">
+          {{ sourceText.length }} / {{ SOURCE_MAX }} 字 · 后端最多接受 {{ MAX_SOURCES }} 段材料，这一页先支持一段。
+        </p>
+      </template>
+
+      <template v-else>
+        <label class="muted" for="lab-source-url" style="margin-top: 10px">材料网址</label>
+        <input
+          id="lab-source-url"
+          v-model="sourceUri"
+          type="url"
+          inputmode="url"
+          placeholder="https://example.com/some-article"
+        />
+        <p class="muted">
+          点「开始研究」时服务端会先去看一眼这个地址：只允许公开网站，本机与局域网地址会被拒绝；
+          读回来的正文按行留下摘要，第三方材料默认只把前 500 字交给 AI，原文不落库。
+        </p>
+        <label class="row" style="gap: 8px; align-items: center; margin-top: 6px">
+          <input v-model="sourceFullRetention" type="checkbox" style="width: auto" />
+          <span class="muted">
+            这份材料由我本人拥有，或我已获得保留全文的授权（不勾选只保留摘要 500 字，
+            勾选后保留前 2 万字）
+          </span>
+        </label>
+      </template>
+
+      <p v-if="ingestNote" class="notice" style="margin-top: 10px">✅ {{ ingestNote }}</p>
+      <p v-if="ingestError" class="notice warn" style="margin-top: 10px">
+        ⚠️ {{ ingestError }} 材料没有读回来，所以这次研究没有开始——换一个来源再试。
       </p>
 
       <p v-if="inputProblem" class="notice warn">⚠️ {{ inputProblem }}</p>
 
       <button :disabled="!canSubmit" style="margin-top: 10px" @click="submit">
-        {{ busy ? '正在提交…' : '开始研究' }}
+        {{ ingesting ? '正在读材料…' : busy ? '正在提交…' : '开始研究' }}
       </button>
       <p v-if="busy" class="muted" style="margin-top: 8px">
         正在把这次研究排进后台队列。
@@ -2263,14 +2527,43 @@ onUnmounted(stopPolling)
         只剩版本本身——要看报告就得当场编译。
       </p>
 
+      <!-- 交接口：问一次「用哪份数据验证」，因为标的不是策略内容（ADR-191） -->
+      <div style="margin-top: 14px">
+        <h4 style="margin: 0 0 4px">用哪份数据验证这一版？</h4>
+        <template v-if="backtestTargets.length">
+          <label class="muted" for="lab-backtest-target">标的</label>
+          <select id="lab-backtest-target" v-model="backtestSeriesId">
+            <option :value="null">请选择一个标的…</option>
+            <option v-for="option in backtestTargets" :key="option.seriesId" :value="option.seriesId">
+              {{ option.symbol }} · {{ timeframeLabel(option.timeframe) }} · {{ option.start }} 至
+              {{ option.end }}
+            </option>
+          </select>
+          <p v-if="chosenBacktestTarget" class="muted">
+            数据质量：{{ qualityLabel(chosenBacktestTarget.quality) }}。策略规则里没有「买什么」，
+            标的是你在这里指定的，规则本身不受影响。
+          </p>
+        </template>
+        <p v-else class="muted">
+          还没有可用的行情数据，所以现在没法直接去回测。先到
+          <RouterLink to="/data">「数据」</RouterLink> 同步一份，再回到这一页。
+        </p>
+        <p v-if="backtestBlockedReason" class="muted">{{ backtestBlockedReason }}</p>
+      </div>
+
       <div class="row" style="margin-top: 8px">
         <button v-if="!compiledVersion.is_current" :disabled="activating" @click="activate">
           {{ activating ? '正在激活…' : '激活为当前版本' }}
         </button>
         <span v-else class="verdict ok">已是当前版本</span>
-        <button class="ghost" @click="goToBacktest">去「回测」用这一版</button>
+        <button class="ghost" :disabled="!chosenBacktestTarget" @click="goToBacktest">
+          去「回测」用这一版
+        </button>
       </div>
       <p class="muted" style="margin-top: 8px">
+        点「去「回测」用这一版」会带上你选的标的直接开跑，跑完不用你再点一次运行。
+      </p>
+      <p class="muted">
         激活只改「哪一版是当前版本」：不改这一版的内容，不触发回测，也不会下单。
         之后可以随时再激活别的版本——不激活也能先拿去回测。
       </p>

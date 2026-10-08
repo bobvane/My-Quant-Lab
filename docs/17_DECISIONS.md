@@ -3439,3 +3439,35 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：①对一台 NAS 来说容器就是编排单位，nginx/uvicorn/worker/beat 共享同一个镜像、同一份 `requirements.txt`、同一份配置和同一次迁移，「一个部署 = 一个镜像 = 一次迁移 = 一组进程」比四个容器之间的依赖顺序更容易说清也更容易验；②发布端口的形状逐字不变，所有既有 URL、防火墙规则与脚本的对外部分都不用改，这次精简只动「里面」；③**不用 supervisord / s6-overlay / pm2**：任何进程管理器自己也要先被监督，等于把一份配置面与一个故障模式搬进容器，而这里真正的需求只有「子进程死了整容器重启」一条，`wait -n` + compose `restart` 就能说完；④**不用 `celery worker -B`**：把时钟嵌进 worker 会让调度与任务执行挤在同一个 prefork 进程里，而且「beat 死了 worker 还活着」这种状态从容器外面看不出来；独立子进程让探针能分别问「worker 应答吗」和「beat 的 schedule 文件还新鲜吗」（原先 `quantlab-scheduler` 那个 `pgrep` 探针正是因为镜像里没有 procps 而恒为 unhealthy 的教训）；⑤**不保留独立的 nginx 容器**：上游变成 `127.0.0.1:8000` 之后，nginx 与 uvicorn 之间不再有网络边界值得用一个容器去换，而拆分意味着前端产物、token 注入点与后端分成两次构建、两个镜像；⑥**不为 `envsubst` 装 gettext-base**：真正要替换的只有 `${AUTH_LINE}` 一行，三行 Python 比在运行时镜像里多一个构建依赖更小，也少一个能配错的地方；⑦**uvicorn 绑 `0.0.0.0` 而不是 loopback**：这不是把 API 变成新的网络服务，而是让「发布端口」继续成立——Docker 的端口转发落在容器网卡上，容器内绑 loopback 等于把 `${API_PORT}` 关死。浏览器仍然只经 nginx，主机侧仍然只绑 `127.0.0.1`，与 v2.5.0 那个独立 api 容器（`exec uvicorn ... --host 0.0.0.0 --port "${PORT}"`）完全同形，对外可达面一个字都没有增加；把这条写进 ADR 是因为「内部 API 只监听 loopback」听起来更安全，很容易在后续维护里被当成更严的做法改回去，而代价是一扇静默失效的门。
 - 影响与兼容：部署从「三个镜像、六个容器」变成「一个镜像、三个容器」；`docker compose logs quantlab-api` / `quantlab-web` / `quantlab-worker` / `quantlab-scheduler` 这类按旧容器名取日志与取环境的习惯必须改成 `quantlab-app`（四个进程的日志都写在一个 stdout 里，由启动器的行首标签区分）；`docker/Dockerfile.backend`、`docker/Dockerfile.web`、`docker/web.nginx.conf`、`docker/web-entrypoint.sh` 删除；对外的端口、`.env` 的变量名、API 形状与 beat 的七条定时计划都不变；镜像名变了，所以升级与回滚都是一次 tag 切换。历史 ADR 与版本历史里关于多容器布局的描述保留原样——它们记录的是当时的形态，本 ADR 只描述 v2.6.0 起的形态。
 - 测试：新增 `backend/tests/test_app_container.py`（九个文本级守卫：启动器恰好起四个子进程且顺序为 beat→worker→api→nginx、绝不用 `worker -B`、TERM/INT 由启动器处理并有 SIGKILL 上界、子进程死亡即整容器退出、compose 的 `init`/`restart`/`stop_grace_period`/端口形状/单网络/`celery_beat` 卷、镜像不含 `HEALTHCHECK` 且不装 gettext 与任何 supervisor、nginx 仍只监听 8080 且反代仍走 `127.0.0.1:8000`、`${API_PORT}` 这个发布端口与 uvicorn 的 `--host 0.0.0.0` 必须同时成立、四个旧服务名与四个旧文件彻底消失）；另有 `backend/tests/test_app_launcher.py` 真跑 `docker/entrypoint.sh`（子进程桩）验证四子进程起停一次、子进程死亡即整容器以 1 退出、SIGTERM 有界停止、渲染后的配置才是 nginx 读到的；`backend/tests/test_boundary_claims.py` 已按合并后的形态书写（断言 `docker/app.nginx.conf` 里的 `proxy_pass http://127.0.0.1:8000/api/;` 与 `${AUTH_LINE}`，以及 compose 里的 `${WEB_BIND:-0.0.0.0}`）；其余按容器名与服务集合断言的守卫（`backend/tests/test_deploy_defaults.py`、`test_exposure_surface.py`、`test_health_probe.py`、`test_database_wait.py` 的角色集合收敛为 `app`/`migrate`、`test_nightly_pipeline.py`、`test_release_pipeline.py`、`test_deploy_preflight.py`、`test_release_prerelease.py`、`test_production_secret.py`）随同一次改动收敛到三个容器，`docs/15_ROADMAP_ACCEPTANCE.md` 的版本行在 v2.6.0 一并记录。
+
+## ADR-191：实验室交接到回测时，标的由用户在交接口选一次，交了就跑
+
+- 背景：v2.5.0 的 `/lab` 已经能把「一句话」走到「编译好的策略版本」（`frontend/src/views/LabView.vue` ①→⑦），但最后一步 `goToBacktest()`（`LabView.vue:812-816`）只带 `strategy_version_id`，不带 `run=1`、不带标的。接收端 `BacktestView.vue:1696` 只在 `run=1` 时自动开跑（同一套交接 `/research` 已经在用，`ResearchView.vue:194-210`，`docs/13_UI_UX.md:196-198` 把它写成承诺 ADR-132），于是在 AI 这条链上，用户点完「去回测用这一版」之后看到的是一个空表单：要再选一次版本、想一个标的代码、再点一次「开始回测」。这不是「多一次点击」的问题，而是 `docs/25` 场景 1「一条链，中间无人工断点」在这条链上没有成立。
+- 决策：
+  1. 把标的（数据序列）选择放到**交接口**，也就是 `LabView.vue` 的 ⑦ 版本卡里：一个下拉，选项来自现有 `GET /assets` + `GET /series`，每项显示「标的 · 周期 · 数据区间 · 质量」，与 `/research` 页第①步逐字同源（`ResearchView.vue:31-43` 的映射逻辑照抄，不新增 API、不新增数据服务）。
+  2. 选中后跳 `/backtest?strategy_version_id=<id>&symbol=<symbol>&timeframe=<tf>&run=1`，由接收端已有的自动开跑逻辑执行，**回测页本身不改交接代码**。
+  3. 没有可用的数据序列时不留灰按钮：写明「还没有同步过行情」，并给一条指向「数据」页的链接（`docs/13_UI_UX.md:181` ADR-138）。
+  4. **不在实验室里替用户编一个标的**：不默认选第一个、不猜。理由见下条。
+- 理由：①标的**不是**策略内容，DSL 里没有它，编译器把「标的」明确留在 `not_expressible`（`backend/app/compiler/compiler.py:617`），它本来就属于运行参数——所以这不是「又问了一个本该 AI 回答的问题」，而是把一件必须由人定的事放在正确的位置问一次；②问在交接口而不是回测页，用户看到的是「用哪个标的验证这一版」而不是「这个表单要填什么」，且紧邻刚编译出来的版本，上下文完整；③不猜标的：猜错会产出一条看着像结论的数字，而数字一旦出来就很难收回，宁可让用户选一次；④复用接收端已有的 `run=1` 语义，交接的两种来源（`/research` 与 `/lab`）行为完全一致，不产生第二套交接协议。
+- 影响与兼容：`/backtest` 的 query 协议不变（`symbol`/`timeframe`/`run` 早已被 `applyResearchQuery()` 支持并在跑完后 `router.replace` 清掉）；`LabView.vue` 新增一次 `api.assets()`/`api.series()` 读取（只读）；没有新增路由、没有新增导航条目；`docs/13_UI_UX.md` 的 §11 与 §15 同步记录这条链。
+- 测试：`backend/tests/test_lab_journey_contracts.py::test_the_page_offers_the_next_step_of_every_stage` 改为钉「交接同时带 `strategy_version_id`、标的、`run: '1'` 与 `/backtest`」，并新增一条钉「没有序列时的原因与出口」。
+
+## ADR-192：从实验室交接过来的回测，跑完自动要一次人话解释
+
+- 背景：`docs/13_UI_UX.md:252` 写着「AI 解释是加法，不是链路」——卡片底部一个按钮，点不点都不影响数字。而 `docs/25_AI_QUANT_RESEARCH_LAYER_PLAN.md:2375-2454` 与 `:2966-3051`（场景 1「一条链，中间无人工断点」）要求回测跑完就给解释。两条都写在同一套文档里，实现上必须先说清它们不矛盾：**「不是链路」说的是数字与正确性不依赖 AI，「无人工断点」说的是用户不必知道该点哪个按钮**。真实存在的风险不是这两句话冲突，而是「悄悄花钱」——自动调用会在用户没预期的时候消耗 Provider 预算。
+- 决策：
+  1. 只有**从实验室交接过来**的回测（即地址里出现过 `run=1` 的那一次）在跑完后自动请求一次 `POST /backtests/{run_id}/explain`——就是「AI 汇总」那张卡背后的端点，不是 Phase C 那张「AI 用大白话解释这次分析」卡（`/explain-performance` 仍然只由按钮触发）；用户自己在回测页点「开始回测」的场合，两个端点都由按钮触发，一个字都不自动。
+  2. 自动请求只在 `GET /ai/status` 的 `configured` 为真时发生；未配置时按钮 disabled 并说明原因（同时修掉 `BacktestView.vue:2942-2944` 那句「未配置 AI 时这个按钮不可用」的假话——此前页面从没读过 AI 状态）。
+  3. 自动请求**只做一次**（按 run id 记账），失败**完全静默**：不写页面错误槽、不弹提示、不改变任何卡片的状态。用户没点过的动作失败了，不该在页面上留下一条属于用户的错误；「这次没取到解释」这种提示本身就是对没点按钮的人多说的废话。
+  4. 解释仍然只能复述已有数字（ADR-189 的出口守卫 `explanation_guard.py` 不变），仍然走 `run_task()`（缓存身份、预算闸门、审计，ADR-150–153 不变）。
+- 理由：①这条链的卖点就是「不用懂量化也能走到结论」，让用户在读完结论后自己找按钮是唯一的断点；②把自动限制在交接场景，等于把「花钱」绑定在用户刚刚明确走过的旅程上——他点「去回测用这一版」就是在说「把这一版跑给我看并解释」，而自己手动跑回测的人没有被这样默认；③预算与审计照旧走 `run_task()`，服务端仍然可以拒绝（429/502/503），客户端把拒绝当正常结果处理；④不引入任何新的 AI 调用路径，只改「谁在什么时候按按钮」。
+- 影响与兼容：`BacktestView.vue` 新增一次 `api.aiStatus()` 读取与一个「自动解释」分支，并把「AI 汇总」卡从权益/回撤曲线之后移到「可信程度怎么样？」之后（`docs/30` §9.2 要求那个空档给绩效/风险/对照卡组，而该卡组本来就在那里，所以 AI 汇总卡排在它前面；`docs/13` §13「一级指标之后才轮到研究工具」是这一处上移的依据）；未配置 Provider 的实例行为与今天完全一致（没有解释，只有数字），只是文案从假话变成实话；不改任何后端端点、不改预算与缓存机制；`docs/13_UI_UX.md` §11/§15 同步记录落点。
+- 测试：`backend/tests/test_frontend_contracts.py` 中「AI 汇总回答五个问题而不欠任何一个」保持不变；新增 `test_the_ai_summary_sits_with_the_conclusion_not_with_the_tools`（钉位置 + 真读 `aiStatus` + 实话文案）与 `test_a_backtest_handed_over_from_the_lab_explains_itself_once`（钉「只在 `run=1` 交接场景 + 只一次 + 静默」）；`test_lab_journey_contracts.py::test_the_page_offers_the_next_step_of_every_stage` 改为钉新的交接 query；`test_frontend_contracts.py` 里「灰掉的按钮说明原因」继续全绿。
+
+## ADR-193：首页引导卡说两条入口——知道规则的走市集，只有一句话的走实验室
+
+- 背景：`docs/13_UI_UX.md:15` 的导航有 `/lab`（AI 研究实验室），`docs/25` 与 `docs/26` 都把它写成研究入口，但首页那张首次使用引导卡（ADR-143）只写了「数据 → 研究策略 → 回本页看结论 → 模拟验证」。结果是：一个手里只有一句想法、根本不知道自己的规则怎么写进 DSL 的人，按引导卡走会在第 2 步卡住，而真正为他做的那一页在导航里叫「AI 研究实验室」——他没有任何理由点进去。导航里有不等于用户找得到（这是「功能没有入口」这一类问题的最小版本）。
+- 决策：引导卡从四条改成五条，第 2、3 条并列为两条入口，并且**用用户自己的话**区分它们：② 「已经知道想试什么规则」→ `/research`；③ 「只有一句想法、说不上规则」→ `/lab`，并写明它「走的还是同一个引擎」。第 4、5 条（回本页看结论、模拟验证）位置不变。
+- 理由：①两条入口通向同一个后端链路（研究 → 草案 → 编译 → 策略版本 → 回测），差别只在「由谁把想法写清楚」，所以卡片必须把这个差别说成用户能判断的条件，而不是模块名（ADR-133 的同一类：导航不按模块命名）；②把实验室写成「整理成策略草案，再编译成一版策略去回测」而不是「让 AI 帮你交易」，是为了不越过那条红线（AI 只解释与整理，不下单、不产生量化事实）；③引导卡只在「什么都还没有」时出现、可以永久关掉，改它不改变任何已经进入使用状态的用户的界面。
+- 影响与兼容：`DashboardView.vue` 的 `<ol class="guide-steps">` 从 4 条变 5 条，标题从「按这四步走」变「按这五步走」；`backend/tests/test_frontend_contracts.py::test_the_first_visit_gets_a_way_in` 同步改成钉五步 + 两个 `RouterLink`；`docs/13_UI_UX.md` 第 1 节的导航条数（历史遗留的「共 11 条」，v2.6.0 删掉 `/resources` 后实际是 10 条）一并对齐。不改路由、不加页面。
+

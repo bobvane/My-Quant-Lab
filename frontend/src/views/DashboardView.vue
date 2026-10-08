@@ -512,15 +512,23 @@ onMounted(load)
 
     <p v-if="error" class="error">{{ error }}</p>
 
-    <!-- 首次使用引导（评审报告 P2-12）：只在什么都还没有的时候出现，可以关掉。 -->
+    <!-- 首次使用引导（评审报告 P2-12）：只在什么都还没有的时候出现，可以关掉。
+         v2.7.0 补上第四条路：手里只有一句想法（听到的说法、一个现象）时走「AI 研究实验室」，
+         它同样走到一次回测，不是另一套架构（ADR-193）。 -->
     <div v-if="showGuide" class="card guide-card" style="margin-bottom: 14px">
       <div class="row" style="justify-content: space-between; align-items: flex-start">
-        <h3 style="margin: 0">第一次用？按这四步走</h3>
+        <h3 style="margin: 0">第一次用？按这五步走</h3>
         <button class="ghost" @click="dismissGuide">知道了，不再显示</button>
       </div>
       <ol class="guide-steps">
         <li><RouterLink to="/data">先同步一段行情</RouterLink>：有一个标的的历史数据才有得研究。</li>
-        <li><RouterLink to="/research">到「研究策略」选标的、选策略、点开始研究</RouterLink>。</li>
+        <li>
+          已经知道想试什么规则：<RouterLink to="/research">到「研究策略」选标的、选策略、点开始研究</RouterLink>。
+        </li>
+        <li>
+          只有一句想法、说不上规则：<RouterLink to="/lab">到「AI 研究实验室」把想法写清楚</RouterLink>，
+          让 AI 帮你整理成策略草案，再编译成一版策略去回测。它走的还是同一个引擎。
+        </li>
         <li>回测跑完后，回这一页看②③④：结论是什么、下一步做什么、要注意什么。</li>
         <li>觉得还行的策略，到「模拟验证」用虚拟资金跑一段时间再和回测比。</li>
       </ol>

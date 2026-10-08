@@ -564,6 +564,48 @@ def test_the_ai_summary_answers_five_questions_and_owes_none_of_them() -> None:
     assert "AI 汇总" in UI_SPEC
 
 
+def test_the_ai_summary_sits_with_the_conclusion_not_with_the_tools() -> None:
+    """ADR-192: the summary explains the conclusion, so it stands right after credibility.
+
+    The result page answers before it lists (ADR-128): conclusion, then how much to trust
+    it, then the same thing in plain language. Equity/drawdown curves and the advanced
+    analysis are research tools and come later (docs/13 §13), so the summary must stay
+    above them. And the page must not *claim* to know whether AI is configured without
+    asking — it asks ``GET /ai/status`` and keeps "unknown" unknown.
+    """
+
+    summary = BACKTEST.index("AI 汇总（只解释已有数字，不重新计算）")
+    assert BACKTEST.index("可信程度怎么样？") < summary
+    # The cards themselves, not a passing mention of the charts somewhere else.
+    assert summary < BACKTEST.index("<h3>权益曲线</h3>")
+    assert summary < BACKTEST.index("<h3>回撤曲线</h3>")
+    assert summary < BACKTEST.index('<template v-if="isAdvanced">')
+
+    # The claim about AI availability is a reading, not a guess.
+    assert "api.aiStatus()" in BACKTEST
+    assert "aiConfigured" in BACKTEST
+    # A dead button says why, and the reason is the server's answer, not the page's.
+    assert "这个实例未配置 AI" in BACKTEST
+
+
+def test_a_backtest_handed_over_from_the_lab_explains_itself_once() -> None:
+    """ADR-192: the leg that arrives with ``run=1`` finishes the sentence by itself.
+
+    Only that leg: a run the reader started by hand behaves exactly as before, because
+    the explanation is an addition and never a link in the chain (docs/13 §15). It asks
+    only when the server says AI is configured, it asks at most once per run, and if the
+    request fails it says nothing — nobody pressed a button, so nobody gets an error.
+    """
+
+    assert "labHandoff" in BACKTEST
+    assert "autoExplainHandedOverRun" in BACKTEST
+    assert "autoExplainedRunId" in BACKTEST
+    assert "explainCurrent({ silent: true })" in BACKTEST
+    assert "labHandoff.value = true" in BACKTEST
+    # The silent path is real: it does not write the page-level error slot either.
+    assert "if (!options.silent) error.value" in BACKTEST
+
+
 def test_the_paper_page_compares_itself_with_a_stored_backtest() -> None:
     """The paper account is a verification tool, so it must show backtest vs paper (ADR-130).
 
@@ -792,7 +834,10 @@ def test_the_backtest_page_accepts_a_handoff_without_trusting_it() -> None:
 
     # Applied once, then removed from the address bar; the run is the page's own.
     assert "await router.replace({ path: '/backtest' })" in BACKTEST
-    assert "if (shouldRun) await runNew()" in BACKTEST
+    assert "if (shouldRun) {" in BACKTEST
+    assert "await runNew()" in BACKTEST
+    # v2.7.0 (ADR-192): the handoff is remembered so the finished run can explain itself.
+    assert "labHandoff.value = true" in BACKTEST
 
     body = _function_body(BACKTEST, "applyResearchQuery")
     assert "router.replace" in body
@@ -1066,9 +1111,13 @@ def test_the_settings_page_is_split_into_tabs() -> None:
 def test_the_first_visit_gets_a_way_in() -> None:
     """The product review's P2-12 and P2-13: a first-time reader needs a starting point.
 
-    The home page shows a dismissible four-step lead-in while there is no strategy yet,
-    and points at the data page when the stored span is too short to conclude from.
-    Neither is a new page, and neither decides anything.
+    The home page shows a dismissible lead-in while there is no strategy yet, and points
+    at the data page when the stored span is too short to conclude from. Neither is a new
+    page, and neither decides anything.
+
+    v2.7.0 (ADR-193): the lead-in carries *two* ways into research, because the reader
+    may arrive with a rule they already know or with nothing but a sentence. The second
+    one is the AI research lab, which walks the same engine, not a second architecture.
     """
 
     assert "const GUIDE_KEY = 'mql-guide-dismissed'" in DASHBOARD
@@ -1076,9 +1125,14 @@ def test_the_first_visit_gets_a_way_in() -> None:
     assert "const showGuide = computed(" in DASHBOARD
     assert "function dismissGuide()" in DASHBOARD
     assert 'class="card guide-card"' in DASHBOARD
-    assert "第一次用？按这四步走" in DASHBOARD
+    assert "第一次用？按这五步走" in DASHBOARD
     assert "知道了，不再显示" in DASHBOARD
     assert '<RouterLink to="/data">到「数据」同步更长的一段</RouterLink>' in DASHBOARD
+    # Both entry points, and the plain-language one is named as such.
+    assert '<RouterLink to="/research">' in DASHBOARD
+    assert '<RouterLink to="/lab">' in DASHBOARD
+    assert "让 AI 帮你整理成策略草案" in DASHBOARD
+    assert "它走的还是同一个引擎" in DASHBOARD
 
 
 def test_dangerous_actions_look_dangerous() -> None:

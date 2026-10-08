@@ -1024,6 +1024,8 @@ async function open(id: number) {
     // 分析块也就自然不出现（Phase C，docs/30 §9）。
     if (loaded.status === 'completed' && loaded.metrics != null) {
       await loadAnalysis(loaded.id)
+      // 从实验室交接来的这一次：跑完就把「AI 汇总」补上，用户不用再点一次（ADR-192）。
+      await autoExplainHandedOverRun(loaded.id)
     } else {
       analysis.value = null
       perfExplanation.value = null
@@ -1298,15 +1300,53 @@ async function adoptAsExperiment() {
 const btExplanation = ref<ExplainResult | null>(null)
 const explainingBt = ref(false)
 
-async function explainCurrent() {
+/**
+ * AI 是否配置好了：`null` = 还不知道（没问到 / 问不到）。
+ *
+ * 这一页以前写着「未配置 AI 时这个按钮不可用」，但从来没问过服务端 —— 那句话说不出根据。
+ * 现在真的问 `GET /ai/status`（`configured`），并且问不到时保留「不知道」，
+ * 不谎称已配置，也不谎称未配置（ADR-192）。
+ */
+const aiConfigured = ref<boolean | null>(null)
+
+async function loadAiStatus() {
+  try {
+    aiConfigured.value = Boolean((await api.aiStatus()).configured)
+  } catch {
+    aiConfigured.value = null
+  }
+}
+
+/** 这次回测是从「AI 研究实验室」带 `run=1` 交接过来的吗？只有这一条路自动解释（ADR-192）。 */
+const labHandoff = ref(false)
+/** 已经自动解释过哪一次运行：轮询完成与手动打开会把同一次运行送进来多次。 */
+let autoExplainedRunId: number | null = null
+
+/**
+ * 交接来的那次回测跑完，自动请求一次解读（ADR-192）。
+ *
+ * 三个前提缺一不可：① 这次运行是实验室带 `run=1` 过来的；② 服务端说 AI 已配置；
+ * ③ 这一次还没有自动解释过。自动请求**失败不出声**：解释是加法（docs/13 §15），
+ * 用户没点过的动作不该在页面上留一条错误。
+ */
+async function autoExplainHandedOverRun(runId: number) {
+  if (!labHandoff.value) return
+  if (aiConfigured.value === null) await loadAiStatus()
+  if (aiConfigured.value !== true) return
+  if (autoExplainedRunId === runId) return
+  autoExplainedRunId = runId
+  await explainCurrent({ silent: true })
+}
+
+async function explainCurrent(options: { silent?: boolean } = {}) {
   if (!detail.value) return
   explainingBt.value = true
-  error.value = ''
+  if (!options.silent) error.value = ''
   try {
     btExplanation.value = await api.explainBacktest(detail.value.id)
   } catch (e) {
-    error.value = (e as Error).message
     btExplanation.value = null
+    if (!options.silent) error.value = (e as Error).message
   } finally {
     explainingBt.value = false
   }
@@ -1726,13 +1766,19 @@ async function applyResearchQuery() {
   if (!handedOver) return
   // 参数已经落到表单里，地址栏再留着它们只会让刷新重复跑一次。
   await router.replace({ path: '/backtest' })
-  if (shouldRun) await runNew()
+  if (shouldRun) {
+    // 记住这一次是「交接来」的：跑完之后自动补一次 AI 汇总（ADR-192）。
+    // 手动跑的回测不走这条路，用户自己点「生成解读」时行为与以前完全一样。
+    labHandoff.value = true
+    await runNew()
+  }
 }
 
 watch(strategyId, loadVersions)
 watch(evidenceStrategyId, loadLifecycle)
 onMounted(async () => {
     await load()
+    await loadAiStatus()
     await loadVersions()
     await loadLifecycle()
     // Ensemble candidates span every strategy, so they load independently of the
@@ -2070,6 +2116,67 @@ onMounted(async () => {
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- AI 汇总整个研究结果（评审 §13；ADR-129）：结论、原因、风险、可信程度、下一步。
+         它排在「可信程度」之后、研究工具之前：用户问完「发生了什么、有多可信」，
+         接下来就该有人用大白话讲一遍；权益/回撤曲线与高级分析属于研究工具，排在后面（ADR-128）。
+         AI 只解释引擎已经算出来的数字，所以没有 AI 时上面的结论照样成立（ADR-192）。 -->
+    <div v-if="detail && hasResult" class="card" style="margin-top: 14px">
+      <h3>AI 汇总（只解释已有数字，不重新计算）</h3>
+      <div class="row" style="margin-bottom: 10px">
+        <button :disabled="explainingBt || aiConfigured === false" @click="explainCurrent()">
+          {{ explainingBt ? '解读中…' : '生成解读' }}
+        </button>
+        <span v-if="btExplanation?.cached" class="muted">缓存命中，未产生费用</span>
+        <span v-else-if="explainingBt" class="muted">正在把上面的数字翻译成人话；数字本身不会变。</span>
+      </div>
+      <div v-if="btExplanation">
+        <h4>① 结论</h4>
+        <p>{{ btExplanation.explanation.summary }}</p>
+        <p v-if="btExplanation.explanation.plain_language" class="muted">
+          {{ btExplanation.explanation.plain_language }}
+        </p>
+
+        <h4>② 原因</h4>
+        <ul v-if="aiDrivers.length" class="answer-list">
+          <li v-for="(driver, idx) in aiDrivers" :key="idx">{{ driver }}</li>
+        </ul>
+        <p v-else class="muted">这次解读没有给出原因。没有原因就不编一个。</p>
+
+        <h4>③ 风险</h4>
+        <ul v-if="aiRisks.length" class="answer-list">
+          <li v-for="(risk, idx) in aiRisks" :key="idx">{{ risk }}</li>
+        </ul>
+        <p v-else class="muted">
+          这次解读没有给出风险条目；上面「最大风险」那段是引擎读数，它一直有效。
+        </p>
+
+        <h4>④ 可信程度</h4>
+        <p>{{ evidenceSentence }}</p>
+        <ul v-if="btExplanation.explanation.what_could_invalidate?.length" class="answer-list">
+          <li v-for="(item, idx) in btExplanation.explanation.what_could_invalidate" :key="idx">
+            什么会让它失效：{{ item }}
+          </li>
+        </ul>
+
+        <h4>⑤ 下一步</h4>
+        <ul v-if="btExplanation.explanation.what_to_watch_next.length" class="answer-list">
+          <li v-for="(item, idx) in btExplanation.explanation.what_to_watch_next" :key="idx">
+            {{ item }}
+          </li>
+        </ul>
+        <p v-else>{{ nextStep.text }}</p>
+      </div>
+      <p v-else-if="aiConfigured === false" class="muted">
+        这个实例未配置 AI，所以「生成解读」暂时点不了：到
+        <RouterLink to="/settings">「系统管理」</RouterLink> 的 AI 那一栏填一个 Provider 就能用。
+        上面的结论、风险与可信程度都不受影响——那些数字是引擎算出来的，不经过 AI。
+      </p>
+      <p v-else class="muted">
+        还没有生成解读。点上面的「生成解读」，让 AI 用大白话把这次回测讲一遍：
+        它只读已经算好的数字，不重新计算，也不会改变上面的结论。
+      </p>
     </div>
 
     <!-- Phase C：赚了多少 / 冒了多大风险 / 比简单持有好吗（docs/30 §9，ADR-188）。
@@ -2890,58 +2997,6 @@ onMounted(async () => {
     <div v-if="detail && hasResult" class="card" style="margin-top: 14px">
       <h3>回撤曲线</h3>
       <MultiLineChart :series="drawdownSeries" height="220px" />
-    </div>
-
-    <!-- AI 汇总整个研究结果（评审 §13；ADR-129）：结论、原因、风险、可信程度、下一步。
-         AI 只解释引擎算出来的事实，所以缺 AI 时这一页的结论照样成立。 -->
-    <div v-if="detail && hasResult" class="card" style="margin-top: 14px">
-      <h3>AI 汇总（只解释已有数字，不重新计算）</h3>
-      <div class="row" style="margin-bottom: 10px">
-        <button :disabled="explainingBt" @click="explainCurrent">
-          {{ explainingBt ? '解读中…' : '生成解读' }}
-        </button>
-        <span v-if="btExplanation?.cached" class="muted">缓存命中，未产生费用</span>
-      </div>
-      <div v-if="btExplanation">
-        <h4>① 结论</h4>
-        <p>{{ btExplanation.explanation.summary }}</p>
-        <p v-if="btExplanation.explanation.plain_language" class="muted">
-          {{ btExplanation.explanation.plain_language }}
-        </p>
-
-        <h4>② 原因</h4>
-        <ul v-if="aiDrivers.length" class="answer-list">
-          <li v-for="(driver, idx) in aiDrivers" :key="idx">{{ driver }}</li>
-        </ul>
-        <p v-else class="muted">这次解读没有给出原因。没有原因就不编一个。</p>
-
-        <h4>③ 风险</h4>
-        <ul v-if="aiRisks.length" class="answer-list">
-          <li v-for="(risk, idx) in aiRisks" :key="idx">{{ risk }}</li>
-        </ul>
-        <p v-else class="muted">
-          这次解读没有给出风险条目；上面「最大风险」那段是引擎读数，它一直有效。
-        </p>
-
-        <h4>④ 可信程度</h4>
-        <p>{{ evidenceSentence }}</p>
-        <ul v-if="btExplanation.explanation.what_could_invalidate?.length" class="answer-list">
-          <li v-for="(item, idx) in btExplanation.explanation.what_could_invalidate" :key="idx">
-            什么会让它失效：{{ item }}
-          </li>
-        </ul>
-
-        <h4>⑤ 下一步</h4>
-        <ul v-if="btExplanation.explanation.what_to_watch_next.length" class="answer-list">
-          <li v-for="(item, idx) in btExplanation.explanation.what_to_watch_next" :key="idx">
-            {{ item }}
-          </li>
-        </ul>
-        <p v-else>{{ nextStep.text }}</p>
-      </div>
-      <p v-else class="muted">
-        尚未生成解读。未配置 AI 时这个按钮不可用，上面的结论、风险与可信程度都不受影响。
-      </p>
     </div>
 
     <div v-if="compareResult" class="card" style="margin-top: 14px">

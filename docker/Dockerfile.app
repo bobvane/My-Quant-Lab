@@ -63,8 +63,10 @@ USER quantlab
 
 ENV APP_ROLE=app
 
-# 8080 = nginx (published as ${WEB_PORT:-8081}), 8000 = uvicorn on the container
-# loopback (published as ${API_PORT:-8080}, bound to 127.0.0.1 on the host).
+# 8080 = nginx (published as ${WEB_PORT:-8081}), 8000 = uvicorn, which has to
+# listen on the container interface: a published port is forwarded to that
+# interface, never to the container's loopback, so a loopback-bound API would
+# make ${API_PORT:-8080} a dead door. The host side stays 127.0.0.1-bound.
 EXPOSE 8080 8000
 
 # No HEALTHCHECK here on purpose: docker-compose.yml declares one, and the probe

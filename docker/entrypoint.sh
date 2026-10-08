@@ -317,8 +317,15 @@ main_app() {
         --loglevel=INFO --schedule="$BEAT_SCHEDULE" --pidfile="$BEAT_PIDFILE"
     start worker celery -A "$CELERY_APP" worker \
         --loglevel=INFO --concurrency="${CELERY_CONCURRENCY:-2}"
+    # `--host 0.0.0.0` is required, not sloppy: compose publishes this port as
+    # `${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8000`, and Docker forwards a
+    # published port to the container's interface, never to its loopback — a
+    # loopback listener would leave that door dead (CI caught exactly that).
+    # The browser still talks to nginx alone, and the API's own door stays a
+    # loopback-bound *host* port, which is how the separate api container had it
+    # in v2.5.0.
     start api uvicorn app.api.main:app \
-        --host 127.0.0.1 --port 8000 \
+        --host 0.0.0.0 --port 8000 \
         --proxy-headers --forwarded-allow-ips='*' \
         --no-server-header
     start nginx nginx -c "$NGINX_RENDERED_CONF" -g 'daemon off;'

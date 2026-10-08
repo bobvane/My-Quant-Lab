@@ -123,10 +123,10 @@ class Settings(BaseSettings):
     # `app.infrastructure.secrets` and are never echoed back by the API.
     secret_key: str = Field(default="change-me-in-production")
     # Optional bearer token for the REST API. Empty (default) leaves the API
-    # process open; that process binds to 127.0.0.1 (API_BIND), but the same
-    # container's nginx publishes ${WEB_BIND:-0.0.0.0}:8081 and proxies /api to it
-    # *with* the token injected, so the token stops clients that bypass that nginx
-    # — not the LAN clients that use it (ADR-097). Close the
+    # process open; its published port is bound to 127.0.0.1 (API_BIND), but the
+    # same container's nginx publishes ${WEB_BIND:-0.0.0.0}:8081 and proxies /api
+    # to it *with* the token injected, so the token stops clients that bypass that
+    # nginx — not the LAN clients that use it (ADR-097). Close the
     # deployment where it is open: WEB_BIND=127.0.0.1, or a firewall in front.
     api_auth_token: str | None = None
     # Per-IP limit for mutating API requests (POST/PUT/DELETE). 0 disables it;

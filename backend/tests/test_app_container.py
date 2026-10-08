@@ -12,8 +12,10 @@ The merge is only safe while the launcher stays a launcher:
   measured;
 * a stop signal is handled by the launcher (SIGTERM -> bounded wait -> SIGKILL),
   so no third-party process manager is on the critical path;
-* nginx is still the only door the browser can reach, and uvicorn is still on the
-  container loopback rather than a second HTTP surface.
+* nginx is still the only door the browser can reach; uvicorn listens on the
+  container interface for one reason only -- the published API port is forwarded
+  to that interface, never to the container's loopback -- and that host port
+  stays 127.0.0.1-bound, as the separate api container had it in v2.5.0.
 
 The four retired service names stay retired: no file, no image, no role.
 
@@ -207,6 +209,29 @@ def test_the_deployment_keeps_the_same_two_doors_as_v2_5() -> None:
             f"{name} is waited for by existence, not by readiness"
         )
     assert set(_services(COMPOSE)) == set(services)
+
+
+def test_the_published_api_port_can_actually_reach_the_api() -> None:
+    """A published port reaches the container's interface, never its loopback.
+
+    The first v2.6.0 CI run failed exactly here: the container was healthy,
+    nginx answered, and ``http://127.0.0.1:${API_PORT}/api/v1/healthz`` timed out
+    from the host because uvicorn was bound to the container's loopback. The two
+    files have to agree, so this guard reads both.
+    """
+
+    app = _services(COMPOSE)["quantlab-app"]
+    assert API_PORT_MAPPING in app["ports"], "the API door is gone from the deployment"
+
+    launcher = _text(ENTRYPOINT)
+    api = launcher[launcher.index("start api uvicorn") : launcher.index("start nginx")]
+    assert "--host 0.0.0.0 --port 8000" in api, (
+        f"a loopback-bound API makes the published port a dead door: {' '.join(api.split())}"
+    )
+
+    # The browser's door still goes through the container loopback, and that is
+    # the only place the API is addressed by name.
+    assert "proxy_pass http://127.0.0.1:8000" in _text(NGINX_CONF)
 
 
 def test_the_retired_services_leave_nothing_behind() -> None:

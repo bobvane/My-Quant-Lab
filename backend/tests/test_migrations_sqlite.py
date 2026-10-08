@@ -9,6 +9,12 @@ resource insert failed with ``NOT NULL constraint failed: resource_events.id``.
 In a request that surfaced as a *successful* backtest being reported as HTTP 500
 (fixed separately in ADR-044). These tests run the REAL migration chain against SQLite
 and then insert without an explicit id, which is the precise operation that failed.
+
+v2.6.0 deleted the resource-monitor feature — its ORM models, collector, store and API —
+but the four tables of the already-applied migrations stay in the database: the code is
+gone, the schema is not (no ``DROP TABLE``, no ``0021``). These tests therefore drive
+the tables with raw SQL, which is also the standing proof that the applied DDL is still
+insertable for as long as the tables exist.
 """
 
 from __future__ import annotations
@@ -18,13 +24,6 @@ import datetime as dt
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
-
-from app.domain.models import (
-    ContainerResourceSample,
-    HostResourceSample,
-    ResourceEvent,
-    ResourceRollup,
-)
 
 
 @pytest.fixture(scope="module")
@@ -63,38 +62,71 @@ def migrated_session(sqlite_migrated_url):
 def test_resource_events_id_autogenerates(migrated_session: Session) -> None:
     """The exact insert that used to raise NOT NULL constraint failed."""
 
-    row = ResourceEvent(event_key="test:migrated", event_type="unit_test")
-    migrated_session.add(row)
+    migrated_session.execute(
+        text("INSERT INTO resource_events (event_key, event_type) VALUES (:key, :kind)"),
+        {"key": "test:migrated", "kind": "unit_test"},
+    )
     migrated_session.commit()
 
+    row = migrated_session.execute(
+        text("SELECT id, event_key FROM resource_events WHERE event_key = :key"),
+        {"key": "test:migrated"},
+    ).one()
     assert row.id is not None
     assert row.id > 0
-    stored = migrated_session.get(ResourceEvent, row.id)
-    assert stored is not None and stored.event_key == "test:migrated"
+    assert row.event_key == "test:migrated"
 
 
 def test_second_insert_gets_a_new_id(migrated_session: Session) -> None:
     """Auto-generation must keep advancing, not reuse rowid 1."""
 
-    first = ResourceEvent(event_key="test:seq1", event_type="unit_test")
-    second = ResourceEvent(event_key="test:seq2", event_type="unit_test")
-    migrated_session.add_all([first, second])
+    for key in ("test:seq1", "test:seq2"):
+        migrated_session.execute(
+            text("INSERT INTO resource_events (event_key, event_type) VALUES (:key, :kind)"),
+            {"key": key, "kind": "unit_test"},
+        )
     migrated_session.commit()
-    assert second.id != first.id
-    assert max(first.id, second.id) >= 2
+
+    ids = (
+        migrated_session.execute(
+            text("SELECT id FROM resource_events WHERE event_key IN ('test:seq1', 'test:seq2')")
+        )
+        .scalars()
+        .all()
+    )
+    assert len(ids) == 2
+    assert ids[0] != ids[1]
+    assert max(ids) >= 2
 
 
 def test_sibling_resource_tables_autogenerate_too(migrated_session: Session) -> None:
     """All four tables got the same treatment, so check them all."""
 
-    now = dt.datetime.now(tz=dt.UTC)
-    host = HostResourceSample(ts=now, cpu_percent=12.5)
-    container = ContainerResourceSample(ts=now, container_name="quantlab-api", is_quantlab=True)
-    rollup = ResourceRollup(granularity="5m", bucket_start=now, scope="host", cpu_avg=12.5)
-    migrated_session.add_all([host, container, rollup])
+    now = dt.datetime.now(tz=dt.UTC).isoformat()
+    migrated_session.execute(
+        text("INSERT INTO host_resource_samples (ts, cpu_percent) VALUES (:ts, :cpu)"),
+        {"ts": now, "cpu": 12.5},
+    )
+    migrated_session.execute(
+        text(
+            "INSERT INTO container_resource_samples (ts, container_name, is_quantlab) "
+            "VALUES (:ts, :name, :flag)"
+        ),
+        {"ts": now, "name": "quantlab-api", "flag": True},
+    )
+    migrated_session.execute(
+        text(
+            "INSERT INTO resource_rollups (granularity, bucket_start, scope, cpu_avg) "
+            "VALUES (:grain, :bucket, :scope, :cpu)"
+        ),
+        {"grain": "5m", "bucket": now, "scope": "host", "cpu": 12.5},
+    )
     migrated_session.commit()
 
-    assert host.id and container.id and rollup.id
+    for table in ("host_resource_samples", "container_resource_samples", "resource_rollups"):
+        ids = migrated_session.execute(text(f"SELECT id FROM {table}")).scalars().all()
+        assert ids, f"{table} accepted no row"
+        assert all(row_id and row_id > 0 for row_id in ids), table
 
 
 def test_sqlite_column_type_is_integer(migrated_session: Session) -> None:

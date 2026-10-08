@@ -36,8 +36,8 @@ dev = [
     "mypy>=1.13",
     # starlette's TestClient prefers httpx2 and otherwise emits a deprecation
     # warning on every run that uses the `client` fixture. The application keeps
-    # using httpx for its own HTTP calls (app/notifications, resource_monitor,
-    # app/ai, ...), so this is test-only and does NOT replace the runtime client.
+    # using httpx for its own HTTP calls (app/notifications, app/ai, ...), so this
+    # is test-only and does NOT replace the runtime client.
     "httpx2>=2.13",
 ]
 

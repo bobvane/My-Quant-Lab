@@ -4,8 +4,7 @@
 same artifact: a ``BacktestRun`` plus its ``BacktestResult``, metric rows, trade rows and
 ``backtest_completed`` audit event. That persistence used to be inline in the backtests
 route handler; it lives here so an experiment cannot grow a second, subtly different copy
-of it (a real ledger, the metric grouping and the optional resource event are easy to
-drift apart).
+of it (a real ledger and the metric grouping are easy to drift apart).
 
 Nothing here implements a quant algorithm: ``app.research.engine.run_backtest`` remains
 the only engine.
@@ -398,8 +397,6 @@ def execute_backtest(
     db.commit()
     db.refresh(run)
 
-    _record_resource_event(db, run, outcome)
-
     return BacktestExecution(run=run, outcome=outcome)
 
 
@@ -457,39 +454,6 @@ def advance_backtest(db: Session, run: BacktestRun, step: str) -> None:
     run.current_step = step
     run.progress = PROGRESS_LADDER[step]
     db.commit()
-
-
-def _record_resource_event(db: Session, run: BacktestRun, outcome: Any) -> None:
-    """Optional monitoring, deliberately in its own transaction after the run is committed.
-
-    Window peaks come from the monitor's samples when they cover the run; a task shorter
-    than one collection cycle leaves them null rather than invented. `record_resource_event`
-    flushes, so a failure here would otherwise leave the session rollback-pending and turn
-    a perfectly good backtest into a 500 (PendingRollbackError) — committing first means the
-    rollback can only ever discard the monitoring row.
-    """
-
-    try:
-        from app.infrastructure.resource_store import record_resource_event
-
-        record_resource_event(
-            db,
-            event_key=f"backtest:{run.id}",
-            event_type="backtest_completed",
-            started_at=run.started_at,
-            ended_at=run.finished_at,
-            payload={
-                "backtest_run_id": run.id,
-                "strategy_version_id": run.strategy_version_id,
-                "dataset_version_id": run.dataset_version_id,
-                "trade_count": len(outcome.trades),
-                "result_hash": outcome.result_hash,
-            },
-        )
-        db.commit()
-    except Exception:  # pragma: no cover - monitoring must never break backtests
-        logger.warning("resource event recording failed", exc_info=True)
-        db.rollback()
 
 
 def _as_datetime(value: Any) -> dt.datetime | None:

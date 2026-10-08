@@ -207,7 +207,6 @@ def delete_backtest(run_id: int, db: Session = Depends(get_db)) -> dict:
     if run is None:
         raise HTTPException(status_code=404, detail="backtest run not found")
 
-    # Resource events are observational, safe to keep even after deletion.
     # The cascade on BacktestResult and BacktestTrade handles the rest.
     #
     # An experiment_result that points at this run is NOT cascade deleted (ADR-174):

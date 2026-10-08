@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { RouterLink } from 'vue-router'
 import {
   api,
   ApiError,
@@ -1289,12 +1288,8 @@ onMounted(async () => {
         <div class="row" style="margin-top: 12px">
           <span v-for="m in serverInfo?.modules ?? []" :key="m" class="badge">{{ m }}</span>
         </div>
-        <p class="muted" style="margin-top: 10px">
-          行情源：{{ serverInfo?.market_data_provider ?? '—' }} · 特征版本：{{ serverInfo?.feature_version ?? '—' }} ·
-          DSL Schema：{{ serverInfo?.strategy_schema_version ?? '—' }}
-        </p>
         <p class="muted" style="margin-top: 8px">
-          CPU、内存、磁盘与容器明细在<RouterLink to="/resources">系统资源</RouterLink>页。
+          DSL Schema：{{ serverInfo?.strategy_schema_version ?? '—' }}
         </p>
       </div>
     </template>

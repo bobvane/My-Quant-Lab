@@ -1,6 +1,6 @@
 """Guards for the release pipeline: publishing is not a substitute for a verdict.
 
-`release.yml` builds and pushes the backend, proxy and web images, then boots the
+`release.yml` builds and pushes the backend and web images, then boots the
 stock production compose file to smoke test exactly what it published. On the v1.5.2
 release that smoke test said `SMOKE_TEST_FAILED` — the images could not boot, because
 the migration id did not fit `alembic_version.version_num` (ADR-064) — and the run
@@ -167,5 +167,5 @@ def test_the_release_smoke_test_pulls_the_version_it_is_releasing():
     """Smoke testing `latest` would certify whatever happened to be there."""
 
     body = _step(_text(RELEASE), "Smoke test the released images")
-    for image in ("BACKEND_IMAGE", "WEB_IMAGE", "PROXY_IMAGE"):
+    for image in ("BACKEND_IMAGE", "WEB_IMAGE"):
         assert f'"${{{image}}}:${{VERSION}}"' in body, f"{image} is not pulled at the released tag"

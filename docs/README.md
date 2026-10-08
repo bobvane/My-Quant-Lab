@@ -24,7 +24,6 @@
 - `17_DECISIONS.md`：架构决策记录
 - `18_SAMPLE_STRATEGY.md`：示例策略
 - `19_DEVELOPMENT_PLAYBOOK.md`：分阶段 AI 编程实施方法
-- `20_RESOURCE_MONITOR.md`：内置轻量系统资源监控
 
 ## 最重要的设计
 

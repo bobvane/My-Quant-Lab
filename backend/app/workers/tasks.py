@@ -142,29 +142,6 @@ def notify_signals() -> dict:
         return notify_pending_signals(db)
 
 
-@celery_app.task(name="quantlab.collect_resources")
-def collect_resources() -> dict:
-    """Sample NAS + container resources. Intentionally cheap: one cycle is a
-    handful of /proc reads plus a couple of small inserts."""
-
-    if not settings.resource_collection_enabled:
-        return {"skipped": "disabled"}
-    from app.infrastructure.resource_monitor import collect_cycle
-    from app.infrastructure.resource_store import roll_up_recent, save_cycle
-
-    with session_scope() as db:
-        cycle = collect_cycle()
-        rows = save_cycle(db, cycle)
-        roll_up_recent(db)
-    quantlab = cycle["quantlab"]
-    return {
-        "containers": len(cycle["containers"]),
-        "rows": rows,
-        "quantlab_cpu": quantlab["cpu"],
-        "quantlab_mem_mb": quantlab["mem_mb"],
-    }
-
-
 @celery_app.task(name="quantlab.evaluate_strategy_lifecycle")
 def evaluate_strategy_lifecycle() -> dict:
     """Promote/degrade strategies using the deterministic evidence rules.
@@ -206,17 +183,6 @@ def evaluate_signal_outcomes() -> dict:
     with session_scope() as db:
         result = evaluate_pending_outcomes(db)
     return result
-
-
-@celery_app.task(name="quantlab.purge_resources")
-def purge_resources() -> dict:
-    """Enforce retention: raw 7d, rollups 30d (configurable)."""
-
-    from app.infrastructure.resource_store import purge_expired
-
-    with session_scope() as db:
-        deleted = purge_expired(db)
-    return {"deleted": deleted}
 
 
 @celery_app.task(name="quantlab.reap_stuck_runs")

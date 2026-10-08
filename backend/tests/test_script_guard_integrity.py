@@ -28,7 +28,6 @@ VERIFY_STACK = SCRIPTS / "verify-stack.sh"
 LOCAL_STACK = SCRIPTS / "Start-LocalStack.ps1"
 FRONTEND_CHECKS = SCRIPTS / "Invoke-FrontendChecks.ps1"
 VERSION_SH = SCRIPTS / "version.sh"
-RESOURCE_BASELINE = SCRIPTS / "resource_baseline.sh"
 CI = WORKFLOWS / "ci.yml"
 RELEASE = WORKFLOWS / "release.yml"
 README = REPO_ROOT / "README.md"
@@ -165,21 +164,3 @@ def test_the_release_notes_do_not_point_at_a_port_that_serves_nobody() -> None:
     assert in_notes.group(1) == in_readme.group(1), (
         f"version.sh says :{in_notes.group(1)}/docs while README says :{in_readme.group(1)}/docs"
     )
-
-
-def test_the_resource_baseline_names_every_default_container() -> None:
-    """Sampling grepped every `^quantlab-` container; the report printed six."""
-
-    text = _text(RESOURCE_BASELINE)
-    match = re.search(r"^CONTAINERS=\"([^\"]*)\"", text, re.MULTILINE)
-    assert match, "resource_baseline.sh no longer declares its container list"
-    listed = match.group(1).split()
-    compose = yaml.safe_load(_text(COMPOSE))
-    default = sorted(
-        name
-        for name, service in (compose.get("services") or {}).items()
-        if name.startswith("quantlab-") and not (service or {}).get("profiles")
-    )
-    missing = [name for name in default if name not in listed]
-    assert missing == [], f"these default services are never reported: {missing}"
-    assert "quantlab-docker-proxy" in listed, "the proxy container is missing from the baseline"

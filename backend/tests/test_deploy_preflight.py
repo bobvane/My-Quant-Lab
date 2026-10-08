@@ -1,11 +1,12 @@
 """A deployment check must cover the deployment it claims to check.
 
-`scripts/preflight.sh` hardcoded two image names -- backend and web -- so the
-`my-quant-lab-docker-proxy` image was never mentioned, even though the stock
-compose file starts it (ADR-076 forgot the same image in the nightly pipeline).
-It also demanded source files (`docker/Dockerfile.backend`, ...) that a
-documented two-file NAS deployment does not have, and nothing ran it at all: its
-verdict lived only in whoever's terminal (ADR-078).
+`scripts/preflight.sh` hardcoded two image names instead of reading the compose
+file, so the check carried a second copy of a list the deployment already owns --
+and that copy had already drifted past an image the stock compose file starts
+(ADR-076 forgot the same image in the nightly pipeline). It also demanded source
+files (`docker/Dockerfile.backend`, ...) that a documented two-file NAS deployment
+does not have, and nothing ran it at all: its verdict lived only in whoever's
+terminal (ADR-078).
 
 These guards hold the three fixes in place -- the image list is derived from the
 compose file, source files are required only when that file builds from source,
@@ -129,9 +130,8 @@ def test_the_overlay_builds_every_image_the_deployment_pulls() -> None:
 
     overlay = _services(OVERLAY)
     project = _project_images()
-    assert len(project) >= 3, (
-        "the deployment is expected to pull the backend, the web and the proxy image, "
-        f"found {sorted(project)}"
+    assert len(project) >= 2, (
+        f"the deployment is expected to pull the backend and web images, found {sorted(project)}"
     )
     assert set(overlay) <= set(_services(COMPOSE)), (
         "the overlay names a service the deployment file does not: "
@@ -144,10 +144,11 @@ def test_the_overlay_builds_every_image_the_deployment_pulls() -> None:
         assert dockerfile.is_file(), f"{name} builds from a missing {build['dockerfile']}"
 
 
-def test_the_proxy_image_is_one_the_deployment_pulls() -> None:
-    """The image ADR-076 forgot is named by the deployment file, not a list."""
+def test_the_retired_proxy_image_is_gone_from_the_deployment() -> None:
+    """v2.6.0 retired the read-only Docker stats proxy; nothing may pull it again."""
 
-    assert any("docker-proxy" in image for image in _project_images().values())
+    images = _project_images().values()
+    assert not [image for image in images if "proxy" in image], sorted(images)
 
 
 # --- the check itself ----------------------------------------------------------

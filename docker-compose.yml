@@ -10,7 +10,6 @@
 #   quantlab-scheduler    Celery beat（定时扫描信号）
 #   quantlab-postgres     PostgreSQL（仅 backend 网络，不对外暴露）
 #   quantlab-redis        Redis（仅 backend 网络，不对外暴露）
-#   quantlab-docker-proxy 只读 Docker stats 代理（仅 backend 网络，不对外暴露）
 #
 # 镜像全部来自 GitHub Packages 预构建（本文件不含 build 段）：
 #   默认拉取 latest（.env 里可改 MQL_VERSION 锁定版本，例如 v0.0.8）。
@@ -63,14 +62,6 @@ x-backend-env: &backend-env
   RUN_RECOVERY_QUEUED_AFTER_SECONDS: ${RUN_RECOVERY_QUEUED_AFTER_SECONDS:-7200}
   GHOSTFOLIO_BASE_URL: ${GHOSTFOLIO_BASE_URL:-}
   GHOSTFOLIO_API_KEY: ${GHOSTFOLIO_API_KEY:-}
-  # System Resource Monitor (docs/20_RESOURCE_MONITOR.md)
-  RESOURCE_COLLECTION_ENABLED: ${RESOURCE_COLLECTION_ENABLED:-true}
-  RESOURCE_RETENTION_RAW_DAYS: ${RESOURCE_RETENTION_RAW_DAYS:-7}
-  RESOURCE_RETENTION_ROLLUP_DAYS: ${RESOURCE_RETENTION_ROLLUP_DAYS:-30}
-  # Read-only Docker stats proxy (phase 1b): lets the collector see every
-  # container on the NAS without mounting the Docker socket into api/worker.
-  DOCKER_PROXY_URL: ${DOCKER_PROXY_URL:-http://quantlab-docker-proxy:9100}
-  DOCKER_PROXY_TOKEN: ${DOCKER_PROXY_TOKEN:-}
   DEFAULT_CURRENCY: ${DEFAULT_CURRENCY:-USD}
   DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-UTC}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -82,7 +73,7 @@ x-backend-env: &backend-env
   # Leave empty for direct access. NO_PROXY excludes internal services.
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
-  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,quantlab-postgres,quantlab-redis,quantlab-docker-proxy,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.local,.internal}
+  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,quantlab-postgres,quantlab-redis,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.local,.internal}
 
 x-backend-networks: &backend-networks
   - backend
@@ -124,36 +115,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
-
-  # Read-only Docker stats proxy (ADR-024): the ONLY container that touches the
-  # Docker socket. stdlib-only, ~20 MB RSS, whitelist of two GET endpoints and
-  # nothing else. Never publish its port; only the backend network reaches it.
-  quantlab-docker-proxy:
-    # No build: section here: source builds live in docker-compose.build.yml.
-    # A deployment that ships only this file and .env must never be asked for a
-    # Dockerfile it does not have. Guarded by test_deploy_preflight.py (ADR-078).
-    image: ghcr.io/bobvane/my-quant-lab-docker-proxy:${MQL_VERSION:-latest}
-    container_name: quantlab-docker-proxy
-    restart: unless-stopped
-    # Run as root: the Docker socket is owned by root:docker on most systems
-    # and the GID varies across NAS platforms, making static group_add fragile.
-    # This is safe because the proxy's whitelist limits it to two GET endpoints,
-    # the port is never published, and container root ≠ host root.
-    user: root
-    environment:
-      QUANTLAB_PROXY_TOKEN: ${DOCKER_PROXY_TOKEN:-}
-    volumes:
-      # :ro stops writes through the file but does NOT limit API verbs — that
-      # is what the whitelist in readonly_proxy.py is for.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - backend
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import socket;s=socket.create_connection(('127.0.0.1',9100),3);s.close()\""]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
 
   quantlab-api:
     <<: *backend-image
@@ -201,8 +162,6 @@ services:
       # decision (ADR-099).
       quantlab-api:
         condition: service_healthy
-      quantlab-docker-proxy:
-        condition: service_started
     networks:
       - backend
     healthcheck:

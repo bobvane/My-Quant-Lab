@@ -2,9 +2,8 @@ name: nightly
 
 # The nightly images are the "latest of main" set. Two things have to be true of
 # them, and neither used to be (ADR-076):
-#   1. they are the same three images the release pipeline publishes -- the proxy
-#      image was missing, so `MQL_VERSION=nightly` could never start the stock
-#      compose file at all (quantlab-docker-proxy is not behind a profile);
+#   1. they are the same images the release pipeline publishes, and the stock
+#      compose file alone can start them;
 #   2. they are started once, from the registry, before anyone is told they exist.
 # The verdict is `scripts/verify-stack.sh`, the same script release.yml calls.
 on:
@@ -20,7 +19,6 @@ env:
   REGISTRY: ghcr.io
   BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-backend
   WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-web
-  PROXY_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-docker-proxy
 
 jobs:
   images:
@@ -46,16 +44,6 @@ jobs:
           file: docker/Dockerfile.backend
           push: true
           tags: ${{ env.BACKEND_IMAGE }}:nightly
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build proxy (nightly tag)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: .
-          file: docker/Dockerfile.proxy
-          push: true
-          tags: ${{ env.PROXY_IMAGE }}:nightly
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -94,7 +82,6 @@ jobs:
           # them.
           docker pull "${BACKEND_IMAGE}:${VERSION}"
           docker pull "${WEB_IMAGE}:${VERSION}"
-          docker pull "${PROXY_IMAGE}:${VERSION}"
 
           # The stock file ships example values. A real deployment generates
           # its own, and the application refuses to serve production with a
@@ -133,9 +120,6 @@ jobs:
             echo
             echo "### quantlab-web logs"
             docker compose --env-file .env.example logs --no-color --tail 200 quantlab-web 2>&1
-            echo
-            echo "### quantlab-docker-proxy logs"
-            docker compose --env-file .env.example logs --no-color --tail 100 quantlab-docker-proxy 2>&1
             echo '```'
           } 2>&1 | tee -a "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 

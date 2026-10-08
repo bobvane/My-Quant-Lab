@@ -365,8 +365,12 @@ def test_the_interface_has_a_basic_mode_that_hides_engineering_readings() -> Non
     assert "fetch(" not in MODE
 
     assert "○ 普通模式" in APP and "● 高级模式" in APP
-    assert '<template v-if="isAdvanced">' in APP
-    assert '<RouterLink to="/resources">' in APP
+    # The sidebar's engineering readings are the shell's remaining advanced-only block;
+    # the other one was the navigation group that left with the /resources page.
+    assert 'v-if="isAdvanced" class="sidebar-meta' in APP
+    # v2.6.0 retired the container-resource page with the 7→3 container work; nothing
+    # in the shell may point at it again (the route is checked below).
+    assert "/resources" not in APP
 
     # Dashboard: the engineering readings are gone from the first screen entirely
     # (ADR-134), so the question is no longer "which ones are gated" but "which page
@@ -618,7 +622,6 @@ def test_the_navigation_splits_research_from_the_strategy_library() -> None:
         "信号",
         "数据",
         "AI 研究实验室",
-        "系统资源",
         "系统管理",
     ]
     assert [path for path, _ in nav] == [
@@ -631,17 +634,16 @@ def test_the_navigation_splits_research_from_the_strategy_library() -> None:
         "/signals",
         "/data",
         "/lab",
-        "/resources",
         "/settings",
     ]
 
-    # The group heading and the engineering page are advanced-only; settings stays
-    # reachable in both modes because the mode switch itself lives there (ADR-133).
-    start = APP.index('<template v-if="isAdvanced">')
-    gated = APP[start : APP.index("</template>", start)]
-    assert '<div class="nav-group">高级</div>' in gated
-    assert 'to="/resources"' in gated
-    assert 'to="/settings"' not in gated
+    # The 高级 group title left with the page it pointed at (v2.6.0): every remaining
+    # entry is reachable in both modes, and the shell's engineering readings are still
+    # advanced-only (ADR-133).
+    assert '<div class="nav-group">高级</div>' not in APP
+    assert '<RouterLink to="/resources">' not in APP
+    assert "{ path: '/resources'" not in MAIN_TS
+    assert 'v-if="isAdvanced" class="sidebar-meta' in APP
 
     # The old address keeps working without becoming a navigation row of its own.
     assert "{ path: '/market', redirect: '/strategies' }" in MAIN_TS

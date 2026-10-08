@@ -207,7 +207,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
 
 ## 架构（已确定的 Q1–Q10 决策）
 
-### 七个 Docker 服务
+### 六个 Docker 服务
 
 | 服务 | 作用 | 网络 |
 |------|------|------|
@@ -217,14 +217,8 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
 | `quantlab-scheduler` | Celery Beat（每 15 分钟扫描一次信号） | backend |
 | `quantlab-postgres` | PostgreSQL 16 | backend（不对外暴露） |
 | `quantlab-redis` | Redis 7（缓存 + Broker + Result） | backend（不对外暴露） |
-| `quantlab-docker-proxy` | 只读 Docker stats 代理，唯一接触 docker.sock 的容器（ADR-024） | backend（不对外暴露） |
 
 > 设计原则：**模块化单体 + Docker 服务化基础设施**。业务域不拆微服务。
->
-> 「系统资源监控」需要读取 NAS 上每个容器的状态。为了不把 `docker.sock` 挂进
-> `quantlab-api` / `quantlab-worker`，只有 `quantlab-docker-proxy` 挂它，且该代理
-> 仅放行两个只读 GET 端点、端口从不发布。不需要容器级监控时可在 `.env` 里设
-> `RESOURCE_COLLECTION_ENABLED=false`（代理容器仍在，但不再被调用）。
 
 ### 应用内部领域层
 

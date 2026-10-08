@@ -792,12 +792,12 @@ re-imported automatically when a new commit lands):
 `GET /settings/ghostfolio/test` [已实现] —— 测试 Ghostfolio 连接。
 `GET /settings/ghostfolio/holdings` [已实现] —— Ghostfolio 持仓（只读）。
 
-## System Resources
+## System Resources （v2.6.0 撤回）
 
-`GET /resources/current` [已实现] —— 最新采样：NAS 概览 + Quant Lab 份额 + 容器。
-`GET /resources/history` [已实现] —— CPU/内存时间序列（1h/24h/7d/30d）。
-`GET /resources/events` [已实现] —— 任务资源事件（回测峰值等）。
-`GET /resources/summary` [已实现] —— 直接答案：NAS 总量、Quant Lab 份额、最大占用者。
+`GET /resources/current` [取消] —— 资源监控在 v2.6.0 被整体删除。
+`GET /resources/history` [取消] —— 资源监控在 v2.6.0 被整体删除。
+`GET /resources/events` [取消] —— 资源监控在 v2.6.0 被整体删除。
+`GET /resources/summary` [取消] —— 资源监控在 v2.6.0 被整体删除。
 
 ## API 规则
 

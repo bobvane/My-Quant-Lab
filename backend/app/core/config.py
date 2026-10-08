@@ -184,24 +184,6 @@ class Settings(BaseSettings):
     # (reference_signal, retired) are never applied automatically.
     lifecycle_auto_enabled: bool = True
 
-    # --- System Resource Monitor ------------------------------------------
-    # Phase 1a needs no Docker access at all: host metrics come from /proc via
-    # psutil, and Quant Lab's own containers report through their cgroups.
-    # Phase 1b adds a *read-only filtered proxy* so the collector may also see
-    # every container on the NAS. The full Docker socket is never mounted into
-    # the api/worker (see ADR-024).
-    resource_collection_enabled: bool = True
-    resource_retention_raw_days: int = Field(default=7, ge=1, le=90)
-    resource_retention_rollup_days: int = Field(default=30, ge=1, le=365)
-    # Comma-separated container paths to stat for disk usage; defaults to the
-    # container's own filesystem (the NAS system disk via overlay).
-    resource_disk_paths: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["/app"])
-    # Read-only Docker stats proxy (phase 1b). Empty disables layer 2.
-    docker_proxy_url: str | None = None
-    docker_proxy_token: str | None = None
-    # How the collector identifies Quant Lab containers among all NAS containers.
-    quantlab_compose_project: str = "my-quant-lab"
-
     # --- Celery delivery and run recovery (v2.6.0 P0) ----------------------
     # The worker now acks a task only after it returns (see `workers/celery_app.py`),
     # so a hard-killed worker redelivers its task instead of losing it. The two
@@ -292,11 +274,6 @@ class Settings(BaseSettings):
         if not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", text):
             raise ValueError("API_AUTH_TOKEN contains unsupported characters")
         return text
-
-    @field_validator("resource_disk_paths", mode="before")
-    @classmethod
-    def _split_disk_paths(cls, value: object) -> object:
-        return cls._split_origins(value)
 
     @field_validator("market_data_watchlist", mode="before")
     @classmethod

@@ -47,11 +47,6 @@ celery_app.conf.update(
     # so a task still running at the limit could be handed to a second worker.
     # Sit strictly above the limit plus a queue wait.
     broker_transport_options={"visibility_timeout": 7200},
-    # The one deliberately lossy task: `collect_resources` writes sample rows that
-    # have no unique constraint (`domain/models.py`), so a redelivery would double
-    # them. It is deleted with the whole feature in Step 3, so it is excluded from
-    # late ack instead of being hardened.
-    task_annotations={"quantlab.collect_resources": {"acks_late": False}},
     beat_schedule={
         "scan-signals": {
             "task": "quantlab.scan_signals",
@@ -66,16 +61,6 @@ celery_app.conf.update(
         "sync-market-data": {
             "task": "quantlab.sync_market_data",
             "schedule": crontab(minute=0, hour="*"),
-        },
-        # System Resource Monitor: 1-minute raw samples, deliberately cheap.
-        "collect-resources": {
-            "task": "quantlab.collect_resources",
-            "schedule": crontab(minute="*"),
-        },
-        # Retention: raw 7d, rollups 30d (configurable in settings).
-        "purge-resources": {
-            "task": "quantlab.purge_resources",
-            "schedule": crontab(minute=17, hour=3),
         },
         # Signal outcome tracking: look forward in price data for pending signals.
         "evaluate-signal-outcomes": {
@@ -93,9 +78,8 @@ celery_app.conf.update(
             "schedule": crontab(minute=10, hour=4),
         },
         # Stuck-run recovery (docs/33 §6): fail a run whose worker is gone, so no
-        # row claims to be `running` for ever. This also replaces
-        # `collect-resources` as the worker/Beat liveness signal, because it fires
-        # every five minutes and touches the schedule file every time.
+        # row claims to be `running` for ever. Every five minutes, and it touches
+        # the schedule file every time, which is also the Beat liveness signal.
         "reap-stuck-runs": {
             "task": "quantlab.reap_stuck_runs",
             "schedule": crontab(minute="*/5"),

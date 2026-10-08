@@ -9,7 +9,6 @@ import PaperView from './views/PaperView.vue'
 import SignalsView from './views/SignalsView.vue'
 import DataView from './views/DataView.vue'
 import SettingsView from './views/SettingsView.vue'
-import ResourcesView from './views/ResourcesView.vue'
 import StrategyDetailView from './views/StrategyDetailView.vue'
 import LabView from './views/LabView.vue'
 import ExperimentsView from './views/ExperimentsView.vue'
@@ -27,7 +26,6 @@ const router = createRouter({
     { path: '/signals', name: 'signals', component: SignalsView },
     { path: '/data', name: 'data', component: DataView },
     { path: '/lab', name: 'lab', component: LabView },
-    { path: '/resources', name: 'resources', component: ResourcesView },
     { path: '/settings', name: 'settings', component: SettingsView },
     // The old name of the strategy library. It had been the only name, so it stays
     // as a redirect rather than 404ing on every bookmark (ADR-131): a redirect has

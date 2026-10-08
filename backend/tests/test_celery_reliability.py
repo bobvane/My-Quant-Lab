@@ -4,9 +4,9 @@ A Redis broker forgets a message the instant it is handed to a worker, so Celery
 default ack-on-receipt turned every SIGKILLed child (OOM, ``docker kill``, an image
 swap) into a lost task whose run row stayed ``running`` for ever — nothing
 re-delivered it, and nothing reaped it. These tests pin the settings that close
-that hole, and pin the schedule they must not disturb: the eight periodic jobs keep
-their crontab literally, and ``reap-stuck-runs`` is the only addition (docs/33 §5,
-§6.5).
+that hole, and pin the schedule they must not disturb: the six business jobs that ship
+keep their crontab literally, and ``reap-stuck-runs`` is the only addition (docs/33 §5,
+§6.5). v2.6.0 removed the two resource-monitor jobs without touching either property.
 """
 
 from __future__ import annotations
@@ -21,8 +21,6 @@ SHIPPED_SCHEDULE = {
     "scan-signals": ("quantlab.scan_signals", crontab(minute="*/15")),
     "notify-signals": ("quantlab.notify_signals", crontab(minute="5,20,35,50")),
     "sync-market-data": ("quantlab.sync_market_data", crontab(minute=0, hour="*")),
-    "collect-resources": ("quantlab.collect_resources", crontab(minute="*")),
-    "purge-resources": ("quantlab.purge_resources", crontab(minute=17, hour=3)),
     "evaluate-signal-outcomes": (
         "quantlab.evaluate_signal_outcomes",
         crontab(minute="*/30"),
@@ -66,15 +64,16 @@ def test_celery_reliability_defaults() -> None:
     assert conf.accept_content == ["json"]
 
 
-def test_collect_resources_is_the_only_task_excused_from_late_ack() -> None:
-    """The exception is one named task, and it is a task that exists."""
+def test_no_task_is_excused_from_late_ack() -> None:
+    """One lossy collector used to opt out; v2.6.0 deleted it together with the task."""
 
     from app.workers import tasks as worker_tasks  # noqa: F401 - registers the tasks
 
     annotations = celery_app.conf.task_annotations
-    assert annotations == {"quantlab.collect_resources": {"acks_late": False}}
-    # A typo in the annotation name would silently excuse nothing at all.
-    assert set(annotations) <= set(celery_app.tasks)
+    assert not annotations, annotations
+    # The retired resource-monitor jobs must not be registered behind Beat's back.
+    assert "quantlab.collect_resources" not in celery_app.tasks
+    assert "quantlab.purge_resources" not in celery_app.tasks
 
 
 def test_beat_schedule_is_unchanged_except_the_reaper() -> None:
@@ -87,6 +86,11 @@ def test_beat_schedule_is_unchanged_except_the_reaper() -> None:
 
     assert schedule[REAPER]["task"] == "quantlab.reap_stuck_runs"
     assert schedule[REAPER]["schedule"] == crontab(minute="*/5")
+
+    # The two resource-monitor jobs were deleted in v2.6.0; Beat must not know them.
+    assert "collect-resources" not in schedule
+    assert "purge-resources" not in schedule
+    assert len(schedule) == 7, sorted(schedule)
 
 
 def test_the_reaper_is_a_registered_task() -> None:

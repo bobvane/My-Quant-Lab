@@ -8,7 +8,8 @@
 #   * EVERY project image the compose file names is either already present
 #     locally (CI builds its own) or reachable in the registry. The list is
 #     DERIVED from the compose file: the previous hardcoded pair of image names
-#     silently ignored the docker-proxy image (ADR-076, ADR-078);
+#     silently ignored every image the deploy would actually pull (ADR-076,
+#     ADR-078);
 #   * SECRET_KEY satisfies the same rule the API enforces at startup (ADR-077),
 #     with the shell environment winning over the env file, exactly as compose
 #     resolves it;

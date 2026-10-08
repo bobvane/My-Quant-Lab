@@ -36,8 +36,3 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.web
-
-  quantlab-docker-proxy:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.proxy

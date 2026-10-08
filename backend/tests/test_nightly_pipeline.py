@@ -1,13 +1,13 @@
 """Guards for the nightly pipeline: an image nobody starts is an unverified claim.
 
-`nightly.yml` used to build **two** images (`backend`, `web`), push them as
-`:nightly`, and stop. Three problems, none of them visible from the workflow's own
+``nightly.yml`` used to build **two** images (``backend``, ``web``), push them as
+``:nightly``, and stop. Three problems, none of them visible from the workflow's own
 name (ADR-076):
 
-- the release pipeline publishes **three** images (`backend`, `proxy`, `web`), and
-  `quantlab-docker-proxy` is a default service in `docker-compose.yml` with no
-  `profiles:` entry — so `MQL_VERSION=nightly` could never start the stock compose
-  file at all, because there is no `my-quant-lab-docker-proxy:nightly`;
+- the release pipeline published **three** images (``backend``, ``proxy``, ``web``)
+  while nightly published two, so the tags were not the same set: ``MQL_VERSION=nightly``
+  could not start the stock compose file at all (v2.6.0 retired the proxy image, so the
+  two pipelines again publish the same set — the guard below holds that equality);
 - both build steps read `cache-from: type=gha` and neither wrote one, so the nightly
   run borrowed a cache it never contributed to;
 - nothing ever started the images. A nightly that cannot boot would be discovered by
@@ -90,7 +90,7 @@ def test_the_nightly_workflow_is_where_this_guard_expects_it():
 
 
 def test_the_nightly_images_are_the_images_the_release_publishes():
-    """A tag has to be a complete set: the compose file cannot start without the proxy."""
+    """A tag has to be a complete set: the compose file has to start from it alone."""
 
     nightly = _text(NIGHTLY)
     release = _text(RELEASE)
@@ -102,13 +102,12 @@ def test_the_nightly_images_are_the_images_the_release_publishes():
     )
     assert nightly_files == {
         "docker/Dockerfile.backend",
-        "docker/Dockerfile.proxy",
         "docker/Dockerfile.web",
     }
 
     built = {match.group("image") for match in _NIGHTLY_TAG.finditer(nightly)}
     declared = set(_IMAGE_CONSTANT.findall(nightly))
-    assert built == {"BACKEND_IMAGE", "PROXY_IMAGE", "WEB_IMAGE"}, f"nightly tags {sorted(built)}"
+    assert built == {"BACKEND_IMAGE", "WEB_IMAGE"}, f"nightly tags {sorted(built)}"
     assert built <= declared, f"nightly tags {sorted(built - declared)} an undeclared image name"
     release_declared = set(_IMAGE_CONSTANT.findall(release))
     assert built == release_declared, (
@@ -137,7 +136,7 @@ def test_the_nightly_verification_boots_the_images_it_publishes():
     body = _uncommented(_job(text, "verify"))
     assert "needs: images" in body, "verification does not wait for the images it verifies"
     assert "VERSION: nightly" in body, "the verification does not pin the nightly tag"
-    for image in ("BACKEND_IMAGE", "WEB_IMAGE", "PROXY_IMAGE"):
+    for image in ("BACKEND_IMAGE", "WEB_IMAGE"):
         assert f'"${{{image}}}:${{VERSION}}"' in body, f"{image} is not pulled at the nightly tag"
     assert "docker compose --env-file .env.example up -d" in body
     assert "bash scripts/verify-stack.sh" in body, (

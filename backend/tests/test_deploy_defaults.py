@@ -12,7 +12,7 @@ Three findings from the deployment audit of v1.6.8 live here:
   (ADR-099);
 * ``.env.example``, ``docker-compose.yml`` and ``app/core/config.py`` each kept a
   copy of the same defaults, and they had already drifted apart
-  (``MARKET_DATA_PROVIDER``, ``DOCKER_PROXY_URL``, ``NO_PROXY``,
+  (``MARKET_DATA_PROVIDER``, ``NO_PROXY``,
   ``CORS_ORIGINS``), while the image declared probes that compose always
   overrode (ADR-100).
 
@@ -58,7 +58,6 @@ COMPOSE_ONLY = {"MARKET_DATA_PROVIDER"}
 # Defaults whose two layers mean different things on purpose.
 CODE_EXCEPTIONS = {
     "APP_ENVIRONMENT": "a bare Settings() is for local work; the deployment ships production",
-    "DOCKER_PROXY_URL": "None means 'no proxy configured'; the example documents the bundled one",
     "MARKET_DATA_PROVIDER": "a bare Settings() stays offline; the example ships the real provider",
     "SECRET_KEY": "both values are published placeholders production refuses, by name",
 }
@@ -73,9 +72,6 @@ KNOBS = {
     "LOG_LEVEL": "log_level",
     "DEFAULT_CURRENCY": "default_currency",
     "DEFAULT_TIMEZONE": "default_timezone",
-    "RESOURCE_COLLECTION_ENABLED": "resource_collection_enabled",
-    "RESOURCE_RETENTION_RAW_DAYS": "resource_retention_raw_days",
-    "RESOURCE_RETENTION_ROLLUP_DAYS": "resource_retention_rollup_days",
     "POSTGRES_USER": "postgres_user",
     "POSTGRES_DB": "postgres_db",
     "CORS_ORIGINS": "cors_origins",
@@ -250,9 +246,3 @@ def test_migrations_finish_before_the_queues_start() -> None:
         assert condition == "service_healthy", (
             f"{name} may start before the api role has finished migrating"
         )
-
-
-def test_the_proxy_runs_as_the_user_both_files_name() -> None:
-    declared = re.search(r"^USER (\S+)", _text(DOCKER / "Dockerfile.proxy"), re.MULTILINE)
-    assert declared, "the proxy image no longer states which user it runs as"
-    assert declared.group(1) == _compose()["services"]["quantlab-docker-proxy"].get("user")

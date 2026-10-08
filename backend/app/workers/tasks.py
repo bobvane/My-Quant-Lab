@@ -10,6 +10,8 @@ import datetime as dt
 import logging
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
+
 from app.core.config import settings
 from app.core.db import session_scope
 from app.data.market_data_repo import (
@@ -19,6 +21,7 @@ from app.data.market_data_repo import (
     upsert_bars,
 )
 from app.data.providers import asset_metadata_for, get_market_data_provider, mark_closed_bars
+from app.data.run_recovery import recover_stuck_runs
 from app.domain.models import Asset, MarketDataSource
 from app.notifications.service import notify_pending_signals
 from app.simulation.outcome_evaluator import evaluate_pending_outcomes
@@ -82,21 +85,36 @@ def sync_market_data(symbols: list[str] | None = None) -> dict:
             # A daily candle covering today is still forming; store it as
             # not-closed so strategies never read an unfinished bar.
             frame = mark_closed_bars(frame, "1d", settings.default_timezone)
-            asset = db.query(Asset).filter_by(symbol=symbol).one_or_none()
-            if asset is None:
-                meta = asset_metadata_for(provider, symbol)
-                asset = Asset(
-                    symbol=symbol,
-                    display_name=meta.get("display_name") or symbol,
-                    asset_class=str(meta.get("asset_class") or "stock"),
-                    currency=str(meta.get("currency") or "USD"),
-                    exchange=meta.get("exchange"),
+            # One symbol is one chunk, and one chunk is one savepoint: a bar that
+            # collides with a concurrent sync (the PK is (series_id, timestamp),
+            # which is exactly what makes redelivery possible) must not discard
+            # the symbols that already succeeded, nor the ones still to come
+            # (docs/33 §7.4).
+            try:
+                with db.begin_nested():
+                    asset = db.query(Asset).filter_by(symbol=symbol).one_or_none()
+                    if asset is None:
+                        meta = asset_metadata_for(provider, symbol)
+                        asset = Asset(
+                            symbol=symbol,
+                            display_name=meta.get("display_name") or symbol,
+                            asset_class=str(meta.get("asset_class") or "stock"),
+                            currency=str(meta.get("currency") or "USD"),
+                            exchange=meta.get("exchange"),
+                        )
+                        db.add(asset)
+                        db.flush()
+                    series = get_or_create_series(
+                        db, asset=asset, timeframe="1d", source_id=source.id
+                    )
+                    summary[symbol] = upsert_bars(db, series, frame_to_bars(frame))
+                    series.quality_status, _ = assess_bars_quality(frame)
+            except IntegrityError:
+                logger.warning(
+                    "sync for %s collided with a concurrent sync; symbol skipped", symbol
                 )
-                db.add(asset)
-                db.flush()
-            series = get_or_create_series(db, asset=asset, timeframe="1d", source_id=source.id)
-            summary[symbol] = upsert_bars(db, series, frame_to_bars(frame))
-            series.quality_status, _ = assess_bars_quality(frame)
+                summary[symbol] = -1
+                continue
     return {"provider": provider.name, "watchlist": targets, "inserted": summary}
 
 
@@ -199,6 +217,19 @@ def purge_resources() -> dict:
     with session_scope() as db:
         deleted = purge_expired(db)
     return {"deleted": deleted}
+
+
+@celery_app.task(name="quantlab.reap_stuck_runs")
+def reap_stuck_runs() -> dict:
+    """Fail runs whose worker is gone, so none claims to be `running` for ever.
+
+    The rules live in :mod:`app.data.run_recovery` because the API calls the same
+    function at startup (docs/33 §6.6): the conditional `UPDATE` makes racing the
+    two call sites harmless, and keeps one implementation to test.
+    """
+
+    with session_scope() as db:
+        return recover_stuck_runs(db)
 
 
 def _record_review(
@@ -463,13 +494,28 @@ def check_github_sources() -> dict:
         for source in sources:
             url = source.repository_url
             try:
-                status = check_source(db, source)
+                # Each source is its own savepoint, and the row is read FOR UPDATE
+                # first: `check_source` decides "new commit" by comparing against
+                # `current_commit`, so two runners holding the same stale value
+                # would both import the same commit (docs/33 §7.5). The lock makes
+                # the read and the write that follows it one decision; a redelivery
+                # after a kill sees the commit already recorded and answers
+                # "unchanged".
+                with db.begin_nested():
+                    locked = _lock_github_source(db, source.id)
+                    if locked is None:
+                        outcomes["skipped"] = outcomes.get("skipped", 0) + 1
+                        continue
+                    status = check_source(db, locked)
             except Exception as exc:  # noqa: BLE001 - one source must not stop the rest
                 # check_source handles its own failures; this is the last resort, so
                 # a scheduled run always returns a summary with every source
-                # accounted for instead of dying on the first bad one. The rollback
-                # also drops this run's uncommitted updates, which the next run
-                # rebuilds from the commits themselves (ADR-062).
+                # accounted for instead of dying on the first bad one. The savepoint
+                # above is what lets the loop carry on: it releases this source's
+                # half-written rows and leaves the session usable. The rollback that
+                # follows is the deliberate whole-run reset ADR-062 describes --
+                # nothing in this task commits -- and the next run rebuilds it from
+                # the commits themselves.
                 logger.warning("github watch crashed for %s: %s", url, exc)
                 db.rollback()
                 status = "error"
@@ -478,6 +524,27 @@ def check_github_sources() -> dict:
         # actually produced is reported beside it, so the summary cannot drift
         # from the vocabulary check_source uses (ADR-058).
         return {"checked": len(sources), **outcomes}
+
+
+def _lock_github_source(db: Any, source_id: int) -> Any | None:
+    """Re-read one watched source with a row lock, or ``None`` if another runner has it.
+
+    ``SKIP LOCKED`` where the database can do it. SQLite (the test suite) has no
+    row locks at all and would reject the clause, so the guard is on the dialect —
+    the same guard :mod:`app.notifications.service` applies, and the only two
+    places this repository takes a row lock.
+    """
+
+    from sqlalchemy import select
+
+    from app.domain.models import GitHubSource
+
+    statement = select(GitHubSource).where(
+        GitHubSource.id == source_id, GitHubSource.is_watched.is_(True)
+    )
+    if db.get_bind().dialect.name == "postgresql":
+        statement = statement.with_for_update(skip_locked=True)
+    return db.scalars(statement).one_or_none()
 
 
 # --------------------------------------------------------------------------- #
@@ -540,7 +607,10 @@ def run_backtest(
     process boundary, so it is both the input — strategy version, dataset, parameters and
     the resolved execution model are read back from it — and the lock: a run that already
     reached a verdict is left exactly as it is, which makes a duplicate delivery a wasted
-    CPU pass instead of a second, conflicting result.
+    CPU pass instead of a second, conflicting result. A redelivery that arrives after the
+    run completed therefore short-circuits below, before the engine is called at all; the
+    `IntegrityError` branch covers the narrower race where both attempts got past that
+    guard and only one could win the unique result row.
 
     ``timeframe``/``start``/``end`` are the request's window, carried across the boundary as
     ISO strings (Celery serialises JSON) because the row does not store it; a caller that
@@ -583,6 +653,33 @@ def run_backtest(
         except backtest_service.BacktestFailed:
             # execute_backtest already recorded and committed the failure on the run.
             raise
+        except IntegrityError as exc:
+            # Two attempts ran the same run and this one lost the race: the unique
+            # key on `backtest_results.backtest_run_id` refused the second result
+            # (docs/33 §7.2). Losing a race is not a failure — the row is re-read
+            # and its real verdict reported, instead of overwriting a completed run
+            # with "failed" and hiding a result that exists.
+            db.rollback()
+            fresh = db.get(BacktestRun, run_id)
+            if fresh is not None and fresh.status == "completed":
+                logger.info("backtest run %s was already completed by another attempt", run_id)
+                # Getting this far meant writing a rung, and a rung commits: the
+                # winner's "100 / completed" was overwritten on the way in. It is the
+                # terminal rung of a run that has a result, so putting it back is not
+                # a guess -- and leaving it would show a finished run as "computing
+                # features, 20%".
+                if fresh.progress != 100 or fresh.current_step != "completed":
+                    backtest_service.advance_backtest(db, fresh, "completed")
+                return {
+                    "run_id": run_id,
+                    "status": fresh.status,
+                    "step": fresh.current_step,
+                    "skipped": "already completed",
+                }
+            logger.exception("backtest run %s hit a conflicting write", run_id)
+            if fresh is None:
+                raise
+            backtest_service.fail_backtest(db, fresh, exc)
         except Exception as exc:  # noqa: BLE001 - the worker's last resort, see docstring
             logger.exception("backtest run %s crashed", run_id)
             backtest_service.fail_backtest(db, run, exc)

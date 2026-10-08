@@ -219,6 +219,21 @@ class Settings(BaseSettings):
     # called a failure and its child is stopped.
     temporary_access_start_timeout_seconds: int = Field(default=30, ge=5, le=300)
 
+    # --- Celery delivery and run recovery (v2.6.0 P0) ----------------------
+    # The worker now acks a task only after it returns (see `workers/celery_app.py`),
+    # so a hard-killed worker redelivers its task instead of losing it. The two
+    # budgets below are the net for the case where *nothing* will be redelivered:
+    # a run row that claims to be running and is not. They are deliberately
+    # generous, because a false positive fails a healthy run.
+    #
+    # A run a worker demonstrably started (`progress > 0` / research `running`) is
+    # bounded by Celery itself: `task_time_limit` 3600 s kills it, so 3900 s can
+    # only ever hit a row whose worker is gone (docs/33 §6.4).
+    run_recovery_lost_after_seconds: int = Field(default=3900, ge=60)
+    # A run that was never picked up (`progress == 0` / research `queued`) may
+    # simply be queueing behind a long task, so it gets the longer budget.
+    run_recovery_queued_after_seconds: int = Field(default=7200, ge=60)
+
     log_level: str = "INFO"
     log_json: bool = True
 

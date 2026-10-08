@@ -14,6 +14,7 @@ import datetime as dt
 import logging
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.data.market_data_repo import SeriesNotResolved, load_bars, resolve_series
@@ -135,7 +136,18 @@ def evaluate_pending_outcomes(
             evaluated_at=dt.datetime.now(tz=dt.UTC),
             notes=f"evaluated over {bars_after} bars after signal",
         )
-        db.add(outcome)
+        # One savepoint per outcome: the unique key on the signal is what protects
+        # the data, so a concurrent writer that already stored this signal's
+        # outcome must not discard the rest of this batch as well (docs/33 §7.6).
+        # The row is a duplicate, which is the one case that needs no repair; the
+        # next tick would have found nothing left to do anyway.
+        try:
+            with db.begin_nested():
+                db.add(outcome)
+        except IntegrityError:
+            logger.info("outcome for signal %s already exists; skipped", signal.id)
+            skipped += 1
+            continue
         evaluated += 1
 
     db.commit()

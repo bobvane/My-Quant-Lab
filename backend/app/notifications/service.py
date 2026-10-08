@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.data.strategy_service import record_audit
@@ -199,11 +199,74 @@ def _audit(
     )
 
 
+def _candidate_lock(db: Session) -> dict[str, Any]:
+    """``FOR UPDATE SKIP LOCKED`` where the database can do it.
+
+    PostgreSQL is the deployment; SQLite (the test suite) has no row locks and
+    would reject the clause outright, so the guard is on the dialect. This and
+    ``workers/tasks.py:_lock_github_source`` are the only two places the
+    repository takes a row lock.
+    """
+
+    if db.get_bind().dialect.name == "postgresql":
+        return {"skip_locked": True}
+    return {}
+
+
+def _claim_signal(db: Session, signal_id: int, moment: dt.datetime) -> Signal | None:
+    """Take the exclusive, durable claim that makes a send at-most-once.
+
+    Two things happen here, in this order, and the order is the whole point
+    (docs/33 §7.3):
+
+    1. the row is locked (``SKIP LOCKED``), so a second runner cannot even read it
+       while this one decides — that is the concurrency guarantee;
+    2. ``notified_at`` is written and **committed before anything is sent**, so the
+       decision is durable, not a value that a killed process takes with it.
+
+    What that trades away: a process killed between the claim and the outbound call
+    loses that notification. That is the choice this deployment makes — a duplicate
+    alert to a human is worse than a missed one that is still visible in the signal
+    list with its ``notified_at`` receipt — and it is recorded here rather than in a
+    comment nobody reads. A send whose *every* channel fails is released by the
+    caller, because no message existed to duplicate.
+    """
+
+    statement = select(Signal).where(Signal.id == signal_id, Signal.notified_at.is_(None))
+    claimed = db.scalars(statement.with_for_update(**_candidate_lock(db))).one_or_none()
+    if claimed is None:
+        # Another runner owns it (locked) or has already claimed it (notified).
+        db.rollback()
+        return None
+    claimed.notified_at = moment
+    db.commit()
+    return claimed
+
+
+def _release_signal(db: Session, signal_id: int) -> None:
+    """Give back a claim that produced no message, so a later tick may retry it.
+
+    Only ever called when nothing was delivered, so releasing cannot duplicate
+    anything — it can only restore a notification that would otherwise be lost.
+    The caller owns the commit, so the release and the audit entry that explains
+    it land together.
+    """
+
+    db.rollback()
+    db.execute(
+        update(Signal)
+        .where(Signal.id == signal_id, Signal.notified_at.is_not(None))
+        .values(notified_at=None)
+    )
+
+
 def notify_pending_signals(db: Session, *, now: dt.datetime | None = None) -> dict[str, Any]:
     """Send notifications for every eligible, not-yet-notified signal.
 
     Idempotent: signals carry ``notified_at`` once handled, so repeated scans or
-    worker restarts never produce duplicate notifications.
+    worker restarts never produce duplicate notifications. The write happens
+    *before* the outbound call and under a row lock, which is what closes the
+    window a killed or concurrent worker used to be able to double-send through.
     """
 
     moment = now or dt.datetime.now(tz=dt.UTC)
@@ -216,6 +279,7 @@ def notify_pending_signals(db: Session, *, now: dt.datetime | None = None) -> di
         "suppressed": 0,
         "skipped_quiet_hours": 0,
         "skipped_cooldown": 0,
+        "skipped_claimed": 0,
     }
     if not config.configured:
         return summary
@@ -281,11 +345,24 @@ def notify_pending_signals(db: Session, *, now: dt.datetime | None = None) -> di
             summary["suppressed"] += 1
             continue
 
+        # Claim before anything is sent: the receipt is written and committed while
+        # this runner holds the row, so neither a concurrent runner nor a worker
+        # killed here can produce a second message (docs/33 §7.3). Everything below
+        # runs *after* the claim, which is why the branches that decide "not sent"
+        # have to release it explicitly.
+        claimed = _claim_signal(db, signal.id, moment)
+        if claimed is None:
+            summary["skipped_claimed"] += 1
+            continue
+        signal = claimed
+
         try:
             message = build_signal_payload(db, signal, config)
         except Exception as exc:  # noqa: BLE001 - a notification must never kill the worker
             logger.exception("could not build notification for signal %s", signal.id)
-            db.rollback()
+            # Nothing reached a human, so the receipt is taken back rather than
+            # suppressing a signal that was never delivered.
+            _release_signal(db, signal.id)
             _audit(db, EVENT_FAILED, signal, symbol=None, detail=type(exc).__name__)
             db.commit()
             summary["failed"] += 1
@@ -307,8 +384,9 @@ def notify_pending_signals(db: Session, *, now: dt.datetime | None = None) -> di
         if sent_channels:
             # The event is considered surfaced once at least one channel took it;
             # a channel that failed while another succeeded is not retried (it is
-            # audited instead) so no successful channel can be duplicated.
-            signal.notified_at = moment
+            # audited instead) so no successful channel can be duplicated. The
+            # receipt was already written by the claim above -- this branch only
+            # records what happened.
             _audit(db, EVENT_NOTIFIED, signal, symbol=symbol, channels=sent_channels)
             for channel_id, detail in failures:
                 _audit(db, EVENT_FAILED, signal, symbol=symbol, channel=channel_id, detail=detail)
@@ -317,6 +395,9 @@ def notify_pending_signals(db: Session, *, now: dt.datetime | None = None) -> di
             sent_today += 1
             summary["sent"] += 1
         else:
+            # No channel took it, so no message exists that a retry could
+            # duplicate: give the signal back for the next tick.
+            _release_signal(db, signal.id)
             for channel_id, detail in failures:
                 _audit(db, EVENT_FAILED, signal, symbol=symbol, channel=channel_id, detail=detail)
             db.commit()

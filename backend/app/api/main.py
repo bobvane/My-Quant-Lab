@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -81,6 +82,7 @@ from app.api.routers.health import warm_dependency_probes
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.data.market_data_repo import SeriesNotResolved
+from app.data.run_recovery import recover_stuck_runs_in_new_session
 from app.infrastructure.rate_limit import limiter
 from app.infrastructure.temporary_access import manager as temporary_access_manager
 
@@ -123,6 +125,17 @@ async def lifespan(app: FastAPI):
     # bound we control. Results are thrown away — `/health` still measures live
     # (ADR-069).
     warm_dependency_probes()
+    # An App restart is exactly the event that orphans a run: whatever a previous
+    # incarnation was executing is gone, and its row still says `running`. The same
+    # rules the scheduled reaper applies are applied here, so the repair does not
+    # have to wait for the next tick (docs/33 §6.6). Off the startup path, because
+    # a slow database must not hold the API's door shut, and in its own session
+    # because a failure here is a log line, never a refusal to serve.
+    threading.Thread(
+        target=recover_stuck_runs_in_new_session,
+        name="stuck-run-recovery",
+        daemon=True,
+    ).start()
     yield
     logger.info("shutting down %s", settings.app_name)
     temporary_access_manager.shutdown()

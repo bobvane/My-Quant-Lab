@@ -54,6 +54,13 @@ x-backend-env: &backend-env
   # watch progress/current_step while the engine runs (ADR-180). Set to true only for
   # a deployment with quantlab-worker; false is the inline path every caller had.
   BACKTEST_ASYNC: ${BACKTEST_ASYNC:-false}
+  # Stuck-run recovery (docs/33 §6.4). A worker that is killed mid-run no longer
+  # loses the task (acks_late), but if the message is gone too, these budgets are
+  # what stop a row from claiming to be running for ever. Short budget: the run
+  # demonstrably started, and Celery's own task_time_limit (3600 s) bounds it.
+  RUN_RECOVERY_LOST_AFTER_SECONDS: ${RUN_RECOVERY_LOST_AFTER_SECONDS:-3900}
+  # Long budget: the run may just be queueing behind a long task.
+  RUN_RECOVERY_QUEUED_AFTER_SECONDS: ${RUN_RECOVERY_QUEUED_AFTER_SECONDS:-7200}
   GHOSTFOLIO_BASE_URL: ${GHOSTFOLIO_BASE_URL:-}
   GHOSTFOLIO_API_KEY: ${GHOSTFOLIO_API_KEY:-}
   # System Resource Monitor (docs/20_RESOURCE_MONITOR.md)

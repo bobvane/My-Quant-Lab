@@ -1030,6 +1030,11 @@ def execute_research(
     re-formalization follows and the only rule a worker in another process *can*
     follow. The sources themselves are not touched here -- ingest stored them -- so
     everything below decides the run's own status and nothing else.
+
+    A run that a previous attempt already advanced is **resumed**, not restarted:
+    ``hypothesis_id``/``draft_id`` say which artifacts exist, and a worker that was
+    killed mid-run is redelivered to this function. Each link is committed as soon
+    as it is made, because the row is the only state that survives the process.
     """
 
     sources, kinds, source_hashes = _stored_material(db, run.id)
@@ -1043,36 +1048,54 @@ def execute_research(
         run.status = "running"
         run.current_step = "researcher"
         db.flush()
-        hypothesis_row, claims = _researcher_step(
-            db,
-            run,
-            sources=sources,
-            source_hashes=source_hashes,
-            kinds=kinds,
-            providers=live,
-            router_factory=router_factory,
-            model=model,
+        # A previous attempt may already have produced and *linked* an artifact.
+        # Reusing it is what turns a redelivery into a resume: the second attempt
+        # neither pays for the model call again nor leaves a second hypothesis
+        # behind (docs/33 §7.1). The link is committed the moment it is made,
+        # below, because that is the only way it can outlive the crash it describes.
+        hypothesis_row = (
+            db.get(StrategyHypothesisRow, run.hypothesis_id) if run.hypothesis_id else None
         )
-        run.hypothesis_id = hypothesis_row.id
-        db.flush()
+        if hypothesis_row is not None:
+            claims = []
+        else:
+            hypothesis_row, claims = _researcher_step(
+                db,
+                run,
+                sources=sources,
+                source_hashes=source_hashes,
+                kinds=kinds,
+                providers=live,
+                router_factory=router_factory,
+                model=model,
+            )
+            run.hypothesis_id = hypothesis_row.id
+            run.warnings_json = list(warnings) + claims
+            db.commit()
 
         run.current_step = "architect"
         db.flush()
         hypothesis = gates.parse_hypothesis(hypothesis_row.hypothesis_json)
-        draft_row, draft_claims = _architect_step(
-            db,
-            run,
-            hypothesis_row=hypothesis_row,
-            hypothesis=hypothesis,
-            sources=sources,
-            source_hashes=source_hashes,
-            kinds=kinds,
-            providers=live,
-            router_factory=router_factory,
-            model=model,
-        )
-        run.draft_id = draft_row.id
-        run.capability_status = draft_row.capability_status
+        draft_row = db.get(StrategyDraftRow, run.draft_id) if run.draft_id else None
+        if draft_row is not None:
+            draft_claims = []
+        else:
+            draft_row, draft_claims = _architect_step(
+                db,
+                run,
+                hypothesis_row=hypothesis_row,
+                hypothesis=hypothesis,
+                sources=sources,
+                source_hashes=source_hashes,
+                kinds=kinds,
+                providers=live,
+                router_factory=router_factory,
+                model=model,
+            )
+            run.draft_id = draft_row.id
+            run.capability_status = draft_row.capability_status
+            run.warnings_json = list(warnings) + claims + draft_claims
+            db.commit()
         run.warnings_json = list(warnings) + claims + draft_claims
         return _finish(db, run, "completed", "completed")
     except BudgetExceeded as exc:

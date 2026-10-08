@@ -325,7 +325,10 @@ jobs:
 
           # The schedule Beat actually loaded: seven entries with the reaper, and the
           # two resource-monitor jobs v2.6.0 deleted must not return through Beat.
-          $compose exec -T quantlab-app python -c 'import app.workers.celery_app as m; n = sorted(m.celery_app.conf.beat_schedule); print("beat schedules:", n); assert "reap-stuck-runs" in n, n; assert "collect-resources" not in n and "purge-resources" not in n, n; assert len(n) == 7, n; print("beat schedule is the seven expected entries")'
+          # `import app.workers.celery_app as m` binds the Celery instance, not the
+          # module (the package re-exports the same name), so the name is imported
+          # from the module instead.
+          $compose exec -T quantlab-app python -c 'from app.workers.celery_app import celery_app as c; n = sorted(c.conf.beat_schedule); print("beat schedules:", n); assert "reap-stuck-runs" in n, n; assert "collect-resources" not in n and "purge-resources" not in n, n; assert len(n) == 7, n; print("beat schedule is the seven expected entries")'
 
       - name: "Smoke 1/5: sync market data"
         env:

@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
+import sys
 
 import yaml
 
@@ -72,6 +74,15 @@ def _function(text: str, name: str) -> str:
 
 def _starts(text: str) -> list[str]:
     return re.findall(r"^    start (\w+) ", text, flags=re.MULTILINE)
+
+
+def _ci_step(name: str) -> str:
+    """Return one CI step's body, from its name to the next step."""
+
+    ci = _text(CI)
+    step = re.search(rf"- name: {re.escape(name)}\n(?P<body>.*?)(?=\n      - name: )", ci, re.S)
+    assert step is not None, f"the CI step {name!r} is gone"
+    return step.group("body")
 
 
 def test_the_launcher_starts_the_four_processes_once_each() -> None:
@@ -235,6 +246,34 @@ def test_the_published_api_port_can_actually_reach_the_api() -> None:
     assert "proxy_pass http://127.0.0.1:8000" in _text(NGINX_CONF)
 
 
+def test_the_schedule_probe_in_ci_runs_against_the_application() -> None:
+    """Run the probe the CI step runs, so a broken import fails here first.
+
+    The step's first version asked for ``m.celery_app`` after ``import
+    app.workers.celery_app as m`` -- and that name is the Celery instance the
+    package re-exports, not the module -- so the probe could only ever have
+    failed inside the container. Executing the same snippet here costs a second
+    and keeps the deployment step honest about the schedule it loads.
+    """
+
+    body = _ci_step("Container process assertions (ADR-190)")
+    probe = re.search(r"python -c '(?P<code>[^']+)'", body)
+    assert probe is not None, "the beat schedule probe is gone from the CI step"
+    code = probe.group("code")
+    assert "collect-resources" in code and "reap-stuck-runs" in code
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT / "backend",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "reap-stuck-runs" in result.stdout
+    assert "seven expected entries" in result.stdout
+
+
 def test_the_process_check_cannot_match_its_own_command_line() -> None:
     """The CI process check must read a filtered listing, not raw ``ps`` output.
 
@@ -246,14 +285,7 @@ def test_the_process_check_cannot_match_its_own_command_line() -> None:
     has, and every needle is matched against that filtered file.
     """
 
-    ci = _text(CI)
-    step = re.search(
-        r"- name: Container process assertions \(ADR-190\)\n(?P<body>.*?)(?=\n      - name: )",
-        ci,
-        re.S,
-    )
-    assert step is not None, "the container process assertions step is gone"
-    body = step.group("body")
+    body = _ci_step("Container process assertions (ADR-190)")
 
     assert "/tmp/ps.txt > /tmp/ps.kids" in body, "the raw listing is matched unfiltered"
     assert '-e "^nginx:"' in body and '-e "^/usr/local/bin/python"' in body

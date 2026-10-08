@@ -105,7 +105,7 @@ MQL_VERSION=v0.9.0
 ### 访问
 
 - **Web 界面**：http://<NAS-IP>:8081
-- **API 文档**：http://<NAS-IP>:8081/docs（经 Web 容器代理；API 直连端口默认只绑本机）
+- **API 文档**：http://<NAS-IP>:8081/docs（经 `quantlab-app` 容器内的 nginx 代理；API 直连端口默认只绑本机）
 - **存活探针**：http://<NAS-IP>:8081/healthz
 
 首次进入「行情与策略」页面：
@@ -118,8 +118,8 @@ MQL_VERSION=v0.9.0
 排查问题：
 
 ```bash
-docker compose ps -a                    # 容器状态与健康状况
-docker compose logs --tail 80 quantlab-api
+docker compose ps -a                    # 三个容器的状态与健康状况
+docker compose logs --tail 80 quantlab-app   # nginx / uvicorn / worker / beat 四个进程都写这里
 ```
 
 ### 常见报错对照
@@ -127,7 +127,7 @@ docker compose logs --tail 80 quantlab-api
 | 报错 | 原因 | 处理 |
 |---|---|---|
 | `POSTGRES_PASSWORD is required` | `.env` 未创建或未填写 | `cp .env.example .env` 后修改 |
-| `container quantlab-api is unhealthy` | 启动失败 | `docker compose logs --tail 100 quantlab-api`，日志会直接给出原因 |
+| `container quantlab-app is unhealthy` | 启动失败 | `docker compose logs --tail 100 quantlab-app`，日志会直接给出原因（启动器先打印是哪个子进程起不来） |
 | 拉取镜像缓慢或超时 | 和 GitHub 之间的网络问题 | 多试几次，或换个时间段；也可以在有源码的机器上用 `docker-compose.build.yml` 本地构建 |
 
 > **默认已是真实行情**：`.env.example` 发的是 `MARKET_DATA_PROVIDER=yahoo_finance`
@@ -153,8 +153,10 @@ docker compose logs --tail 80 quantlab-api
 
 ## 安全与暴露面（可选）
 
-默认部署对局域网是**开放**的：`quantlab-web` 发布 `${WEB_BIND:-0.0.0.0}:8081`，
-并把 `/api/` 反向代理给 API 进程（`docker/web.nginx.conf`），所以任何能访问
+默认部署对局域网是**开放**的：`quantlab-app` 把 nginx 发布在
+`${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8081}`，并由容器内的 nginx 把 `/api/`
+（以及 `/docs`、`/openapi.json`）反向代理给同一个容器里的 uvicorn
+（`docker/app.nginx.conf`），所以任何能访问
 `http://<NAS-IP>:8081` 的主机都能读写 API —— 界面没有登录，写请求只有
 `RATE_LIMIT_PER_MINUTE` 的限流。`API_BIND=127.0.0.1` 关住的是 8080 直连，
 不是这个部署本身。
@@ -179,9 +181,9 @@ RATE_LIMIT_PER_MINUTE=60
 
 - `API_AUTH_TOKEN` 设置后，除 `/api/v1/healthz` 与 `/api/v1/health` 两个探针外，
   应用提供的**所有**入口都需要 `Authorization: Bearer <token>`，包括 `/docs` 与
-  `/openapi.json`（它们和 `/api/v1` 一样是 API 的门，见 ADR-103）；**内置 Web 容器
-  会自动带上它** —— 所以它拦住的是绕过 Web 容器、直连 API 的客户端，经 8081 代理的
-  局域网访问不受影响。
+  `/openapi.json`（它们和 `/api/v1` 一样是 API 的门，见 ADR-103）；**`quantlab-app`
+  内置的 nginx 会自动带上它** —— 所以它拦住的是绕过这个 nginx、直连 API 的客户端，
+  经 8081 代理的局域网访问不受影响。
 - 通知渠道（Webhook / 飞书 / Telegram / PushPlus / Email）的密钥、AI API Key
   均**加密存储、只写入不回显**；审计日志也绝不包含密钥。
 
@@ -207,16 +209,17 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
 
 ## 架构（已确定的 Q1–Q10 决策）
 
-### 六个 Docker 服务
+### 三个容器、四个进程
 
-| 服务 | 作用 | 网络 |
+| 容器 | 作用 | 网络 |
 |------|------|------|
-| `quantlab-web` | Vue 3 + TypeScript + Vite（nginx 分发，代理 /api） | frontend |
-| `quantlab-api` | FastAPI（REST + OpenAPI），启动时自动执行 Alembic 迁移 | frontend + backend |
-| `quantlab-worker` | Celery worker（行情同步、回测、信号扫描） | backend |
-| `quantlab-scheduler` | Celery Beat（每 15 分钟扫描一次信号） | backend |
+| `quantlab-app` | 唯一的自维护镜像：nginx（分发 Vue 3 + TypeScript 构建产物，代理 `/api/`、`/docs`、`/openapi.json` 并注入 Bearer Token）+ uvicorn（FastAPI，REST + OpenAPI）+ Celery worker（行情同步、回测、信号扫描）+ Celery Beat | backend（宿主机发布 8081 / 8080） |
 | `quantlab-postgres` | PostgreSQL 16 | backend（不对外暴露） |
 | `quantlab-redis` | Redis 7（缓存 + Broker + Result） | backend（不对外暴露） |
+
+`quantlab-app` 里的四个进程都由 `docker/entrypoint.sh` 启动（镜像 `docker/Dockerfile.app`，
+`ghcr.io/bobvane/my-quant-lab-app:${MQL_VERSION:-latest}`）：uvicorn 在起任何子进程之前
+先执行一次 `alembic upgrade head`；Celery Beat 是独立子进程，**不是** `worker -B`。
 
 > 设计原则：**模块化单体 + Docker 服务化基础设施**。业务域不拆微服务。
 
@@ -320,7 +323,7 @@ git push origin main && git push origin <新版本号>
 
 推送标签后 `release.yml` 会自动：
 
-1. 构建并推送 `backend` / `web` 镜像到 GHCR；
+1. 构建并推送 `app` 镜像（`ghcr.io/bobvane/my-quant-lab-app`）到 GHCR；
 2. 用该版本镜像跑一次冒烟测试；
 3. 创建 GitHub Release，附带 NAS 部署说明。
 
@@ -333,21 +336,21 @@ git push origin main && git push origin <新版本号>
 升级时在 NAS 上 `docker compose pull && docker compose up -d`，再跑 `scripts/Test-NasDeployment.ps1` 验证。
 
 **发布候选**（`vX.Y.Z-rc.N`，例如 `v2.5.0-rc.1`）是「不等下一个大版本，先把已经完成的 `main` 变成可拉取镜像」的通道（ADR-175）：
-它照常构建并推送 `backend` / `web` / `docker-proxy` 三个镜像，但**不改 `version.txt`**，也**不移动 `latest` 与 `X.Y` 线标签**——
+它照常构建并推送唯一的 `app` 镜像，但**不改 `version.txt`**，也**不移动 `latest` 与 `X.Y` 线标签**——
 因此跟随 `latest` 的部署不会被候选动到。在 NAS 的 `.env` 里把 `MQL_VERSION` 指向候选即可试用，验收通过后再发正式版本：
 
 ```bash
 MQL_VERSION=v2.5.0-rc.1
 ```
 
-候选的数据库迁移与正式版完全一致：`quantlab-api` 启动时自动 `alembic upgrade head`，无需在 NAS 上手动执行任何命令。
+候选的数据库迁移与正式版完全一致：`quantlab-app` 启动后、起任何子进程之前自动 `alembic upgrade head`，无需在 NAS 上手动执行任何命令。
 
 ---
 
 ## 常见问题
 
 **页面能打开但提示后端不可用**
-后端默认只绑定 `127.0.0.1:8080`，由 `quantlab-web` 代理访问。若要从局域网直接调 API，
+后端默认只绑定 `127.0.0.1:8080`，由 `quantlab-app` 容器内的 nginx 代理访问。若要从局域网直接调 API，
 把 `.env` 的 `API_BIND` 改为 `0.0.0.0`（**请自行加反向代理与认证**）。
 
 **回测提示「需要至少 60 根已收盘 K 线」**
@@ -377,11 +380,11 @@ Provider 与 Model 都可以删除，**删除只移除当前配置**：历史 AI
 My-Quant-Lab/
 ├── backend/            # FastAPI 应用、领域层、迁移、测试
 ├── frontend/           # Vue 3 + TypeScript 界面
-├── docker/             # Dockerfile、entrypoint、nginx 配置
+├── docker/             # Dockerfile.app、entrypoint.sh、app.nginx.conf
 ├── examples/strategies # 示例策略 DSL
 ├── scripts/version.sh  # 版本与发布脚本
 ├── docs/               # 开发文档（设计规格）
-├── docker-compose.yml  # 七服务编排
+├── docker-compose.yml  # 三容器编排（app / postgres / redis）
 └── .env.example        # 环境变量模板
 ```
 

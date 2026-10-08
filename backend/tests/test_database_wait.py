@@ -14,6 +14,14 @@ answer is one that waiting cannot change -- while the genuinely transient cases
 report the real error. The behaviour tests drive the real script with a stubbed
 interpreter, because the point is what the container prints and what it exits
 with, not what the script says about itself.
+
+The four processes live in one container now, so there are two roles left:
+`app` (the whole deployment) and `migrate` (an operator's manual step). That
+changes who can report a dead database: the App's wait is fatal because a
+container that came up without PostgreSQL would report "healthy" for four
+children that can serve nothing, and no second container is left to name the
+reason (ADR-099); a hand-run `migrate` keeps the soft wait, because alembic's own
+error names the host, port and database it tried.
 """
 
 from __future__ import annotations
@@ -32,7 +40,7 @@ ENTRYPOINT = REPO_ROOT / "docker" / "entrypoint.sh"
 BASH = shutil.which("bash")
 needs_bash = pytest.mark.skipif(BASH is None, reason="bash is required to exercise the script")
 
-ROLES = ("api", "worker", "scheduler", "migrate")
+ROLES = ("app", "migrate")
 
 # Answers that no amount of waiting can change, and answers that a slow start
 # can produce. Kept apart because one list must fail fast and the other must not.
@@ -138,6 +146,28 @@ def _role_branch(text: str, role: str) -> str:
     return text[start:end]
 
 
+def _main_app(text: str) -> str:
+    """Return the body of `main_app()`, where the App role's startup order lives.
+
+    The `app` branch itself says only `main_app`, so the interesting assertions
+    are one level in (ADR-099).
+    """
+
+    return text[text.index("main_app() {") : text.index('case "$ROLE" in')]
+
+
+def _function(text: str, name: str) -> str:
+    """Return one shell function, header to closing brace.
+
+    Slicing between two function headers would swallow whatever comments sit
+    between them, and those comments change; this stops at the function's own end.
+    """
+
+    start = text.index(f"{name}() {{")
+    end = text.index("\n}\n", start)
+    return text[start : end + 2]
+
+
 def _posix(path: pathlib.Path) -> str:
     """A path a POSIX shell can use in a redirection.
 
@@ -163,9 +193,18 @@ def _functions() -> str:
 
 
 def _run_bash(script: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """Run a snippet of the entrypoint through stdin.
+
+    Deliberately not `bash -c`: the scripts here are the concatenated helpers of a
+    launcher, and this platform's bash silently mangles a long `-c` argument (the
+    same text through a file or stdin runs correctly). `-s` is the same shell
+    executing the same text, which is all these guards need.
+    """
+
     assert BASH is not None
     return subprocess.run(
-        [BASH, "-c", script],
+        [BASH, "-s"],
+        input=script,
         cwd=REPO_ROOT,
         env={**os.environ, **env},
         capture_output=True,
@@ -207,12 +246,19 @@ def _drive(tmp_path: pathlib.Path, mode: str, **env: str) -> tuple[str, int, int
 
 
 def test_the_wait_keeps_the_answer_postgresql_gave() -> None:
-    """The bug was a redirect: the reason was produced and then discarded."""
+    """The bug was a redirect: the reason was produced and then discarded.
+
+    Scoped to the probe on purpose: the launcher's teardown helpers do write
+    `2>/dev/null`, but that suppresses `kill: no such process`, not a diagnostic
+    a human needs.
+    """
 
     text = _text()
-    assert ">/dev/null" not in text, "this script must not throw its diagnostics away"
-    assert "database_probe() {" in text
-    assert "if reason=$(database_probe 2>&1); then" in text
+    probe = text[text.index("database_probe() {") : text.index("database_error_is_permanent() {")]
+    assert ">/dev/null" not in probe, "the probe throws its diagnostics away"
+    assert "if reason=$(database_probe 2>&1); then" in text, (
+        "the caller no longer keeps the answer the probe produced"
+    )
 
 
 def test_the_wait_names_the_reason_it_is_waiting() -> None:
@@ -227,7 +273,7 @@ def test_a_permanent_answer_is_not_waited_for() -> None:
     body = text[text.index("database_error_is_permanent() {") : text.index("wait_for_db() {")]
     for reason in ("password authentication failed", "does not exist", "NoSuchModuleError"):
         assert f'*"{reason}"*' in body, f"a {reason!r} answer would still be waited for"
-    wait = text[text.index("wait_for_db() {") : text.index("run_migrations() {")]
+    wait = _function(text, "wait_for_db")
     assert 'if database_error_is_permanent "$reason"; then' in wait
     assert "giving up now instead of retrying" in wait
     assert wait.index("database_error_is_permanent") < wait.index('log "waiting for database')
@@ -261,49 +307,59 @@ def test_the_deployment_passes_the_budget_through() -> None:
 
 def test_the_transient_path_still_lets_alembic_report_the_error() -> None:
     text = _text()
-    wait = text[text.index("wait_for_db() {") : text.index("run_migrations() {")]
+    wait = _function(text, "wait_for_db")
     assert "continuing so alembic reports the real error" in wait
     assert wait.rstrip().endswith("return 0\n}"), "a slow database must not stop the container here"
 
 
 @pytest.mark.parametrize("role", ROLES)
 def test_every_role_refuses_to_start_when_the_database_is_refused(role: str) -> None:
-    branch = _role_branch(_text(), role)
-    assert "wait_for_db" in branch, f"{role} would carry on without a database"
-    assert "|| exit 1" in branch, f"{role} ignores the wait's verdict"
+    text = _text()
+    body = _main_app(text) if role == "app" else _role_branch(text, role)
+    assert "wait_for_db" in body, f"{role} would carry on without a database"
+    assert "|| exit 1" in body, f"{role} ignores the wait's verdict"
 
 
-def test_the_roles_without_migrations_make_a_dead_database_fatal() -> None:
-    """api and migrate have alembic behind them to name the real error.
+def test_the_app_makes_a_dead_database_fatal_and_the_manual_step_does_not() -> None:
+    """The App is the deployment; `migrate` is an operator watching a terminal.
 
-    worker and scheduler do not: with the soft exit they stayed up and failed
-    every task while compose (which only pings celery) called them healthy
-    (ADR-099).
+    Four roles used to be four containers, and the ones without migrations had to
+    grow `--required`: with the soft exit they stayed up and failed every task
+    while compose called them healthy (ADR-099). Now the whole deployment is the
+    one container, so the App's own wait is the fatal one -- and a hand-run
+    `migrate` deliberately is not.
     """
 
     text = _text()
-    assert "wait_for_db --required || exit 1" in _role_branch(text, "worker")
-    assert "wait_for_db --required || exit 1" in _role_branch(text, "scheduler")
-    for role in ("api", "migrate"):
-        assert "--required" not in _role_branch(text, role), (
-            f"{role} runs migrations; alembic has a better message than the wait"
-        )
-    wait = text[text.index("wait_for_db() {") : text.index("run_migrations() {")]
+    assert "wait_for_db --required || exit 1" in _main_app(text), (
+        "the App may start four children against a database that never answered"
+    )
+    migrate = _role_branch(text, "migrate")
+    assert "wait_for_db || exit 1" in migrate
+    assert "--required" not in migrate, (
+        "migrate runs migrations; alembic has a better message than the wait"
+    )
+    wait = _function(text, "wait_for_db")
     assert 'if [ "${1:-}" = "--required" ]; then' in wait
-    assert "this role runs no migrations, so nothing else would report it" in wait
+    assert "no second container left to name the reason" in text, (
+        "the reason the App's wait is fatal is no longer written down where the "
+        "next reader will find it"
+    )
 
 
 @needs_bash
-def test_a_worker_with_no_database_never_reaches_celery(tmp_path: pathlib.Path) -> None:
+def test_an_app_with_no_database_never_starts_its_children(tmp_path: pathlib.Path) -> None:
     output, rc, probes, alembic_calls = _drive(
-        tmp_path, "refused", APP_ROLE="worker", DB_WAIT_ATTEMPTS="2", DB_WAIT_INTERVAL="0"
+        tmp_path, "refused", APP_ROLE="app", DB_WAIT_ATTEMPTS="2", DB_WAIT_INTERVAL="0"
     )
-    assert rc == 1, "a worker that cannot reach its database must not report success"
+    assert rc == 1, "an App that cannot reach its database must not report success"
     assert probes == 2, "it must still use the whole budget before giving up"
     assert alembic_calls == 0
-    assert "this role runs no migrations, so nothing else would report it" in output
+    assert "database not ready after" in output
     assert "continuing so alembic reports the real error" not in output
-    assert "starting celery worker" not in output, "the worker started anyway"
+    for name in ("beat", "worker", "api", "nginx"):
+        assert f"starting {name}:" not in output, f"the {name} child started anyway"
+    assert "all four processes are running" not in output
 
 
 # --- what the container actually prints and exits with ---------------------

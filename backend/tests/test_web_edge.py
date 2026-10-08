@@ -1,15 +1,16 @@
 """The web edge must tell the truth about what it serves (ADR-068).
 
-nginx only exists inside the web container, so the behaviour itself (a missing
+nginx only exists inside the App container, so the behaviour itself (a missing
 asset is a 404, the bundle arrives gzipped, hashed files may be cached forever,
 ``/`` is revalidated) is verified by the container smoke test in CI. What lives
 here are the guards that run with nothing but the repository: they fail in the
 normal test suite the moment the config loses a directive that smoke test
 depends on, instead of silently serving the wrong thing until someone deploys.
 
-The config is also a template: ``web-entrypoint.sh`` runs ``envsubst``
-restricted to ``${AUTH_LINE}``, so any other ``${...}`` would be substituted
-away and break nginx's own variables (``$uri``, ``$host``).
+The config is also a template: ``docker/entrypoint.sh`` renders it with three
+lines of Python (the image has no gettext-base on purpose), replacing only
+``${AUTH_LINE}``, so any other ``${...}`` would be left for nginx to reject as an
+unknown variable and break nginx's own ``$uri``/``$host``.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import pathlib
 import re
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-NGINX_CONF = REPO_ROOT / "docker" / "web.nginx.conf"
+NGINX_CONF = REPO_ROOT / "docker" / "app.nginx.conf"
 INDEX_HTML = REPO_ROOT / "frontend" / "index.html"
 FAVICON = REPO_ROOT / "frontend" / "public" / "favicon.svg"
 
@@ -39,7 +40,7 @@ def _location(text: str, header: str) -> str:
         if line.strip() == header:
             start = index
             break
-    assert start is not None, f"no {header!r} block in docker/web.nginx.conf"
+    assert start is not None, f"no {header!r} block in docker/app.nginx.conf"
     body: list[str] = []
     for line in lines[start + 1 :]:
         if line.strip() == "}":
@@ -97,6 +98,6 @@ def test_only_the_auth_line_is_substituted_into_the_template() -> None:
     placeholders = set(re.findall(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", _conf()))
 
     assert placeholders == {"${AUTH_LINE}"}, (
-        "web-entrypoint.sh only substitutes ${AUTH_LINE}; every other ${...} "
-        "would be replaced with nothing and break nginx's own variables"
+        "the launcher only substitutes ${AUTH_LINE}; every other ${...} would be "
+        "left in place and break nginx's own variables"
     )

@@ -7,9 +7,11 @@ Three findings from the deployment audit of v1.6.8 live here:
   ``/`` made SQLAlchemy parse a different host, and a bare ``%`` raised
   ``ValueError: invalid interpolation syntax`` before a single connection was
   attempted (ADR-098);
-* ``quantlab-scheduler``'s probe ran ``pgrep``, which the image never installed,
+* the retired ``quantlab-scheduler`` service's probe ran ``pgrep``, which the image
+  never installed,
   so it exited 127 forever -- and ``docker compose up -d`` still returned 0
-  (ADR-099);
+  (ADR-099). The four roles live in one container now, so the merged probe asks
+  each runtime piece a question that piece can actually answer;
 * ``.env.example``, ``docker-compose.yml`` and ``app/core/config.py`` each kept a
   copy of the same defaults, and they had already drifted apart
   (``MARKET_DATA_PROVIDER``, ``NO_PROXY``,
@@ -38,6 +40,8 @@ COMPOSE = REPO_ROOT / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 BACKEND = REPO_ROOT / "backend"
 DOCKER = REPO_ROOT / "docker"
+ENTRYPOINT = DOCKER / "entrypoint.sh"
+CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 # `VAR=value` or `# VAR=value`: the example file documents optional knobs inside
 # comments, and those are still the defaults an operator reads.
@@ -160,7 +164,7 @@ def test_every_awkward_password_survives_the_round_trip(password: str) -> None:
 
 
 def test_the_database_parts_compose_passes_are_the_parts_the_app_expects() -> None:
-    shared = _compose()["x-backend-env"]
+    shared = _compose()["x-app-env"]
     assert "DATABASE_URL" not in shared, "compose is concatenating a URL again"
     assert _literal(shared["POSTGRES_HOST"]) == _code_default("postgres_host")
     assert _literal(shared["POSTGRES_PORT"]) == _code_default("postgres_port")
@@ -227,22 +231,56 @@ def test_every_service_declares_the_probe_that_runs() -> None:
     )
 
 
-def test_the_scheduler_probe_can_actually_run_where_it_is_declared() -> None:
-    scheduler = _compose()["services"]["quantlab-scheduler"]["healthcheck"]["test"]
-    command = " ".join(scheduler) if isinstance(scheduler, list) else str(scheduler)
-    assert "pgrep" in command, "the scheduler probe no longer proves beat is running"
-    image = _text(DOCKER / "Dockerfile.backend")
-    install = [line for line in image.splitlines() if "apt-get install" in line]
-    assert install, "the backend image no longer installs anything"
-    assert "procps" in install[0], (
-        "the image runs a pgrep probe without installing procps: it exits 127 forever"
+def test_the_app_probe_can_actually_run_where_it_is_declared() -> None:
+    """ADR-099's lesson, in the merged container: the probe must ask answerable questions."""
+
+    probe = _compose()["services"]["quantlab-app"]["healthcheck"]["test"]
+    command = " ".join(probe) if isinstance(probe, list) else str(probe)
+    assert "curl" in command, "the probe no longer asks the two HTTP doors for an answer"
+    assert "inspect ping" in command, (
+        "the probe no longer proves the celery worker is alive, so a container whose "
+        "worker died would still report healthy"
     )
-
-
-def test_migrations_finish_before_the_queues_start() -> None:
-    services = _compose()["services"]
-    for name in ("quantlab-worker", "quantlab-scheduler"):
-        condition = services[name]["depends_on"]["quantlab-api"]["condition"]
-        assert condition == "service_healthy", (
-            f"{name} may start before the api role has finished migrating"
+    assert "celerybeat-schedule" in command, (
+        "the probe no longer checks that beat is scheduling, so a scheduler child that "
+        "died is invisible until the next task is missed"
+    )
+    assert "pgrep" not in command, (
+        "nothing in this container's state needs pgrep: that probe asked a question "
+        "the image could not answer and exited 127 forever (ADR-099)"
+    )
+    image = _text(DOCKER / "Dockerfile.app")
+    install = [line for line in image.splitlines() if "apt-get install" in line]
+    assert install, "the app image no longer installs anything"
+    assert "curl" in install[0], (
+        "the image runs a curl probe without installing curl: it exits 127 forever"
+    )
+    if "ps aux" in _text(CI):
+        assert "procps" in install[0], (
+            "CI dumps processes with `ps aux` inside the container, which needs procps"
         )
+
+
+def test_migrations_finish_before_the_children_start() -> None:
+    """The merged App migrates once, in the launcher, before any child exists.
+
+    Two containers used to encode this ordering as `depends_on: service_healthy`;
+    with one container the ordering is code, so this guard reads the code -- and
+    holds the second half too: no child migrates on its own (ADR-099).
+    """
+
+    text = _text(ENTRYPOINT)
+    main = text[text.index("main_app() {") : text.index('case "$ROLE" in')]
+    assert "run_migrations || exit 1" in main, "the launcher no longer migrates at all"
+    assert main.index("run_migrations") < main.index("start beat"), (
+        "a child may start before the schema it reads is up to date"
+    )
+    children = main[main.index("start beat") : main.index("wait -n")]
+    assert "alembic" not in children, (
+        "a child runs migrations of its own: two migrators in one App race on the "
+        "same version table"
+    )
+    compose = _text(COMPOSE)
+    assert not re.search(r"\balembic\s+upgrade\b", compose), (
+        "compose runs alembic outside the launcher; migration is the App's job, once"
+    )

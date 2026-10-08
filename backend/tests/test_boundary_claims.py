@@ -1,11 +1,11 @@
 """A documented boundary must be the boundary the default deployment has.
 
 `.env.example` and `README.md` used to tell the operator that the API is bound to
-loopback and reached only through the web container, so "局域网无法直连" — a
-boundary nobody delivered.  The web container publishes `${WEB_BIND:-0.0.0.0}:8081`
-on every interface and proxies `/api/` through nginx (`docker/web.nginx.conf:38-49`),
-and `docker/web-entrypoint.sh:10-15` injects the bearer token into that proxy when
-one is configured.  So a default install answers `/api/v1/*` to anyone who can
+loopback and reached only through the web tier, so "局域网无法直连" — a
+boundary nobody delivered.  The App container publishes `${WEB_BIND:-0.0.0.0}:8081`
+on every interface and proxies `/api/` through its own nginx (`docker/app.nginx.conf`),
+and `docker/entrypoint.sh` renders the bearer token into that proxy when one is
+configured.  So a default install answers `/api/v1/*` to anyone who can
 reach port 8081, token or no token; `API_BIND=127.0.0.1` closes port 8080, not the
 deployment.  What the operator needs is the truth plus the one setting that really
 closes it (`WEB_BIND=127.0.0.1`), and that is what these guards hold in place.
@@ -18,7 +18,7 @@ import pathlib
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 README = REPO_ROOT / "README.md"
-NGINX = REPO_ROOT / "docker" / "web.nginx.conf"
+NGINX = REPO_ROOT / "docker" / "app.nginx.conf"
 
 # The exact sentence that claimed a boundary the composition below does not have.
 FALSE_CLAIMS = ("局域网无法直连", "局域网无法无认证访问", "避免无认证暴露")
@@ -47,7 +47,7 @@ def test_the_token_section_says_what_the_token_does_not_cover() -> None:
 
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
     section = text[text.index("# --- API 鉴权") : text.index("RATE_LIMIT_PER_MINUTE")]
-    assert "绕过 Web 容器" in section, (
+    assert "绕过这个 nginx" in section, (
         "the token section no longer says which clients the token actually stops"
     )
     assert "8081" in section, "the token section no longer says the proxied path still works"
@@ -82,7 +82,7 @@ def test_the_composition_that_makes_the_old_claim_false_is_still_there() -> None
     """If this changes, the sentences above stop being true — read them again."""
 
     nginx = NGINX.read_text(encoding="utf-8")
-    assert "proxy_pass http://quantlab-api:8080/api/;" in nginx
+    assert "proxy_pass http://127.0.0.1:8000/api/;" in nginx
     assert "${AUTH_LINE}" in nginx
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "${WEB_BIND:-0.0.0.0}" in compose, "the web port no longer defaults to every interface"

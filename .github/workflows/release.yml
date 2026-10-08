@@ -22,8 +22,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-backend
-  WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-web
+  APP_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-app
 
 jobs:
   release:
@@ -142,47 +141,25 @@ jobs:
       # `2.5` is the tag a user pins to follow a release line, so only a released version
       # may move it: a candidate publishes `v2.5.0-rc.1` / `2.5.0-rc.1` and nothing else
       # (ADR-175). The `latest` gate reads the flag the same way.
-      - name: Backend metadata
-        id: backend_meta
+      - name: App metadata
+        id: app_meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
-          images: ${{ env.BACKEND_IMAGE }}
+          images: ${{ env.APP_IMAGE }}
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ steps.version.outputs.prerelease == 'false' }}
             type=raw,value=latest,enable=${{ steps.latest.outputs.tag_latest }}
 
-      - name: Build and push backend image
+      - name: Build and push app image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
-          file: docker/Dockerfile.backend
+          file: docker/Dockerfile.app
           push: true
-          tags: ${{ steps.backend_meta.outputs.tags }}
-          labels: ${{ steps.backend_meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Web metadata
-        id: web_meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
-        with:
-          images: ${{ env.WEB_IMAGE }}
-          tags: |
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.version.outputs.prerelease == 'false' }}
-            type=raw,value=latest,enable=${{ steps.latest.outputs.tag_latest }}
-
-      - name: Build and push web image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: .
-          file: docker/Dockerfile.web
-          push: true
-          tags: ${{ steps.web_meta.outputs.tags }}
-          labels: ${{ steps.web_meta.outputs.labels }}
+          tags: ${{ steps.app_meta.outputs.tags }}
+          labels: ${{ steps.app_meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -201,10 +178,9 @@ jobs:
         run: |
           set +e
           set -o pipefail
-          # Smoke test the images we just pushed, using the stock production
+          # Smoke test the image we just pushed, using the stock production
           # compose file exactly as a NAS would (MQL_VERSION pins the tag).
-          docker pull "${BACKEND_IMAGE}:${VERSION}"
-          docker pull "${WEB_IMAGE}:${VERSION}"
+          docker pull "${APP_IMAGE}:${VERSION}"
 
           # The stock file ships example values. A real deployment generates
           # its own, and the application refuses to serve production with a
@@ -234,25 +210,22 @@ jobs:
             echo "### compose ps -a"
             docker compose --env-file .env.example ps -a 2>&1
             echo
-            echo "### inside quantlab-api: processes"
-            docker compose --env-file .env.example exec -T quantlab-api sh -c 'ps aux 2>&1' 2>&1
+            echo "### inside quantlab-app: processes"
+            docker compose --env-file .env.example exec -T quantlab-app sh -c 'ps aux 2>&1' 2>&1
             echo
-            echo "### inside quantlab-api: healthcheck by hand"
-            docker compose --env-file .env.example exec -T quantlab-api sh -c \
+            echo "### inside quantlab-app: healthcheck by hand"
+            docker compose --env-file .env.example exec -T quantlab-app sh -c \
               'curl -v -fsS http://127.0.0.1:8080/api/v1/healthz; echo "curl exit=$?"' 2>&1
             echo
-            echo "### inside quantlab-api: app import"
-            docker compose --env-file .env.example exec -T quantlab-api sh -c \
+            echo "### inside quantlab-app: app import"
+            docker compose --env-file .env.example exec -T quantlab-app sh -c \
               'python -c "import app.api.main; print(\"app import OK\")"' 2>&1
             echo
-            echo "### inside quantlab-api: alembic current"
-            docker compose --env-file .env.example exec -T quantlab-api sh -c 'alembic current 2>&1 | tail -5' 2>&1
+            echo "### inside quantlab-app: alembic current"
+            docker compose --env-file .env.example exec -T quantlab-app sh -c 'alembic current 2>&1 | tail -5' 2>&1
             echo
-            echo "### quantlab-api logs"
-            docker compose --env-file .env.example logs --no-color --tail 300 quantlab-api 2>&1
-            echo
-            echo "### quantlab-web logs"
-            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-web 2>&1
+            echo "### quantlab-app logs"
+            docker compose --env-file .env.example logs --no-color --tail 300 quantlab-app 2>&1
             echo '```'
           } 2>&1 | tee -a "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 
@@ -271,14 +244,14 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           # The verdict travels with the artifact: this step runs `if: always()`, so a
-          # reader who never opens the run log must still be told whether the images
-          # below were seen to boot (ADR-102).
+          # reader who never opens the run log must still be told whether the image
+          # below was seen to boot (ADR-102).
           smoke="${{ steps.smoke.outcome }}"
           {
             echo "## My Quant Lab ${version}"
             echo
             if [ "${smoke}" = "success" ]; then
-              echo "> **Smoke test: passed.** These images booted and served \`scripts/verify-stack.sh\` in this run."
+              echo "> **Smoke test: passed.** This image booted and served \`scripts/verify-stack.sh\` in this run."
             else
               echo "> **Smoke test: ${smoke:-not run}.** This release was published anyway, but the stack was not seen to boot. Read the \`Smoke test the released images\` step of the release run before deploying, and consider the previous tag."
             fi
@@ -288,8 +261,7 @@ jobs:
             echo "### Docker images (GitHub Packages / GHCR)"
             echo
             echo '```bash'
-            echo "docker pull ${BACKEND_IMAGE}:${version}"
-            echo "docker pull ${WEB_IMAGE}:${version}"
+            echo "docker pull ${APP_IMAGE}:${version}"
             echo '```'
             echo
             echo "### Deploy on your NAS (2 files only)"
@@ -323,7 +295,7 @@ jobs:
           echo "notes=release-notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        # Runs even if the smoke test failed: the images are already published
+        # Runs even if the smoke test failed: the image is already published
         # at this point, and withholding the release would leave the user with
         # nothing to deploy while the diagnostics sit unread in the run log.
         if: always() && steps.version.outputs.version != ''

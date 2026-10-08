@@ -3,7 +3,7 @@
 Default is off, so a local NAS deployment is unchanged. When ``API_AUTH_TOKEN``
 is set, everything the application serves except the two health probes requires
 the header — including ``/docs`` and ``/openapi.json``, which are doors like any
-other (ADR-103); the bundled web container injects the token while proxying.
+other (ADR-103); the container's own nginx injects the token while proxying.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def test_the_documentation_surface_is_gated_too(client, monkeypatch) -> None:
     They used to answer anyone who could reach the port, which made the
     `.env.example` claim ("everything except the two health probes needs the
     token") false and handed the whole API shape to a client that never
-    authenticated. The web container still presents the token for both, so the
+    authenticated. That same nginx still presents the token for both, so the
     browser keeps its documentation.
     """
     monkeypatch.setattr(settings, "api_auth_token", TOKEN)

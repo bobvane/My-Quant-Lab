@@ -243,9 +243,9 @@ def test_the_line_tag_is_moved_only_by_a_released_version() -> None:
         "type=semver,pattern={{major}}.{{minor}},"
         "enable=${{ steps.version.outputs.prerelease == 'false' }}"
     )
-    # One gated line per published image: v2.6.0 retired the docker-proxy image, so the
-    # release publishes two (the nightly pipeline publishes the same set).
-    assert text.count(gated) == 2, "not every published image gates its `X.Y` line tag"
+    # One gated line per published image: v2.6.0 merged the images into one App image
+    # (ADR-190), so a complete release moves exactly one `X.Y` line tag.
+    assert text.count(gated) == 1, "not every published image gates its `X.Y` line tag"
     assert "type=semver,pattern={{major}}.{{minor}}\n" not in text, (
         "an ungated `X.Y` tag line is left, so a candidate would move the release line"
     )

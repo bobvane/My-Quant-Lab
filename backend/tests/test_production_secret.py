@@ -116,6 +116,12 @@ def _role_branch(text: str, role: str) -> str:
     return text[start:end]
 
 
+def _app_body(text: str) -> str:
+    """The App role is one call to `main_app`; its checks live in that function."""
+
+    return text[text.index("main_app() {") : text.index('case "$ROLE" in')]
+
+
 def test_the_entrypoint_reports_configuration_before_it_waits_for_the_database() -> None:
     """A refused secret must not look like a database that never came up."""
 
@@ -123,10 +129,14 @@ def test_the_entrypoint_reports_configuration_before_it_waits_for_the_database()
     assert "check_settings()" in text
     assert "from app.core.config import settings" in text
     assert "refusing to start" in text
-    for role in ("api", "worker", "scheduler", "migrate"):
-        branch = _role_branch(text, role)
-        assert "check_settings || exit 1" in branch, f"{role} does not check its settings"
-        assert branch.index("check_settings || exit 1") < branch.index("wait_for_db"), (
+    for role, branch in (
+        ("app", _app_body(text)),
+        ("migrate", _role_branch(text, "migrate")),
+    ):
+        # Comments may name the database before the code does; only the code counts.
+        code = "\n".join(line for line in branch.splitlines() if not line.strip().startswith("#"))
+        assert "check_settings || exit 1" in code, f"{role} does not check its settings"
+        assert code.index("check_settings || exit 1") < code.index("wait_for_db"), (
             f"{role} waits for the database before checking its settings"
         )
 

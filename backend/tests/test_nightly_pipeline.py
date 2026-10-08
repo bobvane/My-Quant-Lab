@@ -100,14 +100,11 @@ def test_the_nightly_images_are_the_images_the_release_publishes():
         "the nightly and release pipelines build different image sets, so `:nightly` is "
         f"not a usable tag: nightly={sorted(nightly_files)} release={sorted(release_files)}"
     )
-    assert nightly_files == {
-        "docker/Dockerfile.backend",
-        "docker/Dockerfile.web",
-    }
+    assert nightly_files == {"docker/Dockerfile.app"}
 
     built = {match.group("image") for match in _NIGHTLY_TAG.finditer(nightly)}
     declared = set(_IMAGE_CONSTANT.findall(nightly))
-    assert built == {"BACKEND_IMAGE", "WEB_IMAGE"}, f"nightly tags {sorted(built)}"
+    assert built == {"APP_IMAGE"}, f"nightly tags {sorted(built)}"
     assert built <= declared, f"nightly tags {sorted(built - declared)} an undeclared image name"
     release_declared = set(_IMAGE_CONSTANT.findall(release))
     assert built == release_declared, (
@@ -136,8 +133,7 @@ def test_the_nightly_verification_boots_the_images_it_publishes():
     body = _uncommented(_job(text, "verify"))
     assert "needs: images" in body, "verification does not wait for the images it verifies"
     assert "VERSION: nightly" in body, "the verification does not pin the nightly tag"
-    for image in ("BACKEND_IMAGE", "WEB_IMAGE"):
-        assert f'"${{{image}}}:${{VERSION}}"' in body, f"{image} is not pulled at the nightly tag"
+    assert '"${APP_IMAGE}:${VERSION}"' in body, "the app image is not pulled at the nightly tag"
     assert "docker compose --env-file .env.example up -d" in body
     assert "bash scripts/verify-stack.sh" in body, (
         "the verification does not ask the shared verdict"

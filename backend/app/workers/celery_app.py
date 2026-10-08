@@ -1,4 +1,4 @@
-"""Celery application used by ``quantlab-worker`` and ``quantlab-scheduler``."""
+"""Celery application used by the App container's worker and its beat process (ADR-190)."""
 
 from __future__ import annotations
 

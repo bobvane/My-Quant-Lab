@@ -1,10 +1,10 @@
 name: nightly
 
-# The nightly images are the "latest of main" set. Two things have to be true of
-# them, and neither used to be (ADR-076):
-#   1. they are the same images the release pipeline publishes, and the stock
-#      compose file alone can start them;
-#   2. they are started once, from the registry, before anyone is told they exist.
+# The nightly image is the "latest of main" set. Two things have to be true of
+# it, and neither used to be (ADR-076):
+#   1. it is the same image the release pipeline publishes, and the stock
+#      compose file alone can start it;
+#   2. it is started once, from the registry, before anyone is told it exists.
 # The verdict is `scripts/verify-stack.sh`, the same script release.yml calls.
 on:
   schedule:
@@ -17,8 +17,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-backend
-  WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-web
+  APP_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-app
 
 jobs:
   images:
@@ -37,23 +36,13 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
-      - name: Build backend (nightly tag)
+      - name: Build app (nightly tag)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
-          file: docker/Dockerfile.backend
+          file: docker/Dockerfile.app
           push: true
-          tags: ${{ env.BACKEND_IMAGE }}:nightly
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build web (nightly tag)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: .
-          file: docker/Dockerfile.web
-          push: true
-          tags: ${{ env.WEB_IMAGE }}:nightly
+          tags: ${{ env.APP_IMAGE }}:nightly
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -77,11 +66,10 @@ jobs:
         run: |
           set +e
           set -o pipefail
-          # A separate job, on a separate runner: these images have to come back
+          # A separate job, on a separate runner: this image has to come back
           # out of the registry, not out of the build cache of the job that made
           # them.
-          docker pull "${BACKEND_IMAGE}:${VERSION}"
-          docker pull "${WEB_IMAGE}:${VERSION}"
+          docker pull "${APP_IMAGE}:${VERSION}"
 
           # The stock file ships example values. A real deployment generates
           # its own, and the application refuses to serve production with a
@@ -108,18 +96,15 @@ jobs:
             echo "### compose ps -a"
             docker compose --env-file .env.example ps -a 2>&1
             echo
-            echo "### inside quantlab-api: healthcheck by hand"
-            docker compose --env-file .env.example exec -T quantlab-api sh -c \
+            echo "### inside quantlab-app: healthcheck by hand"
+            docker compose --env-file .env.example exec -T quantlab-app sh -c \
               'curl -v -fsS http://127.0.0.1:8080/api/v1/healthz; echo "curl exit=$?"' 2>&1
             echo
-            echo "### inside quantlab-api: alembic current"
-            docker compose --env-file .env.example exec -T quantlab-api sh -c 'alembic current 2>&1 | tail -5' 2>&1
+            echo "### inside quantlab-app: alembic current"
+            docker compose --env-file .env.example exec -T quantlab-app sh -c 'alembic current 2>&1 | tail -5' 2>&1
             echo
-            echo "### quantlab-api logs"
-            docker compose --env-file .env.example logs --no-color --tail 300 quantlab-api 2>&1
-            echo
-            echo "### quantlab-web logs"
-            docker compose --env-file .env.example logs --no-color --tail 200 quantlab-web 2>&1
+            echo "### quantlab-app logs"
+            docker compose --env-file .env.example logs --no-color --tail 300 quantlab-app 2>&1
             echo '```'
           } 2>&1 | tee -a "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 

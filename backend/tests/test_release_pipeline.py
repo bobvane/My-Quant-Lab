@@ -11,7 +11,7 @@ The GitHub Release was created all the same, and its notes told the reader to ru
 deploy" was a line of console text in a log nobody had a reason to open.
 
 The same step only ever asked the API container (`127.0.0.1:8080`): `docker compose
-up -d` returns 0 even when the web container crash loops, so a release whose UI never
+up -d` returns 0 even when the App crash loops, so a release whose UI never
 came up produced `SMOKE_TEST_OK` too.
 
 The step itself no longer knows how to answer that question: the verdict — the API
@@ -115,7 +115,7 @@ def test_the_shared_verdict_asks_the_web_container_too():
 
     script = _uncommented(_text(VERIFY_STACK))
     assert "8080" in script, "the verdict no longer asks the API"
-    assert "8081" in script, "the verdict never asks the web container"
+    assert "8081" in script, "the verdict never asks the web edge"
     assert "web_ok" in script, "the web half contributes nothing to the verdict"
     # The web half must assert, not merely fetch: liveness, the app's mount point, and
     # the edge contract ADR-068 made real (a missing asset is a 404, not the shell).
@@ -167,5 +167,4 @@ def test_the_release_smoke_test_pulls_the_version_it_is_releasing():
     """Smoke testing `latest` would certify whatever happened to be there."""
 
     body = _step(_text(RELEASE), "Smoke test the released images")
-    for image in ("BACKEND_IMAGE", "WEB_IMAGE"):
-        assert f'"${{{image}}}:${{VERSION}}"' in body, f"{image} is not pulled at the released tag"
+    assert '"${APP_IMAGE}:${VERSION}"' in body, "the app image is not pulled at the released tag"

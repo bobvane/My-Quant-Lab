@@ -135,7 +135,8 @@ API base: `/api/v1`
 - `true`：只做校验、写入运行行（`status = "running"`、`progress = 0`、
   `current_step = "loading data"`）并交给 Celery 任务 `quantlab.run_backtest`，随即返回 **200**
   且结果字段缺省。这条运行已经被持久化，客户端轮询 `/backtests/{run_id}` 看 `progress` 与
-  `current_step` 前进；该路径需要 `quantlab-worker`。失败时这一行落 `status = "failed"` 并把
+  `current_step` 前进；该路径需要容器里的 Celery worker（`quantlab-app` 的四个子进程之一，
+  与 API 同镜像同容器）。失败时这一行落 `status = "failed"` 并把
   引擎的错误原文逐字写进 `error_message`，绝不留下半截结果（warnings 口径不变，ADR-054）。
 
 **没有取消端点**：本轮不实现取消，接口里也不会预先写一个不存在的动作。

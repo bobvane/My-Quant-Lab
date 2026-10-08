@@ -2,11 +2,11 @@
 
 Three claims used to live only in prose:
 
-* ``docker/web.nginx.conf`` presented the bearer token for ``/api/`` but not for
+* ``docker/app.nginx.conf`` presented the bearer token for ``/api/`` but not for
   ``/docs`` or ``/openapi.json``, and the API's own middleware let everything
   outside ``/api/v1`` through by construction — so a deployment that set
   ``API_AUTH_TOKEN`` still handed its full schema to anyone who could reach the
-  port, and the web proxy then let an anonymous visitor use Swagger's
+  port, and the container's own proxy then let an anonymous visitor use Swagger's
   "Try it out" as the token holder (ADR-103).
 * ``.env.example`` documents ``WEB_BIND=127.0.0.1`` as the way to close the LAN
   door, and no workflow ever ran it: a documented switch nobody presses is a
@@ -38,7 +38,7 @@ import pathlib
 import re
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-NGINX = REPO_ROOT / "docker" / "web.nginx.conf"
+NGINX = REPO_ROOT / "docker" / "app.nginx.conf"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 MAIN = REPO_ROOT / "backend" / "app" / "api" / "main.py"
 NAS_CHECK = REPO_ROOT / "scripts" / "Test-NasDeployment.ps1"
@@ -89,7 +89,7 @@ def _proxied_locations(text: str) -> list[tuple[str, str]]:
     return [
         (pattern, body)
         for pattern, body in _locations(text)
-        if "proxy_pass http://quantlab-api:8080" in body
+        if "proxy_pass http://127.0.0.1:8000" in body
     ]
 
 
@@ -195,9 +195,9 @@ def test_the_ci_step_recreates_services_that_exist() -> None:
         "before its first assertion and the claims it was written to press go "
         f"unpressed (ADR-106). Declared names: {sorted(services)}"
     )
-    assert {"quantlab-api", "quantlab-web"} <= set(named), (
-        "the step must recreate the API and the web edge: those are the two containers "
-        "the token and the bind address are configured on (ADR-103/104)"
+    assert {"quantlab-app"} <= set(named), (
+        "the step must recreate the App: it is the one container the token and the "
+        "bind address are configured on (ADR-103/104)"
     )
 
 
@@ -220,7 +220,8 @@ def test_the_ci_step_waits_for_the_web_edge_before_asserting() -> None:
     step = text[text.index("Exposure assertions") : text.index("Dump logs on failure")]
     waits = re.findall(r"for _ in \$\(seq 1 (?P<attempts>\d+)\); do", step)
     assert len(waits) >= 2, (
-        "the exposure step recreates two containers but waits for only "
+        "the exposure step recreates one container that holds two doors (the API on "
+        "8080 and the edge on 8081) but waits for only "
         f"{len(waits)} of them: the second one's first assertion can run before it "
         "binds its port, and the step then reports the wrong verdict (ADR-109)"
     )

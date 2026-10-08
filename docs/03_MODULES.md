@@ -125,12 +125,12 @@ Secrets UI 只能显示掩码；日志绝不能输出完整 key。
 
 ## 新的模块化架构
 
-所有核心业务逻辑被整合为应用内部的六个核心模块，这些模块运行在 `quantlab-api` 和 `quantlab-worker` 服务内部：
+所有核心业务逻辑被整合为应用内部的六个核心模块，这些模块运行在 App 容器（`quantlab-app`，v2.6.0 起 API 与 Celery worker 同镜像同容器，ADR-190）内部：
 
 ### Module Structure
 
 ```text
-quantlab-api (FastAPI + Celery Worker)
+quantlab-app (FastAPI + Celery Worker + Celery Beat + nginx)
 ├── domain/          # 领域模型和业务规则
 ├── data/            # 数据访问和持久化
 ├── features/        # 技术指标和价格行为特征

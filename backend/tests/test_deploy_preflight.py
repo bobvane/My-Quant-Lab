@@ -4,7 +4,7 @@
 file, so the check carried a second copy of a list the deployment already owns --
 and that copy had already drifted past an image the stock compose file starts
 (ADR-076 forgot the same image in the nightly pipeline). It also demanded source
-files (`docker/Dockerfile.backend`, ...) that a documented two-file NAS deployment
+files (`docker/Dockerfile.app`, ...) that a documented two-file NAS deployment
 does not have, and nothing ran it at all: its verdict lived only in whoever's
 terminal (ADR-078).
 
@@ -130,8 +130,8 @@ def test_the_overlay_builds_every_image_the_deployment_pulls() -> None:
 
     overlay = _services(OVERLAY)
     project = _project_images()
-    assert len(project) >= 2, (
-        f"the deployment is expected to pull the backend and web images, found {sorted(project)}"
+    assert set(project) == {"quantlab-app"}, (
+        f"the deployment is one App image since ADR-190; found {sorted(project)} instead"
     )
     assert set(overlay) <= set(_services(COMPOSE)), (
         "the overlay names a service the deployment file does not: "

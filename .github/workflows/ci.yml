@@ -158,8 +158,8 @@ jobs:
           rc=$?
           echo "=== compose up exit code: $rc ==="
           docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example ps -a || true
-          echo "=== quantlab-api logs ==="
-          docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-api || true
+          echo "=== quantlab-app logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-app || true
           exit $rc
 
       - name: Wait for health
@@ -193,30 +193,30 @@ jobs:
             echo "### compose ps -a"
             docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example ps -a 2>&1
             echo
-            echo "### inspect health (quantlab-api)"
-            docker inspect --format '{{json .State}}' quantlab-api 2>&1 | head -c 4000
+            echo "### inspect health (quantlab-app)"
+            docker inspect --format '{{json .State}}' quantlab-app 2>&1 | head -c 4000
             echo
             echo
-            echo "### inside quantlab-api: processes"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-api sh -c 'ps aux 2>&1 || echo "ps unavailable"'
+            echo "### inside quantlab-app: processes"
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-app sh -c 'ps aux 2>&1 || echo "ps unavailable"'
             echo
-            echo "### inside quantlab-api: listening sockets"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-api sh -c 'cat /proc/net/tcp 2>&1 | head -20'
+            echo "### inside quantlab-app: listening sockets"
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-app sh -c 'cat /proc/net/tcp 2>&1 | head -20'
             echo
-            echo "### inside quantlab-api: is curl present?"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-api sh -c 'command -v curl; curl --version 2>&1 | head -2'
+            echo "### inside quantlab-app: is curl present?"
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-app sh -c 'command -v curl; curl --version 2>&1 | head -2'
             echo
-            echo "### inside quantlab-api: run the healthcheck by hand"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-api sh -c 'curl -v -fsS http://127.0.0.1:8080/api/v1/healthz; echo "curl exit=$?"' 2>&1
+            echo "### inside quantlab-app: run the healthcheck by hand"
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-app sh -c 'curl -v -fsS http://127.0.0.1:8080/api/v1/healthz; echo "curl exit=$?"' 2>&1
             echo
-            echo "### inside quantlab-api: can we import the app?"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-api sh -c 'python -c "import app.api.main; print(\"app import OK\")"' 2>&1
+            echo "### inside quantlab-app: can we import the app?"
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-app sh -c 'python -c "import app.api.main; print(\"app import OK\")"' 2>&1
             echo
-            echo "### inside quantlab-api: alembic current"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-api sh -c 'alembic current 2>&1 | tail -5' 2>&1
+            echo "### inside quantlab-app: alembic current"
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example exec -T quantlab-app sh -c 'alembic current 2>&1 | tail -5' 2>&1
             echo
-            echo "### quantlab-api logs"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 300 quantlab-api 2>&1
+            echo "### quantlab-app logs"
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 300 quantlab-app 2>&1
             echo '```'
           } 2>&1 | tee -a "$SUMMARY"
 
@@ -279,6 +279,45 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' "$WEB/signals")
           [ "$code" = "200" ] || { echo "deep link -> $code"; exit 1; }
 
+      - name: Container process assertions (ADR-190)
+        run: |
+          set -euo pipefail
+          compose="docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example"
+
+          # One container, four long-lived children. If the merge left only some of
+          # them running, every later smoke assertion could still pass while a whole
+          # feature is silently missing.
+          $compose exec -T quantlab-app sh -eu -c '
+            ps -eo args= > /tmp/ps.txt
+            for needle in \
+              "nginx: master process" \
+              "uvicorn app.api.main:app" \
+              "celery -A app.workers.celery_app.celery_app worker" \
+              "celery -A app.workers.celery_app.celery_app beat"
+            do
+              grep -qF -- "$needle" /tmp/ps.txt || {
+                echo "missing child: $needle"; cat /tmp/ps.txt; exit 1; }
+            done
+            # `celery worker -B` would fold beat into the worker: the four names above
+            # would still match, and the scheduler could stop without anyone noticing.
+            if grep -qF -- "worker -B" /tmp/ps.txt; then
+              echo "beat is embedded in the worker (-B)"; cat /tmp/ps.txt; exit 1
+            fi
+            echo "four children present"
+          '
+
+          # Beat's liveness is a file, not a process name: a scheduler that still runs
+          # but stopped writing its schedule would otherwise read as healthy.
+          $compose exec -T quantlab-app sh -eu -c '
+            find /app/beat -maxdepth 1 -name "celerybeat-schedule*" -mmin -15 | grep -q . || {
+              echo "beat left no schedule file newer than 15 minutes"; ls -la /app/beat; exit 1; }
+            echo "beat schedule file is fresh"
+          '
+
+          # The schedule Beat actually loaded: seven entries with the reaper, and the
+          # two resource-monitor jobs v2.6.0 deleted must not return through Beat.
+          $compose exec -T quantlab-app python -c 'import app.workers.celery_app as m; n = sorted(m.celery_app.conf.beat_schedule); print("beat schedules:", n); assert "reap-stuck-runs" in n, n; assert "collect-resources" not in n and "purge-resources" not in n, n; assert len(n) == 7, n; print("beat schedule is the seven expected entries")'
+
       - name: "Smoke 1/5: sync market data"
         env:
           APP_ENVIRONMENT: ci
@@ -292,7 +331,7 @@ jobs:
           cat /tmp/sync.json; echo
           if [ "$code" != "200" ]; then
             echo "--- api logs ---"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-api
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-app
             exit 1
           fi
           python3 -c "import json;d=json.load(open('/tmp/sync.json'));assert d['inserted']>0, d"
@@ -309,7 +348,7 @@ jobs:
           cat /tmp/strategy.json; echo
           if [ "$code" != "201" ]; then
             echo "--- api logs (server traceback is here) ---"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-api
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-app
             exit 1
           fi
           SID=$(python3 -c "import json;print(json.load(open('/tmp/strategy.json'))['id'])")
@@ -339,7 +378,7 @@ jobs:
           cat /tmp/version.json; echo
           if [ "$code" != "201" ]; then
             echo "--- api logs ---"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-api
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-app
             exit 1
           fi
           VID=$(python3 -c "import json;print(json.load(open('/tmp/version.json'))['id'])")
@@ -358,7 +397,7 @@ jobs:
           head -c 600 /tmp/backtest.json; echo
           if [ "$code" != "200" ]; then
             echo "--- api logs ---"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-api
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-app
             exit 1
           fi
           python3 -c "import json;d=json.load(open('/tmp/backtest.json'));assert d['status']=='completed', d"
@@ -374,7 +413,7 @@ jobs:
           head -c 400 /tmp/scan.json; echo
           if [ "$code" != "200" ]; then
             echo "--- api logs ---"
-            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-api
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-app
             exit 1
           fi
           python3 -c "import json;d=json.load(open('/tmp/scan.json'));assert isinstance(d['evaluated'],int) and d['evaluated']>=0, d;assert d.get('disclaimer'), d;print('evaluated =', d['evaluated'], '| created =', d['created'])"
@@ -390,17 +429,17 @@ jobs:
           # Two documented claims that nothing ever exercised: WEB_BIND=127.0.0.1
           # really closes the LAN door, and API_AUTH_TOKEN really covers every
           # route the application serves - /docs and /openapi.json included -
-          # while the web container keeps presenting it for the browser
+          # while the web edge keeps presenting it for the browser
           # (ADR-103/104). One recreate, three claims.
           #
           # The stack was created with per-run secrets that only the boot step's
-          # shell knew (ADR-077), so recreating these two containers without
-          # reading those values back would hand the API the example defaults and
-          # lose it the database. They are read out of the running container, and
-          # the two overrides are exported rather than written into an env file,
+          # shell knew (ADR-077), so recreating this container without reading
+          # those values back would hand the API the example defaults and lose it
+          # the database. They are read out of the running container, and the
+          # overrides are exported rather than written into an env file,
           # because shell values win over --env-file in this repository (ADR-077).
           read_env() {
-            docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' quantlab-api \
+            docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' quantlab-app \
               | sed -n "s/^$1=//p" | head -n 1
           }
           export POSTGRES_PASSWORD="$(read_env POSTGRES_PASSWORD)"
@@ -408,11 +447,11 @@ jobs:
           [ -n "$POSTGRES_PASSWORD" ] || { echo "cannot read the password the API is running on"; exit 1; }
           export WEB_BIND=127.0.0.1
           export API_AUTH_TOKEN="$TOKEN"
-          # These are the compose service names, and --no-deps keeps the database,
-          # the queue and the proxy out of the recreate: a step that named a
-          # service which does not exist would fail before its first assertion
-          # (ADR-106, and how this step first failed in CI).
-          $COMPOSE up -d --no-deps quantlab-api quantlab-web
+          # This is the compose service name, and --no-deps keeps the database and
+          # the queue out of the recreate: a step that named a service which does
+          # not exist would fail before its first assertion (ADR-106, and how this
+          # step first failed in CI).
+          $COMPOSE up -d --no-deps quantlab-app
 
           ok=0
           for _ in $(seq 1 60); do
@@ -421,13 +460,13 @@ jobs:
           done
           if [ "$ok" -ne 1 ]; then
             echo "the API never answered again after the token was set"
-            $COMPOSE logs --no-color --tail 100 quantlab-api
+            $COMPOSE logs --no-color --tail 100 quantlab-app
             exit 1
           fi
 
-          # The web container has to bind a port too, and it was recreated a
+          # The web edge has to bind a port too, and the container was recreated a
           # moment ago: an assertion that runs the instant `up -d` returns is
-          # testing the scheduler instead of the policy. That is how this step
+          # testing the launcher instead of the policy. That is how this step
           # failed once, with the API healthy and nginx still binding:
           # `curl: (56) Recv failure: Connection reset by peer` -> 000, reported
           # as if WEB_BIND had not closed the door (ADR-109).
@@ -438,7 +477,7 @@ jobs:
           done
           if [ "$web_ok" -ne 1 ]; then
             echo "the web edge never answered on $WEB"
-            $COMPOSE logs --no-color --tail 100 quantlab-web
+            $COMPOSE logs --no-color --tail 100 quantlab-app
             exit 1
           fi
 
@@ -470,7 +509,7 @@ jobs:
             [ "$got" = "200" ] || { echo "$path is no longer exempt"; exit 1; }
           done
 
-          # 3. Through the web container the browser sends nothing and everything
+          # 3. Through the web edge the browser sends nothing and everything
           #    works: the proxy presents the token for /api/, /docs and
           #    /openapi.json alike.
           for path in /docs /openapi.json /api/v1/strategies /healthz; do

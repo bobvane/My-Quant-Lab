@@ -128,7 +128,7 @@ Write-Output "target: $Base   time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Step 'Web 容器 /healthz' {
     $r = Invoke-WebRequest -Uri "$Base/healthz" -TimeoutSec 20 -UseBasicParsing
     # nginx answers this path itself -- `return 200 "ok\n"` in the `location = /healthz`
-    # block of docker/web.nginx.conf -- and that is the web edge's own liveness answer,
+    # block of docker/app.nginx.conf -- and that is the web edge's own liveness answer,
     # not a proxy to the API: the API probe is the `/api/v1/healthz` step below. A bare
     # 200 is not evidence of it (an nginx default page, a stale upstream or a captive
     # portal answer 200 too), so the body has to be read. Reading it means decoding it:

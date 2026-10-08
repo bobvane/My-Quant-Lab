@@ -82,7 +82,7 @@ def _patch_celery(monkeypatch, fake: _FakeCelery) -> _FakeCelery:
 def test_the_broker_connection_is_opened_under_a_deadline(monkeypatch):
     connection = _FakeConnection()
     fake = _patch_celery(
-        monkeypatch, _FakeCelery(connection, [{"celery@quantlab-worker": {"ok": "pong"}}])
+        monkeypatch, _FakeCelery(connection, [{"celery@quantlab-app": {"ok": "pong"}}])
     )
 
     assert health._check_workers() == "1 online"

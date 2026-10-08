@@ -325,4 +325,4 @@ if [ "$fail" -ne 0 ]; then
 fi
 echo "Pre-flight passed. Next:"
 echo "  docker compose pull && docker compose up -d"
-echo "  docker compose logs -f quantlab-api"
+echo "  docker compose logs -f quantlab-app"

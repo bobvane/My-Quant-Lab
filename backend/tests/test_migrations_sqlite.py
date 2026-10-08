@@ -112,7 +112,7 @@ def test_sibling_resource_tables_autogenerate_too(migrated_session: Session) -> 
             "INSERT INTO container_resource_samples (ts, container_name, is_quantlab) "
             "VALUES (:ts, :name, :flag)"
         ),
-        {"ts": now, "name": "quantlab-api", "flag": True},
+        {"ts": now, "name": "quantlab-app", "flag": True},
     )
     migrated_session.execute(
         text(

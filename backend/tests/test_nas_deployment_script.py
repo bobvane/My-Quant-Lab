@@ -24,7 +24,7 @@ SCRIPT = REPO_ROOT / "scripts" / "Test-NasDeployment.ps1"
 TEXT = SCRIPT.read_text(encoding="utf-8")
 # The edge behaviour the web liveness step asserts lives in this file, so the guard
 # reads both: the script and nginx drifted apart once already (see below).
-NGINX = REPO_ROOT / "docker" / "web.nginx.conf"
+NGINX = REPO_ROOT / "docker" / "app.nginx.conf"
 
 _STEP = re.compile(r"^\s*Step\s+(?:'([^']*)'|\"([^\"]*)\")\s*\{", re.MULTILINE)
 
@@ -65,7 +65,7 @@ def test_the_web_liveness_step_reads_the_body() -> None:
     """A 200 from the web edge is not evidence: nginx default pages are 200 too.
 
     The edge answers this path itself -- `return 200 "ok\\n"` in the
-    `location = /healthz` block of `docker/web.nginx.conf` -- and that is the web
+    `location = /healthz` block of `docker/app.nginx.conf` -- and that is the
     container's own liveness answer, not a proxy to the API (whose probe has its own
     step at `/api/v1/healthz`). The step asked for an API body nginx never served for
     two days, and could not have read one anyway: the edge sends nginx's

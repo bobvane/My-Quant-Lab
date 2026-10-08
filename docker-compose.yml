@@ -1,15 +1,17 @@
-# My Quant Lab — V1 production compose stack.
+# My Quant Lab — V1 production compose stack (3 containers).
 # 最后修改版本: v1.0.0
 #
 # 标准用法（图形化 NAS）：在容器管理界面里选择本项目目录，直接使用本文件。
 # 只需要两个文件：本文件 + 同目录下的 .env。不需要源码，不需要第二个文件。
 #
-#   quantlab-web          Vue 3 UI (nginx, 代理 /api)
-#   quantlab-api          FastAPI，启动时自动执行数据库迁移
-#   quantlab-worker       Celery worker
-#   quantlab-scheduler    Celery beat（定时扫描信号）
-#   quantlab-postgres     PostgreSQL（仅 backend 网络，不对外暴露）
-#   quantlab-redis        Redis（仅 backend 网络，不对外暴露）
+#   quantlab-app        一个容器里的四个进程：nginx（静态 UI + 代理 /api）
+#                       + uvicorn/FastAPI（执行数据库迁移）+ Celery worker
+#                       + Celery beat。由 docker/entrypoint.sh 启动。
+#   quantlab-postgres   PostgreSQL（仅 backend 网络，不对外暴露）
+#   quantlab-redis      Redis（仅 backend 网络，不对外暴露）
+#
+# 只运行一个 quantlab-app：它是唯一持有 Celery beat 的容器，第二个实例会让每个
+# 定时任务重复触发（container_name 也让第二个实例起不来，而不是悄悄并行）。
 #
 # 镜像全部来自 GitHub Packages 预构建（本文件不含 build 段）：
 #   默认拉取 latest（.env 里可改 MQL_VERSION 锁定版本，例如 v0.0.8）。
@@ -19,10 +21,7 @@
 #
 name: my-quant-lab
 
-x-backend-image: &backend-image
-  image: ghcr.io/bobvane/my-quant-lab-backend:${MQL_VERSION:-latest}
-
-x-backend-env: &backend-env
+x-app-env: &app-env
   APP_ENVIRONMENT: ${APP_ENVIRONMENT:-production}
   # The connection URL is assembled inside the app from these parts (ADR-098):
   # the same POSTGRES_* values the database container gets, so a password with
@@ -38,6 +37,8 @@ x-backend-env: &backend-env
   CELERY_RESULT_BACKEND: redis://quantlab-redis:6379/2
   SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
   # Optional bearer auth for the API. Empty = open (loopback-only by default).
+  # When set, the App's own nginx injects it into the /api, /docs and
+  # /openapi.json proxies, so the browser still never sends it (ADR-103).
   API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
   # Per-IP limit for mutating API requests (0 disables).
   RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
@@ -47,11 +48,11 @@ x-backend-env: &backend-env
   AI_DAILY_TASK_LIMIT: ${AI_DAILY_TASK_LIMIT:-20}
   AI_TASK_TIMEOUT_SECONDS: ${AI_TASK_TIMEOUT_SECONDS:-600}
   # Run research in the worker instead of inside the POST /ai/research request.
-  # Set to false only for a deployment without quantlab-worker (docs/06 §21).
+  # The worker is always part of this container, so the default stands.
   AI_RESEARCH_ASYNC: ${AI_RESEARCH_ASYNC:-true}
   # Run backtests in the worker instead of inside POST /backtests, so a client can
-  # watch progress/current_step while the engine runs (ADR-180). Set to true only for
-  # a deployment with quantlab-worker; false is the inline path every caller had.
+  # watch progress/current_step while the engine runs (ADR-180). Default false:
+  # the response shape every caller already knows (inline) is unchanged.
   BACKTEST_ASYNC: ${BACKTEST_ASYNC:-false}
   # Stuck-run recovery (docs/33 §6.4). A worker that is killed mid-run no longer
   # loses the task (acks_late), but if the message is gone too, these budgets are
@@ -74,9 +75,6 @@ x-backend-env: &backend-env
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
   NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,quantlab-postgres,quantlab-redis,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.local,.internal}
-
-x-backend-networks: &backend-networks
-  - backend
 
 services:
   quantlab-postgres:
@@ -116,114 +114,69 @@ services:
       retries: 10
       start_period: 10s
 
-  quantlab-api:
-    <<: *backend-image
-    container_name: quantlab-api
+  quantlab-app:
+    image: ghcr.io/bobvane/my-quant-lab-app:${MQL_VERSION:-latest}
+    container_name: quantlab-app
     restart: unless-stopped
+    # docker-init as PID 1: reaps the orphans the launcher's children can leave
+    # behind and forwards signals. The launcher itself is not a supervisor — it
+    # starts each of the four processes exactly once (ADR-190).
+    init: true
+    # Long enough for a Celery warm shutdown; the launcher's own bound (30 s)
+    # stays below it, so it always finishes before Docker escalates to SIGKILL.
+    stop_grace_period: 60s
     environment:
-      <<: *backend-env
-      APP_ROLE: api
-      PORT: "8080"
-    ports:
-      # bound to localhost only: the web container proxies /api
-      - "${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8080"
-    depends_on:
-      quantlab-postgres:
-        condition: service_healthy
-      quantlab-redis:
-        condition: service_healthy
-    networks:
-      - backend
-      - frontend
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/healthz || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 6
-      start_period: 45s
-
-  quantlab-worker:
-    <<: *backend-image
-    container_name: quantlab-worker
-    restart: unless-stopped
-    environment:
-      <<: *backend-env
-      APP_ROLE: worker
+      <<: *app-env
+      APP_ROLE: app
       CELERY_CONCURRENCY: ${CELERY_CONCURRENCY:-2}
+    ports:
+      # The only user-facing door: nginx on 8080 inside the container (it cannot
+      # bind port 80 as uid 10001, and does not need to).
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8081}:8080"
+      # uvicorn, published on the host loopback only: no second HTTP service is
+      # created inside the container, this is the diagnostics door for
+      # scripts/verify-stack.sh and the CI smokes.
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8000"
+    volumes:
+      # Celery beat's schedule file survives a container recreate (image
+      # upgrade), which keeps the healthcheck's staleness question meaningful
+      # right after an upgrade instead of "missing" until the first dispatch.
+      - celery_beat:/app/beat
     depends_on:
       quantlab-postgres:
         condition: service_healthy
       quantlab-redis:
         condition: service_healthy
-      # `service_healthy`, not `service_started`: the api role is the only one
-      # that runs migrations (docker/entrypoint.sh), so a worker or beat that
-      # starts first can fire a task against a schema that does not exist yet.
-      # quantlab-web already used service_healthy; this was an oversight, not a
-      # decision (ADR-099).
-      quantlab-api:
-        condition: service_healthy
     networks:
       - backend
+    # Four questions, all about the four children (ADR-190):
+    #   1. nginx answers on 8080 (rendered config, static /healthz)
+    #   2. uvicorn answers on 8000 (its dependency-free liveness endpoint)
+    #   3. the Celery worker answers a control ping on the broker
+    #   4. Celery beat has written its schedule file recently (<= 15 min, which
+    #      covers its shortest interval — the 5-minute reaper — plus the up to
+    #      180 s the persistent scheduler may take to flush)
+    # An `unhealthy` container is NOT restarted by plain compose (no autoheal):
+    # it is the operator's signal, and it does not restart anything by itself.
+    # Worker/beat deaths are detected by the launcher's `wait -n`, which stops
+    # the whole App; this probe never second-guesses that with a fragile
+    # per-process check.
     healthcheck:
-      test: ["CMD-SHELL", "celery -A app.workers.celery_app.celery_app inspect ping -d celery@$$HOSTNAME || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz && curl -fsS http://127.0.0.1:8000/api/v1/healthz && celery -A app.workers.celery_app.celery_app inspect ping -d celery@$$HOSTNAME >/dev/null && { [ ! -f /app/beat/celerybeat-schedule ] || find /app/beat -maxdepth 1 -name 'celerybeat-schedule*' -mmin -15 | grep -q . ; }"]
       interval: 60s
       timeout: 20s
       retries: 3
-      start_period: 60s
-
-  quantlab-scheduler:
-    <<: *backend-image
-    container_name: quantlab-scheduler
-    restart: unless-stopped
-    environment:
-      <<: *backend-env
-      APP_ROLE: scheduler
-    depends_on:
-      quantlab-postgres:
-        condition: service_healthy
-      quantlab-redis:
-        condition: service_healthy
-      # See quantlab-worker: migrations run in the api role only (ADR-099).
-      quantlab-api:
-        condition: service_healthy
-    networks:
-      - backend
-    healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' || exit 1"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-  quantlab-web:
-    image: ghcr.io/bobvane/my-quant-lab-web:${MQL_VERSION:-latest}
-    container_name: quantlab-web
-    restart: unless-stopped
-    environment:
-      # Injected into the /api proxy so the UI keeps working when auth is on.
-      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
-    ports:
-      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8081}:80"
-    depends_on:
-      quantlab-api:
-        condition: service_healthy
-    networks:
-      - frontend
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz || exit 1"]
-      interval: 20s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
+      start_period: 120s
 
 volumes:
   postgres_data:
   redis_data:
+  celery_beat:
 
 networks:
-  frontend:
-    name: quantlab-frontend
-    driver: bridge
+  # One network: the App reaches PostgreSQL and Redis, and nothing else in this
+  # file needs a second one (the API's only other surface is the loopback
+  # publish above).
   backend:
     name: quantlab-backend
     driver: bridge

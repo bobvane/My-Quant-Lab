@@ -1368,22 +1368,47 @@ const benchmarkSeries = computed(() => {
   ]
 })
 
-/** 一张「策略 vs 对照」的表：两列都读服务端的数，缺值写「未知」。 */
-const comparisonRows = computed(() => {
+/** 一张「策略 vs 对照」的表：两列都读服务端的数，缺值写「未知」。
+ *  每一行的单位不由这张表自己定，而是交给 `format.ts` 的唯一注册表（docs/30 §9）：
+ *  夏普是倍数、期末权益是金额，只有比例类才带百分号——同一个数在别处怎么显示，这里就怎么显示。 */
+interface ComparisonRow {
+  key: string
+  name: string
+  strategy: number | null
+  other: number | null
+}
+
+const comparisonRows = computed<ComparisonRow[]>(() => {
   const benchmark = analysis.value?.benchmark
   const stored = analysis.value?.performance.stored ?? {}
   if (!benchmark) return []
   return [
-    { name: '总收益', strategy: stored.total_return ?? null, other: benchmark.total_return },
-    { name: '年化收益', strategy: stored.cagr ?? null, other: benchmark.cagr },
     {
+      key: 'total_return',
+      name: '总收益',
+      strategy: stored.total_return ?? null,
+      other: benchmark.total_return,
+    },
+    { key: 'cagr', name: '年化收益', strategy: stored.cagr ?? null, other: benchmark.cagr },
+    {
+      key: 'annualized_volatility',
       name: '年化波动率',
       strategy: stored.annualized_volatility ?? null,
       other: benchmark.annualized_volatility,
     },
-    { name: '夏普比率', strategy: stored.sharpe ?? null, other: benchmark.sharpe },
-    { name: '最大回撤', strategy: stored.max_drawdown ?? null, other: benchmark.max_drawdown },
-    { name: '期末权益', strategy: stored.final_equity ?? null, other: benchmark.final_equity },
+    { key: 'sharpe', name: '夏普比率', strategy: stored.sharpe ?? null, other: benchmark.sharpe },
+    {
+      key: 'max_drawdown',
+      name: '最大回撤',
+      strategy: stored.max_drawdown ?? null,
+      other: benchmark.max_drawdown,
+    },
+    {
+      key: 'final_equity',
+      name: '期末权益',
+      strategy: stored.final_equity ?? null,
+      other: benchmark.final_equity,
+    },
   ]
 })
 
@@ -1416,7 +1441,9 @@ const analysisHeadline = computed(() => {
     parts.push(`最大回撤 ${formatPercent(drawdown)}`)
   }
   parts.push(result.sample.tier_text)
-  return `${parts.join('；')}。`
+  const sentence = `${parts.join('；')}。`
+  // 后端给的人话本身就带句号，别再补一个（否则页面会出现「。」「。」）。
+  return sentence.endsWith('。。') ? sentence.slice(0, -1) : sentence
 })
 
 /** 对照块里所有需要「先说说怎么读」的数字都在这里（口径来自后端 caveats）。 */
@@ -1459,6 +1486,15 @@ function riskText(kind: 'ratio' | 'money' | 'count', value: number | null | unde
   if (kind === 'ratio') return formatPercent(value)
   if (kind === 'money') return formatNumber(value, 2)
   return formatNumber(value, 0)
+}
+
+/**
+ * 对照表里的一格：单位不在这张表里自己发明，一律交给 `frontend/src/format.ts` 的唯一注册表
+ * （夏普是倍数、期末权益是金额，只有比例类才带百分号）；缺值按 Phase C 的约定写「未知」。
+ */
+function comparisonText(key: string, value: number | null | undefined): string {
+  if (value == null) return '未知'
+  return formatMetric(key, value)
 }
 
 /**
@@ -2108,8 +2144,8 @@ onMounted(async () => {
           <tbody>
             <tr v-for="row in comparisonRows" :key="row.name">
               <td>{{ row.name }}</td>
-              <td>{{ riskText('ratio', row.strategy) }}</td>
-              <td>{{ riskText('ratio', row.other) }}</td>
+              <td>{{ comparisonText(row.key, row.strategy) }}</td>
+              <td>{{ comparisonText(row.key, row.other) }}</td>
             </tr>
           </tbody>
         </table>

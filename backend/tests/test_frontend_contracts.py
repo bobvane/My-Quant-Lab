@@ -156,6 +156,37 @@ def test_the_backtest_page_keys_its_units_on_the_metric_name() -> None:
     assert "formatNumber(p.objective)" not in BACKTEST
 
 
+def test_the_comparison_table_borrows_the_unit_rule_instead_of_inventing_one() -> None:
+    """The strategy-vs-benchmark table mixes ratios, a multiple and an amount.
+
+    A local `kind` per row printed Sharpe as ``-23.15%`` and the final equity as
+    ``2313459.84%`` in a real browser (Phase C UAT). Units come from the one registry in
+    ``frontend/src/format.ts``, so each row carries its metric key (ADR-087, ADR-188).
+    """
+
+    assert (
+        "function comparisonText(key: string, value: number | null | undefined): string" in BACKTEST
+    )
+    assert "return formatMetric(key, value)" in BACKTEST
+    # Both columns go through it; no hand-picked unit survives on this table.
+    assert "comparisonText(row.key, row.strategy)" in BACKTEST
+    assert "comparisonText(row.key, row.other)" in BACKTEST
+    assert "riskText('ratio', row.strategy)" not in BACKTEST
+    assert "riskText('ratio', row.other)" not in BACKTEST
+    # Rows key themselves on the registry's names, not on prose.
+    for key in (
+        "'total_return'",
+        "'cagr'",
+        "'annualized_volatility'",
+        "'sharpe'",
+        "'max_drawdown'",
+        "'final_equity'",
+    ):
+        assert re.search(rf"key: {key}", BACKTEST), key
+    # A conclusion that ends twice reads like a stutter.
+    assert "endsWith('。。')" in BACKTEST
+
+
 def test_every_dashboard_request_answers_for_itself() -> None:
     """One 500 in the first two panels used to blank the whole first screen."""
 

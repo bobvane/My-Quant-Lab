@@ -486,3 +486,51 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example down -v
+
+  # Test A of the v2.6.0 P0 delivery work (docs/33 §5). The unit suite can only
+  # assert the four settings that are *supposed* to redeliver a lost task; this job
+  # asserts the mechanism: it SIGKILLs the prefork child that is running a task and
+  # requires the SAME Celery task id to be consumed again, with exactly one result.
+  # That needs a real broker and a real worker, so it is a separate job: the ordinary
+  # suite must not require Redis, and this one must not slow the other three down
+  # (it neither waits on them nor is waited on).
+  celery-redelivery:
+    name: celery redelivery
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      # Scratch Redis, dedicated to this test (its own database index 15 and a
+      # per-run queue name): the test kills worker processes and must not share a
+      # broker with anything else.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_REDIS_URL: redis://localhost:6379/15
+      DATABASE_URL: "sqlite+pysqlite:///:memory:"
+      MARKET_DATA_PROVIDER: synthetic
+      APP_ENVIRONMENT: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "pytest>=8.3"
+
+      # No coverage flags: this job measures one behaviour, and the 85.5% floor
+      # belongs to the suite that owns the whole application.
+      - name: Prove a lost child is redelivered under the same task id
+        run: pytest -o addopts= tests/test_celery_redelivery.py -v

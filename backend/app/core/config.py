@@ -202,23 +202,6 @@ class Settings(BaseSettings):
     # How the collector identifies Quant Lab containers among all NAS containers.
     quantlab_compose_project: str = "my-quant-lab"
 
-    # --- Temporary remote access (ADR-125) --------------------------------
-    # A Cloudflare Quick Tunnel, started on demand from the settings page and
-    # closed by hand, by its deadline, or by the API shutting down. It is off
-    # unless the deployment says otherwise, and it is *never* restored on
-    # restart: a public address must be an explicit act every time.
-    temporary_access_enabled: bool = True
-    # The compose service the tunnel may reach -- the bundled web container, and
-    # nothing else on the NAS. The API shares the frontend network, so it can
-    # resolve this name (ADR-125).
-    temporary_access_target_url: str = "http://quantlab-web:80"
-    temporary_access_cloudflared_bin: str = "cloudflared"
-    # 60 minutes by default; the ceiling is a day, the floor a minute.
-    temporary_access_max_duration_seconds: int = Field(default=3600, ge=60, le=86400)
-    # How long cloudflared gets to report a public address before the attempt is
-    # called a failure and its child is stopped.
-    temporary_access_start_timeout_seconds: int = Field(default=30, ge=5, le=300)
-
     # --- Celery delivery and run recovery (v2.6.0 P0) ----------------------
     # The worker now acks a task only after it returns (see `workers/celery_app.py`),
     # so a hard-killed worker redelivers its task instead of losing it. The two

@@ -792,16 +792,6 @@ re-imported automatically when a new commit lands):
 `GET /settings/ghostfolio/test` [已实现] —— 测试 Ghostfolio 连接。
 `GET /settings/ghostfolio/holdings` [已实现] —— Ghostfolio 持仓（只读）。
 
-### 临时远程访问（Cloudflare Quick Tunnel，ADR-125）
-
-`GET /settings/temporary-access` [已实现] —— 当前状态：`status`（`disabled`/`starting`/`active`/`stopping`/`error`）、
-`url`、`started_at`、`expires_at`、`remaining_seconds`、`max_duration_seconds`、`enabled`、`target_url`、`detail`。
-进程自己退出了、或者超过了期限，都在下一次读取时如实变回 `error`/`disabled`（ADR-125）。
-`POST /settings/temporary-access/start` [已实现] —— 启动隧道；已经在跑（`starting`/`active`）返回 **409**，
-`TEMPORARY_ACCESS_ENABLED=false` 返回 **403**，找不到 `cloudflared` 返回 **503**。
-返回时状态通常是 `starting`：地址要等 `cloudflared` 自己打印出来，下一次 `GET` 才可能变成 `active`。
-`POST /settings/temporary-access/stop` [已实现] —— 立刻终止隧道并清理状态；没有隧道时同样返回 `disabled`（幂等）。
-
 ## System Resources
 
 `GET /resources/current` [已实现] —— 最新采样：NAS 概览 + Quant Lab 份额 + 容器。

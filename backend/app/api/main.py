@@ -75,16 +75,12 @@ from app.api.routers import (
 from app.api.routers import (
     strategy_versions as strategy_versions_router,
 )
-from app.api.routers import (
-    temporary_access as temporary_access_router,
-)
 from app.api.routers.health import warm_dependency_probes
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.data.market_data_repo import SeriesNotResolved
 from app.data.run_recovery import recover_stuck_runs_in_new_session
 from app.infrastructure.rate_limit import limiter
-from app.infrastructure.temporary_access import manager as temporary_access_manager
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +111,6 @@ There is deliberately no broker order endpoint.
 async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("starting %s %s", settings.app_name, settings.app_version)
-    # A public tunnel must not outlive the process that opened it, and it is never
-    # restarted on its own: whatever a previous incarnation left behind is stopped
-    # here, before anything else can reach it, and the settings page has to ask
-    # again (ADR-125).
-    temporary_access_manager.reap_orphans()
     # Warm the dependency probes once, off the request path: the first probe in a
     # process pays for a cold resolver and the broker transport, which is not a
     # bound we control. Results are thrown away — `/health` still measures live
@@ -138,7 +129,6 @@ async def lifespan(app: FastAPI):
     ).start()
     yield
     logger.info("shutting down %s", settings.app_name)
-    temporary_access_manager.shutdown()
 
 
 def create_app() -> FastAPI:
@@ -282,7 +272,6 @@ def create_app() -> FastAPI:
         signals_router.router,
         notifications_router.router,
         settings_router.router,
-        temporary_access_router.router,
         importer_router.router,
         ai_router.router,
         sources_router.router,

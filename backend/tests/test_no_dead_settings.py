@@ -131,3 +131,24 @@ def test_the_knobs_that_did_nothing_are_gone() -> None:
     env = ENV_EXAMPLE.read_text(encoding="utf-8")
     for key in ("AI_PROVIDER_BASE_URL", "AI_PROVIDER_API_KEY", "AI_DEFAULT_MODEL"):
         assert key not in env, f"{key} promises a provider entry point that does not exist"
+
+
+def test_the_withdrawn_tunnel_kept_no_settings() -> None:
+    """ADR-125 was withdrawn in v2.6.0, and its five knobs went with it.
+
+    The tunnel left the runtime entirely (no manager, no router, no `cloudflared` in
+    the image), so a `temporary_access_*` field here would be a knob whose reader no
+    longer exists -- exactly the class this ADR is about.
+    """
+
+    config = CONFIG.read_text(encoding="utf-8")
+    for name in (
+        "temporary_access_enabled",
+        "temporary_access_target_url",
+        "temporary_access_cloudflared_bin",
+        "temporary_access_max_duration_seconds",
+        "temporary_access_start_timeout_seconds",
+    ):
+        assert not re.search(rf"^\s+{name}:\s", config, re.MULTILINE), (
+            f"Settings.{name} is back; the public tunnel it configured was withdrawn (ADR-125)"
+        )

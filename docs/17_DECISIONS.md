@@ -2546,6 +2546,12 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 
 ## ADR-125：公网门只能由人打开，而且只能开到本项目
 
+> **已废止：v2.6.0 的 7→3 容器精简撤销了这条决策。** `quantlab-web` 容器、镜像里的
+> `cloudflared`、三个 `/settings/temporary-access*` 端点、设置页那张卡片和五个
+> `TEMPORARY_ACCESS_*` 设置都已删除（`docker/Dockerfile.backend` 不再有 cloudflared
+> 阶段，`docker-compose.yml` 不再传这些变量）。下面保留的是当时的决策记录，不是当前的
+> 架构承诺；将来若需要临时公网入口，应重新评估，不要照本 ADR 恢复。
+
 - 背景：需要给测试、远程演示和排障一个临时的公网入口：设置页点一下，后端在当前 Docker 环境里用 `cloudflared` Quick Tunnel 把 Web 界面发布成 `https://xxxx.trycloudflare.com`，能复制地址、能立刻关闭、默认最多跑 60 分钟、`cloudflared` 异常退出要看得见、服务重启后**不得**自动把公网门重新打开。两条硬约束跟着它：隧道只许代理本项目自己的 Web 服务（不许顺着 api 容器的网络去碰 NAS 上的其他东西），前端不许执行命令、不许持有任何 Cloudflare 凭证。项目现有的 compose 是「两个文件部署」：`docker-compose.yml` 只引用镜像，`docker-compose.build.yml` 提供构建配方（`test_the_deployment_compose_file_never_builds_from_source`），并且 ADR-024 已经声明只有 `quantlab-docker-proxy` 碰 Docker Socket。
 
 - 决策：

@@ -185,44 +185,6 @@ RATE_LIMIT_PER_MINUTE=60
 - 通知渠道（Webhook / 飞书 / Telegram / PushPlus / Email）的密钥、AI API Key
   均**加密存储、只写入不回显**；审计日志也绝不包含密钥。
 
-### 临时远程访问（Cloudflare Quick Tunnel，ADR-125）
-
-设置页最下方有一张「临时远程访问」卡片：点「开启临时访问」后，后端在 `quantlab-api`
-容器里起一个 `cloudflared` Quick Tunnel，把**内置的 Web 容器**（`http://quantlab-web:80`）
-发布成一个临时的 `https://xxxx.trycloudflare.com`，地址显示在卡片上、可一键复制，
-「关闭临时访问」会让它立刻失效。它不需要 Cloudflare 账号，也不新开任何端口。
-
-- **默认最多运行 60 分钟**（`TEMPORARY_ACCESS_MAX_DURATION_SECONDS`，60–86400 秒），
-  到点自己 SIGTERM → SIGKILL 并回到「未开启」；也可以随时手动关闭。
-- **重启不恢复**：隧道状态只在 API 进程的内存里。容器/后端重启后卡片显示「未开启」，
-  要公网地址必须再手动点一次；重启时若发现上一次遗留的 `cloudflared` 子进程会把它清掉。
-- **同时只有一个**：已经开启时再点一次返回 409，不会叠出第二条隧道。
-- **整个功能可以关掉**：`TEMPORARY_ACCESS_ENABLED=false`，此后「开启」返回 403。
-- **安全边界**：隧道目标写死为内置 Web 容器（只有部署者能用
-  `TEMPORARY_ACCESS_TARGET_URL` 改，请求里无法指定，因此碰不到 NAS 上的其他服务）；
-  前端只调用自己的 API，不执行任何命令、也不持有 Cloudflare 凭证；不碰 Docker Socket，
-  不新增容器、不改数据库、不改现有认证（三个新端点与其它入口一样要 `Authorization: Bearer`）。
-  Quick Tunnel 本身**没有**访问控制 —— 谁拿到地址谁能打开登录页，所以卡片上写着请勿长期
-  公开分享；要真正拦住陌生人请设置 `API_AUTH_TOKEN`。
-- **日志**（`docker compose logs quantlab-api`）：`Tunnel start requested`、`Tunnel started`、
-  `Tunnel URL obtained`、`Tunnel stopped`、`Tunnel expired`、`Tunnel process exited
-  unexpectedly`、`Tunnel start failed`；不打印任何凭证，也不打印整个环境变量。
-
-**部署后怎么验证**（本节要求的验收流程）：
-
-```bash
-docker compose pull && docker compose up -d      # 升级到 v1.9.0；cloudflared 已在 api 镜像里
-# 从源码构建时用 overlay，且必须重建 api 镜像（cloudflared 是镜像内容）：
-# docker compose -f docker-compose.yml -f docker-compose.build.yml build quantlab-api
-```
-
-1. 浏览器打开 `http://<NAS-IP>:8081` → 设置 → 拉到底部「临时远程访问」→ 点「开启临时访问」。
-2. 卡片会先显示「正在启动……」（几秒内变成「● 已开启」并给出 `https://xxxx.trycloudflare.com`）。
-3. 用**另一台机器或手机流量**打开那个地址：应该看到正常的 My Quant Lab 登录/使用界面
-   （若设置了 `API_AUTH_TOKEN`，Web 容器会带上它，所以浏览器里照常可用）。
-4. 回到设置页点「关闭临时访问」→ 卡片回到「未开启」；再刷新第 3 步那个地址应立即失败。
-5. 不影响原有访问方式（`http://<NAS-IP>:8081` 一直可用），也不影响其他容器。
-
 ---
 
 ## 可选：从源码构建（开发者）

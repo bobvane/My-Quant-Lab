@@ -328,47 +328,25 @@ def test_paper_pnl_is_the_realized_result_not_the_spent_cash() -> None:
         assert "a.cash - a.net_deposits" not in text
 
 
-def test_the_settings_page_can_open_a_temporary_tunnel() -> None:
-    """The temporary tunnel is a card on the settings page, and nothing more.
+def test_the_withdrawn_public_tunnel_left_nothing_behind_in_the_ui() -> None:
+    """ADR-125 was withdrawn in v2.6.0; a half-deleted card is worse than none.
 
-    The page may ask the API to open and close a public door; it may never run the
-    command itself, hold a Cloudflare credential, or decide on its own how long the
-    door stays open (ADR-125).
+    v2.6.0 reduced the deployment to three containers and dropped the on-demand
+    Cloudflare Quick Tunnel with it: the API routes, the manager, the binary and the
+    settings page card are gone. What this pins is the failure mode of deleting only
+    one side — a page that keeps polling `/settings/temporary-access` after the API
+    stopped serving it shows a permanent "启动失败" the operator cannot clear.
     """
 
-    for field in (
-        "url: string | null",
-        "started_at: string | null",
-        "expires_at: string | null",
-        "remaining_seconds: number | null",
-        "target_url: string",
-    ):
-        assert field in API_TEXT, field
-    for method in (
-        "temporaryAccess: () => request<TemporaryAccessState>('/settings/temporary-access')",
-        "request<TemporaryAccessState>('/settings/temporary-access/start', { method: 'POST' })",
-        "request<TemporaryAccessState>('/settings/temporary-access/stop', { method: 'POST' })",
-    ):
-        assert method in API_TEXT, method
-
-    assert "<h3>临时远程访问</h3>" in SETTINGS
-    # Every state the API can report has something on screen.
-    for state in ("未开启", "正在启动", "● 已开启", "启动失败"):
-        assert state in SETTINGS, state
-    assert "正在等待 Cloudflare Tunnel 地址……" in SETTINGS
-    assert "{{ temporaryAccess.url }}" in SETTINGS
-    assert "剩余时间：{{ tunnelClock }}" in SETTINGS
-    # The address dies with the tunnel, and the page says so.
-    assert "此地址将在关闭或自动过期后失效" in SETTINGS
-    # The card goes through the API for everything, and fails quietly on its own.
-    assert "api.temporaryAccess()" in SETTINGS
-    assert "api.startTemporaryAccess()" in SETTINGS
-    assert "api.stopTemporaryAccess()" in SETTINGS
-    assert "api.temporaryAccess().catch(() => note('临时远程访问'))" in SETTINGS
-    # Copying is the browser's clipboard, not a shell command.
-    assert "await navigator.clipboard.writeText(url)" in SETTINGS
-    for forbidden in ("child_process", "require(", "exec("):
-        assert forbidden not in SETTINGS, forbidden
+    for text, name in ((API_TEXT, "frontend/src/api.ts"), (SETTINGS, "SettingsView.vue")):
+        for gone in (
+            "temporaryAccess",
+            "temporary-access",
+            "cloudflared",
+            "trycloudflare",
+            "临时远程访问",
+        ):
+            assert gone not in text, f"{name} still carries {gone!r}; ADR-125 was withdrawn"
 
 
 def test_the_interface_has_a_basic_mode_that_hides_engineering_readings() -> None:

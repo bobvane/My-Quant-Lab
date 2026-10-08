@@ -1,14 +1,6 @@
 # My Quant Lab — API / worker / scheduler share this image.
 # The entrypoint selects the role so a single build is reused everywhere.
 
-# cloudflared backs the on-demand "temporary remote access" tunnel (ADR-125). It
-# comes from the upstream image rather than a run-time download, so the binary in
-# production is exactly the one this file pins, and the API container needs no
-# network access to obtain it. Only the binary is copied: the API image stays the
-# final stage, and cloudflared gains no package manager, no shell tooling and no
-# privileges from this stage.
-FROM cloudflare/cloudflared:2026.9.3 AS cloudflared
-
 FROM python:3.12-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
@@ -32,11 +24,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY backend/ /app/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-# The tunnel binary is owned by root and executable by everyone: the API runs as
-# uid 10001 and must be able to exec it, but must not be able to replace it.
-COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared
 RUN chmod +x /usr/local/bin/entrypoint.sh \
-    && chmod 755 /usr/local/bin/cloudflared \
     && useradd --create-home --uid 10001 quantlab \
     && chown -R quantlab:quantlab /app
 

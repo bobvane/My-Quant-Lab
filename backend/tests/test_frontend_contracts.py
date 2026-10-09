@@ -959,6 +959,34 @@ def test_the_signal_page_can_be_pointed_at_one_strategy_version() -> None:
     assert ':to="signalsLink"' in STRATEGY_DETAIL
 
 
+def test_the_signal_page_can_ask_for_outcomes_to_be_backfilled() -> None:
+    """The page can ask for the pending outcome backfill instead of waiting (ADR-202).
+
+    Recording what price did after a signal is the ``quantlab.evaluate_signal_outcomes``
+    beat task's job — every 30 minutes in the composed stack. A single-container run has
+    no beat, so the page could only ever read 「已评估 0 条」 with no way to ask for the
+    work. The button calls the same idempotent function, so it cannot double-write, and
+    it reports each non-zero count instead of a bare 「完成」.
+    """
+
+    assert "evaluateSignalOutcomes" in API_TEXT
+    assert "/signals/outcomes/evaluate" in API_TEXT
+    assert "调的是同一个幂等" in API_TEXT
+
+    assert "evaluateOutcomes" in SIGNALS
+    assert "api.evaluateSignalOutcomes(versionScope.value ?? undefined)" in SIGNALS
+    # 计时器与按钮说的是同一件事：平时是调度器在做。
+    assert "每 30 分钟一次" in SIGNALS
+    # 每个非零计数都说清是什么，不说成一个笼统的「完成」。
+    assert "insufficient_data" in SIGNALS and "not_an_entry" in SIGNALS
+    assert "evaluationNote" in SIGNALS
+    # 没有等待中的信号时按钮不可用，并且说明为什么（ADR-138）。
+    assert "这个范围内还没有信号" in SIGNALS
+    assert "这个范围内的信号都已有结果" in SIGNALS
+    # 回填口径与统计口径是同一个常量，页面上不改窗口。
+    assert "回填窗口固定" in SIGNALS
+
+
 def test_the_typography_separates_a_conclusion_from_its_controls() -> None:
     """The audit (§18) asked to keep the look and rebuild the rank order (ADR-135).
 

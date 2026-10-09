@@ -1596,6 +1596,23 @@ export const api = {
       `/signals/scan?persist=${persist}`,
       { method: 'POST' },
     ),
+  // 结果回填平时是调度器每 30 分钟做一次的事；这个是「现在回填一次」，调的是同一个幂等
+  // 函数，所以在没有调度器的地方（本机单进程跑）也不会永远停在「已评估 0 条」（ADR-202）。
+  // 同一条信号不会被回填两次，按第二次只会报告没有新结果。
+  evaluateSignalOutcomes: (strategyVersionId?: number) =>
+    request<{
+      evaluated: number
+      insufficient_data: number
+      skipped: number
+      not_an_entry: number
+      bars_after: number
+      strategy_version_id: number | null
+    }>(
+      `/signals/outcomes/evaluate${
+        strategyVersionId != null ? `?strategy_version_id=${strategyVersionId}` : ''
+      }`,
+      { method: 'POST' },
+    ),
   paperAccounts: () => request<PaperAccount[]>('/paper/accounts'),
   /** One account with its money totals (cash, market value, unrealized, total equity). */
   paperAccount: (accountId: number) => request<PaperAccount>(`/paper/accounts/${accountId}`),

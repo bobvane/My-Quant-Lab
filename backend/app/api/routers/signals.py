@@ -229,6 +229,38 @@ def outcome_summary(
     }
 
 
+@router.post("/outcomes/evaluate", summary="Evaluate signals that have no outcome yet")
+def evaluate_outcomes(
+    db: Session = Depends(get_db),
+    strategy_version_id: int | None = None,
+) -> dict[str, Any]:
+    """Record what price did after each pending signal — now, not on schedule.
+
+    Backfilling is normally the ``quantlab.evaluate_signal_outcomes`` task on its
+    beat schedule (every 30 minutes). This is that same idempotent function called
+    on demand, so a run without a scheduler — one container, one process — is not
+    stuck reading 「已评估 0 条」 with no way to ask for the work. A second call
+    evaluates nothing and says so.
+
+    ``bars_after`` is deliberately not a parameter: the outcome summary publishes
+    ``DEFAULT_BARS_AFTER`` as the scope its numbers were measured over, and an
+    outcome recorded across a different window would make that published scope
+    untrue for the rows it describes.
+
+    ``strategy_version_id`` narrows the pass like the other outcome endpoints
+    (ADR-201): the counts describe the scope the caller asked about.
+    """
+
+    from app.simulation.outcome_evaluator import DEFAULT_BARS_AFTER, evaluate_pending_outcomes
+
+    counts = evaluate_pending_outcomes(db, strategy_version_id=strategy_version_id)
+    return {
+        **counts,
+        "bars_after": DEFAULT_BARS_AFTER,
+        "strategy_version_id": strategy_version_id,
+    }
+
+
 @router.get("/{signal_id}", response_model=SignalOut, summary="Get one signal")
 def get_signal(signal_id: int, db: Session = Depends(get_db)) -> SignalOut:
     row = db.get(Signal, signal_id)

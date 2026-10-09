@@ -28,7 +28,10 @@ DEFAULT_BARS_AFTER = 10
 
 
 def evaluate_pending_outcomes(
-    db: Session, *, bars_after: int = DEFAULT_BARS_AFTER
+    db: Session,
+    *,
+    bars_after: int = DEFAULT_BARS_AFTER,
+    strategy_version_id: int | None = None,
 ) -> dict[str, int]:
     """Evaluate signals that don't have an outcome yet.
 
@@ -46,10 +49,14 @@ def evaluate_pending_outcomes(
 
     Returns counts: {"evaluated": N, "insufficient_data": M, "skipped": K,
     "not_an_entry": E} — ``E`` counts the closing signals, which are not work.
+
+    ``strategy_version_id`` narrows the pass to one version, so a page pointed at
+    one strategy version can ask for its own backfill instead of reporting a
+    portfolio-wide one (the same reason `/signals` gained this filter, ADR-181).
     """
 
     # Find entry signals without an outcome row.
-    pending = db.scalars(
+    pending_stmt = (
         select(Signal)
         .outerjoin(SignalOutcome, SignalOutcome.signal_id == Signal.id)
         .where(
@@ -57,16 +64,22 @@ def evaluate_pending_outcomes(
             Signal.closes_direction.is_(None),
             Signal.direction.in_(("LONG", "SHORT")),
         )
-        .order_by(Signal.id)
-        .limit(200)
-    ).all()
-
-    not_an_entry = db.scalar(
+    )
+    not_an_entry_stmt = (
         select(func.count())
         .select_from(Signal)
         .outerjoin(SignalOutcome, SignalOutcome.signal_id == Signal.id)
         .where(SignalOutcome.id.is_(None), Signal.closes_direction.is_not(None))
     )
+    if strategy_version_id is not None:
+        pending_stmt = pending_stmt.where(Signal.strategy_version_id == strategy_version_id)
+        not_an_entry_stmt = not_an_entry_stmt.where(
+            Signal.strategy_version_id == strategy_version_id
+        )
+
+    pending = db.scalars(pending_stmt.order_by(Signal.id).limit(200)).all()
+
+    not_an_entry = db.scalar(not_an_entry_stmt)
 
     if not pending:
         return {

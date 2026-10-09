@@ -75,6 +75,7 @@ async function applyScopeChange() {
   showOutcomes.value = false
   outcomes.value = []
   outcomeSummary.value = null
+  outcomeNote.value = ''
   await loadScope()
   await load()
 }
@@ -141,6 +142,19 @@ async function scan() {
 const outcomes = ref<Array<Record<string, any>>>([])
 const outcomeSummary = ref<Record<string, any> | null>(null)
 const showOutcomes = ref(false)
+const evaluating = ref(false)
+const outcomeNote = ref('')
+
+async function fetchOutcomes() {
+  const [rows, summary] = await Promise.all([
+    api.signalOutcomes(50, symbolFilter.value.trim() || undefined, versionScope.value ?? undefined),
+    api
+      .signalOutcomeSummary(symbolFilter.value.trim() || undefined, versionScope.value ?? undefined)
+      .catch(() => null),
+  ])
+  outcomes.value = rows
+  outcomeSummary.value = summary
+}
 
 async function toggleOutcomes() {
   error.value = ''
@@ -148,19 +162,45 @@ async function toggleOutcomes() {
     showOutcomes.value = false
     return
   }
+  outcomeNote.value = ''
   try {
-    const [rows, summary] = await Promise.all([
-      api.signalOutcomes(50, symbolFilter.value.trim() || undefined, versionScope.value ?? undefined),
-      api
-        .signalOutcomeSummary(symbolFilter.value.trim() || undefined, versionScope.value ?? undefined)
-        .catch(() => null),
-    ])
-    outcomes.value = rows
-    outcomeSummary.value = summary
+    await fetchOutcomes()
     showOutcomes.value = true
   } catch (e) {
     error.value = (e as Error).message
   }
+}
+
+/** 「现在回填一次」：与定时任务调的是同一个函数，重复按不会写出第二条结果（ADR-202）。 */
+async function evaluateOutcomes() {
+  error.value = ''
+  info.value = ''
+  evaluating.value = true
+  try {
+    const result = await api.evaluateSignalOutcomes(versionScope.value ?? undefined)
+    await fetchOutcomes()
+    outcomeNote.value = evaluationNote(result)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    evaluating.value = false
+  }
+}
+
+/** 回填这一次到底做了什么：每个非零计数都说清是什么，不说成一个笼统的「完成」。 */
+function evaluationNote(result: Awaited<ReturnType<typeof api.evaluateSignalOutcomes>>): string {
+  const parts = [`本次回填：新增 ${result.evaluated} 条结果`]
+  if (result.insufficient_data > 0) {
+    parts.push(
+      `${result.insufficient_data} 条数据还不够（信号之后不足 ${result.bars_after} 根已收盘 K 线）`,
+    )
+  }
+  if (result.skipped > 0) parts.push(`${result.skipped} 条跳过（读不到该标的的 K 线序列）`)
+  if (result.not_an_entry > 0) {
+    parts.push(`${result.not_an_entry} 条是退出信号，不评估（退出之后价格怎么走是另一个问题）`)
+  }
+  if (parts.length === 1) parts.push('没有等待中的信号')
+  return parts.join('；')
 }
 
 async function showEvidence(row: SignalRecord) {
@@ -616,6 +656,26 @@ onMounted(async () => {
           {{ outcomeSummary.bars_after }} 根 K 线，或该标的还没有 K 线序列）</template
         >。
       </p>
+      <p v-if="outcomeSummary" class="muted">
+        回填平时由调度器做（每 30 分钟一次）。在没有调度器的地方（例如本机单进程跑），这里就是「现在回填一次」：
+        <button
+          class="ghost"
+          :disabled="evaluating || outcomeSummary.undecided === 0"
+          @click="evaluateOutcomes"
+        >
+          {{ evaluating ? '回填中…' : '现在回填一次' }}
+        </button>
+        <template v-if="outcomeSummary.undecided === 0">
+          ——这个按钮现在不可用：{{
+            outcomeSummary.signals === 0 ? '这个范围内还没有信号' : '这个范围内的信号都已有结果'
+          }}。
+        </template>
+        <span v-if="isAdvanced">
+          （服务端：<span class="mono">POST /signals/outcomes/evaluate</span>，与定时任务调同一个函数；
+          回填窗口固定 {{ outcomeSummary.bars_after }} 根 K 线，与上面的统计口径一致。）
+        </span>
+      </p>
+      <p v-if="outcomeNote" class="notice">{{ outcomeNote }}</p>
       <div v-if="outcomeSummary?.groups?.ALL" class="row" style="margin-bottom: 8px">
         <span class="stat small">整体胜率 {{ formatPercent(outcomeSummary.groups.ALL.win_rate) }}</span>
         <span class="muted">样本 {{ outcomeSummary.groups.ALL.count }}（已评估的信号）· 平均 {{ formatPercent(outcomeSummary.groups.ALL.avg_pnl_pct, 3) }} · 累计 {{ formatPercent(outcomeSummary.groups.ALL.total_pnl_pct, 3) }}</span>
@@ -677,7 +737,7 @@ onMounted(async () => {
         还没有信号结果<template v-if="outcomeSummary && outcomeSummary.signals > 0"
           >（共 {{ outcomeSummary.signals }} 条信号，还没有一条等到信号后
           {{ outcomeSummary.bars_after }} 根 K 线）</template
-        ><template v-else>（需价格前进后由定时任务回填）</template>。
+        ><template v-else>（信号发出后要有足够多的已收盘 K 线才能回填）</template>。
       </p>
     </div>
 

@@ -553,6 +553,7 @@ K 线、或那根 K 线没有收盘价）时，价格与盈亏字段为 `null`�
 `GET /signals/outcomes` [已实现] —— 信号结果跟踪（信号到底work不work）。
 `GET /signals/outcome-summary` [已实现]  (win rate / avg PnL grouped by direction/timeframe/state/strategy)
 `POST /signals/scan` [已实现] —— 干跑一次扫描；`persist=false`（默认）只算不落库，`persist=true` 才写入信号（去重）。
+`POST /signals/outcomes/evaluate` [已实现] —— 现在就把等待中的信号回填一次结果（ADR-202）。
 `POST /signals/{signal_id}/explain` [已实现] —— 解释一个已落库的信号。
 `POST /signals/{signal_id}/acknowledge` [已实现] —— 确认一个信号；已确认的信号不再被通知任务推送。
 
@@ -588,6 +589,18 @@ K 线、或那根 K 线没有收盘价）时，价格与盈亏字段为 `null`�
   `undecided` 就是还没等到这些 K 线、或该标的还没有 K 线序列的信号。
 - 未决信号既不计入胜率，也不算亏损 —— 它们只是还没有结果。
 - 状态字段 `evaluated` 已改名为 `decided`（同一个数字只留一个名字）。
+
+`/signals/outcomes/evaluate` 是那条回填的**入口**，不是第二套规则：它调用定时任务每 30 分钟
+调用的同一个幂等函数（`evaluate_pending_outcomes`），所以按第二次只会返回 `evaluated: 0`。
+它存在的理由是那种没有调度器的运行方式（单容器、单进程本机跑）—— 否则页面上永远只能是
+「已评估 0 条」，而没有任何办法请它去算（ADR-202）。响应：
+
+- `evaluated` / `insufficient_data` / `skipped` / `not_an_entry`：本次真正新增的结果数 /
+  信号之后不足 `bars_after` 根 K 线的数量 / 读不到该标的 K 线序列的数量 /
+  本次范围内被排除的平仓指令数量（退出不是一个持仓，回填它问的是另一个问题）。
+- `bars_after`：固定为 `DEFAULT_BARS_AFTER`，**不是**请求参数 —— 统计对外公布的窗口就是它，
+  用别的窗口回填会让那个已公布的口径对不上它描述的行。
+- `strategy_version_id`：与上面两个端点同口径的范围回显（`null` 为全部策略版本，ADR-201）。
 
 ## Feature Snapshots
 

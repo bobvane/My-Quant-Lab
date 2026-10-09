@@ -207,7 +207,13 @@ def monte_carlo(payload: MonteCarloRequest, db: Session = Depends(get_db)) -> Mo
             detail=f"backtest run {run.id} is '{run.status}'; only completed runs can be resampled",
         )
 
-    rows = db.scalars(select(BacktestTrade).where(BacktestTrade.backtest_run_id == run.id)).all()
+    # The seeded RNG draws by *index*, so the pool's order is part of the result: read it
+    # in a pinned order instead of trusting heap order (ADR-197).
+    rows = db.scalars(
+        select(BacktestTrade)
+        .where(BacktestTrade.backtest_run_id == run.id)
+        .order_by(BacktestTrade.id)
+    ).all()
     trades = [{"pnl": float(r.pnl)} for r in rows if r.pnl is not None]
     if not trades:
         raise HTTPException(

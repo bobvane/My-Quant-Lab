@@ -323,7 +323,14 @@ class BacktestRun(Base):
         back_populates="run", cascade="all, delete-orphan", uselist=False
     )
     trades: Mapped[list[BacktestTrade]] = relationship(
-        back_populates="run", cascade="all, delete-orphan"
+        back_populates="run",
+        cascade="all, delete-orphan",
+        # A run's trades are read by things that depend on their order: the detail
+        # endpoint and the trades CSV list them, the AI explanation reads the first 20,
+        # and Monte Carlo resamples their P&L by index. A plain SELECT promises no order
+        # at all, and PostgreSQL is free to hand back heap order, so the relationship
+        # pins it (ADR-197).
+        order_by="BacktestTrade.id",
     )
     # Which series the run was made on. BacktestRun stores only the id; reading a run's
     # symbol/timeframe needs the series (and its asset), so the relationship is eager to

@@ -243,7 +243,9 @@ API base: `/api/v1`
 - `method = trade_level_iid_bootstrap`：对历史的再抽样，**不是预测**。
 - 交易假定独立同分布，因此**低估**连续亏损概率；观测笔数 < 20 时写入 `warnings`。
 - 运行不存在 → 404；状态非 completed / 无已成交交易 / 无正初始资金 / runs 越界 → 422。
-- 相同 seed 必然得到相同分布；每次运行写审计事件 `monte_carlo_completed`。
+- 相同 seed 必然得到相同分布：重采样池按 `BacktestTrade.id` 升序读出（ADR-197），
+  而 RNG 是按**下标**取样的，所以池子的顺序本身就是结果的一部分；不排序列会让同一
+  个 seed 在同一份数据上给出不同的分布。每次运行写审计事件 `monte_carlo_completed`。
 - 年化周期取自该次回测的数据集周期，不接受调用方声明。
 
 ## Backtest 执行模型（仓位管理）

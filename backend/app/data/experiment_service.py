@@ -280,7 +280,13 @@ def _prepare_monte_carlo(
             ),
         )
 
-    rows = db.scalars(select(BacktestTrade).where(BacktestTrade.backtest_run_id == run.id)).all()
+    # Same pool, same order rule as the sibling endpoint: the seeded RNG draws by index,
+    # so an unordered SELECT would make an experiment unreproducible (ADR-197).
+    rows = db.scalars(
+        select(BacktestTrade)
+        .where(BacktestTrade.backtest_run_id == run.id)
+        .order_by(BacktestTrade.id)
+    ).all()
     trades = [{"pnl": float(row.pnl)} for row in rows if row.pnl is not None]
     if not trades:
         raise HTTPException(

@@ -295,6 +295,40 @@ def test_walk_forward_reports_each_window(sample_bars: pd.DataFrame) -> None:
         assert segment["test_start"] < segment["test_end"]
         assert "in_sample" in segment and "out_of_sample" in segment
     assert outcome["summary"]["mean_oos_return"] is not None
+    # Every window here is longer than the warm-up, so every window is evidence.
+    assert outcome["unmeasured_oos_windows"] == 0
+    assert outcome["measured_oos_windows"] == outcome["windows"]
+    assert outcome["warnings"] == []
+
+
+def test_walk_forward_does_not_count_a_window_it_never_measured(
+    sample_bars: pd.DataFrame,
+) -> None:
+    """A test segment shorter than the warm-up reports flat zeros, not a result.
+
+    Those zeros used to enter the mean, the count of positive windows and the
+    consistency ratio, so six windows that never got to trade could read as "no window
+    was positive" (ADR-055; the sensitivity sweep already excludes unmeasured points).
+    """
+
+    outcome = run_walk_forward(
+        _spec(),
+        sample_bars,
+        train_bars=200,
+        test_bars=5,
+        step=50,
+        strategy_version="t@1.0.0",
+    )
+    assert outcome["windows"] >= 2
+    assert all(s["out_of_sample"]["warmup_unmet"] for s in outcome["segments"])
+    assert outcome["unmeasured_oos_windows"] == outcome["windows"]
+    assert outcome["measured_oos_windows"] == 0
+    assert outcome["summary"]["mean_oos_return"] is None
+    assert outcome["summary"]["consistency"] is None
+    assert outcome["summary"]["positive_oos_windows"] == 0
+    assert any("warm-up" in w for w in outcome["warnings"]), outcome["warnings"]
+    # The per-window flag travels with the summary so a surface can label the row.
+    assert all("warmup_unmet" in s["out_of_sample"] for s in outcome["segments"])
 
 
 def test_walk_forward_with_insufficient_history_yields_no_windows(
@@ -336,6 +370,81 @@ def test_short_position_uses_inverted_risk_levels(sample_bars: pd.DataFrame) -> 
         if pnl_pct is not None and trade["exit_price"] is not None:
             expected = (trade["entry_price"] - trade["exit_price"]) / trade["entry_price"]
             assert pnl_pct == pytest.approx(expected, rel=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# Warm-up and the cost of the last bar (ENGINE_VERSION 1.2.0)
+# --------------------------------------------------------------------------- #
+def _always_true_short_dsl() -> dict:
+    dsl = copy.deepcopy(DSL)
+    dsl["market"] = {"asset_classes": ["stock"], "timeframes": ["1d"], "allow_short": True}
+    dsl["entry"] = {
+        "long": {"all": [{"op": "gt", "left": "close", "right": "close"}]},
+        # True on every bar, including the ones before any indicator exists.
+        "short": {"all": [{"op": "gt", "left": "close", "right": "0"}]},
+    }
+    dsl["exit"] = {
+        "long": {"any": [{"op": "lt", "left": "close", "right": "0"}]},
+        "short": {"any": [{"op": "lt", "left": "close", "right": "0"}]},
+    }
+    dsl["risk"] = {"stop_loss_atr_multiple": 1000.0}
+    return dsl
+
+
+def test_a_short_entry_cannot_fire_inside_the_warm_up(sample_bars: pd.DataFrame) -> None:
+    """The warm-up gate applies to shorts too.
+
+    The long side was guarded from the start while the short side was not, so a short
+    rule that reads a column no indicator has filled yet could enter on the very first
+    bars -- the one place the engine promises not to decide. The rule below is true on
+    every bar, so only the guard can keep the first decision out of the warm-up.
+    """
+
+    from app.features.engine import build_features
+
+    spec = StrategySpec.model_validate(_always_true_short_dsl())
+    warmup = build_features(sample_bars, spec=spec).warmup_bars
+    assert warmup > 0, "this test needs a warm-up to be able to fail"
+
+    result = run_backtest(spec, sample_bars, strategy_version="short-warmup@1.0.0")
+    entries = [s for s in result.signals if s.get("fill_time")]
+    assert entries, "the short rule is true on every bar, so it must enter at some point"
+
+    frame = sample_bars
+    first_decision = int(frame.index.get_indexer([pd.Timestamp(entries[0]["bar_time"])])[0])
+    assert first_decision >= warmup, (
+        f"the first short decision was taken on bar {first_decision} of a {warmup}-bar warm-up"
+    )
+
+
+def test_the_position_open_on_the_last_bar_pays_slippage(sample_bars: pd.DataFrame) -> None:
+    """The end-of-data liquidation is a fill like any other.
+
+    It used to be booked at the raw final close with a fee and no slippage, so a trade
+    that never got an exit signal was the only one in the run that could exit for free.
+    """
+
+    dsl = _always_true_short_dsl()
+    # Long-only, entering on every bar, never exiting: the run ends holding a position.
+    dsl["market"] = {"asset_classes": ["stock"], "timeframes": ["1d"]}
+    dsl["entry"] = {"long": {"all": [{"op": "gt", "left": "close", "right": "0"}]}}
+    dsl["exit"] = {"long": {"any": [{"op": "lt", "left": "close", "right": "0"}]}}
+    spec = StrategySpec.model_validate(dsl)
+    result = run_backtest(spec, sample_bars, strategy_version="open@1.0.0")
+
+    last_trades = [t for t in result.trades if t["exit_reason"] == "end_of_data"]
+    assert last_trades, "the strategy never exits on a rule, so the run must end in a position"
+    trade = last_trades[-1]
+
+    final_close = float(sample_bars["close"].iloc[-1])
+    slippage = 0.0005
+    assert trade["exit_price"] == pytest.approx(final_close * (1 - slippage), rel=1e-9)
+    assert trade["slippage"] > 0, "the liquidation must record the slippage it paid"
+    assert trade["exit_time"] == sample_bars.index[-1].isoformat()
+    # The trade's own P&L is what the equity curve ends on.
+    assert result.final_equity == pytest.approx(
+        float(spec.execution.initial_capital) + trade["pnl"], rel=1e-9
+    )
 
 
 # --------------------------------------------------------------------------- #

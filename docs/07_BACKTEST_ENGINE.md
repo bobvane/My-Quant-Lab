@@ -61,7 +61,9 @@ Stop/Take Profit 在同一根 K 线同时触发时，V1 使用保守规则并明
 止损与止盈的价位只在它们**已经存在**的那根 bar 上生效：bar i 的 high/low 与 bar i−1 收盘后
 算出的那条线比较（见 §2），所以建仓那根 bar 只受入场决策冻结的那条线约束。
 
-成交语义变化时 `ENGINE_VERSION` 必须提升（ADR-116 把 1.0.0 提到 1.1.0），并且 API 与
+成交语义变化时 `ENGINE_VERSION` 必须提升（ADR-116 把 1.0.0 提到 1.1.0；ADR-196 把 1.1.0
+提到 1.2.0：预热期闸门对多空两侧同时生效，且最后一根 bar 的强制平仓改走 `_settle`、开始付
+滑点），并且 API 与
 `BacktestRun` 记录的是真正跑过的版本号 —— 不是写死的字符串，因为 `result_hash` 里就钉着
 这个版本号，回显一个别的值等于把两份不同的计算说成同一份。
 
@@ -148,6 +150,8 @@ Train window
 ```
 
 报告每段 test period 的结果，而不是只展示总结果。
+
+一个测试段如果比策略的预热期还短，它**没有真正被测量**（引擎在预热期内不做任何决定，那一段是一条没有交易过的平线）。这种窗口按 ADR-196 的口径处理：逐段标 `warmup_unmet`，顶层分开报 `measured_oos_windows` / `unmeasured_oos_windows`，`mean_oos_return` 与 `consistency` 的**分母只算真正测过的窗口**（一个都没测过时为 `null`，不是 0），并用 `warnings` 说清有几个窗口被排除。同一个口径早已用在参数敏感性上（ADR-055 的 `warmup_unmet` 点不参与排名）。
 
 ## 11. OOS
 

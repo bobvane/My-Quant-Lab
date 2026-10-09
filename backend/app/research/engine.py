@@ -38,7 +38,11 @@ from app.strategies.executor import run_strategy
 
 __all__ = ["BacktestResult", "ENGINE_VERSION", "run_backtest"]
 
-ENGINE_VERSION = "1.1.0"
+# 1.2.0: two fill-semantics fixes. A short entry can no longer fire while the
+# strategy is still inside its warm-up (the long side was already guarded), and the
+# position still open on the last bar is liquidated through ``_settle`` like every
+# other exit, so it pays slippage instead of getting a free exit (docs/07 §4).
+ENGINE_VERSION = "1.2.0"
 BARS_PER_YEAR_DEFAULT = 252.0
 
 
@@ -364,7 +368,11 @@ def run_backtest(
         #    limit/stop order is placed and filled by step 2.5.
         if quantity == 0 and i + 1 < len(frame):
             want_long = bool(entry_flag[i]) and not _warmup(i, feature_frame.warmup_bars)
-            want_short = bool(entry_short_flag[i]) and spec.market.allow_short
+            want_short = (
+                bool(entry_short_flag[i])
+                and spec.market.allow_short
+                and not _warmup(i, feature_frame.warmup_bars)
+            )
             if want_long or want_short:
                 if order_type == "market":
                     fill_ref = float(opens[i + 1])
@@ -485,32 +493,16 @@ def run_backtest(
         )
 
     # Close any still-open position at the final close so results are comparable.
+    # It goes through ``_settle`` like every other exit: a position that is still open
+    # on the last bar pays the same fee and slippage as one that was closed by a rule,
+    # instead of exiting at the raw close with a cost-free fill (ENGINE_VERSION 1.2.0).
     if quantity > 0 and len(frame) > 0:
         last = len(frame) - 1
-        fill = float(closes[last])
-        fee = abs(fill * quantity) * fee_rate
-        cash += direction_sign(direction) * (fill * quantity) - fee
-        pnl = (fill - entry_price) * quantity * direction_sign(direction) - fee - entry_fee
-        trades.append(
-            _trade_record(
-                direction=direction,
-                symbol=symbol,
-                entry_time=index[entry_index],
-                entry_price=entry_price,
-                exit_time=index[last],
-                exit_price=fill,
-                quantity=quantity,
-                fees=fee + entry_fee,
-                slippage=entry_slippage,
-                pnl=pnl,
-                holding_bars=last - entry_index,
-                exit_reason="end_of_data",
-                ambiguous_fill=False,
-                strategy_version=strategy_version,
-                trade_high=trade_high,
-                trade_low=trade_low,
-                entry_stop=entry_stop,
-            )
+        _settle(
+            exit_index=last,
+            exit_price=float(closes[last]),
+            reason="end_of_data",
+            ambiguous=False,
         )
         equity_curve[-1]["equity"] = cash
         equity_curve[-1]["cash"] = cash

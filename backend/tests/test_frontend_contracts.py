@@ -1241,3 +1241,26 @@ def test_the_strategy_library_does_not_claim_it_is_empty() -> None:
     assert STRATEGIES.count("还没有策略。") == 1
     assert 'v-else class="muted">策略库还是空的' in STRATEGIES
     assert "<th>操作</th>" in STRATEGIES
+
+
+def test_a_window_that_was_never_measured_is_labelled_not_scored() -> None:
+    """A walk-forward / OOS window inside the warm-up must not print as a 0% result.
+
+    The backend now reports ``measured_oos_windows`` / ``unmeasured_oos_windows`` and a
+    per-window ``warmup_unmet`` flag, and excludes those zeros from the statistics. The
+    page has to follow: the denominator of "样本外为正的窗口" is the measured count, the
+    row says 未测量 instead of 0.00%, and the OOS table stops printing an unmeasured
+    column as a number (ADR-055 / ADR-196).
+    """
+
+    assert "unmeasuredWfWindows" in BACKTEST
+    assert "wfResult.measured_oos_windows ?? wfResult.windows" in BACKTEST
+    assert "wfResult.measured_oos_windows ?? 0" in BACKTEST
+    assert "seg.out_of_sample.warmup_unmet" in BACKTEST
+    assert "'未测量'" in BACKTEST
+    assert "oosResult.out_of_sample?.warmup_unmet" in BACKTEST
+    assert "没有超过策略的预热期" in BACKTEST
+    # A null ratio is 未知, never 0.00% and never the Latin "N/A" in a Chinese page.
+    assert "function wfPercent(" in BACKTEST
+    assert "wfPercent(wfResult.summary.mean_oos_return)" in BACKTEST
+    assert "wfPercent(wfResult.summary.consistency)" in BACKTEST

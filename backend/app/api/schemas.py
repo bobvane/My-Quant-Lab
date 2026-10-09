@@ -379,6 +379,12 @@ class WalkForwardOut(BaseModel):
     windows: int
     train_bars: int
     test_bars: int
+    # A window whose test segment never left the strategy's warm-up was not measured:
+    # its out-of-sample return is the flat 0.0 of a strategy that never traded, so it
+    # stays out of ``summary`` and is counted here instead (ADR-055 / ADR-196).
+    measured_oos_windows: int = 0
+    unmeasured_oos_windows: int = 0
+    warnings: list[str] = Field(default_factory=list)
     segments: list[dict[str, Any]]
     summary: dict[str, Any]
 

@@ -182,6 +182,18 @@ API base: `/api/v1`
 
 `POST /research/walk-forward` [已实现]
 
+参数：`strategy_version_id`、`symbol`、`timeframe`、`train_bars`（默认 250，≥60）、
+`test_bars`（默认 60，≥20）、`step`（≥1）。
+
+返回：`windows`（**窗口总数**，语义不变）、`train_bars`、`test_bars`、`segments`
+（每段含 `train`/`out_of_sample`，其中 `out_of_sample.warmup_unmet` 表示这一段没有真正被测量）、
+`summary`（`mean_is_return`/`mean_oos_return`/`positive_oos_windows`/`consistency`）、
+`measured_oos_windows`、`unmeasured_oos_windows`、`warnings`。
+
+语义（ADR-196）：测试段短于策略预热期的窗口没有被真正测量，逐段标 `warmup_unmet`，
+并且**不计入** `mean_oos_return` / `positive_oos_windows` / `consistency` 的分母；这几个读数
+在没有任何窗口被真正测量时是 `null`（不是 `0`），`warnings` 会说明有几个窗口落在预热期里。
+
 ## Parameter Sensitivity
 
 `POST /research/sensitivity` [已实现]

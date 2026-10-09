@@ -385,7 +385,13 @@ def test_walk_forward_endpoint(client) -> None:
         ).model_dump(mode="json"),
     )
     assert response.status_code == 200
-    assert response.json()["windows"] >= 1
+    body = response.json()
+    assert body["windows"] >= 1
+    # The response model must carry the honesty fields: without them a caller cannot
+    # tell a window that was measured from one that never traded (ADR-196).
+    assert body["measured_oos_windows"] + body["unmeasured_oos_windows"] == body["windows"]
+    assert isinstance(body["warnings"], list)
+    assert all("warmup_unmet" in segment["out_of_sample"] for segment in body["segments"])
 
 
 def test_signal_scan_and_preview(client) -> None:

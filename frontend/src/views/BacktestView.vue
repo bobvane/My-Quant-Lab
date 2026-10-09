@@ -807,6 +807,19 @@ async function runCompare() {
   }
 }
 
+const unmeasuredWfWindows = computed(
+  () => Number(wfResult.value?.unmeasured_oos_windows ?? 0),
+)
+
+/**
+ * Walk-Forward 汇总里的比例：没有窗口被真正测量时服务端给的是 `null`，这一格写「未知」
+ * —— 0% 会被读成"每个窗口都亏"，`N/A` 在中文界面里又等于没说（ADR-195 的同一口径）。
+ */
+function wfPercent(value: number | null | undefined): string {
+  if (value == null) return '未知'
+  return formatPercent(value)
+}
+
 async function runOos() {
   error.value = ''
   oosResult.value = null
@@ -2370,6 +2383,10 @@ onMounted(async () => {
         </span>
       </div>
       <div v-if="oosResult" style="margin-top: 10px">
+        <p v-if="oosResult.out_of_sample?.warmup_unmet" class="muted">
+          样本外那一段只有 {{ oosResult.out_of_sample_bars }} 根，没有超过策略的预热期，所以「样本外」那一列不是测出来的：
+          它是一段没有交易过的平线。请换更长的数据、缩短预热期，或把样本外比例调大再跑一次。
+        </p>
         <table>
           <thead>
             <tr>
@@ -2384,7 +2401,13 @@ onMounted(async () => {
               <td :class="oosResult.in_sample[k] != null ? toneOf(oosResult.in_sample[k]) : ''">
                 {{ formatMetric(k, oosResult.in_sample[k]) }}
               </td>
-              <td :class="oosResult.out_of_sample[k] != null ? toneOf(oosResult.out_of_sample[k]) : ''">
+              <td
+                v-if="oosResult.out_of_sample?.warmup_unmet"
+                class="muted"
+              >
+                未测量
+              </td>
+              <td v-else :class="oosResult.out_of_sample[k] != null ? toneOf(oosResult.out_of_sample[k]) : ''">
                 {{ formatMetric(k, oosResult.out_of_sample[k]) }}
               </td>
             </tr>
@@ -2441,16 +2464,21 @@ onMounted(async () => {
           <tbody>
             <tr>
               <td>{{ wfResult.windows }}</td>
-              <td>{{ formatPercent(wfResult.summary.mean_is_return) }}</td>
-              <td>{{ formatPercent(wfResult.summary.mean_oos_return) }}</td>
+              <td>{{ wfPercent(wfResult.summary.mean_is_return) }}</td>
+              <td>{{ wfPercent(wfResult.summary.mean_oos_return) }}</td>
               <td>
                 {{ wfResult.summary.positive_oos_windows }} /
-                {{ wfResult.windows }}
+                {{ wfResult.measured_oos_windows ?? wfResult.windows }}
               </td>
-              <td>{{ formatPercent(wfResult.summary.consistency) }}</td>
+              <td>{{ wfPercent(wfResult.summary.consistency) }}</td>
             </tr>
           </tbody>
         </table>
+        <p v-if="unmeasuredWfWindows" class="muted" style="margin-top: 8px">
+          {{ unmeasuredWfWindows }} 个窗口的测试段没有超过策略的预热期，所以那几段没有真正被测量：
+          它们的样本外收益是一段没交易过的平线（0）。上表的平均、为正的窗口数与一致性都只按
+          真正测过的 {{ wfResult.measured_oos_windows ?? 0 }} 个窗口算。
+        </p>
 
         <table v-if="wfResult.segments?.length" style="margin-top: 10px">
           <thead>
@@ -2468,8 +2496,12 @@ onMounted(async () => {
               <td class="muted">{{ String(seg.train_start).slice(0, 10) }} → {{ String(seg.train_end).slice(0, 10) }}</td>
               <td class="muted">{{ String(seg.test_start).slice(0, 10) }} → {{ String(seg.test_end).slice(0, 10) }}</td>
               <td>{{ formatPercent(seg.in_sample.total_return) }}</td>
-              <td :class="toneOf(seg.out_of_sample.total_return)">
-                {{ formatPercent(seg.out_of_sample.total_return) }}
+              <td :class="seg.out_of_sample.warmup_unmet ? 'muted' : toneOf(seg.out_of_sample.total_return)">
+                {{
+                  seg.out_of_sample.warmup_unmet
+                    ? '未测量'
+                    : formatPercent(seg.out_of_sample.total_return)
+                }}
               </td>
             </tr>
           </tbody>

@@ -93,9 +93,16 @@ def run_walk_forward(
             }
         )
 
+    # A window whose test slice never left the strategy's warm-up was not measured. Its
+    # out-of-sample return is the flat 0.0 of a strategy that never traded, so it must
+    # not enter the statistics -- otherwise an unmeasured window counts as evidence
+    # against consistency, and enough of them drag the mean towards zero (ADR-055).
+    measured = [s for s in segments if not s["out_of_sample"]["warmup_unmet"]]
+    unmeasured = [s for s in segments if s["out_of_sample"]["warmup_unmet"]]
+
     oos_returns = [
         s["out_of_sample"]["total_return"]
-        for s in segments
+        for s in measured
         if s["out_of_sample"]["total_return"] is not None
     ]
     is_returns = [
@@ -103,8 +110,24 @@ def run_walk_forward(
         for s in segments
         if s["in_sample"]["total_return"] is not None
     ]
+
+    warnings: list[str] = []
+    if unmeasured:
+        detail = (
+            "no window was measured"
+            if not measured
+            else f"{len(unmeasured)} of {len(segments)} were excluded from the statistics"
+        )
+        warnings.append(
+            f"{len(unmeasured)} window(s) had a test segment shorter than the strategy's "
+            f"warm-up: {detail}"
+        )
+
     return {
         "windows": len(segments),
+        "measured_oos_windows": len(measured),
+        "unmeasured_oos_windows": len(unmeasured),
+        "warnings": warnings,
         "train_bars": train_bars,
         "test_bars": test_bars,
         "segments": segments,
@@ -180,6 +203,10 @@ def _summarise(result: Any) -> dict[str, Any]:
         "win_rate": metrics.get("win_rate"),
         "number_of_trades": metrics.get("number_of_trades"),
         "result_hash": result.result_hash,
+        "warnings": list(result.warnings),
+        # A window shorter than the strategy's warm-up was never measured: its metrics
+        # are the flat zeros of a strategy that never got to trade (ADR-055).
+        "warmup_unmet": result.warmup_unmet,
     }
 
 

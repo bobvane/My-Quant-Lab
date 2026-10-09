@@ -21,6 +21,7 @@ __all__ = [
     "SUPPORTED_INDICATOR_TYPES",
     "build_features",
     "feature_input_hash",
+    "frame_content_hash",
     "normalise_indicator_type",
 ]
 
@@ -205,10 +206,24 @@ def _materialize_indicator(frame: pd.DataFrame, indicator: Any, parameters: dict
     raise ValueError(f"unsupported indicator type '{indicator.type}' (id '{column}')")
 
 
+def frame_content_hash(frame: pd.DataFrame, columns: tuple[str, ...] | None = None) -> str:
+    """Stable hash of a frame's content — the one content hash of this codebase.
+
+    ``columns`` names (and orders) the columns that count as content; ``None``
+    means "every column of the frame". Column order never changes the result, so
+    two frames agree exactly when they hold the same numbers in the same index
+    order — not when they agree to ten significant digits (ADR-198). Each value
+    is written in its shortest round-tripping form, which is why a price stored
+    at ``Numeric(20, 8)`` precision survives into the digest unchanged.
+    """
+
+    selected = frame[sorted(frame.columns)] if columns is None else frame[list(columns)]
+    hasher = hashlib.sha256()
+    hasher.update(selected.to_csv().encode("utf-8"))
+    return hasher.hexdigest()
+
+
 def feature_input_hash(bars: pd.DataFrame, columns: tuple[str, ...] = OHLCV_COLUMNS) -> str:
     """Stable hash of the raw input bars, stored as evidence with every run."""
 
-    hasher = hashlib.sha256()
-    payload = bars[list(columns)].to_csv(float_format="%.10g")
-    hasher.update(payload.encode("utf-8"))
-    return hasher.hexdigest()
+    return frame_content_hash(bars, columns)

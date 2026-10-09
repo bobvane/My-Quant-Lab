@@ -416,7 +416,7 @@ needs_user_decision = valid global code
 
 DSL 的 `Condition.left/right` 是 `str`（`dsl.py:73-74`），所以数字阈值必须**决定性地**序列化成字符串：
 
-- 规则：`"%.10g"` 格式（先例：`backend/app/features/engine.py:208-214` 用 `float_format="%.10g"` 做 `feature_input_hash`）。
+- 规则：`"%.10g"` 格式（这条规则只讲 spec 文本：编译器用十位有效数字把数字写成 `Condition.right`。内容哈希曾用同一格式做先例，ADR-198 起它们覆盖每一个已落库的位数，两者不再是同一个约定）。
 - `30` → `"30"`；`30.0` → `"30"`；`0.1` → `"0.1"`；`0.1234567890123` → `"0.123456789"`（`.10g` 取 10 位有效数字且**不保留尾零**；旧示例里的 `"0.1234567890"` 是笔误，已按上面的规范句修正）。
 - **不得**使用 `str()`（会给出 `"30.0"`）、`repr()`、`json.dumps()` 的默认浮点输出或本地化格式。
 
@@ -591,7 +591,7 @@ id = <type 小写去空格> + <period 或 period_ref 的十进制字面量>
 |---|---|---|---|
 | `immutable_hash` | `backend/app/data/strategy_service.py:58-64` | `{"version", "dsl"}`，`sort_keys=True, separators=(",", ":"), default=str` + SHA-256 | 「这一行版本有没有被改过？」 |
 | `result_hash` | `backend/app/research/engine.py:524-537` | 回测结果摘要（**不含 spec 正文/费用/sizing/fill_model**） | 「这次回测的结果是不是同一份？」 |
-| `feature_input_hash` | `backend/app/features/engine.py:208-214` | OHLCV，`float_format="%.10g"` | 「特征是在哪份输入上算的？」 |
+| `feature_input_hash` | `backend/app/features/engine.py:209-229` | OHLCV 五列（列序无关），每个值完整往返精度 | 「特征是在哪份输入上算的？」 |
 | `output_hash` / `source_snapshot_hash` / `cache_key` | `backend/app/ai/runtime.py:62-116` | AI 层输入输出与缓存身份 | 「AI 调用用了哪份输入？」 |
 
 **仓库此前不存在 spec 级编译哈希**（无 `spec_hash` / `compiled_hash`）。

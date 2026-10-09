@@ -386,9 +386,9 @@ execution: ExecutionSpec         # fill_model, entry_order_type, ..., sizing
 | 哈希 | 位置 | 覆盖什么 |
 |---|---|---|
 | `immutable_hash(dsl, version)` | `strategy_service.py:58-64` | 配置行的完整性（含版本号字符串） |
-| `dataset_hash`（= `series_content_hash`） | `market_data_repo.py:430-433`、`backtests.py:76` | 数据集内容 |
-| `feature_input_hash` | `features/engine.py:208-214` | **只 OHLCV** |
-| `_feature_hash` | `signal_engine.py:52-55` | **整帧**（与上一个口径不同） |
+| `dataset_hash`（= `series_content_hash`） | `market_data_repo.py:430-433`、`backtests.py:76` | 数据集内容（OHLCV 五列，每个值完整往返精度） |
+| `feature_input_hash` | `features/engine.py:226-229` | **只 OHLCV** |
+| `_feature_hash` | `signal_engine.py:52-59` | **整帧**（特征行的每一列，因为指标值也是内容） |
 | `result_hash` | `research/engine.py:524-537` | 结果摘要，**不含 spec 正文/费用/sizing/fill_model** |
 
 - 配置可复现靠 `BacktestRun` 的五列（`engine_version`/`feature_version`/`parameters_json`/`execution_model_json`/`dataset_hash`，`backtests.py:78-88`），不是靠 `result_hash`。
@@ -609,7 +609,7 @@ POST /ai/strategy/drafts/{draft_id}/compile
 | 机制 | 位置 | 做法 |
 |---|---|---|
 | `immutable_hash(dsl, version)` | `backend/app/data/strategy_service.py:58-64` | `json.dumps({...}, sort_keys=True, separators=(",", ":"), default=str)` 后 SHA-256 |
-| `feature_input_hash` | `backend/app/features/engine.py:208-214` | `bars[OHLCV_COLUMNS].to_csv(float_format="%.10g")` → SHA-256（**固定列序 + 固定浮点格式**） |
+| `feature_input_hash` | `backend/app/features/engine.py:209-229`（`frame_content_hash` + 五列投影） | `bars[OHLCV_COLUMNS].to_csv()` → SHA-256（**固定列序 + 每个值完整往返精度**，ADR-198） |
 | `result_hash` | `backend/app/research/engine.py:524-537` | 结果摘要 |
 | `output_hash` / `source_snapshot_hash` / `cache_key` | `backend/app/ai/runtime.py:62-116` | AI 层输入输出摘要与缓存键 |
 | `sorted({...})` 去重去序 | `backend/app/importer/dsl_builder.py:155-157` | 用排序后的列表避免 set 迭代序 |
@@ -1255,7 +1255,7 @@ Step 6  冻结与全量回归
 | `backend/app/capabilities.py:289-308` | `CapabilityReport.as_dict` | 编译报告里 capability 块的形状 |
 | `backend/app/capabilities.py:331-378` | `assess` | 三态判定 |
 | `backend/app/features/engine.py:69-214` | `build_features` | 指标/特征唯一实现 |
-| `backend/app/features/engine.py:208-214` | `feature_input_hash` | 固定列序 + 浮点格式的哈希先例 |
+| `backend/app/features/engine.py:209-229` | `frame_content_hash` / `feature_input_hash` | 内容哈希唯一实现（固定列序 + 完整往返精度；ADR-198） |
 | `backend/app/strategies/executor.py:154` | 执行入口 | 编译器的下游边界 |
 | `backend/app/research/engine.py:179` | `run_backtest` | 只吃 spec + bars |
 | `backend/app/research/engine.py:524-537` | `result_hash` | **不含 spec 正文** |

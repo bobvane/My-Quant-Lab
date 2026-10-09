@@ -139,9 +139,10 @@ def is_number(value: Any) -> bool:
 def number_literal(value: Any) -> str:
     """§10.4: one deterministic way for a number to become spec text.
 
-    `g` is the same conversion the existing canonical writer uses
-    (`app/features/engine.py:212` passes `float_format="%.10g"`), spelled with
-    the builtin `format` so the lint profile's UP031 stays quiet.
+    `g` is the conversion docs/29 §10.4 freezes for a numeric operand, spelled with
+    the builtin `format` so the lint profile's UP031 stays quiet. The same ten
+    significant digits used to govern the bar-content hashes too; those now cover
+    every stored digit (ADR-198), so this form is the compiler's convention alone.
     """
 
     return format(float(value), ".10g")

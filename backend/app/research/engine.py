@@ -42,7 +42,10 @@ __all__ = ["BacktestResult", "ENGINE_VERSION", "run_backtest"]
 # strategy is still inside its warm-up (the long side was already guarded), and the
 # position still open on the last bar is liquidated through ``_settle`` like every
 # other exit, so it pays slippage instead of getting a free exit (docs/07 §4).
-ENGINE_VERSION = "1.2.0"
+# 1.2.1: ``dataset_hash`` stopped rounding its input to ten significant digits, so
+# ``result_hash`` describes the data it actually ran on; the version moves with it
+# because the version string is part of the payload (ADR-198, docs/07 §4).
+ENGINE_VERSION = "1.2.1"
 BARS_PER_YEAR_DEFAULT = 252.0
 
 

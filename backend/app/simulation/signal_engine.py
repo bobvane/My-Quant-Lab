@@ -10,7 +10,6 @@ The AI layer may add an explanation afterwards. It can never change the state.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import logging
 import math
 from typing import Any
@@ -30,7 +29,7 @@ from app.domain.models import (
     Signal,
     StrategyVersion,
 )
-from app.features.engine import FEATURE_VERSION, build_features
+from app.features.engine import FEATURE_VERSION, build_features, frame_content_hash
 from app.strategies.executor import run_strategy
 
 logger = logging.getLogger(__name__)
@@ -50,9 +49,13 @@ class ScanResult(dict):
 
 
 def _feature_hash(bars: pd.DataFrame) -> str:
-    hasher = hashlib.sha256()
-    hasher.update(bars.to_csv(float_format="%.10g").encode("utf-8"))
-    return hasher.hexdigest()
+    """Content hash of the feature row behind a signal (ADR-198).
+
+    Every column counts here, indicator values included, because the hash is the
+    signal's evidence of *which* feature row produced it.
+    """
+
+    return frame_content_hash(bars)
 
 
 def load_portfolio_holdings() -> list[dict[str, Any]] | None:

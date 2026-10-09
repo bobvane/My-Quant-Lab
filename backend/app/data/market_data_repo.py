@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.models import Asset, MarketDataBar, MarketDataSeries
+from app.features.engine import OHLCV_COLUMNS, frame_content_hash
 
 __all__ = [
     "SeriesNotResolved",
@@ -428,6 +429,11 @@ def refresh_series_content_hash(db: Session, series: MarketDataSeries) -> str | 
 
 
 def series_content_hash(frame: pd.DataFrame) -> str:
-    hasher = hashlib.sha256()
-    hasher.update(frame.to_csv(float_format="%.10g").encode("utf-8"))
-    return hasher.hexdigest()
+    """Hash of a series' stored bars, over the same columns a run reads (ADR-198).
+
+    It delegates to the shared content hash so that ``refresh_series_content_hash`
+    above and ``POST /backtests`` cannot drift into two different statements about
+    the same bars: both cover exactly the five OHLCV columns.
+    """
+
+    return frame_content_hash(frame, OHLCV_COLUMNS)

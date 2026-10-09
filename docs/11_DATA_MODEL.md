@@ -31,7 +31,10 @@ asset_class VARCHAR(20) NOT NULL, -- stock, crypto, etf
 - is_archived
 
 `content_hash` is the SHA-256 of every *closed* bar of the series, in timestamp order,
-rendered exactly as `series_content_hash()` renders a frame (`frame.to_csv(float_format="%.10g")`).
+rendered by the shared content hash (`backend/app/features/engine.py:209-223
+frame_content_hash`) over the five OHLCV columns, each value written at its full
+round-tripping precision — so a price stored at `Numeric(20, 8)` precision is not rounded
+away (ADR-198).
 It is refreshed by `upsert_bars()` — the one function both bar-writing paths go through —
 so it always describes the rows that are actually stored (ADR-092). A series with no
 closed bars has `NULL`, which is not the same thing as the hash of an empty frame.

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import {
   ApiError,
   api,
@@ -56,10 +56,16 @@ interface PaperTradeRow {
   exit_time: string | null
   exit_price: number | null
   quantity: number | null
+  fees: number | null
+  slippage: number | null
   pnl: number | null
   r_multiple: number | null
   reason: string | null
   strategy_version: string | null
+  /** 产生这一笔的成交单；`null` 表示这笔成交没有对应的成交单。 */
+  order_id: number | null
+  /** 成交单是为哪条信号下的；`null` 表示这笔成交不是从信号来的（ADR-204）。 */
+  signal_id: number | null
 }
 
 /** 新账户的绑定方式：不绑定 / 从一次已完成的回测创建 / 直接绑定策略版本。 */
@@ -1539,7 +1545,8 @@ async function bootstrap() {
       <p class="muted">
         逐笔成交记录，来自后端的逐笔流水接口。R 倍数 = 这笔交易的盈亏 ÷ 它承担的风险
         （入场价与止损的距离）：1R 表示赚到的钱正好等于当初愿意亏的钱。还没平仓的那一笔没有
-        盈亏与 R 倍数，写「未知」，不写 0。
+        盈亏。费用与滑点是这一笔真实付出的成本，「来源」写的是产生这笔成交的信号编号。
+        读不到的量写「未知」，不写 0。
       </p>
       <p v-if="loadingTrades === tradesAccount" class="muted">读取中…</p>
       <table v-else-if="trades.length">
@@ -1557,6 +1564,7 @@ async function bootstrap() {
             <th>费用 / 滑点</th>
             <th>平仓原因</th>
             <th>策略版本</th>
+            <th>来源</th>
           </tr>
         </thead>
         <tbody>
@@ -1572,16 +1580,26 @@ async function bootstrap() {
               {{ t.pnl == null ? '未知（还没平仓）' : formatNumber(t.pnl) }}
             </td>
             <td>{{ t.r_multiple == null ? '未知' : formatNumber(t.r_multiple) }}</td>
-            <td class="muted">未知</td>
+            <td>{{ moneyOrUnknown(t.fees) }} / {{ moneyOrUnknown(t.slippage) }}</td>
             <td>{{ t.reason || '—' }}</td>
             <td>{{ t.strategy_version || '—' }}</td>
+            <td>
+              <RouterLink v-if="t.signal_id != null" :to="`/signals?signal_id=${t.signal_id}`">
+                信号 #{{ t.signal_id }}
+              </RouterLink>
+              <span v-else class="muted">没有来源</span>
+            </td>
           </tr>
         </tbody>
       </table>
       <p v-else class="muted">这个账户还没有成交记录。执行一条信号之后，这里会出现逐笔明细。</p>
       <p v-if="trades.length" class="muted" style="margin-top: 8px">
-        费用与滑点这一列写「未知」：逐笔流水不返回它们（费用/滑点记在成交单上，本页的接口层没有
-        暴露订单明细，这一页也不会编一个 0 出来）。执行信号之后的「上次成交」里有那一次真实的费用与滑点。
+        「来源」一列是从逐笔流水本身读出来的：成交单记着它当时为哪条信号下的，一笔成交记着
+        自己的成交单，所以这里写的是那一笔自己的来历，不是把账户里所有成交都倒推给某一版策略
+        （归因仍然按账户，ADR-114）。点「信号 #N」会打开那条信号的详情卡，看它当时为什么发出。
+        「没有来源」表示这笔成交不是从信号来的。费用是这一笔真实付出的手续费（平仓之后包含
+        进场与出场两次），滑点是成交价与当时基准价的差；R 倍数对模拟盘一律写「未知」，因为纸面
+        引擎不设止损、也就没有「当初愿意亏多少」这个基准，这一页不会编一个数出来。
       </p>
     </div>
 

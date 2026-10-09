@@ -138,3 +138,14 @@ def test_paper_orders_and_trades_are_queryable(client, db_session) -> None:
 
     trades = client.get(f"/api/v1/paper/trades?account_id={account['id']}").json()
     assert len(trades) == 1 and trades[0]["account_id"] == account["id"]
+    # ADR-204: the row carries the order and the signal it came from, plus the costs the
+    # engine already stored, so a fill can be traced back instead of showing 「未知」.
+    assert trades[0]["order_id"] == order_id
+    assert trades[0]["signal_id"] == signal.id
+    assert trades[0]["fees"] is not None and trades[0]["slippage"] is not None
+
+    account_trades = client.get(f"/api/v1/paper/accounts/{account['id']}/trades").json()
+    assert len(account_trades) == 1
+    assert "account_id" not in account_trades[0]
+    assert account_trades[0]["order_id"] == order_id
+    assert account_trades[0]["signal_id"] == signal.id

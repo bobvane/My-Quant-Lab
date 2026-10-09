@@ -1441,3 +1441,58 @@ def test_a_signal_can_be_handed_to_a_paper_account_by_url() -> None:
     assert '<p v-if="handedNote" class="notice">{{ handedNote }}</p>' in PAPER
     # UI_SPEC's dead-button rule: the page says why it did not do something for you.
     assert "没有替你选账户" in PAPER
+
+
+def test_a_paper_fill_can_be_handed_to_the_signal_it_came_from() -> None:
+    """A trade row can point back at its signal, and states its costs (ADR-204).
+
+    The reverse of ADR-203, and the last hop of the chain: the trade list used to print
+    「未知」 for fees and slippage (stored on the row all along) and admitted the page
+    could not say where a fill came from. The row now publishes its own order, signal and
+    costs, and the signals page opens the named signal's detail card -- reading it, never
+    trading it. ADR-114's account-level attribution is refined, not replaced, and the
+    copy says so: a version is still a label, and 「没有来源」 is a real answer.
+    """
+
+    # The API comment must keep telling the truth about what the row carries.
+    assert "ADR-114, refined by" in API_TEXT
+    assert "`signal_id: null` means the fill did not come from a signal" in API_TEXT
+
+    # Both payloads answer the same questions; only the cross-account one repeats account.
+    assert "order_id: number | null" in PAPER
+    assert "signal_id: number | null" in PAPER
+    assert "fees: number | null" in PAPER
+    assert "slippage: number | null" in PAPER
+
+    # Costs come from the row, and the source column links to the signal (ADR-204).
+    assert "<th>来源</th>" in PAPER
+    assert "moneyOrUnknown(t.fees)" in PAPER
+    assert "moneyOrUnknown(t.slippage)" in PAPER
+    assert "`/signals?signal_id=${t.signal_id}`" in PAPER
+    assert "信号 #{{ t.signal_id }}" in PAPER
+    assert "没有来源" in PAPER
+    # The apology for the missing costs is gone, and attribution still says 按账户.
+    assert "本页的接口层没有" not in PAPER
+    assert "归因仍然按账户" in PAPER
+    # A metric the engine never writes is unknown, not 0 (ADR-112).
+    assert "R 倍数对模拟盘一律写「未知」" in PAPER
+
+    # The signals page reads the named signal by id and opens its card.
+    assert "function requestedSignalId()" in SIGNALS
+    handed_body = _function_body(SIGNALS, "loadHandedSignal")
+    assert "await api.signal(id)" in handed_body
+    assert "handedSignal.value = row" in handed_body
+    assert "await showDetail(row)" in handed_body
+    assert "await loadHandedSignal()" in SIGNALS
+    assert "HANDED_SIGNAL_OUT_OF_LIST" in SIGNALS
+    assert "e instanceof ApiError && e.status === 404" in SIGNALS
+    assert "这一页是跟着一笔模拟成交进来的" in SIGNALS
+    # Reading a hand-off never trades, and neither does this one.
+    assert "executeSignal" not in handed_body
+    assert "acknowledgeSignal" not in handed_body
+    # The list is not silently filtered to the handed signal: it is read back separately.
+    assert "按 id 单独读回这条信号" in SIGNALS
+
+    # The strategy page's attribution sentence names where a fill came from.
+    assert "ADR-204" in STRATEGY_DETAIL
+    assert "归因按<strong>账户</strong>" in STRATEGY_DETAIL

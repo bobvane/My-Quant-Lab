@@ -527,8 +527,9 @@ onMounted(load)
       <section class="card">
         <h3>模拟验证（Paper Trading）</h3>
         <p class="muted">
-          归因按<strong>账户</strong>：模拟验证的交易只带账户与它当时的策略版本名，系统不会把一笔成交倒推给
-          某个策略，所以这里列的是「绑定到这个策略的账户」，而不是声称这些盈亏都属于这个策略。
+          归因按<strong>账户</strong>：模拟验证的交易只带账户与它当时的策略版本名，所以这里列的是「绑定到这个
+          策略的账户」，而不是声称这些盈亏都属于这个策略。逐笔流水会写出每一笔成交自己的来历（产生它的
+          成交单与信号编号，ADR-204）——那是那一行的出处，不是把这个账户的盈亏算到这个策略头上。
         </p>
         <p v-if="!myAccounts.length" class="muted">
           还没有绑定到这个策略的模拟账户。在 <RouterLink to="/paper">模拟验证</RouterLink>

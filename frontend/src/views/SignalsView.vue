@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { api, type ExplainResult, type SignalRecord } from '@/api'
+import { ApiError, api, type ExplainResult, type SignalRecord } from '@/api'
 import { formatDateTime, formatNumber, formatPercent, signalDirection, toneOf } from '@/format'
 import { isAdvanced } from '@/mode'
 // 状态、周期、分组键都走同一个词汇表：同一件事在这一页只说一种话（ADR-127，评审 §12／§14）。
@@ -501,9 +501,58 @@ function paperLink(row: SignalRecord): { path: string; query: Record<string, str
   }
 }
 
+// ---- 地址里点名的一条信号（ADR-204）------------------------------------------
+//
+// `/signals?signal_id=12` 是「模拟盘的逐笔流水」那一列「来源」写出来的地址：一笔成交
+// 回到产生它的那条信号。这一页不猜、也不重新筛列表：它按 id 单独读回那条信号，直接把
+// 详情卡打开（列表仍是当前筛选范围），读不到就照实说读不到（ADR-112、ADR-138）。
+
+const handedSignal = ref<SignalRecord | null>(null)
+const handedSignalGone = ref(false)
+const handedNote = ref('')
+
+const HANDED_SIGNAL = '这一页是跟着一笔模拟成交进来的：下面打开的详情卡就是这条信号。'
+const HANDED_SIGNAL_OUT_OF_LIST = '这条信号不在上面的列表里（列表是这一页当前的筛选范围），详情卡按地址里的编号单独读了回来。'
+
+/** 地址里的信号号只在它是正整数时才算数：手改的地址不改变这一页在问什么。 */
+function requestedSignalId(): number | null {
+  const raw = Number(route.query.signal_id)
+  return Number.isInteger(raw) && raw > 0 ? raw : null
+}
+
+async function loadHandedSignal() {
+  const id = requestedSignalId()
+  handedSignal.value = null
+  handedSignalGone.value = false
+  handedNote.value = ''
+  if (id === null) return
+  try {
+    const row = await api.signal(id)
+    handedSignal.value = row
+    const listed = signals.value.some((candidate) => candidate.id === id)
+    handedNote.value = listed ? HANDED_SIGNAL : `${HANDED_SIGNAL}${HANDED_SIGNAL_OUT_OF_LIST}`
+    await showDetail(row)
+  } catch (e) {
+    handedSignalGone.value = e instanceof ApiError && e.status === 404
+    handedNote.value = handedSignalGone.value
+      ? `信号 #${id} 在服务端已经没有了（可能已被删除）。`
+      : `读不到信号 #${id}：${(e as Error).message}`
+  }
+}
+
+// 从「模拟盘」点过来时组件可能被复用，`onMounted` 不会再跑一次（和 ADR-201 同一条理由）。
+watch(
+  () => route.query.signal_id,
+  () => {
+    if (requestedSignalId() === handedSignal.value?.id) return
+    void loadHandedSignal()
+  },
+)
+
 onMounted(async () => {
   await loadScope()
   await load()
+  await loadHandedSignal()
 })
 </script>
 
@@ -521,6 +570,14 @@ onMounted(async () => {
       <span v-if="isAdvanced">
         （服务端过滤：<span class="mono">GET /signals?strategy_version_id=</span>，
         结果追踪也是同一个范围 —— 不是把这一页取回来的 {{ signals.length }} 条本地筛一遍。）
+      </span>
+    </p>
+
+    <p v-if="handedNote" class="notice">
+      {{ handedNote }}
+      <span v-if="isAdvanced">
+        （地址里的编号：<span class="mono">GET /signals?signal_id=</span>，
+        按 id 单独读回这条信号 —— 不复用下面列表里的那一条。）
       </span>
     </p>
 

@@ -1636,9 +1636,10 @@ export const api = {
     }>(`/paper/accounts/${accountId}/equity`),
   paperPositions: (accountId: number) =>
     request<PaperPosition[]>(`/paper/accounts/${accountId}/positions`),
-  // Trades carry the strategy *version label* they came from, not a strategy id:
-  // attribution is per account, and this page says so rather than inventing a join
-  // the backend does not make (ADR-114).
+  // Each row names the order that produced it and the signal that order was executed
+  // for — the row's own provenance over stored facts, not a strategy-level join the
+  // backend does not make. Attribution is still per account (ADR-114, refined by
+  // ADR-204), and `signal_id: null` means the fill did not come from a signal.
   paperTrades: (accountId?: number, limit = 100) =>
     request<Array<Record<string, any>>>(
       `/paper/trades?limit=${limit}${accountId ? `&account_id=${accountId}` : ''}`,

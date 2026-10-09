@@ -552,6 +552,56 @@ def account_performance(account_id: int, db: Session = Depends(get_db)) -> dict:
     }
 
 
+def _trade_payloads(db: Session, rows: list[PaperTrade], *, with_account: bool) -> list[dict]:
+    """The trade rows, each one naming the order and the signal behind it (ADR-204).
+
+    A trade stores the order that produced it and an order stores the signal it was
+    executed for, so "where did this fill come from?" is answerable from stored facts
+    instead of a guess about which strategy it "must have" belonged to. Attribution
+    stays per account (ADR-114): this publishes the row's own provenance, not a
+    strategy-level join. The signal is read back in one query for the whole page, and
+    `None` means the order did not come from a signal — not that it came from one we
+    could not find.
+    """
+
+    order_ids = [int(t.order_id) for t in rows if t.order_id is not None]
+    signal_by_order: dict[int, int | None] = {}
+    if order_ids:
+        signal_by_order = {
+            int(order_id): (int(signal_id) if signal_id is not None else None)
+            for order_id, signal_id in db.execute(
+                select(PaperOrder.id, PaperOrder.signal_id).where(PaperOrder.id.in_(order_ids))
+            ).all()
+        }
+    payloads: list[dict] = []
+    for t in rows:
+        order_id = int(t.order_id) if t.order_id is not None else None
+        payload: dict = {"id": t.id}
+        if with_account:
+            payload["account_id"] = t.account_id
+        payload.update(
+            {
+                "asset_id": t.asset_id,
+                "direction": t.direction,
+                "entry_time": t.entry_time,
+                "entry_price": float(t.entry_price),
+                "exit_time": t.exit_time,
+                "exit_price": float(t.exit_price) if t.exit_price is not None else None,
+                "quantity": float(t.quantity),
+                "fees": float(t.fees) if t.fees is not None else None,
+                "slippage": float(t.slippage) if t.slippage is not None else None,
+                "pnl": float(t.pnl) if t.pnl is not None else None,
+                "r_multiple": float(t.r_multiple) if t.r_multiple is not None else None,
+                "reason": t.reason,
+                "strategy_version": t.strategy_version,
+                "order_id": order_id,
+                "signal_id": signal_by_order.get(order_id) if order_id is not None else None,
+            }
+        )
+        payloads.append(payload)
+    return payloads
+
+
 @router.get("/accounts/{account_id}/trades", summary="List paper trades")
 def account_trades(account_id: int, db: Session = Depends(get_db)) -> list[dict]:
     account = db.get(PaperAccount, account_id)
@@ -560,22 +610,7 @@ def account_trades(account_id: int, db: Session = Depends(get_db)) -> list[dict]
     rows = db.scalars(
         select(PaperTrade).where(PaperTrade.account_id == account_id).order_by(PaperTrade.id)
     ).all()
-    return [
-        {
-            "id": t.id,
-            "asset_id": t.asset_id,
-            "direction": t.direction,
-            "entry_time": t.entry_time,
-            "entry_price": float(t.entry_price),
-            "exit_time": t.exit_time,
-            "exit_price": float(t.exit_price) if t.exit_price is not None else None,
-            "quantity": float(t.quantity),
-            "pnl": float(t.pnl) if t.pnl is not None else None,
-            "reason": t.reason,
-            "strategy_version": t.strategy_version,
-        }
-        for t in rows
-    ]
+    return _trade_payloads(db, list(rows), with_account=False)
 
 
 @router.get(
@@ -644,24 +679,7 @@ def list_trades(
     if account_id is not None:
         stmt = stmt.where(PaperTrade.account_id == account_id)
     rows = db.scalars(stmt.order_by(PaperTrade.id.desc()).limit(limit)).all()
-    return [
-        {
-            "id": t.id,
-            "account_id": t.account_id,
-            "asset_id": t.asset_id,
-            "direction": t.direction,
-            "entry_time": t.entry_time,
-            "entry_price": float(t.entry_price),
-            "exit_time": t.exit_time,
-            "exit_price": float(t.exit_price) if t.exit_price is not None else None,
-            "quantity": float(t.quantity),
-            "pnl": float(t.pnl) if t.pnl is not None else None,
-            "r_multiple": float(t.r_multiple) if t.r_multiple is not None else None,
-            "reason": t.reason,
-            "strategy_version": t.strategy_version,
-        }
-        for t in rows
-    ]
+    return _trade_payloads(db, list(rows), with_account=True)
 
 
 @router.post(

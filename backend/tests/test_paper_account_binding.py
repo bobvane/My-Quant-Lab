@@ -26,7 +26,9 @@ from sqlalchemy import select
 from app.data.market_data_repo import frame_to_bars, upsert_bars
 from app.domain.models import (
     Asset,
+    AuditLog,
     BacktestRun,
+    ExperimentResult,
     MarketDataSeries,
     MarketDataSource,
     PaperAccount,
@@ -34,6 +36,7 @@ from app.domain.models import (
     PaperTrade,
     Signal,
     Strategy,
+    StrategyExperiment,
     StrategyVersion,
 )
 
@@ -110,6 +113,44 @@ def _seed_run(
     db.add(run)
     db.flush()
     return run
+
+
+def _seed_experiment(
+    db,
+    *,
+    version: StrategyVersion,
+    run: BacktestRun | None = None,
+    name: str = "Exp",
+    kind: str = "backtest",
+    parameters: dict | None = None,
+) -> StrategyExperiment:
+    """An experiment, with its run lineage recorded the way production records it.
+
+    A `StrategyExperiment` has no `backtest_run_id` column: the link to a run lives on
+    the `ExperimentResult` rows (ADR-054/055/183), so a run passed here becomes one.
+    """
+
+    experiment = StrategyExperiment(
+        name=name,
+        kind=kind,
+        status="completed",
+        strategy_version_id=version.id,
+        parameters_json={"fast": 10, "slow": 30} if parameters is None else parameters,
+        request_json={},
+    )
+    db.add(experiment)
+    db.flush()
+    if run is not None:
+        db.add(
+            ExperimentResult(
+                experiment_id=experiment.id,
+                kind="point",
+                backtest_run_id=run.id,
+                payload_json={},
+            )
+        )
+        db.flush()
+    return experiment
 
 
 def _seed_account(db, *, cash: float = 10_000.0, name: str = "PA") -> PaperAccount:
@@ -276,6 +317,142 @@ def test_a_version_from_another_strategy_is_refused(client, db_session):
 
     assert response.status_code == 422
     assert "does not own strategy version" in response.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# The experiment binding: which record the user actually acted on (ADR-209)
+# --------------------------------------------------------------------------- #
+
+
+def test_an_account_opened_from_an_experiment_remembers_which_experiment(client, db_session):
+    strategy, version = _seed_strategy(db_session, slug="exp-binding")
+    asset = _seed_asset(db_session, symbol="EXPBIND")
+    series = _seed_bars(db_session, asset, [100.0])
+    run = _seed_run(db_session, version=version, series=series)
+    experiment = _seed_experiment(db_session, version=version, run=run)
+    db_session.commit()
+
+    body = _create(
+        client,
+        name="From an experiment",
+        initial_cash=7_000,
+        backtest_run_id=run.id,
+        experiment_id=experiment.id,
+    )
+
+    assert body["experiment_id"] == experiment.id
+    assert body["backtest_run_id"] == run.id
+    assert body["strategy_version_id"] == version.id
+    assert body["strategy_id"] == strategy.id
+
+    stored = db_session.get(PaperAccount, body["id"])
+    assert stored.experiment_id == experiment.id
+    # Recording the origin changed nothing about the origin itself.
+    assert db_session.get(StrategyExperiment, experiment.id) is not None
+
+    assert _account_body(client, body["id"])["experiment_id"] == experiment.id
+
+    # The audit event names it too, so the provenance is not only in one place.
+    audit = db_session.scalars(
+        select(AuditLog).where(
+            AuditLog.entity_type == "paper_account",
+            AuditLog.entity_id == str(body["id"]),
+        )
+    ).one()
+    assert audit.payload_json is not None
+    assert audit.payload_json["experiment_id"] == experiment.id
+
+
+def test_an_account_not_opened_from_an_experiment_says_so(client, db_session):
+    _strategy, version = _seed_strategy(db_session, slug="exp-absent")
+    asset = _seed_asset(db_session, symbol="EXPABSENT")
+    series = _seed_bars(db_session, asset, [100.0])
+    run = _seed_run(db_session, version=version, series=series)
+    db_session.commit()
+
+    body = _create(client, name="From a backtest only", initial_cash=1_000, backtest_run_id=run.id)
+
+    # `null` is the honest answer, not a zero and not a guess.
+    assert body["experiment_id"] is None
+
+
+def test_an_experiment_binding_alone_carries_its_version_and_parameters(client, db_session):
+    _strategy, version = _seed_strategy(db_session, slug="exp-only")
+    asset = _seed_asset(db_session, symbol="EXPONLY")
+    series = _seed_bars(db_session, asset, [100.0])
+    run = _seed_run(db_session, version=version, series=series, parameters={"fast": 7, "slow": 21})
+    experiment = _seed_experiment(
+        db_session, version=version, run=run, parameters={"fast": 7, "slow": 21}
+    )
+    db_session.commit()
+
+    body = _create(client, name="Experiment only", initial_cash=2_000, experiment_id=experiment.id)
+
+    assert body["experiment_id"] == experiment.id
+    assert body["strategy_version_id"] == version.id
+    assert body["parameters"] == {"fast": 7, "slow": 21}
+    # The experiment names a run, but the caller did not open the account from that run;
+    # copying it here would claim a binding nobody asked for.
+    assert body["backtest_run_id"] is None
+
+
+def test_an_account_cannot_name_an_experiment_that_ran_a_different_backtest(client, db_session):
+    _strategy, version = _seed_strategy(db_session, slug="exp-mismatch")
+    asset = _seed_asset(db_session, symbol="EXPMISMATCH")
+    series = _seed_bars(db_session, asset, [100.0])
+    mine = _seed_run(db_session, version=version, series=series)
+    other = _seed_run(db_session, version=version, series=series)
+    experiment = _seed_experiment(db_session, version=version, run=mine)
+    db_session.commit()
+
+    response = client.post(
+        "/api/v1/paper/accounts",
+        json={
+            "name": "Contradiction",
+            "initial_cash": 1_000,
+            "backtest_run_id": other.id,
+            "experiment_id": experiment.id,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        f"experiment {experiment.id} ran backtest run {mine.id}, not {other.id}"
+    )
+
+
+def test_binding_to_an_experiment_that_does_not_exist_is_refused(client) -> None:
+    response = client.post(
+        "/api/v1/paper/accounts",
+        json={"name": "Missing experiment", "initial_cash": 1_000, "experiment_id": 999_999},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "experiment 999999 not found"
+
+
+def test_deleting_the_experiment_clears_the_reference_and_keeps_the_account(client, db_session):
+    _strategy, version = _seed_strategy(db_session, slug="exp-delete")
+    asset = _seed_asset(db_session, symbol="EXPDELETE")
+    series = _seed_bars(db_session, asset, [100.0])
+    run = _seed_run(db_session, version=version, series=series)
+    experiment = _seed_experiment(db_session, version=version, run=run)
+    db_session.commit()
+
+    body = _create(
+        client, name="Outlives its experiment", initial_cash=3_000, experiment_id=experiment.id
+    )
+    assert client.delete(f"/api/v1/experiments/{experiment.id}").status_code == 204
+
+    fetched = _account_body(client, body["id"])
+    # The account stands, with one fewer thing to point at -- never a dangling id.
+    assert fetched["name"] == "Outlives its experiment"
+    assert fetched["experiment_id"] is None
+
+    db_session.expire_all()
+    stored = db_session.get(PaperAccount, body["id"])
+    assert stored is not None
+    assert stored.experiment_id is None
 
 
 # --------------------------------------------------------------------------- #

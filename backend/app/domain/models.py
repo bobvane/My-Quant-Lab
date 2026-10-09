@@ -611,6 +611,16 @@ class PaperAccount(Base, TimestampMixin):
     backtest_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("backtest_runs.id", ondelete="SET NULL")
     )
+    # The experiment the account was opened from, when it was opened from one. The
+    # run id above says *what* was copied; this says *why it was copied at all* —
+    # an experiment is the record that froze the version, parameters, symbol and
+    # window, so without this column "用这条实验建一个模拟账户" leaves the account
+    # unable to name where it came from (ADR-209). Same rule as the run id: nullable,
+    # never cascades — deleting the experiment leaves the account standing, with the
+    # reference cleared rather than dangling.
+    experiment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("strategy_experiments.id", ondelete="SET NULL")
+    )
     parameters_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     base_currency: Mapped[str] = mapped_column(String(8), default="USD", nullable=False)
     initial_cash: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)

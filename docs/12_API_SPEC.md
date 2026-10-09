@@ -466,6 +466,16 @@ strategy version {strategy_version_id}; the version decides the strategy`）。`
 `backtest_run_id`、`parameters` 与解析出来的 `strategy_name`；`backtest_run_id` 是
 `ondelete="SET NULL"` 外键——退役一次回测不会连带删掉用它建出来的账户。
 
+请求体还可选带 `experiment_id`：账户是从哪条实验建的就记哪条（ADR-209）。这条实验必须存在
+（否则 422 `experiment {id} not found`）；同时给了 `backtest_run_id` 时，那条实验必须**真的跑过**
+这次回测——血缘在 `experiment_results.backtest_run_id` 上，不在实验自己身上，所以服务端查的是结果行，
+查不到就 **422**（`experiment {id} ran backtest run {run}, not {given}`，实验一条回测都没跑过时是
+`experiment {id} has no backtest run to bind to`）。原因很直白：一条把 A 实验和 B 回测配在一起、
+却对外声称「我来自 A」的账户，比一条拒绝创建的账户更糟。只给 `experiment_id` 时，版本与参数从这条
+实验推导（显式传入优先），`backtest_run_id` **保持为 `null`**——不凭空补一个没人要的绑定。
+响应里 `experiment_id` 同样是 `ondelete="SET NULL"` 外键：删除实验时服务端显式把引用清成 `null`
+（不指望方言替它做这件事），账户本身不动；`null` 的诚实含义是「不是从实验建的」或「那条实验已经删了」。
+
 账户响应还给出总览口径的一组数字（ADR-181）：`net_deposits`、`cash`、`market_value`（持仓市值）、
 `unrealized_pnl`（未实现盈亏）、`realized_pnl`（已实现盈亏）、`total_equity`（总资产）、
 `total_pnl`（总盈亏）与 `total_pnl_pct`（总收益率，比率不是百分数，ADR-087）。标记价一律取该标的

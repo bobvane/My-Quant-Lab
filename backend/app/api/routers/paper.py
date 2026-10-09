@@ -34,12 +34,14 @@ from app.data.strategy_service import record_audit
 from app.domain.models import (
     AuditLog,
     BacktestRun,
+    ExperimentResult,
     PaperAccount,
     PaperOrder,
     PaperPosition,
     PaperTrade,
     Signal,
     Strategy,
+    StrategyExperiment,
     StrategyVersion,
 )
 from app.simulation.paper_engine import (
@@ -250,6 +252,11 @@ def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)) -
     because a strategy id alone cannot answer "which strategy, with which settings" once
     the strategy has moved on — and a version is immutable, so the answer stays true
     (ADR-181). Only a completed run has results to bind to.
+
+    When the account is opened from an experiment (「用这条实验创建模拟账户」), that
+    experiment is recorded too: the run id says what was copied, the experiment id says
+    which record the user acted on, so the account can walk back to it (ADR-209). An
+    experiment that contradicts the run it is handed is refused rather than stored.
     """
 
     backtest_run_id = payload.backtest_run_id
@@ -271,6 +278,40 @@ def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)) -
             strategy_version_id = run.strategy_version_id
         if parameters is None:
             parameters = dict(run.parameters_json or {})
+
+    experiment_id = payload.experiment_id
+    if experiment_id is not None:
+        experiment = db.get(StrategyExperiment, experiment_id)
+        if experiment is None:
+            raise HTTPException(status_code=422, detail=f"experiment {experiment_id} not found")
+        # The experiment already froze a version and a parameter set. An account that
+        # names it must not quietly contradict it: a caller pairing experiment A with
+        # run B is asking for a record that lies about where it came from. The lineage
+        # to a run lives on the experiment's *result* rows, not on the experiment
+        # itself (ExperimentResult, ADR-054/055/183), so that is what is checked.
+        if backtest_run_id is not None:
+            ran_runs = sorted(
+                value
+                for value in db.scalars(
+                    select(ExperimentResult.backtest_run_id).where(
+                        ExperimentResult.experiment_id == experiment_id,
+                        ExperimentResult.backtest_run_id.is_not(None),
+                    )
+                ).all()
+                if value is not None
+            )
+            if backtest_run_id not in ran_runs:
+                ran = ", ".join(str(value) for value in ran_runs)
+                detail = (
+                    f"experiment {experiment_id} ran backtest run {ran}, not {backtest_run_id}"
+                    if ran
+                    else f"experiment {experiment_id} has no backtest run to bind to"
+                )
+                raise HTTPException(status_code=422, detail=detail)
+        if strategy_version_id is None:
+            strategy_version_id = experiment.strategy_version_id
+        if parameters is None:
+            parameters = dict(experiment.parameters_json or {})
 
     strategy_id = payload.strategy_id
     if strategy_version_id is not None:
@@ -296,6 +337,7 @@ def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)) -
         strategy_id=strategy_id,
         strategy_version_id=strategy_version_id,
         backtest_run_id=backtest_run_id,
+        experiment_id=experiment_id,
         parameters_json=parameters or {},
         base_currency=payload.base_currency,
         initial_cash=payload.initial_cash,
@@ -315,6 +357,7 @@ def create_account(payload: PaperAccountCreate, db: Session = Depends(get_db)) -
             "net_deposits": str(account.initial_cash),
             "strategy_version_id": account.strategy_version_id,
             "backtest_run_id": account.backtest_run_id,
+            "experiment_id": account.experiment_id,
         },
     )
     db.commit()

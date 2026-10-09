@@ -235,6 +235,18 @@ function accountStrategyLink(account: PaperAccount) {
 }
 
 /**
+ * 这个账户是从哪条实验建的（ADR-209）：账户记着那条实验的 id，点回去就是当时那条记录。
+ * 没记（不是从实验建的，或那条实验后来被删了）就返回 null，页面上那条回头路改说缺的是什么，
+ * 而不是给一个死链（ADR-207/ADR-138）。
+ */
+function accountExperimentLink(account: PaperAccount) {
+  const experimentId = account.experiment_id ?? null
+  return experimentId === null
+    ? null
+    : { path: '/experiments', query: { experiment: String(experimentId) } }
+}
+
+/**
  * 这一版发过的信号。账户认的是它跑的那一版；同一版跑出的别的账户也落在同一个范围里，
  * 所以这里明说「这一版」，不说「这个账户」。
  */
@@ -1166,8 +1178,15 @@ async function bootstrap() {
             <td>{{ a.name }}</td>
             <td>
               {{ bindingLabel(a) }}
-              <span v-if="accountStrategyLink(a)" class="muted">
-                （<RouterLink :to="accountStrategyLink(a)!">策略</RouterLink>）
+              <span v-if="accountStrategyLink(a) || accountExperimentLink(a)" class="muted">
+                （<template v-if="accountStrategyLink(a)"
+                  ><RouterLink :to="accountStrategyLink(a)!">策略</RouterLink></template
+                ><template v-if="accountStrategyLink(a) && accountExperimentLink(a)"> · </template
+                ><template v-if="accountExperimentLink(a)"
+                  ><RouterLink :to="accountExperimentLink(a)!"
+                    >来自实验 #{{ a.experiment_id }}</RouterLink
+                  ></template
+                >）
               </span>
             </td>
             <td>{{ formatNumber(a.net_deposits) }}</td>
@@ -1242,6 +1261,16 @@ async function bootstrap() {
           —— 账户里的成交是从这些信号来的。
         </template>
         <span v-else>· 这个账户没有钉版本，所以没有「这一版的信号」可看。</span>
+        <template v-if="accountExperimentLink(selectedAccount)">
+          ·
+          <RouterLink :to="accountExperimentLink(selectedAccount)!"
+            >这条账户是从哪条实验建的</RouterLink
+          >
+          —— 那条实验上写着当时的参数、标的和时间范围。
+        </template>
+        <span v-else
+          >· 这个账户不是从实验建的（或者那条实验已经不在了），所以没有「哪条实验」可回头。</span
+        >
       </p>
       <table style="margin-top: 10px">
         <thead>

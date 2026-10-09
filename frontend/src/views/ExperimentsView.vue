@@ -171,6 +171,28 @@ function requestedVersionId(): number | null {
 
 const scopeVersionId = ref<number | null>(requestedVersionId())
 
+/** 地址里的 `?experiment=<id>`：从别的页面走回来时直接打开那一条实验（ADR-209）。 */
+function requestedExperimentId(): number | null {
+  const raw = route.query.experiment
+  const text = Array.isArray(raw) ? raw[0] : raw
+  if (!text) return null
+  const value = Number(text)
+  return Number.isInteger(value) && value > 0 ? value : null
+}
+
+/**
+ * 地址里指着某一条实验。它是「打开的是这一条」的说法，所以一旦在页面里选了别的实验，
+ * 这个参数就得跟着改口——地址栏里留着一个指向别处的 id 就是在说假话。
+ */
+const scopedExperimentId = ref<number | null>(requestedExperimentId())
+
+function dropExperimentParam() {
+  scopedExperimentId.value = null
+  const query = { ...route.query }
+  delete query.experiment
+  void router.replace({ path: '/experiments', query })
+}
+
 /** 只在服务端筛「这一版跑过的实验」——取回来再本地筛会把更早的实验漏掉（ADR-201 同一条）。 */
 const scopeTitle = computed(() => {
   const id = scopeVersionId.value
@@ -451,6 +473,10 @@ async function openDetail(id: number) {
   detailError.value = ''
   accountError.value = ''
   accountNotice.value = ''
+  // 地址里指着的是另一条实验：换了一条就把那个参数去掉，别让地址栏继续说别的那条。
+  if (scopedExperimentId.value !== null && scopedExperimentId.value !== id) {
+    dropExperimentParam()
+  }
   // 换了另一条实验就把上一条的编辑框收掉：草稿里的名字属于之前那条，不该跟着换过来。
   cancelRename()
   renameNotice.value = ''
@@ -963,8 +989,11 @@ async function createPaperFromDetail() {
   try {
     const created = await api.createPaperAccount(`${current.name} · 模拟`.slice(0, 120), capital, {
       backtestRunId: runId,
+      experimentId: current.id,
     })
-    accountNotice.value = `已经用这条实验建好模拟账户（本金 ${formatNumber(capital, 2)}，绑定回测 #${runId}），正在打开它。`
+    accountNotice.value =
+      `已经用这条实验建好模拟账户（本金 ${formatNumber(capital, 2)}，绑定回测 #${runId}，` +
+      `记下它来自实验 #${current.id}），正在打开它。`
     await router.push({ path: '/paper', query: { account: String(created.id) } })
   } catch (e) {
     accountError.value = `创建模拟账户没有成功：${messageOf(e)}`
@@ -975,6 +1004,9 @@ async function createPaperFromDetail() {
 
 onMounted(async () => {
   await Promise.all([loadExperiments(), loadChoices(), loadVersionOwners()])
+  // `?experiment=<id>`：从「模拟」页那条回头路走进来时，直接把这一条实验打开（ADR-209）。
+  const requested = requestedExperimentId()
+  if (requested !== null) await openDetail(requested)
 })
 </script>
 
@@ -1546,7 +1578,8 @@ onMounted(async () => {
             <span v-if="paperBlockedReason" class="muted">{{ paperBlockedReason }}</span>
             <span v-else class="muted">
               会用这条实验记下的本金 {{ detailCapitalText }}
-              建一个模拟账户，并绑定它的回测 #{{ backtestRunId }}。
+              建一个模拟账户，绑定它的回测 #{{ backtestRunId }}，
+              并记下这个账户来自<strong>实验 #{{ detail.id }}</strong>（在「模拟」页可以从账户点回这里）。
             </span>
             <p v-if="accountError" class="error" style="margin: 6px 0 0">{{ accountError }}</p>
             <p v-if="accountNotice" class="notice" style="margin: 6px 0 0">{{ accountNotice }}</p>

@@ -1792,3 +1792,74 @@ def test_the_evidence_panel_does_not_ask_without_a_symbol() -> None:
     assert "ApiError," in STRATEGY_DETAIL
     # The page is ten parts, not nine (ADR-207), and its own header says so.
     assert "The ten-part strategy detail page" in STRATEGY_DETAIL
+
+
+def test_a_paper_account_remembers_the_experiment_it_was_opened_from() -> None:
+    """ADR-209：模拟账户记得它是从哪条实验建的，并且能从账户走回那条实验。
+
+    The chain was broken on this hop: 「用这个实验创建模拟账户」 copied the *backtest run*
+    into the account and dropped the experiment id, so the account could say what was
+    copied but not which record the user acted on — and nothing downstream could walk
+    back to the experiment (the same broken half ADR-207 fixed one hop up, for
+    strategies and signals).
+
+    Three things are load-bearing. The origin is stored, not re-derived: the account
+    carries ``experiment_id`` and the API sends it. The walk-back lands on the record
+    itself, so ``/experiments?experiment=<id>`` opens that experiment (a permalink, not
+    a filter of the list already on screen). And a walk-back that cannot be built says
+    which half is missing instead of rendering a link that lands on an empty page
+    (ADR-138) — an account that came from no experiment, or whose experiment was
+    deleted, gets one honest sentence rather than a dead link.
+    """
+
+    # The account's origin travels out of the API and back in on creation.
+    assert "experiment_id?: number | null" in API_TEXT, (
+        "the account view has no field for the experiment it came from, so the origin "
+        "cannot be shown at all (ADR-209)"
+    )
+    assert "experimentId?: number" in API_TEXT
+    binding = "...(binding.experimentId != null ? { experiment_id: binding.experimentId } : {})"
+    # `createPaperAccount` is an object property, so `_function_body` cannot find it; the
+    # slice runs to the next property instead.
+    body = API_TEXT[API_TEXT.index("createPaperAccount: (") : API_TEXT.index("  settings: () =>")]
+    assert binding in body, (
+        "the binding option is accepted but never sent, so the account is created without "
+        "its origin (ADR-209)"
+    )
+    # The lineage is the experiment's *result* rows, not a column on the experiment.
+    assert "storing an origin that is not true (ADR-209)" in API_TEXT
+
+    # 「用这个实验创建模拟账户」 now names the experiment it came from.
+    assert "experimentId: current.id," in EXPERIMENTS, (
+        "the experiments page still opens the account without telling it which experiment "
+        "it was created from (ADR-209)"
+    )
+    assert "记下它来自实验 #${current.id}" in EXPERIMENTS
+    assert "并记下这个账户来自<strong>实验 #{{ detail.id }}</strong>" in EXPERIMENTS
+
+    # The walk-back is a permalink that opens that experiment, fetched by id.
+    assert "function requestedExperimentId(): number | null" in EXPERIMENTS
+    assert "const scopedExperimentId = ref<number | null>(requestedExperimentId())" in EXPERIMENTS
+    assert "if (requested !== null) await openDetail(requested)" in EXPERIMENTS
+    assert "const query = { ...route.query }" in EXPERIMENTS
+    assert "delete query.experiment" in EXPERIMENTS, (
+        "the address keeps naming an experiment the page no longer shows (ADR-209)"
+    )
+    open_detail = _function_body(EXPERIMENTS, "openDetail")
+    assert "api.experiment(id)" in open_detail, (
+        "the permalink must fetch that one experiment from the server, not sieve the list "
+        "already on screen (ADR-207/ADR-209)"
+    )
+    assert "scopedExperimentId.value !== id" in open_detail
+
+    # The account page gives the hop back, and names the missing half when it cannot.
+    assert "function accountExperimentLink(account: PaperAccount)" in PAPER
+    assert "query: { experiment: String(experimentId) }" in PAPER
+    assert ':to="accountExperimentLink(a)!"' in PAPER
+    assert ':to="accountExperimentLink(selectedAccount)!"' in PAPER
+    assert "来自实验 #{{ a.experiment_id }}" in PAPER
+    assert "这条账户是从哪条实验建的" in PAPER
+    assert "这个账户不是从实验建的（或者那条实验已经不在了）" in PAPER, (
+        "an account with no experiment (or whose experiment is gone) must say so rather "
+        "than render a link that lands nowhere (ADR-138/ADR-209)"
+    )

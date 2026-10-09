@@ -773,6 +773,13 @@ export interface PaperAccount {
   strategy_version_id?: number | null
   /** The backtest it was copied from, if it was. Never a cascade: the run may be retired. */
   backtest_run_id?: number | null
+  /**
+   * The experiment the account was opened from, when it was opened from one (ADR-209).
+   * The run id says what was copied; this says which record the user acted on, so the
+   * account can walk back to it. Null means "not opened from an experiment", or the
+   * experiment has since been deleted — in both cases the account itself still stands.
+   */
+  experiment_id?: number | null
   parameters?: Record<string, unknown>
   /** Display name of the bound strategy, resolved server-side. */
   strategy_name?: string | null
@@ -1703,6 +1710,10 @@ export const api = {
    * Open an account. Passing `backtest_run_id` copies that run's strategy version and
    * parameters into the account, which is what makes the paper result comparable with
    * the backtest that motivated it (ADR-181).
+   *
+   * Passing `experiment_id` records which experiment the account came from, so the
+   * account can walk back to it. The server refuses an experiment that did not run the
+   * run being copied rather than storing an origin that is not true (ADR-209).
    */
   createPaperAccount: (
     name: string,
@@ -1710,6 +1721,7 @@ export const api = {
     binding: {
       strategyVersionId?: number
       backtestRunId?: number
+      experimentId?: number
       parameters?: Record<string, unknown>
     } = {},
   ) =>
@@ -1722,6 +1734,7 @@ export const api = {
           ? { strategy_version_id: binding.strategyVersionId }
           : {}),
         ...(binding.backtestRunId != null ? { backtest_run_id: binding.backtestRunId } : {}),
+        ...(binding.experimentId != null ? { experiment_id: binding.experimentId } : {}),
         ...(binding.parameters != null ? { parameters: binding.parameters } : {}),
       }),
     }),

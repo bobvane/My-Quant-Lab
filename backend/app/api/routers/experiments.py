@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.api.schemas import (
@@ -37,7 +37,7 @@ from app.api.schemas import (
 from app.core.db import get_db
 from app.data import experiment_service
 from app.data.strategy_service import record_audit
-from app.domain.models import StrategyExperiment
+from app.domain.models import PaperAccount, StrategyExperiment
 
 router = APIRouter(prefix="/experiments", tags=["experiments"])
 
@@ -212,11 +212,24 @@ def update_experiment(
 
 @router.delete("/{experiment_id}", status_code=204, summary="Delete an experiment and its results")
 def delete_experiment(experiment_id: int, db: Session = Depends(get_db)) -> Response:
-    """Delete the experiment; the ``BacktestRun`` it produced is its own artifact."""
+    """Delete the experiment; the ``BacktestRun`` it produced is its own artifact.
+
+    A paper account opened from this experiment keeps standing -- deleting an
+    experiment must not delete an account, and it must not leave a reference to a row
+    that is gone: the account's ``experiment_id`` is cleared here, so it reads as
+    "never recorded" instead of pointing at a hole (ADR-209). The foreign key's
+    ``ON DELETE SET NULL`` is the backstop in PostgreSQL; SQLite (tests) does not
+    enforce it, so the honest behaviour must not depend on the dialect.
+    """
 
     experiment = _load(db, experiment_id)
     kind = experiment.kind
     result_count = len(experiment.results)
+    db.execute(
+        update(PaperAccount)
+        .where(PaperAccount.experiment_id == experiment_id)
+        .values(experiment_id=None)
+    )
     db.delete(experiment)
     record_audit(
         db,

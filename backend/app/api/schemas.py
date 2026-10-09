@@ -717,6 +717,11 @@ class PaperAccountCreate(BaseModel):
     # backtest keeps both (ADR-181). Omitted fields are copied from the run.
     strategy_version_id: int | None = None
     backtest_run_id: int | None = None
+    # The experiment the caller opened this account *from*, when it did: the run id
+    # says what was copied, this says which experiment record the user acted on, so
+    # the account can walk back to it (ADR-209). Validated to exist; omitted by the
+    # paths that open an account directly.
+    experiment_id: int | None = None
     parameters: dict[str, Any] | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
 
@@ -729,6 +734,11 @@ class PaperAccountOut(BaseModel):
     strategy_id: int | None
     strategy_version_id: int | None = None
     backtest_run_id: int | None = None
+    # Which experiment the account was opened from, or `null`: `null` is the honest
+    # answer for every account opened before this column existed, and also for one
+    # whose experiment has since been deleted (the reference is cleared, never left
+    # dangling — ADR-209).
+    experiment_id: int | None = None
     # Validated from the ORM column `parameters_json`, published as `parameters`.
     parameters: dict[str, Any] = Field(default_factory=dict, validation_alias="parameters_json")
     # Resolved server-side so the panel does not need a second request per account.

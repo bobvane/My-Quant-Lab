@@ -83,6 +83,11 @@ const confirming = ref(false)
 const confirmationNote = ref('')
 const loadingRuns = ref(false)
 const loadingRun = ref(false)
+// 用同样的输入再跑一次（ADR-206）。运行把问题与材料都留了档，所以能原样再交一次；
+// 这一条和「打开」正好相反——它真的会再调一次 AI、真的花额度，所以必须由人按下去。
+const rerunning = ref(false)
+const rerunError = ref('')
+const rerunNotice = ref('')
 const error = ref('')
 const notice = ref('')
 const notConfigured = ref(false)
@@ -537,6 +542,9 @@ function resetNotices() {
   compileDetail.value = ''
   versionError.value = ''
   compileOutcome.value = null
+  // 换一条运行看，上一条「再跑一次」的话就作废了：留着会让新那条运行看起来被重跑过。
+  rerunError.value = ''
+  rerunNotice.value = ''
 }
 
 /** 503 = 没有可用的 AI 提供方：这不是页面错误，是配置缺失，单独渲染。 */
@@ -825,6 +833,139 @@ function ingestProblem(e: unknown): string {
   }
   const message = (e as Error)?.message
   return typeof message === 'string' && message ? message : '抓取这个地址时出了点问题。'
+}
+
+// --------------------------------------------------------------------------- //
+// 用同样的输入再跑一次（ADR-206）
+// --------------------------------------------------------------------------- //
+/**
+ * 把这次运行留下的材料变成能交回去的输入。
+ *
+ * 三条路各说各的话：留了档的来源（`snapshot_id`）按当时那一份读回、不再联网；只有地址
+ * 的 `url`/`pdf` 来源要重新抓一次；而用户当时贴进来的原文**本身没有留档**（ADR-161 只
+ * 留摘要），交不回去——那就照实说，让人重新贴一遍，不拿一份猜的材料去换一次 AI 调用。
+ */
+type RerunPlan = {
+  inputs: AIResearchSourceInput[]
+  /** 没有留档、再跑时会重新联网抓的来源。 */
+  refetched: string[]
+  /** 交不回去的来源（贴进来的原文没有留档）。 */
+  unreproducible: string[]
+}
+
+/** 服务端的 `FETCHED_KINDS`：只有这两种来源会被服务端亲自去读。 */
+const RERUN_FETCHED_KINDS = ['url', 'pdf']
+
+const rerunPlan = computed<RerunPlan | null>(() => {
+  const current = run.value
+  if (!current) return null
+  const inputs: AIResearchSourceInput[] = []
+  const refetched: string[] = []
+  const unreproducible: string[] = []
+  for (const item of current.sources ?? []) {
+    const label = item.label || item.source_ref
+    if (!item.kind) {
+      unreproducible.push(label)
+      continue
+    }
+    if (item.snapshot_id != null) {
+      inputs.push(rerunInput(item, true))
+      continue
+    }
+    if (RERUN_FETCHED_KINDS.includes(item.kind) && (item.uri || '').trim()) {
+      inputs.push(rerunInput(item, false))
+      refetched.push(label)
+      continue
+    }
+    unreproducible.push(label)
+  }
+  return { inputs, refetched, unreproducible }
+})
+
+/** 不能原样再跑时的一句人话；空串 = 能跑（ADR-138 的同一条规矩：按钮灰了要说为什么）。 */
+const rerunBlocked = computed<string>(() => {
+  const plan = rerunPlan.value
+  if (!plan) return '先打开一条研究记录。'
+  if (plan.unreproducible.length) {
+    return (
+      `这次研究的材料里有交不回去的来源：${plan.unreproducible.join('、')}。` +
+      '那是当时直接交给服务端的原文，服务端只留了摘要、原文本身没有留档，' +
+      '所以没法原样再跑一次——把原文重新贴一遍再提交。'
+    )
+  }
+  if (!plan.inputs.length) return '这次运行没有留下可交回去的材料，没法原样再跑一次。'
+  return ''
+})
+
+const canRerun = computed<boolean>(() => !rerunBlocked.value && !rerunning.value)
+
+/** 再跑一次会怎么读这份材料：留档的读回、没留档的重新抓，两句都说清。 */
+const rerunMaterialNote = computed<string>(() => {
+  const plan = rerunPlan.value
+  if (!plan || rerunBlocked.value || !plan.inputs.length) return ''
+  if (plan.refetched.length) {
+    return (
+      `材料里的 ${plan.refetched.join('、')} 没有留档，再跑会重新联网抓一次，内容可能和当时不同；` +
+      '其余的按当时留档的那一份读回，不再联网。'
+    )
+  }
+  return `材料按当时留档的那一份读回（${plan.inputs.length} 条），不再联网。`
+})
+
+/** 一条留档来源 → 一次提交里的一个 source（只带服务端 schema 认得的字段）。 */
+function rerunInput(item: AIResearchSourceMeta, useSnapshot: boolean): AIResearchSourceInput {
+  const source: AIResearchSourceInput = {
+    kind: item.kind as AIResearchSourceInput['kind'],
+    source_ref: item.source_ref,
+  }
+  if (item.label) source.label = item.label
+  if (item.uri) source.uri = item.uri
+  if (useSnapshot && item.snapshot_id != null) source.snapshot_id = item.snapshot_id
+  // 用户当时自己声明过「这份材料我有权保留全文」，就把同一份声明一起交回去：
+  // 声明不是页面替他加的，也不能替他丢掉（ADR-161）。
+  if (item.license_note) {
+    source.license_note = item.license_note
+    if (item.retention?.policy === 'full') source.retention = 'full'
+  }
+  return source
+}
+
+/** 重新提交失败的照实说法：429 是额度、422 是政策拦下、502 是读不回来（没花钱）。 */
+function rerunFailure(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.status === 503) return '这台部署现在没有可用的 AI 提供方，这次没有提交。'
+    if (e.status === 429) return '今天的 AI 额度已经用完了，这次没有提交。'
+    if (e.status === 422) return '材料在服务端被政策拦下了，整次运行都不会开始。'
+    if (e.status === 502) return '材料没能读回来，这次运行没有开始（也就没有花 AI 额度）。'
+    if (e.status === 404) return '这次运行在服务端已经读不到了，重新打开一条再试。'
+  }
+  const text = (e as Error)?.message
+  return typeof text === 'string' && text ? text : '重新提交时出了点问题。'
+}
+
+async function rerunResearch() {
+  const current = run.value
+  const plan = rerunPlan.value
+  if (!current || !plan || rerunning.value) return
+  if (!plan.inputs.length || plan.unreproducible.length) return
+  rerunning.value = true
+  rerunError.value = ''
+  rerunNotice.value = ''
+  const previousId = current.run_id
+  try {
+    // 同一个问题、同一份材料，再走一次 POST /ai/research：这是**新的一次运行**，
+    // 会真的调 AI、真的花额度（和「打开」只读回结果完全不同）。
+    const fresh = await api.aiResearchStart({ question: current.question, sources: plan.inputs })
+    applyRun(fresh)
+    rerunNotice.value =
+      `已经用研究 #${previousId} 的同一个问题和同一份材料重新提交了一次：新的运行是 #${fresh.run_id}。` +
+      `旧的 #${previousId} 仍然留在「最近的研究」里，两次结果可以对着看。`
+    await loadRuns()
+  } catch (e) {
+    rerunError.value = rerunFailure(e)
+  } finally {
+    rerunning.value = false
+  }
 }
 
 async function openRun(runId: number) {
@@ -2004,6 +2145,22 @@ onUnmounted(stopPolling)
           {{ run.attempts ?? 0 }} 次）
         </template>
       </p>
+      <!-- 用同样的输入再跑一次（ADR-206）：这一条真的会再调一次 AI，所以按钮旁边先讲明；
+           材料哪一条能原样读回、哪一条交不回去，也在下面照实说。 -->
+      <div class="row" style="margin-top: 10px; gap: 8px; align-items: center; flex-wrap: wrap">
+        <button class="ghost" :disabled="!canRerun" @click="rerunResearch">
+          {{ rerunning ? '正在提交…' : '用同样的输入再跑一次' }}
+        </button>
+        <span class="muted">会真的再调一次 AI（花额度），不是只读回上一次的结果。</span>
+      </div>
+      <p v-if="rerunBlocked" class="notice warn" style="margin-top: 8px">⚠️ {{ rerunBlocked }}</p>
+      <p v-else-if="rerunMaterialNote" class="muted" style="margin-top: 8px">
+        {{ rerunMaterialNote }}
+      </p>
+      <p v-if="rerunError" class="notice warn" style="margin-top: 8px">
+        ⚠️ 这次没能重新提交：{{ rerunError }}
+      </p>
+      <p v-if="rerunNotice" class="notice" style="margin-top: 8px">✅ {{ rerunNotice }}</p>
       <p v-if="statusSentence" class="conclusion-sentence">{{ statusSentence }}</p>
 
       <!-- 被拒绝：说清每一条原因，并明确系统没有替 AI 改。 -->
@@ -2635,6 +2792,8 @@ onUnmounted(stopPolling)
       <p v-if="runs.length" class="muted" style="margin-top: 8px">
         打开一条记录只会读回当时的结果，不会重新调用 AI，也不会产生任何费用。
         如果那次编译过，页面会直接显示编译出的策略版本和它的激活状态。
+        打开之后想用同一个问题和同一份材料再跑一次，可以点结果卡上的「用同样的输入再跑一次」——
+        那是<strong>新的一次运行</strong>，会真的调 AI、也会花额度。
       </p>
     </div>
 

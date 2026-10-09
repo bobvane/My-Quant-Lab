@@ -1094,12 +1094,23 @@ export interface AIResearchSourceMeta {
   kind?: string
   label?: string | null
   uri?: string | null
+  /**
+   * 服务端当时抓下的那一份观测（`POST /ai/sources/url`）。
+   *
+   * 运行把它和材料一起留了档：有它就能把同一份材料原样交回去，服务端按 `snapshot_id`
+   * 读回当时保留的那一份，**不再联网**（ADR-206）。没有它的 `url`/`pdf` 来源再跑时会
+   * 重新抓一次，而用户当时贴进来的原文本身不留档，交不回去。
+   */
+  snapshot_id?: number | null
+  original_uri?: string | null
   parse_status?: string
   text_hash?: string
   size_bytes?: number
   characters_read?: number
   fragment_count?: number
   license_note?: string | null
+  /** 当时按哪种策略留的正文，决定再跑一次要不要把用户同一份声明交回去（ADR-161/ADR-206）。 */
+  retention?: { policy?: string | null; full_text_stored?: boolean } | null
 }
 
 /**

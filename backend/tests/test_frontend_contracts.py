@@ -53,6 +53,7 @@ DATA = (VIEWS / "DataView.vue").read_text(encoding="utf-8")
 STYLE = (SRC / "style.css").read_text(encoding="utf-8")
 STRATEGY_DETAIL = (VIEWS / "StrategyDetailView.vue").read_text(encoding="utf-8")
 EXPERIMENTS = (VIEWS / "ExperimentsView.vue").read_text(encoding="utf-8")
+LAB = (VIEWS / "LabView.vue").read_text(encoding="utf-8")
 VITE_CONFIG = (REPO_ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
 ENV_DTS = (SRC / "env.d.ts").read_text(encoding="utf-8")
 
@@ -1545,3 +1546,78 @@ def test_an_experiment_can_be_renamed_without_touching_its_record() -> None:
     assert "归档状态也不受影响" in EXPERIMENTS
     # Opening another experiment drops the previous draft rather than carrying it over.
     assert "cancelRename()" in _function_body(EXPERIMENTS, "openDetail")
+
+
+def test_a_research_run_can_be_run_again_with_the_inputs_it_stored() -> None:
+    """A stored run keeps its question and its material, so it can be run again (ADR-206).
+
+    The page already promised that 打开 a stored run reads the old result back without
+    calling the model. The other half of that promise is the useful one: the same
+    question and the same material can be submitted a second time — and that one *does*
+    call the model and spend budget, so the button has to say so. Material that cannot
+    be handed back is named rather than quietly replaced: a source the user pasted in
+    was kept as an excerpt only (ADR-161), so its text cannot be resubmitted, while a
+    source the platform fetched can be handed back by the snapshot it stored.
+    """
+
+    # The materials are rebuilt from what the run stored, not from whatever the form
+    # happens to hold when the button is pressed.
+    assert "const rerunPlan = computed<RerunPlan | null>(() => {" in LAB
+    assert "for (const item of current.sources ?? []) {" in LAB
+    assert "const RERUN_FETCHED_KINDS = ['url', 'pdf']" in LAB
+    # A stored observation goes back by its snapshot: the server reads it, no refetch.
+    assert "if (item.snapshot_id != null) {" in LAB
+    handed_back = (
+        "if (useSnapshot && item.snapshot_id != null) source.snapshot_id = item.snapshot_id"
+    )
+    assert handed_back in LAB
+    # A pasted source is named, not faked, and a fetched one is admitted as a refetch.
+    assert "unreproducible.push(label)" in LAB
+    assert "refetched.push(label)" in LAB
+    assert "原文本身没有留档" in LAB
+    assert "把原文重新贴一遍再提交" in LAB
+    assert "没有留档，再跑会重新联网抓一次，内容可能和当时不同" in LAB
+
+    # The request schema forbids unknown fields (`extra="forbid"`), so the payload may
+    # only carry what a `ResearchSourceIn` accepts. The stored meta has more than that.
+    input_body = LAB[LAB.index("function rerunInput(") : LAB.index("function rerunFailure(")]
+    for forbidden in ("parse_status", "text_hash", "characters_read", "fragment_count"):
+        assert forbidden not in input_body
+    # The user's own "I am licensed to keep this" is carried back, not dropped.
+    assert "if (item.retention?.policy === 'full') source.retention = 'full'" in input_body
+
+    # The button sits with the run it re-runs, and it says what it costs before it is pressed.
+    assert "{{ rerunning ? '正在提交…' : '用同样的输入再跑一次' }}" in LAB
+    assert "会真的再调一次 AI（花额度），不是只读回上一次的结果。" in LAB
+    assert ':disabled="!canRerun"' in LAB
+    # A disabled button says why (ADR-138), and the reason is the plan's own verdict.
+    assert "const rerunBlocked = computed<string>(() => {" in LAB
+    can_rerun = "const canRerun = computed<boolean>(() => !rerunBlocked.value && !rerunning.value)"
+    assert can_rerun in LAB
+
+    body = _function_body(LAB, "rerunResearch")
+    # The same question and the same material, through the same endpoint: a new run.
+    assert "api.aiResearchStart({ question: current.question, sources: plan.inputs })" in body
+    assert "api.aiResearchRun" not in body
+    # It waits for a human press, and it never fires with material it cannot vouch for.
+    assert "if (!current || !plan || rerunning.value) return" in body
+    assert "if (!plan.inputs.length || plan.unreproducible.length) return" in body
+    # It says the old run is still there, and that this one spent budget.
+    assert "旧的 #${previousId} 仍然留在「最近的研究」里" in body
+
+    # Two callers only: the form's own submit and this button. Opening a stored run
+    # never becomes a model call — that is the promise the two halves share.
+    assert LAB.count("api.aiResearchStart(") == 2
+    assert "aiResearchStart" not in _function_body(LAB, "openRun")
+    assert "aiResearchStart" not in _function_body(LAB, "refreshRun")
+    # The list keeps both halves of the promise in one place.
+    assert "打开一条记录只会读回当时的结果，不会重新调用 AI，也不会产生任何费用。" in LAB
+    assert "那是<strong>新的一次运行</strong>，会真的调 AI、也会花额度。" in LAB
+    # Switching runs drops the previous re-run's message instead of carrying it over.
+    start = LAB.index("function resetNotices()")
+    reset_body = LAB[start : LAB.index("\n}\n", start)]
+    assert "rerunNotice.value = ''" in reset_body
+
+    # The stored meta carries the snapshot id at runtime; the type now admits it.
+    assert "snapshot_id?: number | null" in API_TEXT
+    assert "export interface AIResearchSourceMeta {" in API_TEXT

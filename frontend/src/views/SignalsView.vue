@@ -471,6 +471,36 @@ function contextNote(row: SignalRecord): string {
   return (row.portfolio_context?.note as string) ?? '—'
 }
 
+// ---- 把一条信号交给模拟账户（ADR-203）----------------------------------------
+//
+// 纸面执行是在另一页发生的，所以这里只做一件事：把「是哪一条」写进地址（`/paper?signal_id=`），
+// 让对面那一页能点名它。跳过去**不会**自动成交 —— 成交仍然要人在「模拟验证」页按一次「执行」。
+//
+// 只有看多 / 看空信号、且带参考价时纸面引擎才收得下（`execute_signal` 的前两条前置检查），
+// 所以其余状态这里不给入口，而是写明为什么不能执行：一个点了必然 422 的按钮不是入口（ADR-138）。
+
+/** 这条信号现在能不能交给纸面引擎成交。 */
+function canPaperExecute(row: SignalRecord): boolean {
+  return (row.state === 'BUY' || row.state === 'SELL') && row.price_reference != null
+}
+
+/** 不能执行时，缺的是什么 —— 逐条说清，不写「不可用」。 */
+function paperBlockedReason(row: SignalRecord): string {
+  if (row.price_reference == null) return '这条信号没有参考价，纸面引擎没有成交价可用'
+  return `${signalLabel(row.state)}不是可执行方向`
+}
+
+/** 带过去的两个参数：信号本身，以及它属于哪一版（对面按版本挑账户时要看）。 */
+function paperLink(row: SignalRecord): { path: string; query: Record<string, string> } {
+  return {
+    path: '/paper',
+    query: {
+      signal_id: String(row.id),
+      strategy_version_id: String(row.strategy_version_id),
+    },
+  }
+}
+
 onMounted(async () => {
   await loadScope()
   await load()
@@ -570,6 +600,10 @@ onMounted(async () => {
               >
                 标记已读
               </button>
+              <RouterLink v-if="canPaperExecute(s)" class="ghost" :to="paperLink(s)">
+                去纸面执行
+              </RouterLink>
+              <span v-else class="muted">不能执行：{{ paperBlockedReason(s) }}</span>
             </td>
           </tr>
         </tbody>
@@ -586,6 +620,13 @@ onMounted(async () => {
           {{ loading ? '加载中…' : '加载更多' }}
         </button>
       </div>
+      <p v-if="isAdvanced && signals.length" class="muted" style="margin-top: 8px">
+        「去纸面执行」把这条信号带到「模拟验证」页（地址写成
+        <span class="mono">/paper?signal_id=&lt;id&gt;</span>）：对面走的是
+        <span class="mono">POST /paper/accounts/&lt;id&gt;/execute</span>，只收看多 / 看空信号且要有参考价，
+        其余状态服务端一律 422，所以这一页干脆不给那个入口。跳过去不会自动下单 ——
+        选好账户、按一次「执行」才成交。
+      </p>
     </div>
 
     <div v-if="detailRow" class="card" style="margin-top: 14px">

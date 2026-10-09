@@ -1544,6 +1544,10 @@ export const api = {
         symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
       }${strategyVersionId ? `&strategy_version_id=${strategyVersionId}` : ''}`,
     ),
+  // One persisted signal by id. A page that was handed a signal id (the paper page's
+  // `?signal_id=`, ADR-203) can name what it was given instead of printing a number it
+  // cannot vouch for; a deleted signal answers 404 and the page says so.
+  signal: (id: number) => request<SignalRecord>(`/signals/${id}`),
   acknowledgeSignal: (id: number) =>
     request<Record<string, unknown>>(`/signals/${id}/acknowledge`, { method: 'POST' }),
   signalEvidence: (id: number) => request<Record<string, any>>(`/signals/${id}/evidence`),

@@ -1372,3 +1372,72 @@ def test_a_window_that_was_never_measured_is_labelled_not_scored() -> None:
     assert "function wfPercent(" in BACKTEST
     assert "wfPercent(wfResult.summary.mean_oos_return)" in BACKTEST
     assert "wfPercent(wfResult.summary.consistency)" in BACKTEST
+
+
+def test_a_signal_can_be_handed_to_a_paper_account_by_url() -> None:
+    """A signal row can carry itself to the paper page; it must not trade on arrival (ADR-203).
+
+    ``POST /paper/accounts/{id}/execute`` and ``api.executePaperSignal`` already existed,
+    but only the paper page's own dropdown ever reached them: to execute the signal you
+    were reading on /signals you had to remember its id and go find it there by hand.
+    The row now links to ``/paper?signal_id=<id>`` (plus the version it belongs to), and
+    the paper page names what it was handed, picks the one account bound to that version
+    when there is exactly one, and otherwise says why it did not choose.
+
+    Two rules are load-bearing here. The landing page must never execute anything by
+    itself (the product's first red line), and it must not offer the hand-off for a
+    signal the engine will refuse: only BUY/SELL with a reference price fills.
+    """
+
+    # The row hands over both halves: which signal, and which version it belongs to.
+    assert "function paperLink(row: SignalRecord)" in SIGNALS
+    assert "path: '/paper'" in SIGNALS
+    assert "signal_id: String(row.id)" in SIGNALS
+    assert "strategy_version_id: String(row.strategy_version_id)" in SIGNALS
+    assert '<RouterLink v-if="canPaperExecute(s)" class="ghost" :to="paperLink(s)">' in SIGNALS
+
+    # Only a fillable signal gets the entry point; the rest state the reason (ADR-138).
+    assert "function canPaperExecute(row: SignalRecord)" in SIGNALS
+    assert "(row.state === 'BUY' || row.state === 'SELL') && row.price_reference != null" in SIGNALS
+    assert "不能执行：" in SIGNALS
+    assert "不是可执行方向" in SIGNALS
+    assert "没有参考价，纸面引擎没有成交价可用" in SIGNALS
+
+    # One persisted signal can be read back by id, so the landing page can name it.
+    assert "signal: (id: number) => request<SignalRecord>(`/signals/${id}`)" in API_TEXT
+
+    assert "function routeSignalId()" in PAPER
+    assert "name: 'signal_id' | 'strategy_version_id'" in PAPER
+    assert "return routePositiveInt('signal_id')" in PAPER
+    assert "handedSignal.value = await api.signal(id)" in PAPER
+    # A signal the server says is gone is not the same as one that could not be read.
+    assert "e instanceof ApiError && e.status === 404" in PAPER
+    # Reading the hand-off never trades: the press is still the person's.
+    assert "executeSignal" not in _function_body(PAPER, "loadHandedSignal")
+    assert "submit" not in _function_body(PAPER, "loadHandedSignal")
+
+    # One candidate account is chosen and said out loud; two or more are not guessed at.
+    handed = _function_body(PAPER, "openHandedAccount")
+    assert "handedAccounts.value.length !== 1" in handed
+    assert "await openAccount(only.id, true)" in handed
+    assert "handedAccountPicked.value = true" in handed
+    assert "await openHandedAccount()" in PAPER
+    assert "selectHandedSignal()" in PAPER
+
+    # The address keeps naming the signal when the account changes or the page reloads.
+    assert "query.signal_id = String(signal)" in PAPER
+    assert "function paperQuery(accountId: number)" in PAPER
+    assert "router.replace({ path: '/paper', query: paperQuery(accountId) })" in _function_body(
+        PAPER, "openAccount"
+    )
+    # The handed signal wins over the default "newest one" selection when it is listed.
+    panel_watch = PAPER.index("watch(panelSignals, (list) => {")
+    assert "signal.id === handed" in PAPER[panel_watch : panel_watch + 400]
+
+    assert "const handedNote = computed(" in PAPER
+    assert "这一页不会自动下单" in PAPER
+    assert "还没有模拟账户" in PAPER
+    assert "个账户都绑定策略版本" in PAPER
+    assert '<p v-if="handedNote" class="notice">{{ handedNote }}</p>' in PAPER
+    # UI_SPEC's dead-button rule: the page says why it did not do something for you.
+    assert "没有替你选账户" in PAPER

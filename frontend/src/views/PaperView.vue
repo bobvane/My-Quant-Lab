@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  ApiError,
   api,
   type BacktestDetail,
   type BacktestSummary,
@@ -122,6 +123,13 @@ const sizingNotional = ref<number | null>(null)
 const lastFill = ref<PaperExecution | null>(null)
 const fillAccount = ref<number | null>(null)
 
+// 从「信号」页带过来的信号（`?signal_id=`，ADR-203）：读出来是为了能说出它是谁。
+const handedSignal = ref<SignalRecord | null>(null)
+// 服务端已经没有这条信号了（404）—— 与「读不到但可能还在」分开说。
+const handedSignalGone = ref(false)
+// 这一页替不替你选账户：只有「绑定这一版的账户恰好只有一个」时才选，且要说出来。
+const handedAccountPicked = ref(false)
+
 /** 正数才算填了仓位：空字符串、0、负数一律当作「没填」。 */
 function positiveNumber(value: unknown): number | null {
   const parsed = typeof value === 'number' ? value : Number(value)
@@ -144,6 +152,30 @@ function routeAccountId(): number | null {
   if (typeof value !== 'string' || value.trim().length === 0) return null
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+/** 地址里那个正整数参数（`?signal_id=` / `?strategy_version_id=`）；读不出就是「没写」。 */
+function routePositiveInt(name: 'signal_id' | 'strategy_version_id'): number | null {
+  const raw = route.query[name]
+  const value = Array.isArray(raw) ? raw[0] : raw
+  if (typeof value !== 'string' || value.trim().length === 0) return null
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+/**
+ * 从「信号」页带过来的那条信号（ADR-203）。
+ *
+ * 信号页的「去纸面执行」把 `?signal_id=<id>` 写进地址，这一页照着它把要执行的信号填好。
+ * 它**不会**自动成交：执行仍然要人按一次按钮（红线：不自动交易）。
+ */
+function routeSignalId(): number | null {
+  return routePositiveInt('signal_id')
+}
+
+/** 带过来的信号属于哪一版；信号本身读得到时以信号自己的版本为准。 */
+function routeVersionId(): number | null {
+  return routePositiveInt('strategy_version_id')
 }
 
 function strategyName(strategyId: number | null | undefined): string {
@@ -283,6 +315,127 @@ const selectedSignal = computed(
   () => panelSignals.value.find((signal) => signal.id === selectedSignalId.value) ?? null,
 )
 
+// ---- 从「信号」页带过来的信号（`?signal_id=`，ADR-203）-------------------------
+//
+// 信号页只写地址，不写状态：这一页照着地址把「要执行哪一条」填好，但**不成交**。
+// 成交永远要人按一次「执行」（红线：不自动交易）。
+
+/** 带过来的信号属于哪一版：信号自己读得到就听它的，读不到才退回地址里那个版本号。 */
+const handedVersion = computed<number | null>(
+  () => handedSignal.value?.strategy_version_id ?? routeVersionId(),
+)
+
+/** 绑定这一版的账户：一个都没有时不猜，有两个以上时也不猜（谁也不比谁更该被选中）。 */
+const handedAccounts = computed<PaperAccount[]>(() => {
+  const version = handedVersion.value
+  if (version === null) return []
+  return accounts.value.filter((account) => account.strategy_version_id === version)
+})
+
+/**
+ * 读一次地址里点名的信号，并把「按信号 ID 执行」的输入框也填上。
+ *
+ * 404 与别的失败分开说：服务端明确说没有这条信号，和「这次没读到」不是一件事（ADR-112）。
+ */
+async function loadHandedSignal() {
+  handedSignal.value = null
+  handedSignalGone.value = false
+  handedAccountPicked.value = false
+  const id = routeSignalId()
+  if (id === null) return
+  // 高级模式的「按信号 ID 执行」也落在同一条上：带过来的是哪条，就执行哪条。
+  signalId.value = id
+  try {
+    handedSignal.value = await api.signal(id)
+  } catch (e) {
+    handedSignalGone.value = e instanceof ApiError && e.status === 404
+  }
+}
+
+/** 带过来的信号属于这一版，而绑定这一版的账户恰好只有一个：那就选中它，并说明是替你选的。 */
+async function openHandedAccount() {
+  if (routeSignalId() === null || routeAccountId() !== null) return
+  if (handedAccounts.value.length !== 1) return
+  const only = handedAccounts.value[0]
+  await openAccount(only.id, true)
+  handedAccountPicked.value = true
+}
+
+/** 面板下拉里如果有这条信号，就选中它（没有就交给默认的「最新一条」，不硬塞）。 */
+function selectHandedSignal() {
+  const id = routeSignalId()
+  if (id === null) return
+  if (panelSignals.value.some((signal) => signal.id === id)) selectedSignalId.value = id
+}
+
+/**
+ * 这一页读到地址里的信号之后要说的话：它是谁、会不会自动成交、账户替不替你选。
+ *
+ * 没有信号被带过来时返回空串（这一页照旧）。
+ */
+const handedNote = computed(() => {
+  const id = routeSignalId()
+  if (id === null) return ''
+  const parts: string[] = []
+  if (handedSignalGone.value) {
+    parts.push(
+      `从「信号」页带过来的信号 #${id} 在服务端已经没有了（可能已被删除），执行它会失败。`,
+    )
+  } else if (handedSignal.value) {
+    const row = handedSignal.value
+    parts.push(
+      `从「信号」页带过来的信号 #${id}：${row.symbol ?? `#${row.asset_id}`} · ` +
+        `${signalLabel(row.state)} · ${signalDirection(row.direction, row.closes_direction)} · ` +
+        `${formatDateTime(row.bar_timestamp)}。`,
+    )
+  } else {
+    parts.push(`地址里点名了信号 #${id}，但这次没读到它的内容。`)
+  }
+  parts.push('这一页不会自动下单：选好账户与仓位口径，按「执行」才成交。')
+
+  if (!handedSignalGone.value) {
+    const version = handedVersion.value
+    if (handedAccountPicked.value && selectedAccount.value) {
+      parts.push(
+        `已替你选中唯一绑定策略版本 #${version} 的账户《${selectedAccount.value.name}》。`,
+      )
+    } else if (selectedAccount.value && selectedSignal.value?.id === id) {
+      parts.push('已在上面的信号下拉里选中它。')
+    } else if (selectedAccount.value) {
+      const bound = selectedAccount.value.strategy_version_id ?? null
+      parts.push(
+        bound === null
+          ? '这个账户没有绑定策略版本，下拉里只列最近 500 条信号，所以没有选中它：' +
+              '换一个绑定了这一版的账户，或者在高级模式里直接按信号 ID 执行。'
+          : `这个账户绑定的是策略版本 #${bound}，下拉里只列该版本的信号，所以没有选中它：` +
+              `换一个绑定 #${version ?? '这一版'} 的账户，或者在高级模式里直接按信号 ID 执行。`,
+      )
+    } else if (accounts.value.length === 0) {
+      parts.push(
+        '还没有模拟账户：先在「新建模拟账户」里建一个' +
+          (version === null ? '' : `（绑定策略版本 #${version} 就能在下拉里看到它）`) +
+          '，再回来执行这条信号。',
+      )
+    } else if (handedAccounts.value.length > 1) {
+      parts.push(
+        `没有替你选账户：有 ${handedAccounts.value.length} 个账户都绑定策略版本 #${version}，` +
+          '从上面的账户列表里挑一个。',
+      )
+    } else if (routeAccountId() !== null) {
+      parts.push(
+        `地址里点名的账户 #${routeAccountId()} 没有读出来（原因见上面的报错），所以这一屏还没有选中账户。`,
+      )
+    } else {
+      parts.push(
+        version === null
+          ? '没有替你选账户：地址里没写这条信号属于哪一版，所以不知道哪个账户该执行它。'
+          : `没有替你选账户：没有账户绑定策略版本 #${version}。`,
+      )
+    }
+  }
+  return parts.join('')
+})
+
 const performanceMissing = computed(() => {
   const value = performance.value
   if (!value) return false
@@ -291,7 +444,13 @@ const performanceMissing = computed(() => {
 })
 
 // 默认选中最新的一条信号；列表变了（换账户、执行完）就跟着重选，不让旧的选择悬空。
+// 从信号页带过来的那一条只要在列表里就优先选中它 —— 地址里点名了哪条，就执行哪条（ADR-203）。
 watch(panelSignals, (list) => {
+  const handed = routeSignalId()
+  if (handed !== null && list.some((signal) => signal.id === handed)) {
+    selectedSignalId.value = handed
+    return
+  }
   if (!list.some((signal) => signal.id === selectedSignalId.value)) {
     selectedSignalId.value = list.length > 0 ? list[0].id : null
   }
@@ -453,7 +612,19 @@ async function loadTrades(accountId: number) {
 /**
  * 选中一个账户：读它的持仓与流水，并把选择写回 URL 的 `?account=`，
  * 这样刷新页面和分享链接都会落在同一个账户上。
+ *
+ * 地址里原有的「带着哪条信号过来」（`?signal_id=`，ADR-203）不能在这一步被抹掉：
+ * 换一个账户不该等于把要执行的那条信号忘掉。
  */
+function paperQuery(accountId: number): Record<string, string> {
+  const query: Record<string, string> = { account: String(accountId) }
+  const signal = routeSignalId()
+  if (signal !== null) query.signal_id = String(signal)
+  const version = routeVersionId()
+  if (version !== null) query.strategy_version_id = String(version)
+  return query
+}
+
 async function openAccount(accountId: number, updateUrl: boolean) {
   if (accounts.value.length > 0 && !accounts.value.some((a) => a.id === accountId)) {
     error.value = `地址里的账户 #${accountId} 不在账户列表里（可能已被删除）：请从下面的列表重新选一个。`
@@ -461,7 +632,7 @@ async function openAccount(accountId: number, updateUrl: boolean) {
   }
   selectedAccountId.value = accountId
   if (updateUrl && routeAccountId() !== accountId) {
-    await router.replace({ path: '/paper', query: { account: String(accountId) } })
+    await router.replace({ path: '/paper', query: paperQuery(accountId) })
   }
   await Promise.all([
     loadPositions(accountId),
@@ -811,14 +982,23 @@ onMounted(() => {
   void bootstrap()
 })
 
-/** 先把账户读出来，再按 URL 选中（顺序很重要：选中的账户必须先在列表里）。 */
+/**
+ * 先把账户读出来，再按 URL 选中（顺序很重要：选中的账户必须先在列表里）。
+ *
+ * URL 里可能同时点着两件东西：要执行的信号（`?signal_id=`）与要看的账户（`?account=`）。
+ * 账户写在地址里就以它为准；没写、而这条信号只对应一个账户时，才替用户选中那一个 ——
+ * 有多个候选时谁也不比谁更该被选中，宁可不选（ADR-203）。
+ */
 async function bootstrap() {
   await load()
   await loadSignals()
   void loadReference()
   void loadAssetSymbols()
+  await loadHandedSignal()
   const fromUrl = routeAccountId()
   if (fromUrl !== null) await openAccount(fromUrl, false)
+  else await openHandedAccount()
+  selectHandedSignal()
 }
 </script>
 
@@ -835,6 +1015,7 @@ async function bootstrap() {
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="info" class="notice">{{ info }}</p>
+    <p v-if="handedNote" class="notice">{{ handedNote }}</p>
 
     <div class="card card-quiet">
       <h3>新建模拟账户</h3>

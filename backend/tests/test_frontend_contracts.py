@@ -52,6 +52,7 @@ RESEARCH = (VIEWS / "ResearchView.vue").read_text(encoding="utf-8")
 DATA = (VIEWS / "DataView.vue").read_text(encoding="utf-8")
 STYLE = (SRC / "style.css").read_text(encoding="utf-8")
 STRATEGY_DETAIL = (VIEWS / "StrategyDetailView.vue").read_text(encoding="utf-8")
+EXPERIMENTS = (VIEWS / "ExperimentsView.vue").read_text(encoding="utf-8")
 VITE_CONFIG = (REPO_ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
 ENV_DTS = (SRC / "env.d.ts").read_text(encoding="utf-8")
 
@@ -877,6 +878,49 @@ def test_the_backtest_page_accepts_a_handoff_without_trusting_it() -> None:
         "run",
     ):
         assert key in body, key
+
+
+def test_the_backtest_page_can_be_pointed_at_one_stored_run() -> None:
+    """``/backtest?run_id=<id>`` opens a run that already exists (ADR-200).
+
+    Until this, the address could only say "which strategy version, which symbol, which
+    timeframe", so every page that already knew a run id ("这条实验跑的是回测 #N") had to
+    tell the reader to go find row N by hand in 回测记录 — the link lost the one piece of
+    context it actually had. The new key names a **stored** run: it is whitelisted like the
+    rest of the query (a hand-edited address is user input) and it only selects, never runs
+    — "run one now" stays the separate ``run=1``.
+    """
+
+    assert "requestedRunId" in BACKTEST
+    # 白名单：一个手改的地址只会让这个参数被忽略，不会让页面出错。
+    assert "Number.isInteger(raw) && raw > 0" in BACKTEST
+    assert "applyRunQuery" in BACKTEST
+    assert "await applyRunQuery()" in BACKTEST
+
+    body = _function_body(BACKTEST, "applyRunQuery")
+    assert "api.backtestRun(" in body
+    assert "await open(id)" in body
+    # 指名一条已存的回测不是一次新的计算：这条路径上不能出现「开跑」。
+    assert "runNew" not in body
+    # 这一条回测属于哪一版策略也要一并选好，否则页头与下面按版本算的卡片会各说各话。
+    assert "allStrategyVersions(" in body
+    assert "versionId.value = version" in body
+
+    # 用户在「回测记录」里点开某一条时地址栏跟着走：刷新才回到同一条（它不触发计算，
+    # 所以「交接完清掉 query」那条理由对它不成立）。
+    assert "nameRunInAddressBar" in BACKTEST
+    assert "openNamed(r.id)" in BACKTEST
+    assert "query: keepRunId" in BACKTEST
+
+    # 结果回到策略本身，但只在版本确实属于当前策略时才给链接（指错比不给更糟）。
+    assert "detailStrategyId" in BACKTEST
+    assert "`/strategy/${detailStrategyId}`" in BACKTEST
+
+    # 已经知道编号的页面把编号直接送过去，而不是让用户自己去表里按编号找。
+    assert "run_id: String(current.backtest_run_id)" in EXPERIMENTS
+    assert "它没有「直接选中某条回测」的参数" not in EXPERIMENTS
+    assert "run_id: String(id)" in STRATEGY_DETAIL
+    assert ':to="backtestLink"' in STRATEGY_DETAIL
 
 
 def test_the_typography_separates_a_conclusion_from_its_controls() -> None:

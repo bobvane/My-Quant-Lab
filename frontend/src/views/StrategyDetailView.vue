@@ -48,6 +48,21 @@ const currentVersion = computed(
   () => versions.value.find((version) => version.is_current) ?? versions.value[0] ?? null,
 )
 const latestRun = computed(() => runs.value[0] ?? null)
+
+/**
+ * 「去回测」的落点：带上当前版本，让那一页一打开就选中它，而不是回到默认版本（ADR-200）。
+ * 还没有版本时退回不带参数的那一页 —— 这一节要说的仍然是「先把这一版跑一次」。
+ */
+const backtestLink = computed(() =>
+  currentVersion.value
+    ? { path: '/backtest', query: { strategy_version_id: String(currentVersion.value.id) } }
+    : '/backtest',
+)
+
+/** 某一次已存回测的落点：`?run_id=` 让「回测」页直接打开它（ADR-200）。 */
+function runLink(id: number) {
+  return { path: '/backtest', query: { run_id: String(id) } }
+}
 const dsl = computed<Record<string, any> | null>(
   () => (currentVersion.value?.dsl as Record<string, any> | undefined) ?? null,
 )
@@ -424,10 +439,10 @@ onMounted(load)
         <h3>回测（Backtest）</h3>
         <template v-if="latestRun">
           <p class="muted">
-            当前版本最近一次回测（运行 #{{ latestRun.id }}，{{ latestRun.status }}<span
-              v-if="isAdvanced"
-              >，数据集 {{ latestRun.dataset_version_id }}</span
-            >）。「回测」页里有完整的成交明细与参数。
+            当前版本最近一次回测（运行
+            <RouterLink :to="runLink(latestRun.id)">#{{ latestRun.id }}</RouterLink>，{{ latestRun.status
+            }}<span v-if="isAdvanced">，数据集 {{ latestRun.dataset_version_id }}</span
+            >）。点编号到「回测」页看完整的成交明细与参数。
           </p>
           <div class="grid">
             <StatCard label="总收益率" :value="formatPercent(latestRun.total_return)" :tone="toneOf(latestRun.total_return)" />
@@ -439,7 +454,7 @@ onMounted(load)
         </template>
         <p v-else class="muted">
           当前版本还没有跑过回测。不是零，是还没有数据 —— 去
-          <RouterLink to="/backtest">回测</RouterLink> 跑一次，再回来看这一节。
+          <RouterLink :to="backtestLink">回测</RouterLink> 跑一次，再回来看这一节。
         </p>
         <table v-if="runs.length > 1">
           <thead>
@@ -456,7 +471,9 @@ onMounted(load)
           </thead>
           <tbody>
             <tr v-for="run in runs" :key="run.id">
-              <td>{{ run.id }}</td>
+              <td>
+                <RouterLink :to="runLink(run.id)">#{{ run.id }}</RouterLink>
+              </td>
               <td>{{ run.status }}</td>
               <td>{{ run.symbol ?? '—' }}</td>
               <td>{{ run.timeframe ?? '—' }}</td>

@@ -773,15 +773,18 @@ function compareStatusText(row: Record<string, unknown>): string {
 // ---- 权益曲线 / 交易记录：用链接把用户送回「回测」页 --------------------------
 
 /**
- * `/backtest` 的 query 只认 `strategy_version_id` / `symbol` / `timeframe` / … 与
- * `run === '1'`（后者是「立刻新跑一次」，不是「选中某条 run」）。没有任何参数能指定
- * 一条已存在的回测，所以这里只把「哪一版策略、哪个标的、什么周期」送过去，
- * 由用户自己在「回测记录」里按编号找那一条。
+ * `/backtest?run_id=<id>` 直接打开这条实验跑过的那一次回测（ADR-200），
+ * 所以不必再让用户在「回测记录」里按编号自己找。`strategy_version_id` / `symbol` /
+ * `timeframe` 一并带上：它们是那一页的上下文，万一那次回测已被删除，
+ * 落到的也还是一个跟这条实验说得通的状态。
  */
 const backtestLink = computed(() => {
   const current = detail.value
   if (!current || current.backtest_run_id === null || current.backtest_run_id === undefined) return null
-  const query: Record<string, string> = { strategy_version_id: String(current.strategy_version_id) }
+  const query: Record<string, string> = {
+    strategy_version_id: String(current.strategy_version_id),
+    run_id: String(current.backtest_run_id),
+  }
   if (current.symbol) query.symbol = current.symbol
   if (current.timeframe) query.timeframe = current.timeframe
   return { path: '/backtest', query }
@@ -1300,11 +1303,11 @@ onMounted(async () => {
           <li>
             <template v-if="backtestLink">
               <RouterLink :to="backtestLink">权益曲线</RouterLink>
-              —— 到「回测」页，在「回测记录」里找 <strong>#{{ backtestRunId }}</strong> 那一条
-              （表里「#」这一列就是回测编号），点「查看」就能看到它的权益曲线。
+              —— 到「回测」页直接打开这次回测 <strong>#{{ backtestRunId }}</strong>，
+              权益曲线与下面的解读都在那一页上。
               <span class="muted">
-                （<span class="mono">/backtest</span> 的 query 只能表达「哪一版策略 / 哪个标的 / 什么周期」，
-                它没有「直接选中某条回测」的参数，所以这里把页码和编号都写出来，由你点那一下。）
+                （地址里的 <span class="mono">?run_id={{ backtestRunId }}</span>
+                指名的就是这一条回测：刷新或把地址发给别人，落到的还是它。）
               </span>
             </template>
             <span v-else class="muted">这条实验还没有对应的回测，先运行它，跑完就有权益曲线了。</span>
@@ -1312,7 +1315,7 @@ onMounted(async () => {
           <li>
             <template v-if="backtestLink">
               <RouterLink :to="backtestLink">交易记录</RouterLink>
-              —— 同一个页面同一条记录，点「查看」后往下就是这次运行的成交明细（每笔的手续费在那张表里）。
+              —— 同一条回测，那一页往下就是这次运行的成交明细（每笔的手续费在那张表里）。
             </template>
             <span v-else class="muted">这条实验还没有对应的回测，先运行它，跑完就有成交明细了。</span>
           </li>

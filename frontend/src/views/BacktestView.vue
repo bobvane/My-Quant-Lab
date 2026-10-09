@@ -247,6 +247,17 @@ function statusText(run: BacktestSummary): string {
  * 界面就不必在「假装它不存在」和「把它当已完成」之间二选一。
  */
 const activeRun = ref<BacktestRun | null>(null)
+
+/**
+ * 屏幕上这次回测背后是哪个策略：只在这条回测的策略版本确实出现在当前选中的版本集合里
+ * （`versions` 是按 `strategyId` 载入的）时才给链接。指到错的策略页比只写编号更糟，
+ * 所以查不到就只显示编号、不给链接（ADR-200）。
+ */
+const detailStrategyId = computed<number | null>(() => {
+  const version = detail.value?.strategy_version_id
+  if (version === null || version === undefined) return null
+  return versions.value.find((candidate) => candidate.id === version)?.strategy_id ?? null
+})
 const pollGaveUp = ref(false)
 // 「问一次状态」是这一页自己的动作，不能借用 `busy`：那个开关会让整页的按钮
 // 一起变灰，把一次状态查询画成「页面在忙」。
@@ -1013,6 +1024,14 @@ async function removeRun(id: number) {
       activeRun.value = null
       pollGaveUp.value = false
       detail.value = runs.value.length ? await api.backtest(runs.value[0].id) : null
+      // 地址栏里如果指名的正是这条已经不存在的回测，它也该跟着失效（ADR-200）；
+      // 顺手指向删完之后屏幕上留下的那一条，刷新不会落到一条没有的记录上。
+      if (requestedRunId() !== null) {
+        if (detail.value) await nameRunInAddressBar(detail.value.id)
+        else await router.replace({ path: '/backtest' })
+      }
+    } else if (requestedRunId() === id) {
+      await router.replace({ path: '/backtest' })
     }
   } catch (e) {
     error.value = (e as Error).message
@@ -1188,6 +1207,8 @@ async function runNew() {
       endDate.value ? dayEnd(endDate.value) : undefined,
     )
     runs.value = [result, ...runs.value]
+    // 这一次新回测现在就是屏幕上的这一条：地址栏也跟着它，刷新回来还是它（ADR-200）。
+    await nameRunInAddressBar(result.id)
     btExplanation.value = null
     analysis.value = null
     perfExplanation.value = null
@@ -1750,6 +1771,64 @@ function queryText(key: string): string {
   return typeof raw === 'string' ? raw.trim() : ''
 }
 
+/**
+ * `/backtest?run_id=<id>` —— 指名**一条已经存下来的**回测（ADR-200）。
+ *
+ * 与上面那组参数的区别是它不触发任何计算：只把屏幕上这一次与地址栏对齐，
+ * 所以刷新、从别的页面跳过来、把地址发给别人，落到的都是同一条记录
+ * （「在『回测记录』里按编号自己找」那种写法只留给真的没有办法的时候）。
+ * 非法值一律当作没给。
+ */
+function requestedRunId(): number | null {
+  const raw = Number(queryText('run_id'))
+  return Number.isInteger(raw) && raw > 0 ? raw : null
+}
+
+/** 地址里指名的那条回测的 query，用于把它留在地址栏里（不合法就是空的）。 */
+function keepRunQuery(): { run_id: string } | null {
+  const id = requestedRunId()
+  return id === null ? null : { run_id: String(id) }
+}
+
+/** 让地址栏指向屏幕上这一条回测。 */
+async function nameRunInAddressBar(id: number) {
+  await router.replace({ path: '/backtest', query: { run_id: String(id) } })
+}
+
+/**
+ * 打开地址里指名的那一条回测，并把它所属的策略版本一并选好，
+ * 否则页头写着「版本 #7」而下面那些按版本算的卡片还停在别的版本上。
+ */
+async function applyRunQuery(): Promise<boolean> {
+  const id = requestedRunId()
+  if (id === null) return false
+  try {
+    const run = await api.backtestRun(id)
+    const version = run.strategy_version_id
+    if (version != null) {
+      const all = await api.allStrategyVersions()
+      const target = all.find((candidate) => candidate.id === version)
+      if (target) {
+        strategyId.value = target.strategy_id
+        await loadVersions()
+        versionId.value = version
+      }
+    }
+    await open(id)
+    return true
+  } catch (e) {
+    // 地址是用户能改的输入：指一条不存在（或已被删除）的回测是一句提示，不是整页失败。
+    error.value = `地址里指名的回测 #${id} 打不开：${(e as Error).message}`
+    return false
+  }
+}
+
+/** 用户在「回测记录」里点开某一条：先让地址栏也指向它，再打开。 */
+async function openNamed(id: number) {
+  await nameRunInAddressBar(id)
+  await open(id)
+}
+
 async function applyResearchQuery() {
   const requestedVersion = Number(queryText('strategy_version_id'))
   const requestedSymbol = queryText('symbol')
@@ -1791,7 +1870,15 @@ async function applyResearchQuery() {
   }
   if (!handedOver) return
   // 参数已经落到表单里，地址栏再留着它们只会让刷新重复跑一次。
-  await router.replace({ path: '/backtest' })
+  // `run_id` 是例外：它只指名一条已经存下来的回测，不会重新计算，
+  // 留着它刷新后才回到同一条记录（ADR-200）。真正要开跑的那一次（`run=1`）
+  // 由 `runNew` 用新回测的编号覆盖地址，所以这里不必保留旧编号。
+  const keepRunId = shouldRun ? null : keepRunQuery()
+  if (keepRunId === null) {
+    await router.replace({ path: '/backtest' })
+  } else {
+    await router.replace({ path: '/backtest', query: keepRunId })
+  }
   if (shouldRun) {
     // 记住这一次是「交接来」的：跑完之后自动补一次 AI 汇总（ADR-192）。
     // 手动跑的回测不走这条路，用户自己点「生成解读」时行为与以前完全一样。
@@ -1811,6 +1898,8 @@ onMounted(async () => {
     // single-strategy selection above.
     await loadEnsCandidates()
     await applyResearchQuery()
+    // 地址里指名了一条已存回测的话，它说了算（覆盖上面「自动打开最新那一次」，ADR-200）。
+    await applyRunQuery()
   })
 </script>
 
@@ -2007,6 +2096,16 @@ onMounted(async () => {
         <span class="verdict" :class="verdict.tone">{{ verdict.label }}</span>
       </p>
       <p class="conclusion-sentence">{{ conclusionHeadline }}</p>
+      <!-- 这一屏的每一个数字都来自一次具体回测，而它跑的是某一版 DSL：
+           把「哪一版」写成能点的链接，用户才回得到策略本身去改它（ADR-200）。 -->
+      <p v-if="detail" class="muted" style="margin: 6px 0 0">
+        这次回测（#{{ detail.id }}）跑的是<span v-if="detail.symbol"> {{ detail.symbol }}</span>
+        <span v-if="detail.timeframe">的{{ timeframeLabel(detail.timeframe) }}</span>、策略版本
+        <RouterLink v-if="detailStrategyId" :to="`/strategy/${detailStrategyId}`"
+          >#{{ detail.strategy_version_id }}</RouterLink
+        ><span v-else>#{{ detail.strategy_version_id }}</span>
+        的那一版。
+      </p>
       <div class="grid cols-4" style="margin-top: 10px">
         <StatCard
           label="总收益率"
@@ -3109,7 +3208,7 @@ onMounted(async () => {
                   v-if="r.status === 'pending' || r.status === 'running'"
                   class="ghost"
                   style="margin-left: 6px"
-                  @click="open(r.id)"
+                  @click="openNamed(r.id)"
                 >
                   看进度
                 </button>
@@ -3119,7 +3218,7 @@ onMounted(async () => {
               <td>{{ formatNumber(r.sharpe) }}</td>
               <td>{{ r.number_of_trades ?? 'N/A' }}</td>
               <td>
-                <button class="ghost" :disabled="busy" @click="open(r.id)">查看</button>
+                <button class="ghost" :disabled="busy" @click="openNamed(r.id)">查看</button>
                 <button class="ghost danger" :disabled="busy" @click="removeRun(r.id)">删除</button>
               </td>
             </tr>

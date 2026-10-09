@@ -137,6 +137,35 @@ def test_the_lab_can_take_a_url_as_material() -> None:
     assert "body?.detail" in LAB_TEXT
 
 
+def test_the_lab_can_take_a_pdf_as_material() -> None:
+    """A PDF the platform cannot fetch is handed over inline, then read back by snapshot.
+
+    The file lives on the operator's disk, so the page reads it as base64 and posts it to
+    ``/ai/sources/pdf``; the run then names the stored snapshot, so the bytes travel once.
+    A PDF with no text layer is *not* an error (200 + ``parse_status="unsupported"``), but
+    it is also not material: the page has to refuse it in Chinese rather than start a run
+    that would fail at ingest (ADR-210).
+    """
+
+    assert "api.aiSourcePdf(" in LAB_TEXT
+    assert "content_base64" in LAB_TEXT
+    assert "readAsDataURL(" in LAB_TEXT
+    assert 'id="lab-source-pdf"' in LAB_TEXT or "id='lab-source-pdf'" in LAB_TEXT
+    assert 'type="file"' in LAB_TEXT or "type='file'" in LAB_TEXT
+    assert (
+        'accept="application/pdf,.pdf"' in LAB_TEXT or "accept='application/pdf,.pdf'" in LAB_TEXT
+    )
+    # The server's own byte cap, named once and enforced before the upload.
+    assert "MAX_PDF_BYTES" in LAB_TEXT
+    assert "一份最多 2 MiB" in LAB_TEXT
+    # "Read but empty" is a result the page acts on, in the reader's words.
+    assert "pdfUnreadableReason(" in LAB_TEXT
+    assert "parse_status === 'unsupported'" in LAB_TEXT
+    assert "本版不做 OCR" in LAB_TEXT
+    # And the run names the snapshot: the bytes are never uploaded a second time.
+    assert "kind: 'pdf'" in LAB_TEXT
+
+
 def test_the_page_no_longer_promises_a_dead_end() -> None:
     assert DEAD_END_CLAIM not in LAB_TEXT
 
@@ -220,12 +249,13 @@ def test_the_engine_payload_stays_in_a_fold() -> None:
 
 
 def test_the_page_no_longer_claims_it_cannot_read_the_web_or_pdf() -> None:
-    """The API has ingested url/pdf/github_file since v2.1.0, and ``url`` landed in v2.7.0.
+    """The API has ingested url/pdf/github_file since v2.1.0; ``url`` landed in 2.7.0.
 
-    The old sentence said the backend could fetch material but this page was not wired
-    up to it. That was true then and is false now, so the page states what it does read
-    (a pasted paragraph or a public URL) and keeps the honest limit about the rest
-    (``pdf`` / ``github_file`` still have no field on this page).
+    ``pdf`` landed with this change (ADR-210). The old sentence said the backend could
+    fetch material but this page was not wired up to it. That was true then and is false
+    now, so the page states what it does read (a pasted paragraph, a public URL, or a PDF
+    handed over from disk) and keeps the honest limit about the rest (``github_file`` still
+    has no field on this page).
     """
 
     assert "不会去抓网页或解析 PDF" not in LAB_TEXT
@@ -233,6 +263,6 @@ def test_the_page_no_longer_claims_it_cannot_read_the_web_or_pdf() -> None:
     # What the page does now, in the reader's words...
     assert "给一个网址" in LAB_TEXT
     assert "也可以给一个公开网页的地址" in LAB_TEXT
+    assert "传一份 PDF" in LAB_TEXT
     # ... and what it still does not take, said out loud instead of quietly omitted.
-    assert "PDF" in LAB_TEXT
     assert "GitHub" in LAB_TEXT

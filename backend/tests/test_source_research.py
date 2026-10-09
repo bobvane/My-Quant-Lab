@@ -279,6 +279,36 @@ def test_a_snapshot_reference_is_handed_to_the_ingester(db_session, provider, mo
     assert db_session.scalars(select(ResearchArtifact)).one().snapshot_id == row.id
 
 
+def test_a_pdf_handed_over_inline_is_researched_by_its_snapshot(db_session, provider, monkeypatch):
+    """The Lab's PDF path: the bytes travel once, then the run names only the snapshot.
+
+    A file on the operator's disk is read by the browser and posted as base64, which files
+    it as a source snapshot; the run then carries ``{kind: 'pdf', snapshot_id}`` with no
+    ``uri`` and no ``text``, and the ingester reads the stored observation back. Nothing on
+    this path may require a second upload (ADR-210).
+    """
+
+    patch_pipeline(monkeypatch, [hypothesis_payload("report"), draft_payload("report")])
+    row = snapshots.record_material(
+        db_session,
+        material(kind="pdf", uri=None, content_type="application/pdf", parser="pypdf"),
+    )
+    run, calls = run_with(
+        db_session,
+        provider,
+        material(kind="pdf", snapshot_id=row.id, uri=None, parser="pypdf"),
+        inputs=[service.ResearchInput(kind="pdf", snapshot_id=row.id, source_ref="report")],
+    )
+
+    assert run.status == "completed"
+    assert calls[0].snapshot_id == row.id  # read back from the observation, not re-uploaded
+    artifact = db_session.scalars(select(ResearchArtifact)).one()
+    assert artifact.snapshot_id == row.id
+    assert artifact.parse_status == "ok"
+    assert run.sources_json[0]["kind"] == "pdf"
+    assert run.sources_json[0]["snapshot_id"] == row.id
+
+
 def test_a_deployment_that_cannot_fetch_says_so(db_session, provider):
     with pytest.raises(ValueError, match="this deployment cannot fetch a 'url' source"):
         service.start_research(

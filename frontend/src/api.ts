@@ -1858,6 +1858,23 @@ export const api = {
     retention?: 'excerpt' | 'full'
     license_note?: string
   }) => request<AISourceSnapshot>('/ai/sources/url', { method: 'POST', body: JSON.stringify(payload) }),
+  /**
+   * 读一份 PDF 并把它记下来（v2.1.0 的 `POST /ai/sources/pdf`）。
+   *
+   * 这个仓没有 multipart 与对象存储，所以「交一份 PDF」是内联 base64（服务端字段上限
+   * 3,000,000 字符、解码后 2 MiB）。只读文本层：扫描件会以 200 返回、
+   * `parse_status="unsupported"`——那不是错误，但也**不是材料**，调用方必须照着办。
+   * `uri` 与 `content_base64` 只能给一个（都给或都不给是 400）。
+   */
+  aiSourcePdf: (payload: {
+    uri?: string
+    content_base64?: string
+    filename?: string
+    source_ref?: string
+    label?: string
+    retention?: 'excerpt' | 'full'
+    license_note?: string
+  }) => request<AISourceSnapshot>('/ai/sources/pdf', { method: 'POST', body: JSON.stringify(payload) }),
   aiResearchRuns: (limit = 20) => request<{ runs: AIResearchRunSummary[] }>(`/ai/research?limit=${limit}`),
   aiResearchRun: (runId: number) => request<AIResearchRun>(`/ai/research/${runId}`),
   // 只重跑架构师那一步，给已经存下来的假设再要一份草案。

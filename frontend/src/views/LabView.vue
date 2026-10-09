@@ -13,6 +13,7 @@ import {
   type AIResearchRunSummary,
   type AIResearchSourceInput,
   type AIResearchSourceMeta,
+  type AISourceSnapshot,
   type AIResearchViolation,
   type AIResearchWarning,
   type Asset,
@@ -52,6 +53,8 @@ const QUESTION_MIN = 3
 const QUESTION_MAX = 4000
 const SOURCE_MAX = 40000
 const MAX_SOURCES = 8
+/** 服务端 `app/sources/fetch.py:40 MAX_DOCUMENT_BYTES`：一份被读的文档最多 2 MiB。 */
+const MAX_PDF_BYTES = 2 * 1024 * 1024
 
 // 后台研究是异步的：POST 只把运行排进队列（202 + status="queued"），所以状态要靠轮询。
 const POLL_MS = 2000
@@ -65,14 +68,16 @@ const question = ref('')
 const sourceLabel = ref('')
 const sourceText = ref('')
 
-// 材料可以是自己贴的一段文字，也可以是一个网址（ADR-191 之外的另一处「不要假装没有」：
-// 后端从 v2.1.0 起就能抓网页，`POST /ai/sources/url` 带着 SSRF 守卫，只有这一页没接）。
-const materialKind = ref<'text' | 'url'>('text')
+// 材料可以是自己贴的一段文字、一个网址，或者一份 PDF（ADR-191 之外的另一处「不要假装没有」：
+// 后端从 v2.1.0 起就能抓网页、读 PDF，`POST /ai/sources/url` 带着 SSRF 守卫、`POST /ai/sources/pdf`
+// 带着内联 base64 与「没有文本层就如实说、不猜内容」的语义，只有这一页没接）。
+const materialKind = ref<'text' | 'url' | 'pdf'>('text')
 const sourceUri = ref('')
+const pdfFile = ref<File | null>(null)
 const ingesting = ref(false)
 const ingestError = ref('')
 const ingestNote = ref('')
-/** 第三方网页默认只把前 500 字交给 AI；声明「我有权使用」才保留全文。 */
+/** 第三方网页/PDF 默认只把前 500 字交给 AI；声明「我有权使用」才保留全文。 */
 const sourceFullRetention = ref(false)
 
 const run = ref<AIResearchRun | null>(null)
@@ -199,10 +204,27 @@ const uriProblem = computed(() => {
   return ''
 })
 
-/** 当前这一种材料是否已经填好；两种材料一次只用一种。 */
-const materialProblem = computed(() =>
-  materialKind.value === 'url' ? uriProblem.value : sourceProblem.value,
-)
+/** 交一份 PDF：文件本身要选出来，大小要在服务端的读取上限之内。 */
+const pdfProblem = computed(() => {
+  if (materialKind.value !== 'pdf') return ''
+  const file = pdfFile.value
+  if (!file) return '选一份 PDF 文件。'
+  if (!file.size) return '这份文件是空的，换一份。'
+  if (file.size > MAX_PDF_BYTES) {
+    return (
+      `这份 PDF 有 ${(file.size / 1024 / 1024).toFixed(1)} MiB，超过本版一次最多读 ` +
+      `${MAX_PDF_BYTES / 1024 / 1024} MiB 的上限；请先压缩，或者只截出需要的那几页再交。`
+    )
+  }
+  return ''
+})
+
+/** 当前这一种材料是否已经填好；三种材料一次只用一种。 */
+const materialProblem = computed(() => {
+  if (materialKind.value === 'url') return uriProblem.value
+  if (materialKind.value === 'pdf') return pdfProblem.value
+  return sourceProblem.value
+})
 
 const inputProblem = computed(() => questionProblem.value || materialProblem.value)
 const canSubmit = computed(() => !inputProblem.value && !busy.value && !ingesting.value)
@@ -756,6 +778,10 @@ async function buildSource(): Promise<AIResearchSourceInput | null> {
     return source
   }
 
+  if (materialKind.value === 'pdf') {
+    return await buildPdfSource(label)
+  }
+
   const uri = sourceUri.value.trim()
   ingesting.value = true
   ingestError.value = ''
@@ -787,6 +813,119 @@ async function buildSource(): Promise<AIResearchSourceInput | null> {
   } finally {
     ingesting.value = false
   }
+}
+
+/**
+ * 把选中的那份 PDF 变成交给服务端的一份 source。
+ *
+ * 这份文件在磁盘上、服务端拿不到，而本仓没有 multipart 与对象存储，所以只能把字节读成
+ * base64 内联交上去（`POST /ai/sources/pdf`，上限 2 MiB：见 `MAX_PDF_BYTES`）。服务端读完
+ * 会先记一条 source snapshot，研究时按 `snapshot_id` 读回**当时保留的那一份**，不再上传第二次。
+ *
+ * 读不出文字的 PDF 不算材料：扫描件会以 200 返回、`parse_status="unsupported"`，加密或畸形
+ * 的会返回 200 + `parse_failed`——两种都不返回 source，于是这次研究连排队都不会排，
+ * 页面照实说原因（ADR-138：宁可说「读不出」，也不拿一份空材料去换一次 AI 调用）。
+ */
+async function buildPdfSource(label: string): Promise<AIResearchSourceInput | null> {
+  const file = pdfFile.value
+  if (!file) {
+    ingestError.value = pdfProblem.value || '选一份 PDF 文件。'
+    return null
+  }
+  ingesting.value = true
+  ingestError.value = ''
+  ingestNote.value = ''
+  try {
+    const contentBase64 = await readPdfBase64(file)
+    const snapshot = await api.aiSourcePdf({
+      content_base64: contentBase64,
+      filename: file.name,
+      source_ref: 'source_1',
+      ...(label ? { label } : {}),
+      ...(sourceFullRetention.value
+        ? { retention: 'full' as const, license_note: FULL_RETENTION_NOTE }
+        : {}),
+    })
+    const unreadable = pdfUnreadableReason(snapshot)
+    if (unreadable) {
+      ingestError.value = unreadable
+      return null
+    }
+    const kept = snapshot.retention?.retained_chars ?? 0
+    ingestNote.value =
+      `已读过 ${file.name}：全文 ${snapshot.chars_read ?? 0} 个字，服务端保留 ${kept} 个字` +
+      `（${snapshot.retention?.policy === 'full' ? '按你的声明保留全文' : '第三方材料只保留摘要'}）。`
+    const source: AIResearchSourceInput = {
+      kind: 'pdf',
+      snapshot_id: snapshot.snapshot_id,
+      source_ref: 'source_1',
+    }
+    if (label) source.label = label
+    return source
+  } catch (e) {
+    ingestError.value = pdfIngestProblem(e)
+    return null
+  } finally {
+    ingesting.value = false
+  }
+}
+
+/** 把一份文件读成 base64（去掉 `data:` 前缀：服务端要的是裸 base64）。 */
+function readPdfBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error('读不出这份文件'))
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : ''
+      const comma = result.indexOf(',')
+      if (comma < 0) {
+        reject(new Error('读不出这份文件'))
+        return
+      }
+      resolve(result.slice(comma + 1))
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+/**
+ * 服务端**读不出文字**时的一句人话；读得出来就返回空串。
+ *
+ * `parse_status` 是服务端对「这份文档我读到了什么」的结论（`app/sources/parse.py`）：
+ * `ok` 就是读了，`unsupported` 是「没有可读的文本层」（扫描件/纯图片，本版没有 OCR），
+ * `parse_failed` 是「打不开」（加密或格式不完整）。后两种都是 200，所以这一层必须自己看着办，
+ * 不能拿一个空材料去开始研究。`error_message` 是服务端的英文原文，不抖给用户。
+ */
+function pdfUnreadableReason(snapshot: AISourceSnapshot): string {
+  if (snapshot.parse_status === 'unsupported') {
+    return '这份 PDF 里没有可读的文字层（多半是扫描件或图片），本版不做 OCR，所以它不能当材料用；请换一份有文字层的 PDF，或者把关键段落贴成文字。'
+  }
+  if (snapshot.parse_status === 'parse_failed') {
+    return '服务端打不开这份 PDF（可能是加密的，或者文件不完整），它不能当材料用；请换一份再试，或者把关键段落贴成文字。'
+  }
+  if (!(snapshot.chars_read ?? 0)) {
+    return '这份 PDF 读出来是空的，它不能当材料用；请换一份，或者把关键段落贴成文字。'
+  }
+  return ''
+}
+
+/** PDF 交给服务端失败时的说法：400 是「这份文件本身不能用」，其余交给共用的翻译表。 */
+function pdfIngestProblem(e: unknown): string {
+  if (e instanceof ApiError && e.status === 400) {
+    return (
+      `这份 PDF 没能交给服务端：它可能是空的、已经损坏，或者超过本版 ` +
+      `${MAX_PDF_BYTES / 1024 / 1024} MiB 的上限。换一份再试。`
+    )
+  }
+  return ingestProblem(e)
+}
+
+/** 选文件：同一份重新选一次也要能触发（清掉旧值，避免「看着没变」的错觉）。 */
+function pickPdf(event: Event): void {
+  const input = event.target as HTMLInputElement
+  pdfFile.value = input.files?.[0] ?? null
+  ingestError.value = ''
+  ingestNote.value = ''
 }
 
 /**
@@ -2003,9 +2142,8 @@ onUnmounted(stopPolling)
       <h3>① 研究输入</h3>
       <p class="muted">
         一个问句 + 一段材料就够了。材料可以是一段研报摘录、一条公告、或者你自己写下的策略想法；
-        也可以给一个公开网页的地址，让服务端去读那篇正文。
-        后端还支持 PDF 与 GitHub 文件这两种材料，这一步暂时只有「贴文字」和「给网址」两个入口：
-        那两种可以先在别处读出来、再贴成文字（ADR-191）。
+        也可以给一个公开网页的地址，让服务端去读那篇正文；还可以直接传一份 PDF，服务端只读里面的文字层。
+        GitHub 文件这种材料后端同样支持，但这一页还没有入口：可以先在别处读出来、再贴成文字（ADR-191）。
       </p>
 
       <label class="muted" for="lab-question">研究问题</label>
@@ -2018,7 +2156,7 @@ onUnmounted(stopPolling)
       ></textarea>
       <p class="muted">{{ question.trim().length }} / {{ QUESTION_MAX }} 字</p>
 
-      <!-- 材料来源：一次只用一种。网址那条会先让服务端去读一次，读不到就不开始研究。 -->
+      <!-- 材料来源：一次只用一种。网址与 PDF 都会先让服务端去读一次，读不出就不开始这次研究。 -->
       <div class="mode-switch" role="group" aria-label="材料来源">
         <button
           type="button"
@@ -2037,6 +2175,15 @@ onUnmounted(stopPolling)
           @click="materialKind = 'url'"
         >
           给一个网址
+        </button>
+        <button
+          type="button"
+          class="ghost"
+          :class="{ on: materialKind === 'pdf' }"
+          :aria-pressed="materialKind === 'pdf'"
+          @click="materialKind = 'pdf'"
+        >
+          传一份 PDF
         </button>
       </div>
 
@@ -2060,7 +2207,7 @@ onUnmounted(stopPolling)
         </p>
       </template>
 
-      <template v-else>
+      <template v-else-if="materialKind === 'url'">
         <label class="muted" for="lab-source-url" style="margin-top: 10px">材料网址</label>
         <input
           id="lab-source-url"
@@ -2073,14 +2220,34 @@ onUnmounted(stopPolling)
           点「开始研究」时服务端会先去看一眼这个地址：只允许公开网站，本机与局域网地址会被拒绝；
           读回来的正文按行留下摘要，第三方材料默认只把前 500 字交给 AI，原文不落库。
         </p>
-        <label class="row" style="gap: 8px; align-items: center; margin-top: 6px">
-          <input v-model="sourceFullRetention" type="checkbox" style="width: auto" />
-          <span class="muted">
-            这份材料由我本人拥有，或我已获得保留全文的授权（不勾选只保留摘要 500 字，
-            勾选后保留前 2 万字）
-          </span>
-        </label>
       </template>
+
+      <template v-else>
+        <label class="muted" for="lab-source-pdf" style="margin-top: 10px">材料文件（PDF）</label>
+        <input
+          id="lab-source-pdf"
+          type="file"
+          accept="application/pdf,.pdf"
+          @change="pickPdf"
+        />
+        <p class="muted">
+          服务端只读 PDF 里的文字层，不做 OCR：整页都是图片的扫描件读不出正文，本版会直接告诉你读不出，
+          不会拿一份空材料去换一次 AI 调用。一份最多 2 MiB；交上去之后服务端先把它记成一条材料快照，
+          研究时按快照读回当时保留的那一份，不再上传第二次。
+        </p>
+      </template>
+
+      <label
+        v-if="materialKind !== 'text'"
+        class="row"
+        style="gap: 8px; align-items: center; margin-top: 6px"
+      >
+        <input v-model="sourceFullRetention" type="checkbox" style="width: auto" />
+        <span class="muted">
+          这份材料由我本人拥有，或我已获得保留全文的授权（不勾选只保留摘要 500 字，
+          勾选后保留前 2 万字）
+        </span>
+      </label>
 
       <p v-if="ingestNote" class="notice" style="margin-top: 10px">✅ {{ ingestNote }}</p>
       <p v-if="ingestError" class="notice warn" style="margin-top: 10px">

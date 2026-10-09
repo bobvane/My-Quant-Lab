@@ -805,7 +805,7 @@ re-imported automatically when a new commit lands):
 `GET /settings` [已实现] —— 列出设置。
 `PUT /settings` [已实现] —— 创建或更新一条设置。
 `GET /settings/ghostfolio/test` [已实现] —— 测试 Ghostfolio 连接。
-`GET /settings/ghostfolio/holdings` [已实现] —— Ghostfolio 持仓（只读）。
+`GET /settings/ghostfolio/holdings` [已实现] —— Ghostfolio 持仓（只读）；`allocation_pct` 与 `unrealized_pnl_pct` 一律是**百分点**（0–100），单位（0–1 分数还是 0–100）由整份 payload 的金额自行判定，不逐值猜（ADR-199）。
 
 ## System Resources （v2.6.0 撤回）
 

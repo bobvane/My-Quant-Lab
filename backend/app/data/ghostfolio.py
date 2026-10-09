@@ -13,6 +13,7 @@ directly as a Bearer token. Each collection cycle gets a fresh JWT.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import httpx
@@ -238,15 +239,17 @@ class GhostfolioAdapter:
                     "price": price,
                     "value": value,
                     "investment": cost_total,
-                    "allocation_pct": _as_pct(allocation),
+                    # Raw as sent: the payload's unit is decided once, below.
+                    "allocation_pct": allocation,
                     "unrealized_pnl": _to_float(item.get("netPerformance")),
-                    "unrealized_pnl_pct": _as_pct(_to_float(item.get("netPerformancePercent"))),
+                    "unrealized_pnl_pct": _to_float(item.get("netPerformancePercent")),
                     "first_activity_date": item.get("dateOfFirstActivity"),
                     "annual_dividend_per_share": annual_dividend,
                     "dividend_yield_pct": dividend_yield,
                     "currency": str(item.get("currency") or profile.get("currency") or "USD"),
                 }
             )
+        _normalise_percentages(holdings)
         return holdings
 
     def get_dividend_history(self) -> dict[str, dict[str, Any]]:
@@ -340,7 +343,7 @@ class GhostfolioAdapter:
         self, holdings: list[dict[str, Any]], *, accounts_count: int, source: str
     ) -> dict[str, Any]:
         active = [h for h in holdings if (h.get("quantity") or 0) > 0]
-        total_value = sum(h["value"] for h in active if h.get("value") is not None)
+        total_value = _active_total_value(active)
         for holding in active:
             if holding.get("allocation_pct") is None and total_value > 0 and holding.get("value"):
                 holding["allocation_pct"] = round(holding["value"] / total_value * 100, 4)
@@ -371,12 +374,91 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
-def _as_pct(value: float | None) -> float | None:
+def _as_pct(value: float | None, scale: float | None = None) -> float | None:
     if value is None:
         return None
-    # Ghostfolio reports allocation as a 0-1 fraction in some versions and as a
-    # percentage in others; normalise to 0-100.
-    return round(value * 100, 4) if value <= 1 else round(value, 4)
+    if scale is None:
+        # No evidence in the payload about how it writes percentages; fall back
+        # to the legacy per-value reading.
+        return round(value * 100, 4) if value <= 1 else round(value, 4)
+    return round(value * scale, 4)
+
+
+def _active_total_value(holdings: list[dict[str, Any]]) -> float:
+    """Market value the payload itself knows about, over the rows it carries."""
+
+    return sum(h["value"] for h in holdings if h.get("value") is not None)
+
+
+def _normalise_percentages(holdings: list[dict[str, Any]]) -> None:
+    """Turn the payload's raw percentage fields into percent points, once.
+
+    Ghostfolio has shipped both conventions: ``allocationInPercentage: 0.25``
+    meaning 25 % and ``allocationInPercentage: 25`` meaning 25 %. Deciding per
+    value cannot work — ``0.5`` is a legitimate 0.5 % in one convention and 50 %
+    in the other — so the unit is decided once for the whole payload, from the
+    money amounts the payload carries alongside the percentages.
+    """
+
+    total_value = _active_total_value(holdings)
+    allocation_refs = [
+        (h["value"] / total_value * 100) if total_value > 0 and h.get("value") else None
+        for h in holdings
+    ]
+    pnl_refs = [
+        (h["unrealized_pnl"] / h["investment"] * 100)
+        if (h.get("investment") or 0) > 0 and h.get("unrealized_pnl") is not None
+        else None
+        for h in holdings
+    ]
+    allocation_scale = _percent_scale([h.get("allocation_pct") for h in holdings], allocation_refs)
+    pnl_scale = _percent_scale([h.get("unrealized_pnl_pct") for h in holdings], pnl_refs)
+    for holding in holdings:
+        holding["allocation_pct"] = _as_pct(holding.get("allocation_pct"), allocation_scale)
+        holding["unrealized_pnl_pct"] = _as_pct(holding.get("unrealized_pnl_pct"), pnl_scale)
+
+
+def _percent_scale(raws: list[float | None], references: list[float | None]) -> float | None:
+    """Return 100.0 (values are 0–1 fractions), 1.0 (already percent points), or
+    None when the payload offers no evidence and the legacy per-value reading
+    has to decide.
+
+    ``references`` are the same quantity computed from the payload's own money
+    amounts (``value / total * 100``, ``unrealized_pnl / investment * 100``):
+    comparing the two candidate readings against them is what lets a payload
+    whose holdings are all under 1 % be read correctly.
+    """
+
+    pairs = [
+        (raw, reference)
+        for raw, reference in zip(raws, references, strict=True)
+        if raw is not None and reference is not None and raw > 0 and reference > 0
+    ]
+    if pairs:
+
+        def error(scale: float) -> float:
+            return sum(
+                abs(math.log10(raw * scale) - math.log10(reference)) for raw, reference in pairs
+            )
+
+        as_fraction = error(100.0)
+        as_percent = error(1.0)
+        if as_fraction != as_percent:
+            return 100.0 if as_fraction < as_percent else 1.0
+
+    known = [raw for raw in raws if raw is not None]
+    if not known:
+        return None
+    # A 0–1 fraction cannot exceed 1, so a single such number settles the unit.
+    if any(raw > 1 for raw in known):
+        return 1.0
+    # Fractions sum to ≈1 across a portfolio, percent points to ≈100.
+    total = sum(known)
+    if total >= 50:
+        return 1.0
+    if total <= 1.5:
+        return 100.0
+    return None
 
 
 def _count_accounts(payload: Any) -> int:

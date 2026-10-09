@@ -1496,3 +1496,52 @@ def test_a_paper_fill_can_be_handed_to_the_signal_it_came_from() -> None:
     # The strategy page's attribution sentence names where a fill came from.
     assert "ADR-204" in STRATEGY_DETAIL
     assert "归因按<strong>账户</strong>" in STRATEGY_DETAIL
+
+
+def test_an_experiment_can_be_renamed_without_touching_its_record() -> None:
+    """The two human-facing fields are editable from the page (ADR-205).
+
+    The backend has answered `PATCH /experiments/{id}` for a while, but no screen ever
+    called it: a mistyped name could only be fixed by deleting the experiment, which
+    deletes its results too. The detail panel now edits name and notes in place, sends
+    only the fields that actually changed (each PATCH writes an audit entry), refuses the
+    empty and over-long inputs the server also refuses, and says out loud what the edit
+    does not move: the frozen request, the parameters and the results.
+    """
+
+    save_body = _function_body(EXPERIMENTS, "saveRename")
+    assert "api.patchExperiment(" in save_body
+    # Only the two human-facing fields leave this page.
+    assert "payload.name = name" in save_body
+    assert "payload.notes = renameNotes.value" in save_body
+    assert "payload.strategy_version_id" not in save_body
+    assert "payload.status" not in save_body
+    # Unchanged fields are not resent: the server audits every update.
+    assert "if (name !== current.name) payload.name = name" in save_body
+    assert (
+        "if (renameNotes.value !== (current.notes ?? '')) payload.notes = renameNotes.value"
+        in save_body
+    )
+    # The list row is the same row: it renames without waiting for a reload.
+    assert "if (row) row.name = updated.name" in save_body
+    assert "名字与备注已保存" in save_body
+    assert "e instanceof ApiError && e.status === 404" in save_body
+
+    assert "改名 / 改备注" in EXPERIMENTS
+    assert (
+        '<form v-if="renaming" class="card" style="margin-top: 12px" @submit.prevent="saveRename">'
+        in EXPERIMENTS
+    )
+    assert ':maxlength="120"' in EXPERIMENTS
+    assert "最多 4000 个字" in EXPERIMENTS
+    # A disabled button says why (ADR-138), and the reasons are the server's own rules.
+    assert (
+        '<p v-if="renameBlockedReason" class="muted">{{ renameBlockedReason }}</p>' in EXPERIMENTS
+    )
+    assert "名字不能是空的" in EXPERIMENTS
+    assert "服务端会拒绝一个什么都没改的请求" in EXPERIMENTS
+    # The edit says what it does not move, so nobody fears the record changed.
+    assert "冻结的请求、参数与结果一个字都不会动" in EXPERIMENTS
+    assert "归档状态也不受影响" in EXPERIMENTS
+    # Opening another experiment drops the previous draft rather than carrying it over.
+    assert "cancelRename()" in _function_body(EXPERIMENTS, "openDetail")

@@ -21,6 +21,7 @@ import {
   type ExperimentDetailOut,
   type ExperimentResultOut,
   type ExperimentSummaryOut,
+  type ExperimentUpdatePayload,
   type Strategy,
   type StrategyVersion,
 } from '../api'
@@ -415,6 +416,9 @@ async function openDetail(id: number) {
   detailError.value = ''
   accountError.value = ''
   accountNotice.value = ''
+  // 换了另一条实验就把上一条的编辑框收掉：草稿里的名字属于之前那条，不该跟着换过来。
+  cancelRename()
+  renameNotice.value = ''
   try {
     detail.value = await api.experiment(id)
     await loadRunAnalysis(detail.value)
@@ -631,6 +635,84 @@ async function archiveExperiment(item: ExperimentSummaryOut) {
     listError.value = `归档实验「${item.name}」没有成功：${messageOf(e)}`
   } finally {
     archivingId.value = null
+  }
+}
+
+// ---- ③b 名字与备注（ADR-205）-------------------------------------------------
+
+/**
+ * 名字与备注是**人读的标签**，不是实验记录本身。
+ *
+ * 服务端早就能改这两个字段（`PATCH /experiments/{id}`，`extra="forbid"`，一个都没改
+ * 就是 422），但这一页一直没有入口：名字打错了只能删掉重建，而删掉是连结果一起删。
+ * 这里就地改，并把界线写出来——冻结的请求、参数与结果一个字都不动，归档状态也不受影响。
+ *
+ * 只发**真的改了**的字段：服务端每改一次都写一条审计，重发一遍没变的名字等于记一笔
+ * 什么都没发生的改动。
+ */
+const renameId = ref<number | null>(null)
+const renameName = ref('')
+const renameNotes = ref('')
+const renameSaving = ref(false)
+const renameError = ref('')
+const renameNotice = ref('')
+
+const renaming = computed<boolean>(
+  () => detail.value !== null && renameId.value === detail.value.id,
+)
+
+function startRename(item: ExperimentDetailOut) {
+  renameId.value = item.id
+  renameName.value = item.name
+  renameNotes.value = item.notes ?? ''
+  renameError.value = ''
+  renameNotice.value = ''
+}
+
+function cancelRename() {
+  renameId.value = null
+  renameError.value = ''
+}
+
+/** 只拦服务端也会拒绝的输入（空名字 / 超长 / 什么都没改），不编额外的规矩。 */
+const renameBlockedReason = computed<string>(() => {
+  const current = detail.value
+  if (!renaming.value || !current) return ''
+  const name = renameName.value.trim()
+  if (!name) return '名字不能是空的：列表里那一行就没有可认的称呼了。'
+  if (name.length > 120) return `名字最多 120 个字，现在是 ${name.length} 个。`
+  if (renameNotes.value.length > 4000) return `备注最多 4000 个字，现在是 ${renameNotes.value.length} 个。`
+  if (name === current.name && renameNotes.value === (current.notes ?? '')) {
+    return '名字和备注都没改：服务端会拒绝一个什么都没改的请求（422），这一页也就不发。'
+  }
+  return ''
+})
+
+async function saveRename() {
+  const current = detail.value
+  if (!current || !renaming.value || renameSaving.value || renameBlockedReason.value) return
+  const payload: ExperimentUpdatePayload = {}
+  const name = renameName.value.trim()
+  if (name !== current.name) payload.name = name
+  if (renameNotes.value !== (current.notes ?? '')) payload.notes = renameNotes.value
+  renameSaving.value = true
+  renameError.value = ''
+  listError.value = ''
+  try {
+    const updated = await api.patchExperiment(current.id, payload)
+    detail.value = updated
+    // 列表里那一行是同一行的名字，不该等下一次刷新才改口。
+    const row = experiments.value.find((candidate) => candidate.id === updated.id)
+    if (row) row.name = updated.name
+    renameNotice.value = `实验 #${updated.id} 的名字与备注已保存：这次跑过的请求、参数与结果一个字都没动。`
+    renameId.value = null
+  } catch (e) {
+    renameError.value =
+      e instanceof ApiError && e.status === 404
+        ? '这条实验后端已经找不到了（可能刚被删掉）：刷新列表后重新选一条。'
+        : `保存名字与备注没有成功：${messageOf(e)}`
+  } finally {
+    renameSaving.value = false
   }
 }
 
@@ -1126,6 +1208,13 @@ onMounted(async () => {
           </div>
           <div class="row">
             <button
+              class="ghost"
+              :disabled="renameSaving || renaming"
+              @click="startRename(detail)"
+            >
+              改名 / 改备注
+            </button>
+            <button
               :disabled="!canRun(detail) || busyRunId !== null || archivingId !== null"
               @click="runExperiment(detail)"
             >
@@ -1140,6 +1229,38 @@ onMounted(async () => {
             </button>
           </div>
         </div>
+
+        <form v-if="renaming" class="card" style="margin-top: 12px" @submit.prevent="saveRename">
+          <div class="grid cols-2">
+            <label style="display: block">
+              <span class="muted">名字（1–120 个字）</span>
+              <input v-model="renameName" :maxlength="120" placeholder="例如 均线交叉 · v1 · AAPL" />
+            </label>
+            <label style="display: block">
+              <span class="muted">备注（最多 4000 个字）</span>
+              <textarea
+                v-model="renameNotes"
+                rows="3"
+                placeholder="这次想验证什么"
+              ></textarea>
+            </label>
+          </div>
+          <p class="muted" style="margin: 10px 0 0">
+            改的只有这两个人读的字段：这次实验冻结的请求、参数与结果一个字都不会动（服务端逐字记进审计），
+            归档状态也不受影响。改不动的那些量要改就新建一条实验。
+          </p>
+          <p v-if="renameBlockedReason" class="muted">{{ renameBlockedReason }}</p>
+          <p v-if="renameError" class="error">{{ renameError }}</p>
+          <div class="row" style="margin-top: 10px">
+            <button type="submit" :disabled="renameSaving || !!renameBlockedReason">
+              {{ renameSaving ? '保存中…' : '保存名字与备注' }}
+            </button>
+            <button type="button" class="ghost" :disabled="renameSaving" @click="cancelRename">
+              取消
+            </button>
+          </div>
+        </form>
+        <p v-if="renameNotice" class="notice">{{ renameNotice }}</p>
         <p v-if="runBlockedText(detail)" class="muted">{{ runBlockedText(detail) }}</p>
         <p v-if="archiveBlockedText(detail)" class="muted">{{ archiveBlockedText(detail) }}</p>
 
@@ -1150,7 +1271,8 @@ onMounted(async () => {
         <div class="grid cols-3" style="margin-top: 12px">
           <div>
             <div class="muted">备注</div>
-            <div>{{ detail.notes ? detail.notes : '没有备注' }}</div>
+            <div v-if="!renaming">{{ detail.notes ? detail.notes : '没有备注' }}</div>
+            <div v-else class="muted">正在上面的编辑框里改，保存之后这里才改口。</div>
           </div>
           <div>
             <div class="muted">标的</div>

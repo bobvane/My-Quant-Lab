@@ -10,7 +10,7 @@
  * ③ 状态词一律中文；原始编号 / `result_hash` / 参数 JSON 原样读数只在高级模式出现。
  */
 import { computed, onMounted, ref } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import {
   ApiError,
   api,
@@ -27,20 +27,12 @@ import {
 } from '../api'
 import { formatDateTime, formatMetric, formatNumber, formatPercent, toneOf } from '../format'
 import { isAdvanced } from '../mode'
-import { metricKeyLabel, timeframeLabel } from '../wording'
+import { experimentKindLabel, experimentStatusLabel, metricKeyLabel, timeframeLabel } from '../wording'
 
 const router = useRouter()
+const route = useRoute()
 
 // ---- 词表与取值守卫 ---------------------------------------------------------
-
-/** 服务端 `ExperimentStatus` 的五个取值。wording.ts 里没有实验状态词，先在本页收着。 */
-const STATUS_LABELS: Record<string, string> = {
-  draft: '草稿（还没跑）',
-  running: '运行中',
-  completed: '已完成',
-  failed: '没有跑完',
-  archived: '已归档',
-}
 
 const STATUS_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
   { value: '', label: '全部（含已归档）' },
@@ -50,15 +42,6 @@ const STATUS_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'failed', label: '没有跑完' },
   { value: 'archived', label: '已归档' },
 ]
-
-/** 服务端 `ExperimentCreate.kind`；这一页只发起回测类实验，其余四种留给「研究实验室」。 */
-const KIND_LABELS: Record<string, string> = {
-  backtest: '跑一次回测',
-  sensitivity: '参数敏感性',
-  monte_carlo: '成交重采样',
-  walk_forward: '滚动前进',
-  oos: '样本外检验',
-}
 
 /**
  * 逐条结果表读的键：先是服务端 `COMPARE_METRICS` 那五个平铺指标，
@@ -79,17 +62,11 @@ const RESULT_METRIC_KEYS: readonly string[] = [
 const TIMEFRAME_CHOICES: ReadonlyArray<string> = ['1d', '1h', '4h', '1w']
 
 function statusLabel(status: string | null | undefined): string {
-  if (!status) return '未知'
-  const label = STATUS_LABELS[status]
-  if (label) return label
-  return isAdvanced.value ? `未知（${status}）` : '未知'
+  return experimentStatusLabel(status, isAdvanced.value)
 }
 
 function kindLabel(kind: string | null | undefined): string {
-  if (!kind) return '未知'
-  const label = KIND_LABELS[kind]
-  if (label) return label
-  return isAdvanced.value ? `未知（${kind}）` : '未知'
+  return experimentKindLabel(kind, isAdvanced.value)
 }
 
 /** 界面上的「未知」是唯一允许的缺失写法：null / 缺字段都不许退化成 0 或占位符。 */
@@ -165,6 +142,60 @@ const listNotice = ref('')
 const statusFilter = ref('')
 const listLimit = ref(20)
 
+// ---- 版本 → 策略的对照，以及地址里钉住的那一版（ADR-207） ----------------------
+//
+// 一条实验只记 `strategy_version_id`：策略 id 要问 `GET /strategy-versions` 才知道，
+// 所以这里把对照读回来一次，既给「走回那一版策略」的链接用，也给范围那一行起名字用。
+// 读不到对照就只是少一条回头路，列表本身照旧。
+const versionOwners = ref<Map<number, number>>(new Map())
+const ownerError = ref('')
+
+async function loadVersionOwners() {
+  try {
+    const rows = await api.allStrategyVersions()
+    versionOwners.value = new Map(rows.map((row) => [row.id, row.strategy_id]))
+    ownerError.value = ''
+  } catch (e) {
+    ownerError.value = `读不到策略版本列表，这一页暂时无法把那一条实验指回它属于的策略：${messageOf(e)}`
+  }
+}
+
+/** 地址里的 `?strategy_version_id=<id>`：只认正整数的版本号，别的一律当作「没筛」。 */
+function requestedVersionId(): number | null {
+  const raw = route.query.strategy_version_id
+  const text = Array.isArray(raw) ? raw[0] : raw
+  if (!text) return null
+  const value = Number(text)
+  return Number.isInteger(value) && value > 0 ? value : null
+}
+
+const scopeVersionId = ref<number | null>(requestedVersionId())
+
+/** 只在服务端筛「这一版跑过的实验」——取回来再本地筛会把更早的实验漏掉（ADR-201 同一条）。 */
+const scopeTitle = computed(() => {
+  const id = scopeVersionId.value
+  if (!id) return ''
+  const owner = versionOwners.value.get(id)
+  const name = owner === undefined ? undefined : strategies.value.find((s) => s.id === owner)?.name
+  return name ? `策略《${name}》版本 #${id}` : `策略版本 #${id}`
+})
+
+/**
+ * 对照读回来了、而这一版不在里面：那这一页空着不是「没跑过实验」，是这一版在服务端没有了。
+ * 两种情况必须分开说，否则读者会把「版本被删了」当成「这一版还没跑过」。
+ */
+const scopeMissing = computed(() => {
+  const id = scopeVersionId.value
+  if (id === null || ownerError.value || versionOwners.value.size === 0) return false
+  return !versionOwners.value.has(id)
+})
+
+function clearScope() {
+  scopeVersionId.value = null
+  void router.replace({ path: '/experiments' })
+  void loadExperiments()
+}
+
 const currentFilterLabel = computed(
   () => STATUS_FILTERS.find((item) => item.value === statusFilter.value)?.label ?? '全部（含已归档）',
 )
@@ -173,7 +204,11 @@ async function loadExperiments() {
   listLoading.value = true
   listError.value = ''
   try {
-    const response = await api.experiments(listLimit.value, undefined, statusFilter.value || undefined)
+    const response = await api.experiments(
+      listLimit.value,
+      scopeVersionId.value ?? undefined,
+      statusFilter.value || undefined,
+    )
     experiments.value = response.experiments ?? []
   } catch (e) {
     experiments.value = []
@@ -885,6 +920,17 @@ const signalsLink = computed(() =>
     : '/signals',
 )
 
+// ---- 走回这条实验所用的那一版策略（ADR-207） ----------------------------------
+//
+// 实验只钉住版本号；策略 id 要从版本 → 策略的对照里查。查不到（对照没读回来、或这一版
+// 在服务端已经没有了）就不给链接，并在「接着看」里说清缺的是什么，而不是给一个死链。
+const strategyLink = computed(() => {
+  const versionId = detail.value?.strategy_version_id
+  if (!versionId) return null
+  const owner = versionOwners.value.get(versionId)
+  return owner === undefined ? null : { path: `/strategy/${owner}` }
+})
+
 // ---- 用这个实验创建模拟账户 --------------------------------------------------
 
 const creatingAccount = ref(false)
@@ -928,7 +974,7 @@ async function createPaperFromDetail() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadExperiments(), loadChoices()])
+  await Promise.all([loadExperiments(), loadChoices(), loadVersionOwners()])
 })
 </script>
 
@@ -1086,6 +1132,19 @@ onMounted(async () => {
         </div>
       </div>
 
+      <p v-if="scopeVersionId" class="notice" style="margin-top: 10px">
+        现在只看 {{ scopeTitle }} 跑过的实验<template v-if="statusFilter"
+          >（状态：{{ currentFilterLabel }}）</template
+        >。这一行来自地址里的
+        <span class="mono">?strategy_version_id={{ scopeVersionId }}</span>：刷新或把地址发给别人，
+        落到的还是这一版。
+        <button class="ghost" style="margin-left: 8px" @click="clearScope">看全部实验</button>
+      </p>
+      <p v-if="scopeMissing" class="notice warn" style="margin-top: 10px">
+        ⚠️ 服务端已经没有策略版本 #{{ scopeVersionId }} 了 —— 下面空着是因为这一版不存在，
+        不是因为它没跑过实验。
+      </p>
+
       <p v-if="listError" class="error" style="margin-top: 10px">{{ listError }}</p>
       <p v-if="listNotice" class="notice" style="margin-top: 10px">{{ listNotice }}</p>
       <p v-if="listLoading" class="muted" style="margin-top: 10px">正在读实验列表…</p>
@@ -1175,9 +1234,13 @@ onMounted(async () => {
       </div>
       <p v-else-if="!listLoading" class="muted" style="margin-top: 10px">
         {{
-          statusFilter
-            ? `现在这个筛选（${currentFilterLabel}）里没有实验。`
-            : '还没有任何实验。用上面的「新建实验」跑一次，或者到「回测」页把一条跑完的回测收养成实验。'
+          scopeMissing
+            ? `服务端已经没有策略版本 #${scopeVersionId} 了，这一版没有实验可列 —— 空着不是因为这一版没跑过实验，是因为这一版不存在。`
+            : scopeVersionId
+              ? `这一版（#${scopeVersionId}）${statusFilter ? `在「${currentFilterLabel}」这个状态里` : ''}还没有跑过实验。`
+              : statusFilter
+                ? `现在这个筛选（${currentFilterLabel}）里没有实验。`
+                : '还没有任何实验。用上面的「新建实验」跑一次，或者到「回测」页把一条跑完的回测收养成实验。'
         }}
       </p>
     </div>
@@ -1464,6 +1527,16 @@ onMounted(async () => {
             <span v-if="isAdvanced">
               （服务端过滤：<span class="mono">GET /signals?strategy_version_id=</span>，
               不是把「信号」页取回来的那一页本地筛一遍 —— 本地筛会把更早的信号漏掉。）
+            </span>
+          </li>
+          <li>
+            <template v-if="strategyLink">
+              <RouterLink :to="strategyLink">这一版策略</RouterLink>
+              —— 到「我的策略」里那一版的页面上看它的规则、回测入口、模拟账户，
+              以及<strong>这一版上还跑过哪些实验</strong>。
+            </template>
+            <span v-else class="muted">
+              这一版策略现在没有页面可回：{{ ownerError || '服务端已经不记得这个版本了' }}
             </span>
           </li>
           <li>

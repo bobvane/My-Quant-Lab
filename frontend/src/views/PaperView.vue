@@ -218,6 +218,33 @@ function bindingLabel(account: PaperAccount): string {
   return parts.length > 0 ? parts.join(' · ') : '不绑定'
 }
 
+/**
+ * 这个账户跑的是哪一版策略：账户自己记着 `strategy_id`，只有版本号时回头查一次对照。
+ * 查不到就返回 null，页面上那条回头路改说缺的是什么，而不是给一个死链（ADR-207）。
+ */
+function accountStrategyId(account: PaperAccount): number | null {
+  if (account.strategy_id !== null && account.strategy_id !== undefined) return account.strategy_id
+  const versionId = account.strategy_version_id ?? null
+  return versionId === null ? null : versionOwner(versionId)
+}
+
+/** 走回这个账户所用的那一版策略（ADR-207）。 */
+function accountStrategyLink(account: PaperAccount) {
+  const owner = accountStrategyId(account)
+  return owner === null ? null : { path: `/strategy/${owner}` }
+}
+
+/**
+ * 这一版发过的信号。账户认的是它跑的那一版；同一版跑出的别的账户也落在同一个范围里，
+ * 所以这里明说「这一版」，不说「这个账户」。
+ */
+function accountSignalsLink(account: PaperAccount) {
+  const versionId = account.strategy_version_id ?? null
+  return versionId === null
+    ? null
+    : { path: '/signals', query: { strategy_version_id: String(versionId) } }
+}
+
 /** 回测下拉项：策略名/版本、标的、周期、时间、收益率，缺什么就说什么。 */
 function backtestLabel(run: BacktestSummary): string {
   const owner = versionOwner(run.strategy_version_id)
@@ -1137,7 +1164,12 @@ async function bootstrap() {
           >
             <td>{{ a.id }}</td>
             <td>{{ a.name }}</td>
-            <td>{{ bindingLabel(a) }}</td>
+            <td>
+              {{ bindingLabel(a) }}
+              <span v-if="accountStrategyLink(a)" class="muted">
+                （<RouterLink :to="accountStrategyLink(a)!">策略</RouterLink>）
+              </span>
+            </td>
             <td>{{ formatNumber(a.net_deposits) }}</td>
             <td>{{ formatNumber(a.cash) }}</td>
             <td :class="toneOf(a.realized_pnl)">{{ formatNumber(a.realized_pnl) }}</td>
@@ -1197,6 +1229,19 @@ async function bootstrap() {
         {{ accountStatusLabel(selectedAccount.status) }} · {{ selectedAccount.base_currency }} ·
         创建于 {{ formatDateTime(selectedAccount.created_at) }} · 已重置 {{ selectedAccount.reset_count }} 次 ·
         绑定：{{ bindingLabel(selectedAccount) }}
+      </p>
+      <p class="muted">
+        <template v-if="accountStrategyLink(selectedAccount)">
+          <RouterLink :to="accountStrategyLink(selectedAccount)!">这一版策略的页面</RouterLink>
+          —— 规则、回测入口、以及这一版跑过的实验都在那里。
+        </template>
+        <span v-else>这个账户没有记下所属策略，所以没有回头路可给。</span>
+        <template v-if="accountSignalsLink(selectedAccount)">
+          ·
+          <RouterLink :to="accountSignalsLink(selectedAccount)!">这一版发过的信号</RouterLink>
+          —— 账户里的成交是从这些信号来的。
+        </template>
+        <span v-else>· 这个账户没有钉版本，所以没有「这一版的信号」可看。</span>
       </p>
       <table style="margin-top: 10px">
         <thead>

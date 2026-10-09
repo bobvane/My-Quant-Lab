@@ -128,6 +128,48 @@ export function signalStatusLabel(status: string | null | undefined): string {
   return SIGNAL_STATUS_LABELS[status] ?? status
 }
 
+/**
+ * Where an experiment stands in its own lifecycle (the server's `ExperimentStatus`).
+ *
+ * These two tables used to live inside `ExperimentsView.vue` alone. The strategy page
+ * started showing the same rows when a version gained its experiments card (ADR-207),
+ * so they moved here: one table, and the same state cannot be phrased two ways.
+ * Missing values say 「未知」 and never 0; the raw value only appears in advanced mode.
+ */
+export const EXPERIMENT_STATUS_LABELS: Record<string, string> = {
+  draft: '草稿（还没跑）',
+  running: '运行中',
+  completed: '已完成',
+  failed: '没有跑完',
+  archived: '已归档',
+}
+
+export function experimentStatusLabel(
+  status: string | null | undefined,
+  advanced = false,
+): string {
+  if (!status) return '未知'
+  const label = EXPERIMENT_STATUS_LABELS[status]
+  if (label) return label
+  return advanced ? `未知（${status}）` : '未知'
+}
+
+/** How an experiment was run (the server's `ExperimentCreate.kind`). */
+export const EXPERIMENT_KIND_LABELS: Record<string, string> = {
+  backtest: '跑一次回测',
+  sensitivity: '参数敏感性',
+  monte_carlo: '成交重采样',
+  walk_forward: '滚动前进',
+  oos: '样本外检验',
+}
+
+export function experimentKindLabel(kind: string | null | undefined, advanced = false): string {
+  if (!kind) return '未知'
+  const label = EXPERIMENT_KIND_LABELS[kind]
+  if (label) return label
+  return advanced ? `未知（${kind}）` : '未知'
+}
+
 /** How a signal's own outcome turned out, once the bar it pointed at has closed. */
 export const OUTCOME_LABELS: Record<string, string> = {
   pending: '还没走完',

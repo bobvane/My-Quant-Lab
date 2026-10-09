@@ -1621,3 +1621,94 @@ def test_a_research_run_can_be_run_again_with_the_inputs_it_stored() -> None:
     # The stored meta carries the snapshot id at runtime; the type now admits it.
     assert "snapshot_id?: number | null" in API_TEXT
     assert "export interface AIResearchSourceMeta {" in API_TEXT
+
+
+def test_every_downstream_record_can_walk_back_to_its_strategy() -> None:
+    """An experiment, a paper account and a signal can all walk back to their version (ADR-207).
+
+    Every hop in the chain pointed *forward*: a version linked to its backtests, its signals
+    and its paper accounts (ADR-200/ADR-201), and a backtest could be adopted as an experiment
+    (ADR-183) — but from an experiment, a paper account or a signal row there was no way back
+    to the version that produced the reading. Reconstructing it meant reading the version id,
+    opening 「我的策略」 and picking the version by hand.
+
+    Three rules are load-bearing here. The reverse lookup is a real server-side filter, never a
+    local sieve of the page already fetched (ADR-181/ADR-201): ``GET /experiments`` and
+    ``GET /signals`` both take the version. A hop that cannot be built says which half is
+    missing instead of rendering a link that lands on 「读不到」 (ADR-138). And the experiment
+    words live in one table, so the strategy page and the experiments page cannot drift.
+    """
+
+    # One table for the experiment words: the strategy page reads the same five states.
+    assert "export const EXPERIMENT_STATUS_LABELS: Record<string, string> = {" in WORDING
+    assert "export const EXPERIMENT_KIND_LABELS: Record<string, string> = {" in WORDING
+    assert "export function experimentStatusLabel(" in WORDING
+    assert "export function experimentKindLabel(" in WORDING
+    # The local copies are gone: a second table is how the two pages drift apart.
+    assert "STATUS_LABELS" not in EXPERIMENTS
+    assert "KIND_LABELS" not in EXPERIMENTS
+    assert (
+        "import { experimentKindLabel, experimentStatusLabel, metricKeyLabel, timeframeLabel }"
+        " from '../wording'" in EXPERIMENTS
+    )
+
+    # A strategy version now shows the experiments run on it, filtered on the server.
+    assert "const EXPERIMENT_PREVIEW = 5" in STRATEGY_DETAIL
+    preview_call = "const response = await api.experiments(EXPERIMENT_PREVIEW, version.id)"
+    assert preview_call in STRATEGY_DETAIL
+    assert "await loadExperiments()" in _function_body(STRATEGY_DETAIL, "load")
+    assert "function experimentsLink(versionId: number)" in STRATEGY_DETAIL
+    assert "query: { strategy_version_id: String(versionId) }" in STRATEGY_DETAIL
+    assert "到「实验」页看这一版跑过的实验" in STRATEGY_DETAIL
+    assert "这一版跑过的实验" in STRATEGY_DETAIL
+    assert "{{ experimentKindLabel(row.kind, isAdvanced) }}" in STRATEGY_DETAIL
+    assert "{{ experimentStatusLabel(row.status, isAdvanced) }}" in STRATEGY_DETAIL
+    # The list has no total, so the card must not claim one (ADR-182: only stored numbers).
+    list_out = API_TEXT.index("export interface ExperimentListOut")
+    assert "total" not in API_TEXT[list_out : list_out + 200]
+    assert "不是这一版的全部" in STRATEGY_DETAIL
+
+    # /experiments honours the version in its address and says what it narrowed to.
+    assert "const scopeVersionId = ref<number | null>(requestedVersionId())" in EXPERIMENTS
+    assert "scopeVersionId.value ?? undefined" in EXPERIMENTS
+    assert "const scopeMissing = computed(" in EXPERIMENTS
+    assert "服务端已经没有策略版本 #{{ scopeVersionId }} 了" in EXPERIMENTS
+    # The empty state must not claim "never ran one" when the version is simply gone.
+    assert "空着不是因为这一版没跑过实验，是因为这一版不存在" in EXPERIMENTS
+    assert "function clearScope()" in EXPERIMENTS
+    assert "void router.replace({ path: '/experiments' })" in EXPERIMENTS
+    # An unknown version is not the same as a version that never ran one.
+    assert "?strategy_version_id={{ scopeVersionId }}" in EXPERIMENTS
+
+    # An experiment walks back to the version it froze, via the version → strategy table.
+    assert "const versionOwners = ref<Map<number, number>>(new Map())" in EXPERIMENTS
+    owner_map = "versionOwners.value = new Map(rows.map((row) => [row.id, row.strategy_id]))"
+    assert owner_map in EXPERIMENTS
+    assert "loadVersionOwners()" in EXPERIMENTS
+    assert '<RouterLink :to="strategyLink">这一版策略</RouterLink>' in EXPERIMENTS
+    # No lookup, no link — and the missing half is named (ADR-138).
+    assert "服务端已经不记得这个版本了" in EXPERIMENTS
+    assert "ownerError" in EXPERIMENTS
+
+    # A signal row carries the version that produced it, and the scope line its strategy.
+    assert "function strategyLink(versionId: number | null | undefined)" in SIGNALS
+    assert "const scopeStrategyLink = computed(()" in SIGNALS
+    assert "const scopeStrategyId = ref<number | null>(null)" in SIGNALS
+    assert "scopeStrategyId.value = target.strategy_id" in SIGNALS
+    assert "await loadOwners()" in SIGNALS
+    assert 'title="这一版策略的页面：规则、回测入口、这一版跑过的实验"' in SIGNALS
+    assert 'to="scopeStrategyLink"' in SIGNALS
+    assert "到这一版策略的页面" in SIGNALS
+    assert "读不到策略版本列表，这一页暂时指不回每一条信号属于哪一版策略" in SIGNALS
+
+    # A paper account carries both halves: which version it ran, and its signals.
+    assert "function accountStrategyId(account: PaperAccount): number | null" in PAPER
+    assert "function accountStrategyLink(account: PaperAccount)" in PAPER
+    assert "function accountSignalsLink(account: PaperAccount)" in PAPER
+    assert ':to="accountStrategyLink(a)!"' in PAPER
+    assert ':to="accountStrategyLink(selectedAccount)!"' in PAPER
+    assert ':to="accountSignalsLink(selectedAccount)!"' in PAPER
+    assert "这一版发过的信号" in PAPER
+    # An account with no version says so rather than rendering a dead link.
+    assert "这个账户没有记下所属策略，所以没有回头路可给。" in PAPER
+    assert "这个账户没有钉版本，所以没有「这一版的信号」可看。" in PAPER

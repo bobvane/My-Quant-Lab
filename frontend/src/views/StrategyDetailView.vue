@@ -9,6 +9,7 @@ import {
   api,
   type AIStatus,
   type BacktestSummary,
+  type ExperimentSummaryOut,
   type ExplainResult,
   type PaperAccount,
   type Strategy,
@@ -19,7 +20,13 @@ import StatCard from '@/components/StatCard.vue'
 import { formatDateTime, formatNumber, formatPercent, toneOf } from '@/format'
 // 数据集版本号、接口路径这类工程读数只在高级模式出现（ADR-126）。
 import { isAdvanced } from '@/mode'
-import { accountStatusLabel, stageLabel, validationLabel } from '@/wording'
+import {
+  accountStatusLabel,
+  experimentKindLabel,
+  experimentStatusLabel,
+  stageLabel,
+  validationLabel,
+} from '@/wording'
 
 const route = useRoute()
 const strategyId = Number(route.params.strategyId)
@@ -73,6 +80,38 @@ const signalsLink = computed(() =>
     ? { path: '/signals', query: { strategy_version_id: String(currentVersion.value.id) } }
     : '/signals',
 )
+
+/**
+ * 这一版跑过的实验（ADR-207）：`GET /experiments?strategy_version_id=<id>` 在服务端筛，
+ * 不是把「实验」页取回来的那一页本地筛一遍 —— 本地筛会把更早的实验漏掉。
+ * 这一页只读最近几条当入口，看全部还是到「实验」页。
+ */
+const EXPERIMENT_PREVIEW = 5
+const experiments = ref<ExperimentSummaryOut[]>([])
+const experimentsError = ref('')
+
+async function loadExperiments() {
+  const version = currentVersion.value
+  if (!version) {
+    experiments.value = []
+    experimentsError.value = ''
+    return
+  }
+  try {
+    const response = await api.experiments(EXPERIMENT_PREVIEW, version.id)
+    experiments.value = response.experiments ?? []
+    experimentsError.value = ''
+  } catch (e) {
+    experiments.value = []
+    experimentsError.value = `这一版跑过的实验没能载入：${(e as Error).message}`
+  }
+}
+
+/** 某一版实验的落点：`?strategy_version_id=` 让「实验」页只列这一版（ADR-207）。 */
+function experimentsLink(versionId: number) {
+  return { path: '/experiments', query: { strategy_version_id: String(versionId) } }
+}
+
 const dsl = computed<Record<string, any> | null>(
   () => (currentVersion.value?.dsl as Record<string, any> | undefined) ?? null,
 )
@@ -153,6 +192,7 @@ async function load() {
       runs.value = await api.backtests(currentVersion.value.id)
     }
     symbol.value = runs.value.find((run) => run.symbol)?.symbol ?? ''
+    await loadExperiments()
     accounts.value = await api.paperAccounts()
     trades.value = await api.paperTrades()
     ai.value = await api.aiStatus()
@@ -362,6 +402,7 @@ onMounted(load)
               <th>当前</th>
               <th>创建时间</th>
               <th>哈希</th>
+              <th>实验</th>
             </tr>
           </thead>
           <tbody>
@@ -378,6 +419,9 @@ onMounted(load)
                 <span v-if="hashes[version.id]" class="muted">
                   {{ hashes[version.id].intact ? '哈希一致' : '哈希不一致（文本已变）' }}
                 </span>
+              </td>
+              <td>
+                <RouterLink :to="experimentsLink(version.id)">这一版跑过的实验</RouterLink>
               </td>
             </tr>
           </tbody>
@@ -610,12 +654,61 @@ onMounted(load)
       </section>
 
       <section class="card">
+        <h3>实验（Experiments）</h3>
+        <p v-if="!currentVersion" class="muted">没有版本，就没有实验可看。</p>
+        <template v-else>
+          <p class="muted">
+            一条实验 = 一条留在服务端的记录：它冻住了当时的这一版策略、参数、标的与时间范围，
+            以及跑出来的读数。下面读的是<strong>当前版本（{{ currentVersion.version }}）</strong>跑过的
+            最近几条；换一版要按版本看 —— 版本历史那一列每一版都有自己的入口。
+            <span v-if="isAdvanced">
+              （服务端过滤：<span class="mono">GET /experiments?strategy_version_id=</span>，
+              不是把「实验」页取回来的那一页本地筛一遍。）
+            </span>
+          </p>
+          <p v-if="experimentsError" class="error">{{ experimentsError }}</p>
+          <p v-else-if="!experiments.length" class="muted">
+            这一版还没有跑过实验。到「实验」页新建一条，或者把一条跑完的回测收养成实验。
+          </p>
+          <template v-else>
+            <table>
+              <thead>
+                <tr>
+                  <th>实验</th>
+                  <th>怎么跑的</th>
+                  <th>状态</th>
+                  <th>创建时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in experiments" :key="row.id">
+                  <td>#{{ row.id }} {{ row.name }}</td>
+                  <td>{{ experimentKindLabel(row.kind, isAdvanced) }}</td>
+                  <td>{{ experimentStatusLabel(row.status, isAdvanced) }}</td>
+                  <td>{{ formatDateTime(row.created_at) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="muted">
+              这里只列最近 {{ EXPERIMENT_PREVIEW }} 条，不是这一版的全部；每条实验的完整读数在
+              「实验」页上。
+            </p>
+          </template>
+          <p>
+            <RouterLink :to="experimentsLink(currentVersion.id)">
+              到「实验」页看这一版跑过的实验
+            </RouterLink>
+          </p>
+        </template>
+      </section>
+
+      <section class="card">
         <h3>AI 解释（AI Explanation）</h3>
         <p class="muted">
           AI 只解释已有数字，不参与任何计算：它读的是上面的回测、信号与证据，写不成一条交易。
         </p>
         <p v-if="ai && !ai.configured" class="muted">
-          还没有配置 AI：{{ ai.note }}。上面的九段在没有任何 AI 的情况下也全部可用。
+          还没有配置 AI：{{ ai.note }}。上面的十段在没有任何 AI 的情况下也全部可用。
         </p>
         <template v-if="ai && ai.configured">
           <p class="muted">

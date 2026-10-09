@@ -35,6 +35,11 @@ const route = useRoute()
 const versionScope = ref<number | null>(null)
 const scopeTitle = ref('')
 const scopeNote = ref('')
+/** 收窄到哪一版时，那一版属于哪个策略：用来给一条回「那一版策略」的路（ADR-207）。 */
+const scopeStrategyId = ref<number | null>(null)
+/** 版本 → 策略的对照：信号只记版本号，策略 id 要问 `GET /strategy-versions`（ADR-207）。 */
+const versionOwners = ref<Map<number, number>>(new Map())
+const ownersError = ref('')
 
 const SCOPE_HERE = '这一页只看这一版发过的信号与它们的结果统计'
 const SCOPE_GONE = '这个版本号在服务端读不到（可能已经被删掉了），所以下面的列表与统计是空的，不是「这一版没有信号」'
@@ -46,8 +51,34 @@ function requestedVersionId(): number | null {
   return Number.isInteger(raw) && raw > 0 ? raw : null
 }
 
+/**
+ * 信号行 → 那一版策略的页面。对照没读回来、或这一版在服务端已经没有了，就返回 null：
+ * 页面上改说缺的是哪一件事，而不是给一个会走到「读不到」的死链。
+ */
+function strategyLink(versionId: number | null | undefined) {
+  if (versionId === null || versionId === undefined) return null
+  const owner = versionOwners.value.get(versionId)
+  return owner === undefined ? null : { path: `/strategy/${owner}` }
+}
+
+const scopeStrategyLink = computed(() =>
+  scopeStrategyId.value === null ? null : { path: `/strategy/${scopeStrategyId.value}` },
+)
+
+async function loadOwners() {
+  try {
+    const rows = await api.allStrategyVersions()
+    versionOwners.value = new Map(rows.map((row) => [row.id, row.strategy_id]))
+    ownersError.value = ''
+  } catch (e) {
+    versionOwners.value = new Map()
+    ownersError.value = `读不到策略版本列表，这一页暂时指不回每一条信号属于哪一版策略：${(e as Error).message}`
+  }
+}
+
 async function loadScope() {
   versionScope.value = requestedVersionId()
+  scopeStrategyId.value = null
   const id = versionScope.value
   if (id === null) return
   scopeTitle.value = `策略版本 #${id}`
@@ -60,6 +91,7 @@ async function loadScope() {
       scopeNote.value = SCOPE_GONE
       return
     }
+    scopeStrategyId.value = target.strategy_id
     const strategies = await api.strategies()
     const owner = strategies.find((candidate) => candidate.id === target.strategy_id)
     if (owner) scopeTitle.value = `策略《${owner.name}》版本 #${id}`
@@ -550,6 +582,7 @@ watch(
 )
 
 onMounted(async () => {
+  await loadOwners()
   await loadScope()
   await load()
   await loadHandedSignal()
@@ -566,12 +599,16 @@ onMounted(async () => {
 
     <p v-if="versionScope" class="muted" style="margin: 0 0 10px">
       {{ scopeTitle }}：{{ scopeNote }}。
+      <RouterLink v-if="scopeStrategyLink" :to="scopeStrategyLink">到这一版策略的页面</RouterLink>
+      <span v-if="scopeStrategyLink"> · </span>
       <RouterLink to="/signals">看全部策略、全部标的的信号</RouterLink>
       <span v-if="isAdvanced">
         （服务端过滤：<span class="mono">GET /signals?strategy_version_id=</span>，
         结果追踪也是同一个范围 —— 不是把这一页取回来的 {{ signals.length }} 条本地筛一遍。）
       </span>
     </p>
+
+    <p v-if="ownersError" class="notice warn">{{ ownersError }}</p>
 
     <p v-if="handedNote" class="notice">
       {{ handedNote }}
@@ -629,7 +666,18 @@ onMounted(async () => {
           <tr v-for="s in signals" :key="s.id">
             <td class="muted">{{ formatDateTime(s.bar_timestamp) }}</td>
             <td>{{ s.symbol ?? `#${s.asset_id}` }}</td>
-            <td>{{ s.strategy_name ?? '—' }} <span class="muted">v{{ s.strategy_version }}</span></td>
+            <td>
+              {{ s.strategy_name ?? '—' }} <span class="muted">v{{ s.strategy_version }}</span>
+              <template v-if="strategyLink(s.strategy_version_id)">
+                <RouterLink
+                  class="muted"
+                  :to="strategyLink(s.strategy_version_id)!"
+                  title="这一版策略的页面：规则、回测入口、这一版跑过的实验"
+                >
+                  这一版
+                </RouterLink>
+              </template>
+            </td>
             <td>{{ s.timeframe }}</td>
             <td><span class="badge" :class="s.state">{{ signalLabel(s.state) }}</span></td>
             <td>{{ signalDirection(s.direction, s.closes_direction) }}</td>

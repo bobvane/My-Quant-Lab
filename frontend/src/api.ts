@@ -568,6 +568,13 @@ export interface AIStatus {
   spent_today_usd: number
   tasks_today: number
   note: string
+  /**
+   * "undecryptable" when an enabled provider's stored key survived a SECRET_KEY
+   * change and nothing can read it; "empty" when the row holds no key. Both mean
+   * "there IS a provider, its key is unusable", which is not the same as "no
+   * provider configured" (ADR-194).
+   */
+  key_error?: string | null
 }
 
 export interface AIExplanation {
@@ -615,6 +622,13 @@ export interface AIProviderRecord {
   daily_budget_usd: number
   api_key_set: boolean
   key_masked: string
+  /**
+   * "" when the stored key reads fine; "undecryptable" when the ciphertext
+   * survived a SECRET_KEY change and nothing can read it any more; "empty"
+   * when the row holds no key. Only the first two need the operator to
+   * re-enter the key, and the page says so instead of showing a green row.
+   */
+  key_status?: string
   models: AIModelRecord[]
 }
 

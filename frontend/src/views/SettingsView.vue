@@ -814,7 +814,15 @@ onMounted(async () => {
             <td>{{ p.name }}</td>
             <td class="muted">{{ p.base_url }}</td>
             <td>{{ p.default_model ?? '—' }}</td>
-            <td class="muted">{{ p.key_masked || '未设置' }}</td>
+            <td class="muted">
+              {{ p.key_masked || '未设置' }}
+              <span v-if="p.key_status === 'undecryptable'" class="error" style="display: block">
+                存进去的密钥现在读不出来（加密用的 SECRET_KEY 变过）。重新填一次密钥就能恢复。
+              </span>
+              <span v-else-if="p.key_status === 'empty'" class="error" style="display: block">
+                这一行的密钥是空的，请重新填一次。
+              </span>
+            </td>
             <td>{{ formatNumber(p.daily_budget_usd) }} USD</td>
             <td>{{ p.is_active ? '启用' : '停用' }}</td>
             <td>

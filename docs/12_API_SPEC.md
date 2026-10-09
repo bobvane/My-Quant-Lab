@@ -597,11 +597,11 @@ Deterministic, evidence-gated promotion/degradation. No AI is involved.
 
 ## AI Status
 
-`GET /ai/status` [已实现] —— AI 配置与预算。
+`GET /ai/status` [已实现] —— AI 配置与预算（`configured:false` 时 `key_error` 说明原因：`"undecryptable"` = 有启用的 Provider 但密钥解不开，`"empty"` = 密钥为空，`null` = 不是这两种情况；见 ADR-194）。
 
 ## AI Providers
 
-`GET /settings/ai/providers` [已实现] —— 列出 AI 供应商（key 永不返回）。
+`GET /settings/ai/providers` [已实现] —— 列出 AI 供应商（key 永不返回；每行带 `key_status`：`"ok"` / `"empty"` / `"undecryptable"`，见 ADR-194）。
 `POST /settings/ai/providers` [已实现] —— 创建 AI 供应商（key 加密存储、永不返回；`manual_models` 逐字保存完整模型 ID）。
 `PUT /settings/ai/providers/{provider_id}` [已实现] —— 更新一个 AI 供应商。
 `DELETE /settings/ai/providers/{provider_id}` [已实现] —— 删除一个 AI 供应商（历史 AI 任务与用量保留，并保留其名称快照）。

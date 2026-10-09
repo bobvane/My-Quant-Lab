@@ -3471,3 +3471,15 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 理由：①两条入口通向同一个后端链路（研究 → 草案 → 编译 → 策略版本 → 回测），差别只在「由谁把想法写清楚」，所以卡片必须把这个差别说成用户能判断的条件，而不是模块名（ADR-133 的同一类：导航不按模块命名）；②把实验室写成「整理成策略草案，再编译成一版策略去回测」而不是「让 AI 帮你交易」，是为了不越过那条红线（AI 只解释与整理，不下单、不产生量化事实）；③引导卡只在「什么都还没有」时出现、可以永久关掉，改它不改变任何已经进入使用状态的用户的界面。
 - 影响与兼容：`DashboardView.vue` 的 `<ol class="guide-steps">` 从 4 条变 5 条，标题从「按这四步走」变「按这五步走」；`backend/tests/test_frontend_contracts.py::test_the_first_visit_gets_a_way_in` 同步改成钉五步 + 两个 `RouterLink`；`docs/13_UI_UX.md` 第 1 节的导航条数（历史遗留的「共 11 条」，v2.6.0 删掉 `/resources` 后实际是 10 条）一并对齐。不改路由、不加页面。
 
+## ADR-194：密钥读不出来，不等于没有配 Provider
+
+- 背景：`docs/15` 记录过一个实测现象——`GET /ai/status` 返回 `configured:false`，但用户在「系统管理」里明明看到一行启用的 Provider。追下去发现这是三件互不相同的事被同一句话盖住了：①真的一个都没配 ②配了、启用中，但存进去的密钥**现在读不出来**（`SECRET_KEY` 在这把钥匙保存之后变过，Fernet 解密抛 `InvalidToken`）③配了但所有模型都被停用（ADR-173）。旧代码还有两个具体的坑：`backend/app/ai/explain.py` 的 `get_active_provider` 只取**第一条** `is_active` 的行，所以一把读不出的钥匙会把排在它后面的健康 Provider 一起遮住；`backend/app/api/routers/ai.py:47-49` 的 `NOT_CONFIGURED_DETAIL` 是唯一文案，无论真实原因是哪一种都回 `No AI provider configured`。对用户来说这不是同一件事：②的动作是「重填一次密钥」，①的动作是「新配一个 Provider」——说成①会让人去建一个重复的行。
+- 决策：
+  1. `get_active_provider` 不再只认第一行：遍历全部 `is_active=True` 且 `api_key_encrypted` 非空的行，逐行试解密，第一个解得开的就用；解不开的继续往下找，并 `logger.warning` 记下是哪个 Provider（解密失败不再静默）。解密逻辑抽成唯一实现 `_provider_key(provider) -> tuple[key | None, problem]`，`get_active_providers` 与它共用。
+  2. `GET /ai/status` 新增可选字段 `key_error`：`"undecryptable"`（有启用的 Provider，但钥匙解不开）、`"empty"`（行在、密钥是空的）、`null`（不是这两种情况）。`GET /settings/ai/providers` 的每一行新增 `key_status`：`"ok"` / `"empty"` / `"undecryptable"`。密钥本身依旧永不回显（`key_mask` 仍是 `********`）。
+  3. 所有「AI 用不了」的 503 拒因改为经 `_unavailable_detail(db)` 生成：存在读不出的钥匙时，文案点名 Provider、说明是 `SECRET_KEY` 变过、并指到「系统管理」重填；否则保持原来的 `NOT_CONFIGURED_DETAIL`。共 5 处调用点（研究、草案、编译、解释、通用任务入口），语义与状态码不变。
+  4. 前端两页同步说实话：`SettingsView.vue` 的密钥列对 `undecryptable`/`empty` 直接显示「重新填一次密钥就能恢复」；`BacktestView.vue` 的 AI 汇总卡在 `configured:false && key_error` 时说「有一个启用的 Provider（名字），密钥读不出来」，而不是「未配置 AI」。
+- 理由：①「读不出钥匙」和「没配置」对用户是两个不同动作，UI 必须能分辨，否则用户会按错的那一个做（ADR-128 的延伸：结论先说，但原因不能说错）；②坏行遮好行是数据层静默降级——AI 用不了但所有健康 Provider 都在，属于必须修的实现缺陷，不是配置问题；③诊断信息只往「说出真实原因」这个方向加，不改变任何路由、状态码、请求体，也不自动重加密（重加密需要用户的钥匙，服务端不该替用户决定）；④「数字不经过 AI」这条边界一个字都不动：`key_error` 影响的是解释能不能生成，不影响任何指标。
+- 影响与兼容：新增字段都是可选的，老客户端忽略即可；`AIStatusOut` 与 provider 序列化各加一个字段；`docs/12_API_SPEC.md` 的 `GET /ai/status` 与 `GET /settings/ai/providers` 两行补上字段说明；`docs/15` 里记的那条现象由此可以在页面上自证；不改数据库（不加列、不加迁移，下一个可用迁移号仍是 `0021`）、不写生产数据、不改任何 Provider 的启用状态与预算机制（ADR-150–153、ADR-173 全部不变）。
+- 测试：新增 `backend/tests/test_ai_provider_key_status.py`（9 条：用**另一个 `SECRET_KEY`** 加密出的真实 Fernet token 造出解不开的行，断言 `/ai/status` 的 `key_error` 与含 Provider 名的 note；坏行在前、健康行在后时 `get_active_provider` 仍能选到健康行；停用的坏行不算数；空密钥与正常密钥的 `key_status`；`_unavailable_detail` 的两种文案）；`backend/tests/test_frontend_contracts.py` 新增 `test_a_key_that_cannot_be_read_is_not_shown_as_a_working_row` 钉住两页文案与新字段。
+

@@ -1309,9 +1309,22 @@ const explainingBt = ref(false)
  */
 const aiConfigured = ref<boolean | null>(null)
 
+/**
+ * 服务端说「有一个启用的 Provider，但它的密钥读不出来」时，把那一行也带回来。
+ *
+ * 「未配置 AI」在这种情形下是假话：那一行就在「系统管理」里，还显示着「启用」。
+ * 说清楚是密钥读不出来（SECRET_KEY 变过），用户才知道该做什么——重填一次密钥，
+ * 而不是去找一个自己已经看到的 Provider（ADR-194）。
+ */
+const aiKeyError = ref<string | null>(null)
+const aiProviderName = ref<string | null>(null)
+
 async function loadAiStatus() {
   try {
-    aiConfigured.value = Boolean((await api.aiStatus()).configured)
+    const status = await api.aiStatus()
+    aiConfigured.value = Boolean(status.configured)
+    aiKeyError.value = status.key_error ?? null
+    aiProviderName.value = status.provider_name ?? null
   } catch {
     aiConfigured.value = null
   }
@@ -2168,6 +2181,12 @@ onMounted(async () => {
         </ul>
         <p v-else>{{ nextStep.text }}</p>
       </div>
+      <p v-else-if="aiConfigured === false && aiKeyError" class="muted">
+        这个实例有一个启用的 Provider{{ aiProviderName ? `（${aiProviderName}）` : '' }}，但存进去的密钥现在读不出来
+        （加密用的 SECRET_KEY 变过），所以「生成解读」暂时点不了：到
+        <RouterLink to="/settings">「系统管理」</RouterLink> 的 AI 那一栏重新填一次密钥就能用。
+        上面的结论、风险与可信程度都不受影响——那些数字是引擎算出来的，不经过 AI。
+      </p>
       <p v-else-if="aiConfigured === false" class="muted">
         这个实例未配置 AI，所以「生成解读」暂时点不了：到
         <RouterLink to="/settings">「系统管理」</RouterLink> 的 AI 那一栏填一个 Provider 就能用。

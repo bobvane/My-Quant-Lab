@@ -199,11 +199,20 @@ def serialize_provider(db: Session, provider: AIProvider) -> dict[str, Any]:
         select(AIModel).where(AIModel.provider_id == provider.id).order_by(AIModel.id)
     ).all()
     key_hint = ""
+    key_status = ""
     if provider.api_key_encrypted:
         try:
-            key_hint = mask_secret(decrypt_secret(provider.api_key_encrypted))
-        except Exception:  # pragma: no cover - corrupted ciphertext
+            decrypted = decrypt_secret(provider.api_key_encrypted)
+        except Exception:
+            # The row survived a SECRET_KEY change: the ciphertext is intact but
+            # nothing can read it any more. Saying so is the difference between an
+            # operator re-entering a key and an operator hunting a bug.
+            logger.warning("stored AI key failed to decrypt for %s", provider.name, exc_info=True)
             key_hint = "********"
+            key_status = "undecryptable"
+        else:
+            key_hint = mask_secret(decrypted)
+            key_status = "ok" if decrypted else "empty"
     return {
         "id": provider.id,
         "name": provider.name,
@@ -214,6 +223,7 @@ def serialize_provider(db: Session, provider: AIProvider) -> dict[str, Any]:
         "daily_budget_usd": float(provider.daily_budget_usd or 0),
         "api_key_set": bool(provider.api_key_encrypted),
         "key_masked": key_hint,
+        "key_status": key_status,
         "models": [
             {
                 "id": m.id,

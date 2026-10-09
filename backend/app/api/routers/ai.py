@@ -20,11 +20,14 @@ from sqlalchemy.orm import Session
 
 from app.ai.explain import (
     AI_UNCONFIGURED,
+    KEY_EMPTY,
+    KEY_UNDECRYPTABLE,
     explain_backtest,
     explain_performance,
     explain_signal,
     get_active_provider,
     spent_today_usd,
+    unusable_provider_key,
 )
 from app.ai.provider import BudgetExceeded
 from app.api.schemas import (
@@ -47,6 +50,31 @@ router = APIRouter(tags=["ai"])
 NOT_CONFIGURED_DETAIL = (
     "AI provider not configured; configure one under Settings to enable explanations"
 )
+
+# The refusals below say *which* provider is at fault when one is configured and
+# its key cannot be read. "Not configured" would be false there: the row exists
+# and is enabled, and the only fix is re-entering the key (or restoring the
+# SECRET_KEY the key was encrypted with).
+KEY_UNREADABLE_DETAIL = (
+    "AI provider '{name}' is enabled but its stored key cannot be decrypted: the "
+    "encryption key (SECRET_KEY) changed after this key was saved. Re-enter the key "
+    "under Settings to enable explanations"
+)
+KEY_EMPTY_DETAIL = (
+    "AI provider '{name}' is enabled but its stored key is empty; re-enter it under "
+    "Settings to enable explanations"
+)
+
+
+def _unavailable_detail(db: Session) -> str:
+    """Why AI is unavailable, naming the provider when one is at fault."""
+
+    broken = unusable_provider_key(db)
+    if broken is None:
+        return NOT_CONFIGURED_DETAIL
+    provider, problem = broken
+    template = KEY_EMPTY_DETAIL if problem == KEY_EMPTY else KEY_UNREADABLE_DETAIL
+    return template.format(name=provider.name)
 
 
 def _compile_error(
@@ -92,6 +120,25 @@ _COMPILE_ERROR_SCHEMA: dict[str, Any] = {
 def ai_status(db: Session = Depends(get_db)) -> AIStatusOut:
     configured = get_active_provider(db)
     if configured is None:
+        broken = unusable_provider_key(db)
+        if broken is not None:
+            provider, problem = broken
+            return AIStatusOut(
+                configured=False,
+                provider_name=provider.name,
+                key_error=problem,
+                spent_today_usd=0.0,
+                tasks_today=0,
+                note=(
+                    f"Provider '{provider.name}' is enabled but its stored key cannot be "
+                    "decrypted, so nothing can be routed. This happens when the SECRET_KEY "
+                    "changed after the key was saved; re-enter the key under Settings to "
+                    "use explanations again. All quantitative features work without AI."
+                    if problem == KEY_UNDECRYPTABLE
+                    else f"Provider '{provider.name}' is enabled but its stored key is empty; "
+                    "re-enter it under Settings. All quantitative features work without AI."
+                ),
+            )
         return AIStatusOut(
             configured=False,
             spent_today_usd=0.0,
@@ -158,7 +205,7 @@ def explain_signal_endpoint(signal_id: int, db: Session = Depends(get_db)) -> Ex
         if str(exc) == AI_UNCONFIGURED:
             raise HTTPException(
                 status_code=503,
-                detail=NOT_CONFIGURED_DETAIL,
+                detail=_unavailable_detail(db),
             ) from exc
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except BudgetExceeded as exc:
@@ -226,7 +273,7 @@ def explain_preview(payload: dict[str, Any], db: Session = Depends(get_db)) -> E
         if str(exc) == AI_UNCONFIGURED:
             raise HTTPException(
                 status_code=503,
-                detail=NOT_CONFIGURED_DETAIL,
+                detail=_unavailable_detail(db),
             ) from exc
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except BudgetExceeded as exc:
@@ -250,7 +297,7 @@ def explain_backtest_endpoint(run_id: int, db: Session = Depends(get_db)) -> Exp
         if str(exc) == AI_UNCONFIGURED:
             raise HTTPException(
                 status_code=503,
-                detail=NOT_CONFIGURED_DETAIL,
+                detail=_unavailable_detail(db),
             ) from exc
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except BudgetExceeded as exc:
@@ -281,7 +328,7 @@ def explain_performance_endpoint(run_id: int, db: Session = Depends(get_db)) -> 
         if str(exc) == AI_UNCONFIGURED:
             raise HTTPException(
                 status_code=503,
-                detail=NOT_CONFIGURED_DETAIL,
+                detail=_unavailable_detail(db),
             ) from exc
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except BudgetExceeded as exc:
@@ -639,11 +686,11 @@ def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) ->
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
 
-    _raise_for_unserved_run(run)
+    _raise_for_unserved_run(db, run)
     if not queued:
         run = research_service.execute_research(db, run, model=payload.model)
         db.commit()
-        _raise_for_unserved_run(run)
+        _raise_for_unserved_run(db, run)
         return ResearchRunOut(**research_service.run_payload(db, run))
 
     _enqueue_research(run.id, payload.model)
@@ -653,7 +700,7 @@ def start_research_run(payload: ResearchRunIn, db: Session = Depends(get_db)) ->
     )
 
 
-def _raise_for_unserved_run(run: Any) -> None:
+def _raise_for_unserved_run(db: Session, run: Any) -> None:
     """Raise the transport answer for a run that never reached a model.
 
     Three outcomes are decided before a token is spent, and each keeps the answer it
@@ -666,7 +713,7 @@ def _raise_for_unserved_run(run: Any) -> None:
     if run.status == "failed" and run.error_message == AI_UNCONFIGURED:
         # The run row stays: it records that the request was made and why it
         # could not be answered.
-        raise HTTPException(status_code=503, detail=NOT_CONFIGURED_DETAIL)
+        raise HTTPException(status_code=503, detail=_unavailable_detail(db))
     if run.status == "rejected" and run.current_step == "ingest":
         raise HTTPException(status_code=422, detail=_refused_run_detail(run))
     if run.status == "failed" and run.current_step == "ingest":
@@ -798,7 +845,7 @@ def formalize_hypothesis_endpoint(
     except RuntimeError as exc:
         db.commit()
         if str(exc) == AI_UNCONFIGURED:
-            raise HTTPException(status_code=503, detail=NOT_CONFIGURED_DETAIL) from exc
+            raise HTTPException(status_code=503, detail=_unavailable_detail(db)) from exc
         logger.warning("AI formalization failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"AI provider call failed: {exc}") from exc
     db.commit()

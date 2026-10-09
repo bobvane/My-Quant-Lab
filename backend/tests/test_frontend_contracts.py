@@ -243,6 +243,29 @@ def test_every_settings_request_answers_for_itself() -> None:
     assert "if (notification) applyNotification(notification)" in SETTINGS
 
 
+def test_a_key_that_cannot_be_read_is_not_shown_as_a_working_row() -> None:
+    """ADR-194: "not configured" is false when the row is there and enabled.
+
+    A stored key stops decrypting when SECRET_KEY changes afterwards. That row
+    used to look exactly like a healthy one — masked key, green "启用" — and
+    ``/ai/status`` answered "No AI provider configured", which sends the operator
+    looking for a provider they can already see. The page and the type both carry
+    the distinction now.
+    """
+
+    assert "key_status?: string" in API_TEXT
+    assert "p.key_status === 'undecryptable'" in SETTINGS
+    assert "p.key_status === 'empty'" in SETTINGS
+    # The message names the cause and the fix, not the symptom.
+    assert "SECRET_KEY 变过" in SETTINGS
+    assert "重新填一次密钥" in SETTINGS
+    # The backtest page can reach this refusal too: it must not answer "未配置 AI"
+    # when an enabled provider exists, and it keeps its own truthful branch.
+    assert "key_error?: string | null" in API_TEXT
+    assert "aiConfigured === false && aiKeyError" in BACKTEST
+    assert "存进去的密钥现在读不出来" in BACKTEST
+
+
 def test_a_scan_the_ui_promises_can_actually_store_signals() -> None:
     """The button said "扫描完成" while the request was a dry run (ADR-089)."""
 

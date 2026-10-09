@@ -140,31 +140,77 @@ def explainer_prompt(task_type: str) -> tuple[str, str, str, str]:
     )
 
 
-def get_active_provider(
-    db: Session,
-) -> tuple[AIProvider, AIModel | None, str] | None:
-    """Return ``(provider, model, decrypted_key)`` or None when unconfigured."""
+# Why a stored key cannot be used. They are different situations for the
+# operator: one is a key that was never written, the other is a key that no
+# longer decrypts under the current SECRET_KEY, and only the second one means
+# "the encryption namespace changed since this row was saved".
+KEY_UNDECRYPTABLE = "undecryptable"
+KEY_EMPTY = "empty"
 
-    provider = db.scalar(
-        select(AIProvider)
-        .where(AIProvider.is_active.is_(True), AIProvider.api_key_encrypted.is_not(None))
-        .order_by(AIProvider.id)
-    )
-    if provider is None:
-        return None
-    model = db.scalar(
-        select(AIModel)
-        .where(AIModel.provider_id == provider.id, AIModel.is_active.is_(True))
-        .order_by(AIModel.id)
-    )
+
+def _provider_key(provider: AIProvider) -> tuple[str | None, str]:
+    """``(decrypted_key, problem)``; the problem is ``""`` when the key is usable."""
+
     try:
         api_key = decrypt_secret(provider.api_key_encrypted or "")
     except Exception:
-        logger.warning("stored AI key failed to decrypt", exc_info=True)
-        return None
+        logger.warning("stored AI key failed to decrypt for %s", provider.name, exc_info=True)
+        return None, KEY_UNDECRYPTABLE
     if not api_key:
-        return None
-    return provider, model, api_key
+        logger.warning("stored AI key for %s is empty", provider.name)
+        return None, KEY_EMPTY
+    return api_key, ""
+
+
+def get_active_provider(
+    db: Session,
+) -> tuple[AIProvider, AIModel | None, str] | None:
+    """Return ``(provider, model, decrypted_key)`` or None when unconfigured.
+
+    Every enabled provider is considered, not only the first one: a key that no
+    longer decrypts (the SECRET_KEY changed under a saved row) must not hide a
+    healthy provider behind it. When nothing is routable,
+    :func:`unusable_provider_key` explains which row is at fault.
+    """
+
+    rows = db.scalars(
+        select(AIProvider)
+        .where(AIProvider.is_active.is_(True), AIProvider.api_key_encrypted.is_not(None))
+        .order_by(AIProvider.id)
+    ).all()
+    for provider in rows:
+        api_key, problem = _provider_key(provider)
+        if problem:
+            continue
+        model = db.scalar(
+            select(AIModel)
+            .where(AIModel.provider_id == provider.id, AIModel.is_active.is_(True))
+            .order_by(AIModel.id)
+        )
+        return provider, model, api_key
+    return None
+
+
+def unusable_provider_key(db: Session) -> tuple[AIProvider, str] | None:
+    """The first enabled provider whose stored key cannot be used, and why.
+
+    ``GET /ai/status`` and the explanation refusals use this to tell "no provider
+    configured" apart from "a provider is configured and its key cannot be read".
+    Only the second case needs the operator to re-enter the key (or to restore the
+    SECRET_KEY it was encrypted with); saying "no provider configured" there sends
+    them looking for a row they can already see.
+    """
+
+    rows = db.scalars(
+        select(AIProvider)
+        .where(AIProvider.is_active.is_(True), AIProvider.api_key_encrypted.is_not(None))
+        .order_by(AIProvider.id)
+    ).all()
+    for provider in rows:
+        _, problem = _provider_key(provider)
+        if problem:
+            return provider, problem
+    return None
 
 
 def get_active_providers(db: Session) -> list[tuple[AIProvider, str, list[AIModel]]]:
@@ -181,12 +227,8 @@ def get_active_providers(db: Session) -> list[tuple[AIProvider, str, list[AIMode
     ).all()
     out: list[tuple[AIProvider, str, list[AIModel]]] = []
     for provider in rows:
-        try:
-            api_key = decrypt_secret(provider.api_key_encrypted or "")
-        except Exception:
-            logger.warning("stored AI key failed to decrypt for %s", provider.name, exc_info=True)
-            continue
-        if not api_key:
+        api_key, problem = _provider_key(provider)
+        if problem:
             continue
         models = list(
             db.scalars(

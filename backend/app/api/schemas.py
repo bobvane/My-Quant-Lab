@@ -954,6 +954,10 @@ class AIStatusOut(BaseModel):
     spent_today_usd: float = 0.0
     tasks_today: int = 0
     note: str
+    # Set only when an enabled provider exists but its stored key cannot be used:
+    # "undecryptable" (the SECRET_KEY changed after the key was saved) or "empty".
+    # It tells the two situations apart, because "not configured" is false here.
+    key_error: str | None = None
 
 
 class AIModelIn(BaseModel):

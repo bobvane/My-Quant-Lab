@@ -93,7 +93,7 @@
 - 是否年化：**是**，乘 `√periods`。
 - 年化因子：`BARRS_PER_YEAR[timeframe]`，`1d = 252`。**已知口径问题**：crypto 7×24 日线也按 252 折算（应为 365）——记录为债务，Phase C 不改（改它会改变新回的 `result_hash`）。因为策略与对照用**同一个因子**，对照比较仍然成立。
 - 数据不足：`len(returns) < 2` 或 `std == 0` → `sharpe = None` + note `"not enough return samples for Sharpe"`。
-- NaN / Infinity：**这里就是缺口** —— `metrics.py:118` 的 `std` 没有有限性校验，`_safe()`（`:60-69`）是**死函数**（除它以外无人调用）。新分析层必须自己 `math.isfinite` 兜底（§11）。
+- NaN / Infinity：**已闭合（ADR-195）** —— `metrics.py` 自己清洗：分母 ≤ 0 的 bar 与非有限的收益样本被剔除并记 `notes`，终值为负时不给 CAGR（负底数开分数次方是复数，`json.dumps` 直接抛 `TypeError`），所有浮动比率经 `_safe()`（不再是死函数）落成有限值或 `None`。新分析层仍自带 `math.isfinite` 兜底（§11），两条路互不依赖。
 
 **Max Drawdown 的用户重点问题**：
 
@@ -130,7 +130,7 @@
 1. 无「对照（buy & hold）」：全仓 `benchmark|buy_?hold|alpha|beta` **零计算命中**（命中项全是 SSRF 保留网段与「净入金基准」语义）。
 2. 无 `calmar` / 无 `recovery period`：`capabilities.py:256-260` 自己写着 `"not computed yet; max drawdown duration and recovery are also missing"`。
 3. 无「样本是否足够」的**结论性字段**：只有 `metrics.notes` 文本（且 `as_dict()` 丢弃）；前端 `BacktestView.vue:1301 MIN_MEANINGFUL_TRADES = 10` 与 `monte_carlo.py:53 MIN_TRADES_FOR_CONFIDENCE = 20` 是**两个阈值**，一个页面可能同时说两种话。
-4. `metrics.py` 缺 `isfinite` 兜底（`_safe` 是死代码）⇒ 新层必须自带。
+4. ~~`metrics.py` 缺 `isfinite` 兜底（`_safe` 是死代码）⇒ 新层必须自带。~~ **已修（ADR-195）**：`compute_metrics` 现在自己清洗（见 §2 的 NaN/Infinity 一条）；新层仍自带兜底，不依赖它。
 5. 对照需要一个**稳定的窗口定义**：`backtest_runs` 行上**没有** start/end 列，异步 run 的窗口只活在队列 payload（`backtests.py:65`、`workers/tasks.py:569`）⇒ 必须改用 `equity_curve_json` 首尾 timestamp。
 
 **P1（影响质量，可在同一交付里顺手做，但不算新能力）**
@@ -509,7 +509,7 @@ GET /api/v1/backtests/{run_id}/analysis        → 200 AnalysisOut
 7. **`kind` 覆盖范围**：只有 `kind=backtest`（以及 `monte_carlo` 有 `backtest_run_id`）才有曲线可分析；`sensitivity`/`walk_forward`/`oos` 的 `backtest_run_id` 恒 `None` ⇒ 前端必须**只在有 `backtest_run_id` 时**显示分析入口（否则用户会看到 404）。
 8. **命名与漂移**：中文用「对照」不用「基准」；`MarketDataSeries.__tablename__` 是 `market_data`；`BacktestRun.dataset_version_id` 存的是 series id；不要新建 `BacktestDetailOut` 之类的二次命名。
 9. **AI 兼容**：AI 不可用时功能必须完整（数字块独立成立）；实现 calmar/对照后同步 `capabilities.py`，否则 AI 层的「能力清单」会对模型撒谎（`AGENTS.md` AI contract）。
-10. **已知口径债（记录、本阶段不改）**：`BARRS_PER_YEAR["1d"] = 252` 对 crypto；`cagr` 按 bar 折算；`_safe()` 死代码；回撤算法三份实现；`backtest_metrics` 只写不读；`docs/13:82` 的月度/年度视图并不存在。
+10. **已知口径债（记录、本阶段不改）**：`BARRS_PER_YEAR["1d"] = 252` 对 crypto；`cagr` 按 bar 折算；`_safe()` 死代码（**已于 ADR-195 修掉，不再是债**）；回撤算法三份实现；`backtest_metrics` 只写不读；`docs/13:82` 的月度/年度视图并不存在。
 
 ---
 

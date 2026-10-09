@@ -28,6 +28,28 @@ BARRS_PER_YEAR: dict[str, float] = {
 MIN_SAMPLES_SHARPE = 2
 MIN_SAMPLES_WINRATE = 1
 
+# Every ratio this module reports is a float the HTTP layer must be able to
+# serialize. A non-finite one (``nan``/``inf``, or a ``complex`` produced by
+# raising a negative base to a fractional power) is not a number the user can
+# act on, so it is reported as ``None`` -- the UI renders that as ``未知`` and
+# never as ``0`` -- and the reason is recorded in ``notes`` (docs/30 §11).
+_FLOAT_FIELDS: tuple[str, ...] = (
+    "total_return",
+    "cagr",
+    "annualized_volatility",
+    "sharpe",
+    "sortino",
+    "max_drawdown",
+    "win_rate",
+    "avg_win",
+    "avg_loss",
+    "profit_factor",
+    "expectancy",
+    "average_holding_bars",
+    "exposure",
+    "turnover",
+)
+
 
 @dataclass
 class Metrics:
@@ -69,6 +91,22 @@ def _safe(value: Any) -> float | None:
     return result
 
 
+def _clean(metrics: Metrics) -> None:
+    """Replace every non-finite ratio with ``None`` and record why."""
+
+    rejected: list[str] = []
+    for name in _FLOAT_FIELDS:
+        value = getattr(metrics, name)
+        cleaned = _safe(value)
+        if cleaned is None and value is not None:
+            rejected.append(name)
+        setattr(metrics, name, cleaned)
+    if rejected:
+        metrics.notes.append(
+            "these metrics were not finite numbers and are withheld: " + ", ".join(rejected)
+        )
+
+
 def compute_metrics(
     equity_curve: np.ndarray,
     trades: list[dict[str, Any]],
@@ -106,11 +144,43 @@ def compute_metrics(
 
     metrics.total_return = final / initial - 1.0
 
-    returns = np.diff(equity) / equity[:-1]
+    # A return is a ratio between two consecutive equity points, so the earlier
+    # point is the denominator. Equity can reach zero (a paper account fully
+    # withdrawn, a backtest that lost everything), and dividing by it would
+    # hand ``inf`` to every ratio below; those bars are excluded and said out
+    # loud instead of being reported as a number nobody can act on.
+    denominators = equity[:-1]
+    steps = np.diff(equity)
+    usable = denominators > 0
+    # Overflowing to ``inf`` here is expected for absurd inputs and is handled
+    # below; numpy must not print a warning for a case we already report.
+    with np.errstate(all="ignore"):
+        if bool(usable.all()):
+            returns = steps / denominators
+        else:
+            returns = steps[usable] / denominators[usable]
+            notes.append(
+                f"{int((~usable).sum())} bar(s) follow a non-positive equity point and are "
+                "excluded from the return statistics"
+            )
+        finite = np.isfinite(returns)
+        if not bool(finite.all()):
+            returns = returns[finite]
+            notes.append(
+                f"{int((~finite).sum())} return sample(s) were not finite and are excluded "
+                "from the return statistics"
+            )
+
     periods = bars_per_year or BARRS_PER_YEAR.get(timeframe, 252.0)
     years = len(equity) / periods
+    ratio = final / initial
     if years > 0:
-        metrics.cagr = (final / initial) ** (1.0 / years) - 1.0
+        if ratio < 0:
+            # A negative base to a fractional power is a complex number in
+            # Python, which is not JSON-serializable at all: withhold it.
+            notes.append("equity ended below zero, so CAGR has no real value")
+        else:
+            metrics.cagr = ratio ** (1.0 / years) - 1.0
     else:
         notes.append("period too short for CAGR")
 
@@ -164,6 +234,7 @@ def compute_metrics(
     holding = [t.get("holding_bars") for t in trades if t.get("holding_bars") is not None]
     if holding:
         metrics.average_holding_bars = float(np.mean(holding))
+    _clean(metrics)
     return metrics
 
 

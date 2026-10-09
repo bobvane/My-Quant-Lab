@@ -1,11 +1,12 @@
 <script setup lang="ts">
-// The nine-part strategy detail page (docs/13_UI_UX.md §3, ADR-114). Everything a
+// The ten-part strategy detail page (docs/13_UI_UX.md §3, ADR-114 + ADR-207). Everything a
 // decision needs about one strategy used to be scattered over /market, /backtest,
-// /paper and /signals; this page puts the nine parts in one place — and where a
+// /paper and /signals; this page puts the parts in one place — and where a
 // reading does not exist it says so instead of leaving a blank that reads as zero.
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import {
+  ApiError,
   api,
   type AIStatus,
   type BacktestSummary,
@@ -170,13 +171,38 @@ function level(value: unknown): string {
   return String(value)
 }
 
+/** 把服务端那句英文换成这一页自己的说法：能认的状态说出人话，认不出的照实转述。 */
+function evidenceFailure(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.status === 404) return '服务端已经没有这一版了。'
+    if (e.status === 422) return '这个标的（或时间范围）服务端不认。'
+    if (e.status === 503) return '这台部署现在取不到证据。'
+  }
+  return (e as Error).message
+}
+
+// 发出去的标的永远是去掉首尾空白的那一个：粘进来的「  DEMO-AAPL  」不是另一个标的（ADR-208）。
+const requestedSymbol = computed(() => symbol.value.trim())
+
+// 没有标的时这两处（当前信号预览、五层证据）都问不出东西，理由也是同一句（ADR-208）。
+const SYMBOL_NEEDED =
+  '策略自己不点名任何标的，所以先在「当前信号」那一格填一个（例如 DEMO-AAPL）再载入；' +
+  '这一版跑过回测之后，那一格会自带最近一次回测的标的。'
+
 async function loadEvidence() {
   if (!currentVersion.value) return
+  // 证据是「这一版在这个标的上」的证据：没有标的就没有可问的对象 ——
+  // 不去问服务端（问了只有 422），也不把服务端那句英文印给用户。
+  if (!requestedSymbol.value) {
+    evidence.value = null
+    info.value = `五层证据要按标的算：${SYMBOL_NEEDED}`
+    return
+  }
   try {
-    evidence.value = await api.strategyEvidence(currentVersion.value.id, symbol.value || undefined)
+    evidence.value = await api.strategyEvidence(currentVersion.value.id, requestedSymbol.value)
   } catch (e) {
     evidence.value = null
-    info.value = `五层证据没能载入：${(e as Error).message}`
+    info.value = `五层证据没能载入：${evidenceFailure(e)}`
   }
 }
 
@@ -221,9 +247,14 @@ async function loadPreview() {
   if (!currentVersion.value) return
   error.value = ''
   info.value = ''
+  // 预览要按标的算：没有标的就不发这次请求，只说缺什么（ADR-208）。
+  if (!requestedSymbol.value) {
+    info.value = `当前信号要按标的算：${SYMBOL_NEEDED}`
+    return
+  }
   busy.value = 'preview'
   try {
-    preview.value = await api.signalPreview(currentVersion.value.id, symbol.value || undefined)
+    preview.value = await api.signalPreview(currentVersion.value.id, requestedSymbol.value)
     await loadEvidence()
   } catch (e) {
     error.value = (e as Error).message
@@ -239,7 +270,7 @@ async function explainSignalNow() {
   try {
     explanation.value = await api.explainSignalPreview(
       currentVersion.value.id,
-      symbol.value || undefined,
+      requestedSymbol.value || undefined,
     )
   } catch (e) {
     error.value = (e as Error).message
@@ -641,7 +672,7 @@ onMounted(load)
           标的
           <input v-model="symbol" placeholder="例如 DEMO-AAPL" />
         </label>
-        <button :disabled="busy === 'preview' || !symbol" @click="loadPreview">载入当前信号</button>
+        <button :disabled="busy === 'preview' || !requestedSymbol" @click="loadPreview">载入当前信号</button>
         <pre v-if="preview" class="code-block">{{ JSON.stringify(preview, null, 2) }}</pre>
         <p v-else class="muted">还没有载入预览。</p>
         <h4>五层确定性证据</h4>
@@ -716,7 +747,7 @@ onMounted(load)
             {{ formatNumber(ai.spent_today_usd, 4) }} USD / 预算
             {{ ai.daily_budget_usd === null ? '未设' : formatNumber(ai.daily_budget_usd) }}。
           </p>
-          <button :disabled="busy === 'explain' || !symbol" @click="explainSignalNow">
+          <button :disabled="busy === 'explain' || !requestedSymbol" @click="explainSignalNow">
             解释当前信号
           </button>
           <button :disabled="busy === 'explain-run' || !latestRun" @click="explainLatestRun">

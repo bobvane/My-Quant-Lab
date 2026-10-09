@@ -1712,3 +1712,83 @@ def test_every_downstream_record_can_walk_back_to_its_strategy() -> None:
     # An account with no version says so rather than rendering a dead link.
     assert "这个账户没有记下所属策略，所以没有回头路可给。" in PAPER
     assert "这个账户没有钉版本，所以没有「这一版的信号」可看。" in PAPER
+
+
+def test_the_evidence_panel_does_not_ask_without_a_symbol() -> None:
+    """ADR-208：没有标的时不去问五层证据，也不把服务端的英文 422 抖给用户。
+
+    The page's own 「当前信号」 section already says the 标的 box is required, because a
+    strategy names no symbol itself. The evidence panel used to ask anyway — so a strategy
+    with no backtest (hence no default symbol) got a 422 and the reader got the server's
+    English sentence 「either series_id or symbol is required」 in the info line. Asking a
+    question that cannot have an answer is the defect; the fix is to not ask and to name
+    the missing half instead (ADR-138). The same walk found that a symbol pasted with
+    padding reached the API untrimmed, so what the page sends is now the trimmed symbol
+    everywhere it sends one.
+    """
+
+    body = _function_body(STRATEGY_DETAIL, "loadEvidence")
+    guard = "if (!requestedSymbol.value) {"
+    ask = "api.strategyEvidence("
+    assert "const requestedSymbol = computed(() => symbol.value.trim())" in STRATEGY_DETAIL, (
+        "the page sends 标的 raw: a symbol pasted with padding becomes a different symbol "
+        "and the API answers 404 (ADR-208)"
+    )
+    assert guard in body, (
+        "the evidence panel asks for evidence without checking that it has a 标的: the "
+        "server answers 422 and the reader gets its English (ADR-208)"
+    )
+    assert body.index(guard) < body.index(ask), (
+        "the symbol guard runs after the request: the guard is what keeps the request from "
+        "being sent (ADR-208)"
+    )
+    assert "evidence.value = null" in body[: body.index(ask)], (
+        "a skipped evidence call must clear the panel rather than leave the previous "
+        "reading on screen (ADR-208)"
+    )
+    # The reason is named in this page's own words, and it says what to do.
+    assert "五层证据要按标的算" in body
+    assert "SYMBOL_NEEDED" in body
+    assert "先在「当前信号」那一格填一个" in STRATEGY_DETAIL
+    assert "再载入" in STRATEGY_DETAIL
+    assert "api.strategyEvidence(currentVersion.value.id, requestedSymbol.value)" in body
+    assert "evidenceFailure(" in body, (
+        "a failed evidence call must go through the page's own wording, not print the "
+        "server's message straight at the reader (ADR-208)"
+    )
+
+    # The preview asks the same question, so it gets the same guard and the same symbol.
+    preview = _function_body(STRATEGY_DETAIL, "loadPreview")
+    assert "if (!requestedSymbol.value) {" in preview, (
+        "the signal preview is asked without a 标的, so the page sends a request with no "
+        "answer again (ADR-208)"
+    )
+    assert preview.index("if (!requestedSymbol.value) {") < preview.index("api.signalPreview(")
+    assert "api.signalPreview(currentVersion.value.id, requestedSymbol.value)" in preview
+    explain_now = _function_body(STRATEGY_DETAIL, "explainSignalNow")
+    assert "api.explainSignalPreview(" in explain_now
+    assert "requestedSymbol.value || undefined" in explain_now
+    # A whitespace-only box is not a symbol, so it does not enable the buttons.
+    assert STRATEGY_DETAIL.count("!requestedSymbol") >= 3
+
+    # The failure wording recognises the three statuses a reader can act on.
+    failure = STRATEGY_DETAIL[
+        STRATEGY_DETAIL.index("function evidenceFailure(") : STRATEGY_DETAIL.index(
+            "async function loadEvidence("
+        )
+    ]
+    for status in ("404", "422", "503"):
+        assert f"e.status === {status}" in failure, (
+            f"evidenceFailure does not recognise {status}: a refusal the reader can act on "
+            "is shown as the server's English (ADR-208)"
+        )
+    assert "return (e as Error).message" in failure, (
+        "an unrecognised refusal must still be reported, not swallowed (ADR-208)"
+    )
+
+    # The English sentence the server sends for a missing 标的 never reaches the page.
+    assert "either series_id or symbol is required" not in STRATEGY_DETAIL
+    # ... and the class used to read the status is imported, not assumed.
+    assert "ApiError," in STRATEGY_DETAIL
+    # The page is ten parts, not nine (ADR-207), and its own header says so.
+    assert "The ten-part strategy detail page" in STRATEGY_DETAIL

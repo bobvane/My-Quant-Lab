@@ -67,7 +67,7 @@ v1.9.5 又给首页加了两样东西（ADR-139、ADR-143）：① 策略库还�
 5. 回测（Backtest）：当前版本的回测运行列表与最近一次的关键读数（总收益率、最大回撤、夏普比率、胜率、期末权益）。没有运行时写「不是零，是还没有数据」，并把读者送到回测实验室。
 6. 样本外与滚动验证（OOS / Walk-forward）：只从生命周期证据里读「已记录过几次」与最近一次摘要，并明说这些结果**不落库**——`POST /research/oos` 与 `POST /research/walk-forward` 按需计算，系统留下的只有审计事件，所以这一节不是一份完整评估。
 7. 模拟验证（Paper Trading）：绑定到这个策略的账户（`GET /paper/accounts` 的 `strategy_id`）与它们的交易，并明说归因按账户：模拟验证交易只带账户与当时的策略版本名，系统不会把一笔成交倒推给某个策略。这一段的标题在 v1.9.1 从「模拟盘」改成「模拟验证」（ADR-127）：这一页是验证工具，不是账户管理，名字必须说清它替用户做什么。
-8. 当前信号（Current Signals）：`GET /signals/preview/{strategy_version_id}` 的当前（未持久化）信号与 `GET /signals/evidence/{strategy_version_id}` 的五层确定性证据（规则匹配、经验统计、模拟盘统计、组合上下文、信号意图）。预览需要标的，因为策略自己不点名任何标的，所以标的那一格是必填的。
+8. 当前信号（Current Signals）：`GET /signals/preview/{strategy_version_id}` 的当前（未持久化）信号与 `GET /signals/evidence/{strategy_version_id}` 的五层确定性证据（规则匹配、经验统计、模拟盘统计、组合上下文、信号意图）。预览需要标的，因为策略自己不点名任何标的，所以标的那一格是必填的，两个按钮也按「去掉首尾空白之后还有内容」才算有标的。没有标的时五层证据与预览**都不去问服务端**（问了只有 422，服务端那句英文 `either series_id or symbol is required` 不是给用户看的），而是说出缺的那一半：先在「当前信号」那一格填一个（例如 DEMO-AAPL）再载入，这一版跑过回测之后那一格会自带最近一次回测的标的（ADR-208）。发出去的标的永远是去掉首尾空白的那一个，因为粘进来的 `  DEMO-AAPL  ` 不是另一个标的。
 9. AI 解释（AI Explanation）：`GET /ai/status` 说明是否配置；已配置时可以解释当前信号预览（`POST /signals/preview-explain`）或最近一次回测（`POST /backtests/{run_id}/explain`），只解释已有数字、不参与计算；未配置时明说未配置，并写明十段在没有任何 AI 的情况下全部可用。
 10. 实验（Experiments）：这一版跑过的实验（ADR-207）。它读的是服务端过滤 `GET /experiments?strategy_version_id=`，**不是**把「实验」页取回来的那一页本地筛一遍；只列最近 5 条并明说「不是这一版的全部」，完整读数在「实验」页；地址栏里钉住的那一版决定列表的请求，刷新或把地址发给别人落到的还是这一版(`/experiments?strategy_version_id=<id>`)，带一个「看全部实验」清除它。列表里的「实验」列（版本历史那张表）与这张卡指向的地址是同一个。这一版的实验用服务端自己那五个状态词与五种实验类型词显示（`frontend/src/wording.ts` 的 `experimentStatusLabel` / `experimentKindLabel`，与「实验」页同一张表），算不出来的写「未知」，原始取值只在高级模式出现。
 

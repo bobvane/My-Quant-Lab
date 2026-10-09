@@ -792,6 +792,17 @@ const backtestLink = computed(() => {
 
 const backtestRunId = computed(() => detail.value?.backtest_run_id ?? null)
 
+/**
+ * `/signals?strategy_version_id=<id>` 把「信号」页收窄到这条实验用的那一版（ADR-201）：
+ * 收窄在服务端做，不是把这一页取回来的信号本地筛一遍。读不到版本时退回不带参数的那一页，
+ * 那仍然是这一页说得通的状态（看的是全部信号）。
+ */
+const signalsLink = computed(() =>
+  detail.value?.strategy_version_id
+    ? { path: '/signals', query: { strategy_version_id: String(detail.value.strategy_version_id) } }
+    : '/signals',
+)
+
 // ---- 用这个实验创建模拟账户 --------------------------------------------------
 
 const creatingAccount = ref(false)
@@ -1320,12 +1331,17 @@ onMounted(async () => {
             <span v-else class="muted">这条实验还没有对应的回测，先运行它，跑完就有成交明细了。</span>
           </li>
           <li>
-            <RouterLink to="/signals">到「信号」页</RouterLink>
+            <RouterLink :to="signalsLink">到「信号」页</RouterLink>
             —— 这一页看的是「这一版策略现在还发不发信号」；这条实验用的是
-            {{ strategyText(detail) }}。
+            {{ strategyText(detail) }}。打开的是<strong>这一版</strong>的信号，
+            下面的结果追踪也是同一版的范围。
+            <span class="muted">
+              （地址里的 <span class="mono">?strategy_version_id=…</span>
+              把范围钉在这一版上：刷新或把地址发给别人，落到的还是它。）
+            </span>
             <span v-if="isAdvanced">
-              （服务端支持 <span class="mono">GET /signals?strategy_version_id=</span> 过滤，
-              「信号」页目前还没有对应的筛选框，所以上面这个链接打开的是全部信号。）
+              （服务端过滤：<span class="mono">GET /signals?strategy_version_id=</span>，
+              不是把「信号」页取回来的那一页本地筛一遍 —— 本地筛会把更早的信号漏掉。）
             </span>
           </li>
           <li>

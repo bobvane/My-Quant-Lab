@@ -560,6 +560,11 @@ K 线、或那根 K 线没有收盘价）时，价格与盈亏字段为 `null`�
 `limit` 取最新 N 行再在客户端过滤会**静默丢掉**它们（ADR-181）。过滤发生在这条聚合语句里，
 `symbol` 仍然走 `Asset` 的精确匹配（未知标的返回空列表，不是全局结果）。
 
+同样的 `strategy_version_id` 也是 `/signals/outcomes` 与 `/signals/outcome-summary` 的查询参数
+（ADR-201，同一个理由）：只看某一版策略发过的信号，及其结果统计。`/signals/outcome-summary`
+把范围**回显**在响应里（`strategy_version_id`，未收窄时为 `null`），和三个计数一样属于「数字必须
+带着它的分母与范围一起发布」（ADR-065）—— 页面因此不必拿本地状态替它说范围。
+
 两种模式共用同一条新鲜度门禁：`NO_SIGNAL` 不是信号，既不落库也不计入 `created`。`persist=true`
 返回的 `created` 是**真的新建**了几行（过去它靠「最老一条 signal 的 id 有没有变」猜，既算错又会在
 并发扫描撞上 `uq_signal_event` 时 500）。每个 series × current 版本最多一次评估，返回的 `signals`
@@ -575,6 +580,8 @@ K 线、或那根 K 线没有收盘价）时，价格与盈亏字段为 `null`�
 
 - `symbol`：这些数字描述的范围（`null` 为全部标的）；端点接受 `?symbol=`，与 `/signals/outcomes`
   同口径，未知标的返回空范围而不是全局平均。
+- `strategy_version_id`：同样是范围的一部分（`null` 为全部策略版本）；端点接受
+  `?strategy_version_id=`，与上面两个端点同口径，某一版没有信号时返回空范围而不是全局平均（ADR-201）。
 - `signals` / `decided` / `undecided`：范围内信号总数 / 已有可用结果的数量 / 其余数量。
   `decided` 是每个 `count` 与 `win_rate` 的分母，且 `decided == groups.ALL.count`。
 - `bars_after`：评估器要在信号之后看到多少根 K 线才回填结果（`DEFAULT_BARS_AFTER = 10`）；

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { api, type ExplainResult, type SignalRecord } from '@/api'
 import { formatDateTime, formatNumber, formatPercent, signalDirection, toneOf } from '@/format'
 import { isAdvanced } from '@/mode'
@@ -22,6 +23,71 @@ const loading = ref(false)
 const pageOffset = ref(0)
 const PAGE = 50
 
+// ---- 地址里点名的策略版本（ADR-201）------------------------------------------
+//
+// `/signals?strategy_version_id=4` 让这一页只看一版策略发过的信号。收窄发生在服务端
+// （`GET /signals`、`/signals/outcomes`、`/signals/outcome-summary` 都收这个参数）：
+// 本地过滤最新 50 条会把更早的信号漏掉，那正是 ADR-181 拒绝的做法。
+// 没点名时 `versionScope` 是 ``null``，这一页照旧看全部策略、全部标的。
+
+const route = useRoute()
+
+const versionScope = ref<number | null>(null)
+const scopeTitle = ref('')
+const scopeNote = ref('')
+
+const SCOPE_HERE = '这一页只看这一版发过的信号与它们的结果统计'
+const SCOPE_GONE = '这个版本号在服务端读不到（可能已经被删掉了），所以下面的列表与统计是空的，不是「这一版没有信号」'
+const SCOPE_UNKNOWN = '读不到这一版对应的策略名，下面按版本号收窄'
+
+/** 地址里的版本号只在它是正整数时才算数：手改的地址不改变这一页在问什么。 */
+function requestedVersionId(): number | null {
+  const raw = Number(route.query.strategy_version_id)
+  return Number.isInteger(raw) && raw > 0 ? raw : null
+}
+
+async function loadScope() {
+  versionScope.value = requestedVersionId()
+  const id = versionScope.value
+  if (id === null) return
+  scopeTitle.value = `策略版本 #${id}`
+  scopeNote.value = SCOPE_UNKNOWN
+  try {
+    const versions = await api.allStrategyVersions()
+    const target = versions.find((candidate) => candidate.id === id)
+    if (!target) {
+      // 名字读不到就是读不到：不说成「这一版没有信号」（ADR-112 的同一个诚实）。
+      scopeNote.value = SCOPE_GONE
+      return
+    }
+    const strategies = await api.strategies()
+    const owner = strategies.find((candidate) => candidate.id === target.strategy_id)
+    if (owner) scopeTitle.value = `策略《${owner.name}》版本 #${id}`
+    scopeNote.value = SCOPE_HERE
+  } catch {
+    // 名字读不到不影响收窄本身：下面照旧按版本号问服务端。
+  }
+}
+
+/** 范围变了就从头取一遍：列表、条数与已展开的结果追踪都属于上一个范围。 */
+async function applyScopeChange() {
+  pageOffset.value = 0
+  showOutcomes.value = false
+  outcomes.value = []
+  outcomeSummary.value = null
+  await loadScope()
+  await load()
+}
+
+// 从带参数的那一页点「看全部」时组件会被复用，`onMounted` 不会再跑一次（ADR-201）。
+watch(
+  () => route.query.strategy_version_id,
+  () => {
+    if (requestedVersionId() === versionScope.value) return
+    void applyScopeChange()
+  },
+)
+
 function resetAndLoad() {
   pageOffset.value = 0
   return load()
@@ -36,6 +102,7 @@ async function loadMore() {
       PAGE,
       symbolFilter.value.trim() || undefined,
       pageOffset.value,
+      versionScope.value ?? undefined,
     )
     signals.value = [...signals.value, ...more]
   } catch (e) {
@@ -83,8 +150,10 @@ async function toggleOutcomes() {
   }
   try {
     const [rows, summary] = await Promise.all([
-      api.signalOutcomes(50, symbolFilter.value.trim() || undefined),
-      api.signalOutcomeSummary(symbolFilter.value.trim() || undefined).catch(() => null),
+      api.signalOutcomes(50, symbolFilter.value.trim() || undefined, versionScope.value ?? undefined),
+      api
+        .signalOutcomeSummary(symbolFilter.value.trim() || undefined, versionScope.value ?? undefined)
+        .catch(() => null),
     ])
     outcomes.value = rows
     outcomeSummary.value = summary
@@ -320,6 +389,7 @@ async function load() {
       PAGE,
       symbolFilter.value.trim() || undefined,
       pageOffset.value,
+      versionScope.value ?? undefined,
     )
   } catch (e) {
     error.value = (e as Error).message
@@ -361,7 +431,10 @@ function contextNote(row: SignalRecord): string {
   return (row.portfolio_context?.note as string) ?? '—'
 }
 
-onMounted(load)
+onMounted(async () => {
+  await loadScope()
+  await load()
+})
 </script>
 
 <template>
@@ -370,6 +443,15 @@ onMounted(load)
     <p class="page-sub">
       信号只基于已收盘 K 线评估：看多信号 / 看空 / 退出信号 是策略此刻给出的方向，暂不确认表示入场条件还没满足。
       {{ SIGNAL_DISCLAIMER }}
+    </p>
+
+    <p v-if="versionScope" class="muted" style="margin: 0 0 10px">
+      {{ scopeTitle }}：{{ scopeNote }}。
+      <RouterLink to="/signals">看全部策略、全部标的的信号</RouterLink>
+      <span v-if="isAdvanced">
+        （服务端过滤：<span class="mono">GET /signals?strategy_version_id=</span>，
+        结果追踪也是同一个范围 —— 不是把这一页取回来的 {{ signals.length }} 条本地筛一遍。）
+      </span>
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -525,7 +607,10 @@ onMounted(load)
         （最难受的时候亏到多少），MFE% 是最大浮盈（最顺利的时候赚到多少）。
       </p>
       <p v-if="outcomeSummary" class="muted">
-        范围：{{ outcomeSummary.symbol ?? '全部标的' }} · 共 {{ outcomeSummary.signals }} 条信号，已评估
+        范围：{{ outcomeSummary.symbol ?? '全部标的' }}<template v-if="outcomeSummary.strategy_version_id"
+          >、策略版本 #{{ outcomeSummary.strategy_version_id }}</template
+        >
+        · 共 {{ outcomeSummary.signals }} 条信号，已评估
         {{ outcomeSummary.decided }} 条<template v-if="outcomeSummary.undecided > 0"
           >，另有 {{ outcomeSummary.undecided }} 条还没有结果（要等信号后
           {{ outcomeSummary.bars_after }} 根 K 线，或该标的还没有 K 线序列）</template

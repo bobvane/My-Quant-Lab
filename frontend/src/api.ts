@@ -1565,19 +1565,32 @@ export const api = {
         symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
       }`,
     ),
-  signalOutcomes: (limit = 50, symbol?: string) =>
-    request<Array<Record<string, any>>>(
-      `/signals/outcomes?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''}`,
-    ),
-  signalOutcomeSummary: (symbol?: string) =>
-    request<{
+  // 结果追踪与它的统计都按策略版本收窄（ADR-201）：过滤发生在服务端，不是把取回来的
+  // 最新 N 条在本地筛一遍 —— 那样会把更早的信号悄悄漏掉（ADR-181 的同一个理由）。
+  signalOutcomes: (limit = 50, symbol?: string, strategyVersionId?: number) => {
+    const filters: string[] = []
+    if (symbol) filters.push(`symbol=${encodeURIComponent(symbol)}`)
+    if (strategyVersionId != null) filters.push(`strategy_version_id=${strategyVersionId}`)
+    const query = filters.length ? `&${filters.join('&')}` : ''
+    return request<Array<Record<string, any>>>(`/signals/outcomes?limit=${limit}${query}`)
+  },
+  signalOutcomeSummary: (symbol?: string, strategyVersionId?: number) => {
+    const filters: string[] = []
+    if (symbol) filters.push(`symbol=${encodeURIComponent(symbol)}`)
+    if (strategyVersionId != null) filters.push(`strategy_version_id=${strategyVersionId}`)
+    const query = filters.length ? `?${filters.join('&')}` : ''
+    return request<{
       symbol: string | null
+      // 统计的「范围」由服务端回显，和数字来自同一次响应（ADR-065）：页面不拿本地状态
+      // 去替它说范围。
+      strategy_version_id: number | null
       signals: number
       decided: number
       undecided: number
       bars_after: number
       groups: Record<string, Record<string, any>>
-    }>(`/signals/outcome-summary${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`),
+    }>(`/signals/outcome-summary${query}`)
+  },
   scanSignals: (persist = false) =>
     request<{ evaluated: number; created: number; signals: SignalIntent[]; disclaimer: string }>(
       `/signals/scan?persist=${persist}`,

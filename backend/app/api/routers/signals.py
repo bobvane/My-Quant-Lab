@@ -91,6 +91,7 @@ def list_outcomes(
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=500),
     symbol: str | None = None,
+    strategy_version_id: int | None = None,
 ) -> list[dict[str, Any]]:
     from app.domain.models import SignalOutcome
 
@@ -105,6 +106,11 @@ def list_outcomes(
         if asset is None:
             return []
         stmt = stmt.where(Signal.asset_id == asset.id)
+    if strategy_version_id is not None:
+        # ADR-201: a page pointed at one strategy version must see that version's
+        # outcomes; filtering the newest N rows client-side would silently drop the
+        # older ones (the same reason `/signals` gained this filter in ADR-181).
+        stmt = stmt.where(Signal.strategy_version_id == strategy_version_id)
     rows = db.execute(stmt).all()
     return [
         {
@@ -131,6 +137,7 @@ def list_outcomes(
 def outcome_summary(
     db: Session = Depends(get_db),
     symbol: str | None = None,
+    strategy_version_id: int | None = None,
 ) -> dict[str, Any]:
     """Win rate / average PnL across evaluated signal outcomes (docs/12 Signals).
 
@@ -143,6 +150,10 @@ def outcome_summary(
     candles after the signal, or for the symbol to have a candle series at
     all). ``decided`` is the denominator of every ``count``/``win_rate`` below,
     and ``symbol`` says which scope the numbers describe (ADR-065).
+
+    ``strategy_version_id`` narrows the whole population to one strategy version
+    and is echoed back with the numbers, so a scoped page cannot mistake a
+    version's statistics for the portfolio-wide ones (ADR-201).
     """
 
     from app.domain.models import SignalOutcome
@@ -154,6 +165,7 @@ def outcome_summary(
         if asset is None:
             return {
                 "symbol": symbol,
+                "strategy_version_id": strategy_version_id,
                 "signals": 0,
                 "decided": 0,
                 "undecided": 0,
@@ -167,6 +179,11 @@ def outcome_summary(
     if asset_id is not None:
         outcome_stmt = outcome_stmt.where(Signal.asset_id == asset_id)
         signal_count_stmt = signal_count_stmt.where(Signal.asset_id == asset_id)
+    if strategy_version_id is not None:
+        outcome_stmt = outcome_stmt.where(Signal.strategy_version_id == strategy_version_id)
+        signal_count_stmt = signal_count_stmt.where(
+            Signal.strategy_version_id == strategy_version_id
+        )
 
     rows = db.execute(outcome_stmt).all()
     signals = int(db.scalar(signal_count_stmt) or 0)
@@ -203,6 +220,7 @@ def outcome_summary(
 
     return {
         "symbol": symbol,
+        "strategy_version_id": strategy_version_id,
         "signals": signals,
         "decided": decided,
         "undecided": signals - decided,

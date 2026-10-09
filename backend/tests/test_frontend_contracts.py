@@ -923,6 +923,42 @@ def test_the_backtest_page_can_be_pointed_at_one_stored_run() -> None:
     assert ':to="backtestLink"' in STRATEGY_DETAIL
 
 
+def test_the_signal_page_can_be_pointed_at_one_strategy_version() -> None:
+    """``/signals?strategy_version_id=<id>`` narrows the list and its outcome numbers (ADR-201).
+
+    The endpoint and the client method already took the version, but the page never passed
+    it: a reader arriving from a strategy or an experiment saw every signal, and the page's
+    own copy admitted there was no such filter. The narrowing has to happen on the server —
+    filtering the newest page locally would silently drop older signals (ADR-181) — and the
+    reader has to be told which version they are looking at, plus how to leave it.
+    """
+
+    assert "requestedVersionId" in SIGNALS
+    # 白名单：手改的地址只会让这个参数被忽略，不会让页面出错。
+    assert "Number.isInteger(raw) && raw > 0" in SIGNALS
+    # 列表、翻页与结果追踪都把范围交给服务端。
+    assert SIGNALS.count("versionScope.value ?? undefined") >= 4
+    assert "applyScopeChange" in SIGNALS
+    assert "route.query.strategy_version_id" in SIGNALS
+    assert "await loadScope()" in SIGNALS
+    # 点「看全部」时组件被复用，所以范围变化要 watch，不能只靠 onMounted。
+    assert "watch(" in SIGNALS
+    # 读不到这一版时说的是「读不到」，不是「没有信号」（ADR-112 的同一个诚实）。
+    assert "scopeNote" in SIGNALS and "SCOPE_GONE" in SIGNALS
+    assert '<RouterLink to="/signals">' in SIGNALS
+    # 数字旁边的范围用服务端回显的那一个（ADR-065）：页面不拿本地状态替它说范围。
+    assert "outcomeSummary.strategy_version_id" in SIGNALS
+    # 两个结果追踪接口都收这个参数（列表接口本来就有）。
+    assert API_TEXT.count("strategy_version_id=${strategyVersionId}") >= 3
+
+    # 已经知道版本的页面把版本送过去，而不是把用户丢进「全部信号」。
+    assert "signalsLink" in EXPERIMENTS
+    assert "strategy_version_id: String(detail.value.strategy_version_id)" in EXPERIMENTS
+    assert "「信号」页目前还没有对应的筛选框" not in EXPERIMENTS
+    assert "signalsLink" in STRATEGY_DETAIL
+    assert ':to="signalsLink"' in STRATEGY_DETAIL
+
+
 def test_the_typography_separates_a_conclusion_from_its_controls() -> None:
     """The audit (§18) asked to keep the look and rebuild the rank order (ADR-135).
 

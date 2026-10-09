@@ -63,6 +63,16 @@ const backtestLink = computed(() =>
 function runLink(id: number) {
   return { path: '/backtest', query: { run_id: String(id) } }
 }
+
+/**
+ * 这一版发过的信号：`/signals?strategy_version_id=<id>`（ADR-201）。
+ * 没有版本时退回不带参数的那一页 —— 那里看的是全部信号，仍然是说得通的状态。
+ */
+const signalsLink = computed(() =>
+  currentVersion.value
+    ? { path: '/signals', query: { strategy_version_id: String(currentVersion.value.id) } }
+    : '/signals',
+)
 const dsl = computed<Record<string, any> | null>(
   () => (currentVersion.value?.dsl as Record<string, any> | undefined) ?? null,
 )
@@ -573,6 +583,11 @@ onMounted(load)
 
       <section class="card">
         <h3>当前信号（Current Signals）</h3>
+        <p class="muted">
+          这一版<strong>过去</strong>发过什么信号、后来怎么走：
+          <RouterLink :to="signalsLink">到「信号」页看这一版</RouterLink>
+          —— 列表与结果统计都收窄到这一版，不是全部信号里自己挑。
+        </p>
         <p class="muted">
           预览是「此刻这根已收盘 K 线会给出什么」，需要代码：策略自己不点名任何标的，
           所以下面这一格是必填的。

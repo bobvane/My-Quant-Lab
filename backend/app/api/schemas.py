@@ -1284,6 +1284,38 @@ class DraftConfirmationIn(BaseModel):
     note: str | None = Field(default=None, max_length=2000)
 
 
+class DraftAnswerIn(BaseModel):
+    """One answer to one compiler question (ADR-211).
+
+    The client names *which* question it is answering (``code`` + ``slot``) and
+    gives a value -- never a rule, a spec, a parameter override or a slot it chose
+    itself. ``value`` is deliberately untyped here: each slot accepts a different
+    shape (a number, an enum member, a column name, ``{left, operator, right}`` or
+    a block of fields), and the only thing that may decide which shape is legal is
+    the slot's own descriptor, not the request schema.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=64)
+    slot: str = Field(min_length=1, max_length=128)
+    value: Any = None
+
+
+class DraftAnswersIn(BaseModel):
+    """A batch of answers, bound to the exact draft version they were read from.
+
+    ``answered_draft_hash`` is what makes a stale form safe: the server recomputes
+    the hash of the draft it is about to edit and refuses with 409 when it does not
+    match, so answers read from an older draft can never be applied to a newer one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    answered_draft_hash: str = Field(min_length=1, max_length=128)
+    answers: list[DraftAnswerIn] = Field(min_length=1, max_length=20)
+
+
 class ResearchRunOut(BaseModel):
     """A research run and whatever it produced, including its refusals."""
 

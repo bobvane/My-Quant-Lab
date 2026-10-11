@@ -34,6 +34,7 @@ from app.api.schemas import (
     AIStatusOut,
     AITaskOut,
     CompileDraftIn,
+    DraftAnswersIn,
     DraftConfirmationIn,
     ExplainOut,
     FormalizeIn,
@@ -1063,3 +1064,140 @@ def confirm_draft_endpoint(
         "strategy_version_created": False,
         "compiled_strategy_version_id": draft.compiled_strategy_version_id,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Answering the compiler's questions (ADR-211)
+# --------------------------------------------------------------------------- #
+@router.get(
+    "/ai/strategy/drafts/{draft_id}/questions",
+    summary="List the compiler questions a person can answer",
+    response_model=None,
+    responses={
+        404: {
+            "description": "The draft does not exist (`draft_not_found`).",
+            "content": {"application/json": {"schema": _COMPILE_ERROR_SCHEMA}},
+        },
+    },
+)
+def draft_questions_endpoint(
+    draft_id: int, db: Session = Depends(get_db)
+) -> JSONResponse | dict[str, Any]:
+    """What the compiler is currently asking this draft, and how to answer it.
+
+    ``NEEDS_USER_DECISION`` is not a dead end: the refusal report already names
+    every slot the compiler refused to guess (docs/29 §12). This endpoint turns
+    those entries into form descriptors -- the value's type, unit, bounds and
+    allowed choices -- so the page never has to invent a control, and it says
+    which entries a person *cannot* answer here and why. The compiler is the only
+    source of questions: nothing a client sends can add one.
+    """
+
+    from app.ai import draft_answers
+    from app.domain.models import StrategyDraft as StrategyDraftRow
+
+    draft = db.get(StrategyDraftRow, draft_id)
+    if draft is None:
+        return _compile_error(404, "draft_not_found", f"strategy draft {draft_id} not found")
+
+    payload = draft.draft_json if isinstance(draft.draft_json, dict) else {}
+    report = draft_answers.report_for_questions(payload, draft=draft)
+    questions = draft_answers.build_questions(report, payload)
+    return {
+        "draft_id": draft.id,
+        "run_id": draft.run_id,
+        "version": draft.version,
+        "result": report.get("result"),
+        # The hash the answer request has to quote back, so a form that was filled
+        # in against an older draft cannot be applied to a newer one.
+        "draft_hash": draft_answers.draft_hash_of(payload),
+        "answer_schema_version": draft_answers.ANSWER_SCHEMA_VERSION,
+        "compiled_strategy_version_id": draft.compiled_strategy_version_id,
+        "questions": [question.to_dict() for question in questions],
+        "answerable_count": sum(1 for question in questions if question.answerable),
+        "unanswerable_count": sum(1 for question in questions if not question.answerable),
+    }
+
+
+@router.post(
+    "/ai/strategy/drafts/{draft_id}/answers",
+    summary="Answer a draft's open questions into a new draft version",
+    # 201: a new draft row *is* what this creates. The answered draft is untouched.
+    status_code=201,
+    response_model=None,
+    responses={
+        404: {
+            "description": "The draft does not exist (`draft_not_found`).",
+            "content": {"application/json": {"schema": _COMPILE_ERROR_SCHEMA}},
+        },
+        409: {
+            "description": (
+                "Nothing was written. `draft_already_compiled` (a compiled draft may "
+                "not be re-answered), `draft_hash_mismatch` (the answers were read "
+                "from another version of this draft) or `draft_detached` (its "
+                "research run is gone)."
+            ),
+            "content": {"application/json": {"schema": _COMPILE_ERROR_SCHEMA}},
+        },
+        422: {
+            "description": (
+                "The answers were refused before anything was written: "
+                "`answer_refused` (an answer is not one of the draft's current "
+                "questions, is unsupported, duplicated or violates its slot's "
+                "bounds) or `answer_failed_the_gates` (the answered draft would not "
+                "pass the research layer). `error.details` carries every problem."
+            ),
+            "content": {"application/json": {"schema": _COMPILE_ERROR_SCHEMA}},
+        },
+    },
+)
+def answer_draft_endpoint(
+    draft_id: int, payload: DraftAnswersIn, db: Session = Depends(get_db)
+) -> JSONResponse | dict[str, Any]:
+    """Turn human answers into a new draft version of the same run (ADR-211).
+
+    The compiler asks; until now nothing could answer. This endpoint takes the
+    answers a person typed, re-derives the questions from the *stored* draft (so a
+    forged or stale question is refused), applies them deterministically, runs the
+    same research gate an architect draft must pass, and stores the result as a
+    **new** ``strategy_drafts`` row while the answered draft keeps its own content,
+    hash and confirmation record. It never compiles: the new draft has to be
+    confirmed and compiled by the existing endpoints, in that order.
+    """
+
+    from app.ai import draft_answers
+    from app.ai import research as research_service
+    from app.domain.models import StrategyDraft as StrategyDraftRow
+
+    draft = db.get(StrategyDraftRow, draft_id)
+    if draft is None:
+        return _compile_error(404, "draft_not_found", f"strategy draft {draft_id} not found")
+
+    answers = [
+        draft_answers.Answer(code=item.code, slot=item.slot, value=item.value)
+        for item in payload.answers
+    ]
+    try:
+        new_row, outcome, remaining, previous_hash = draft_answers.answer_draft_questions(
+            db,
+            draft=draft,
+            answers=answers,
+            answered_draft_hash=payload.answered_draft_hash,
+        )
+    except draft_answers.Refused as refused:
+        return _compile_error(refused.status_code, refused.code, refused.message, refused.details)
+
+    return JSONResponse(
+        status_code=201,
+        content={
+            "previous_draft_id": draft.id,
+            "previous_draft_hash": previous_hash,
+            "applied": [item.to_dict() for item in outcome.applied],
+            "remaining_questions": [question.to_dict() for question in remaining],
+            # The new draft is a proposal again: it has no confirmation of its own,
+            # and the answered draft's decision does not carry over (ADR-211).
+            "needs_confirmation": True,
+            "strategy_version_created": False,
+            "draft": research_service.draft_payload(new_row),
+        },
+    )

@@ -1078,6 +1078,92 @@ export interface CompileDraftRefusal {
   report: Record<string, any>
 }
 
+/** 块类问题（`risk` / `sizing`）里可以逐个填的一个字段。 */
+export interface DraftQuestionKey {
+  name: string
+  kind: string
+  label: string
+  unit: string
+  minimum: number | null
+  maximum: number | null
+  exclusive_minimum: boolean
+  integer: boolean
+  choices: string[]
+  choice_labels: Record<string, string>
+}
+
+/**
+ * 编译器列出的一个「必须由人来定」的问题（ADR-211）。
+ *
+ * 它不是让前端自己猜该填什么：`kind` 决定控件形态（number / enum / text /
+ * timeframe / condition / block），范围与单位也由服务端给，前端只做展示与本地
+ * 早校验，真正的裁判仍然是服务端。`answerable` 为 false 的问题会被渲染成只读的
+ * 说明——v1 不支持的类型绝不假装能填。
+ */
+export interface DraftQuestion {
+  code: string
+  slot: string
+  kind: 'number' | 'enum' | 'text' | 'timeframe' | 'condition' | 'block' | 'unsupported'
+  label: string
+  detail: string
+  rule_ids: string[]
+  codes: string[]
+  unit: string
+  minimum: number | null
+  maximum: number | null
+  exclusive_minimum: boolean
+  integer: boolean
+  choices: string[]
+  choice_labels: Record<string, string>
+  keys: DraftQuestionKey[]
+  answerable: boolean
+  value_optional: boolean
+  reason: string
+}
+
+/** `GET /ai/strategy/drafts/{id}/questions` 的响应。 */
+export interface DraftQuestionsResult {
+  draft_id: number
+  run_id: number
+  version: number | null
+  result: string
+  draft_hash: string
+  answer_schema_version: string
+  compiled_strategy_version_id: number | null
+  questions: DraftQuestion[]
+  answerable_count: number
+  unanswerable_count: number
+}
+
+/** 一条准备提交的答案；`code` + `slot` 必须来自服务端刚给的问题。 */
+export interface DraftAnswerPayload {
+  code: string
+  slot: string
+  value: unknown
+}
+
+/** 一条真的写进新草案的答案（服务端回执，用来讲清这次改了什么）。 */
+export interface DraftAnswerApplied {
+  code: string
+  slot: string
+  value: unknown
+  label: string
+  summary: string
+  rule_id: string | null
+  unknown_fields: string[]
+}
+
+/** `POST /ai/strategy/drafts/{id}/answers` 的 201 响应：一份**新**草案。 */
+export interface DraftAnswersResult {
+  previous_draft_id: number
+  previous_draft_hash: string
+  applied: DraftAnswerApplied[]
+  remaining_questions: DraftQuestion[]
+  needs_confirmation: boolean
+  strategy_version_created: boolean
+  draft: AIResearchDraft
+}
+
 export interface AIResearchViolation {
   code: string
   message: string
@@ -1909,6 +1995,34 @@ export const api = {
     request<CompileDraftResult>(`/ai/strategy/drafts/${draftId}/compile`, {
       method: 'POST',
       body: JSON.stringify({ strategy_id: strategyId }),
+    }),
+  /**
+   * 编译器列出的开放问题（ADR-211）。
+   *
+   * 服务端每次都用**当前存下来的草案内容**重算编译报告，所以问题列表永远跟着
+   * 草案走：刷新页面、从历史里重新打开一条运行，看到的都是同一条草案此刻真正
+   * 缺的东西，而不是某一次编译留下的旧报告。
+   */
+  draftQuestions: (draftId: number) =>
+    request<DraftQuestionsResult>(`/ai/strategy/drafts/${draftId}/questions`),
+  /**
+   * 把人对这些问题的答案交给服务端，换回一份**新**草案（ADR-211）。
+   *
+   * 两点必须记住：
+   * 1. `answeredDraftHash` 是你读到问题时那份草案的 `draft_hash`。服务端会拿它
+   *    和重算出来的 hash 严格核对；对不上就回 409 并且**什么都不写**（不记审计、
+   *    不建草案）。这是「别把答案写到已经变了的那份草案上」的护栏。
+   * 2. 原件不会被改动：新草案只是同一个研究运行的下一个版本，旧草案与它上面的人
+   *    工确认都原样保留，新草案需要重新确认一次。
+   */
+  answerDraftQuestions: (
+    draftId: number,
+    answeredDraftHash: string,
+    answers: DraftAnswerPayload[],
+  ) =>
+    request<DraftAnswersResult>(`/ai/strategy/drafts/${draftId}/answers`, {
+      method: 'POST',
+      body: JSON.stringify({ answered_draft_hash: answeredDraftHash, answers }),
     }),
   auditForEntity: (entityType: string, entityId: string) =>
     request<{ total: number; events: Array<Record<string, unknown>> }>(

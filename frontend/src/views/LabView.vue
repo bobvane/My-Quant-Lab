@@ -19,6 +19,10 @@ import {
   type Asset,
   type BacktestSummary,
   type CompileRejection,
+  type DraftAnswerApplied,
+  type DraftAnswerPayload,
+  type DraftQuestion,
+  type DraftQuestionsResult,
   type ExperimentCompareOut,
   type ExperimentCreatePayload,
   type ExperimentDetailOut,
@@ -121,8 +125,39 @@ const loadingVersion = ref(false)
 const compileReport = ref<Record<string, any> | null>(null)
 /** 编译器自己拒绝（422）时的结论；`null` = 这次编译没有 422。 */
 const compileOutcome = ref<{ result: string; report: Record<string, any> | null } | null>(null)
+/**
+ * 那份结论是**哪一份草案**的（ADR-211）。
+ *
+ * 作答成功会换一版草案；`compileOutcome` 是上一次编译留下的，不记出处的话，刷新页面
+ * 或从「最近的研究」深链回来时，旧草案的编译报告会被当成新草案的当前状态。
+ */
+const compileOutcomeDraftId = ref<number | null>(null)
 /** 已经为哪一份版本发过读回请求：避免每次轮询都重复发一次。 */
 const requestedVersionId = ref<number | null>(null)
+
+// G7 / ADR-211：编译器列出的问题，以及人对这些问题的回答。
+// 问题清单**只**来自服务端（`GET /ai/strategy/drafts/{id}/questions`），页面不自己拼一条：
+// 该用什么控件、范围是多少、单位是什么、哪一条本版不能答，都由服务端说了算。
+// 这份清单属于哪一份草案也一起记下来——换了草案（作答成功就会换）就不能再拿旧清单去作答。
+const loadingQuestions = ref(false)
+const questionsError = ref('')
+const questionsDetail = ref('')
+const questions = ref<DraftQuestion[]>([])
+const questionsDraftId = ref<number | null>(null)
+const questionsDraftHash = ref('')
+/** slot → 人填的原始输入（条件与整块是嵌套对象）。 */
+const answerInput = ref<Record<string, any>>({})
+/** slot → 「我确认这里仍然是原文没说清」，只对服务端标了 value_optional 的问题开放。 */
+const answerStillUnknown = ref<Record<string, boolean>>({})
+const answering = ref(false)
+const answerError = ref('')
+const answerDetail = ref('')
+const answerNotice = ref('')
+const answerProblems = ref<Array<{ code: string; slot: string; message: string }>>([])
+const answerViolations = ref<Array<{ code: string; message: string }>>([])
+/** 上一次作答真的改了什么（服务端回执），以及它从哪一份草案换到了哪一份。 */
+const appliedAnswers = ref<DraftAnswerApplied[]>([])
+const appliedFromDraftId = ref<number | null>(null)
 
 // 交接口的标的选择（ADR-191）：标的不是策略内容——DSL 里没有它，编译器把「标的」
 // 归到不可表达那一类（`backend/app/compiler/compiler.py` 的 `not_expressible`），
@@ -486,19 +521,35 @@ function rejectionReason(item: CompileRejection): string {
   return REJECTION_REASONS[item.code] ?? `编译器给出的原因（未归类：${item.code}）`
 }
 
+/** 页面现在打开的是哪一份草案；编译报告与问题清单都只对「当前草案」有效。 */
+const currentDraftId = computed<number | null>(() => run.value?.draft?.draft_id ?? null)
+
+/**
+ * 只有属于**当前草案**的那份 422 报告才算数（ADR-211）。
+ *
+ * 作答会换一版草案，而 `compileOutcome` 记的是上一次编译的结果。不做出处检查，
+ * 刷新页面或从「最近的研究」深链回来时，就会把旧草案的编译报告当成新草案的当前报告，
+ * 而新草案其实可能已经可以编译了。
+ */
+const currentCompileOutcome = computed(() =>
+  compileOutcome.value && compileOutcomeDraftId.value === currentDraftId.value
+    ? compileOutcome.value
+    : null,
+)
+
 const compileOutcomeLabel = computed(() => {
-  const result = compileOutcome.value?.result
+  const result = currentCompileOutcome.value?.result
   if (result === 'NEEDS_USER_DECISION') return '需要你先做决定'
   if (result === 'REJECTED') return '编译器拒绝了'
   return result || '编译器没有通过'
 })
 
 const compileOutcomeTone = computed(() =>
-  compileOutcome.value?.result === 'NEEDS_USER_DECISION' ? 'warn' : 'bad',
+  currentCompileOutcome.value?.result === 'NEEDS_USER_DECISION' ? 'warn' : 'bad',
 )
 
 const compileOutcomeSentence = computed(() => {
-  const result = compileOutcome.value?.result
+  const result = currentCompileOutcome.value?.result
   if (result === 'NEEDS_USER_DECISION') {
     return '编译器在草案里遇到了必须由人来定的地方。它不会替你做这个决定，所以这次没有生成策略版本，草案也没有被改动。'
   }
@@ -509,13 +560,13 @@ const compileOutcomeSentence = computed(() => {
 })
 
 const compileRejections = computed<CompileRejection[]>(() => {
-  const raw = compileOutcome.value?.report?.rejections
+  const raw = currentCompileOutcome.value?.report?.rejections
   return Array.isArray(raw) ? (raw as CompileRejection[]) : []
 })
 
 /** 折叠区里的原始报告：刚编译成功的那份，或这次 422 的那份。 */
 const compileReportText = computed(() => {
-  const report = compileReport.value ?? compileOutcome.value?.report ?? null
+  const report = compileReport.value ?? currentCompileOutcome.value?.report ?? null
   return report ? JSON.stringify(report, null, 2) : ''
 })
 
@@ -553,6 +604,84 @@ const compileBlockedReason = computed(() => {
 })
 
 // --------------------------------------------------------------------------- //
+// G7 / ADR-211：编译器问什么、人怎么答
+//
+// 这一页只做两件事：把服务端给的问题渲染成合适的控件，把答案原样交回去。
+// 它不猜任何值、不为任何位置补默认值，也不自己判断哪个问题该不该问——
+// 真正的裁判是服务端：它会拿当前报告重新核对每个 `code`+`slot`。
+// --------------------------------------------------------------------------- //
+
+/** DSL 的比较算子（`backend/app/strategies/dsl.py` 的 `ComparisonOp`），条件控件的选项就是它。 */
+const CONDITION_OPERATORS: Array<{ value: string; label: string }> = [
+  { value: 'gt', label: '大于（gt）' },
+  { value: 'gte', label: '大于或等于（gte）' },
+  { value: 'lt', label: '小于（lt）' },
+  { value: 'lte', label: '小于或等于（lte）' },
+  { value: 'eq', label: '等于（eq）' },
+  { value: 'ne', label: '不等于（ne）' },
+  { value: 'crosses_above', label: '上穿（crosses_above）' },
+  { value: 'crosses_below', label: '下穿（crosses_below）' },
+]
+
+/** 只认「属于当前草案」的问题清单：换了草案，旧清单一个字都不能再用。 */
+const questionsForCurrentDraft = computed<DraftQuestion[]>(() =>
+  questionsDraftId.value !== null && questionsDraftId.value === currentDraftId.value
+    ? questions.value
+    : [],
+)
+
+const answerableQuestions = computed(() => questionsForCurrentDraft.value.filter((item) => item.answerable))
+const unanswerableQuestions = computed(() =>
+  questionsForCurrentDraft.value.filter((item) => !item.answerable),
+)
+
+const canSubmitAnswers = computed(() => !answering.value && answerableQuestions.value.length > 0)
+
+/** 提交按钮为什么是灰的——逐条说清，而不是让它静静躺着。 */
+const answerBlockedReason = computed(() => {
+  if (answering.value) return '正在提交，稍等一下。'
+  if (!run.value?.draft) return '还没有草案，所以没有问题可以答。'
+  if (loadingQuestions.value) return '还在读编译器的问题；读出来之后才能填。'
+  if (!questionsForCurrentDraft.value.length) {
+    return '现在没有可以在这里回答的问题：先点「编译为策略版本」，或者用上面的按钮读一次编译器的问题。'
+  }
+  if (!answerableQuestions.value.length) {
+    return '编译器列出的问题，这一版都不能由你在这里回答——每一条的原因都写在下面的折叠区里，需要改草案本身。'
+  }
+  return ''
+})
+
+/** 数字输入框的占位提示：把单位带上，别让用户猜单位。 */
+function numberPlaceholder(spec: { unit: string }): string {
+  return spec.unit ? `数字（单位：${spec.unit}）` : '数字'
+}
+
+/** 范围与单位说人话：范围是服务端给的，不是页面编的。 */
+function numberRangeSentence(spec: {
+  minimum: number | null
+  maximum: number | null
+  exclusive_minimum: boolean
+  integer: boolean
+  unit: string
+}): string {
+  const parts: string[] = []
+  if (spec.minimum !== null) {
+    parts.push(`${spec.exclusive_minimum ? '必须大于' : '不小于'} ${spec.minimum}${spec.unit}`)
+  }
+  if (spec.maximum !== null) parts.push(`不超过 ${spec.maximum}${spec.unit}`)
+  if (spec.integer) parts.push('整数')
+  if (parts.length) return `要求：${parts.join('、')}`
+  return spec.unit ? `单位：${spec.unit}` : ''
+}
+
+/** 服务端回执里的值可能是对象（条件或整块）；印出来之前先变成人读得懂的一行。 */
+function renderAnswerValue(value: unknown): string {
+  if (value === null || value === undefined) return '仍然不知道'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+// --------------------------------------------------------------------------- //
 // 请求
 // --------------------------------------------------------------------------- //
 function resetNotices() {
@@ -564,6 +693,7 @@ function resetNotices() {
   compileDetail.value = ''
   versionError.value = ''
   compileOutcome.value = null
+  compileOutcomeDraftId.value = null
   // 换一条运行看，上一条「再跑一次」的话就作废了：留着会让新那条运行看起来被重跑过。
   rerunError.value = ''
   rerunNotice.value = ''
@@ -692,8 +822,12 @@ function applyRun(fresh: AIResearchRun) {
     compiledVersion.value = null
     compileReport.value = null
     compileOutcome.value = null
+    compileOutcomeDraftId.value = null
     requestedVersionId.value = null
     elapsedSeconds.value = 0
+    // 作答回执属于上一条运行：换了运行就不该再挂在页面上。
+    appliedAnswers.value = []
+    appliedFromDraftId.value = null
   }
   const versionId = fresh.draft?.compiled_strategy_version_id ?? null
   if (versionId) {
@@ -1191,6 +1325,341 @@ async function confirmDraft(decision: AIResearchDraftDecision) {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// G7 / ADR-211：把编译器的问题读出来、把答案交回去
+// --------------------------------------------------------------------------- //
+
+/**
+ * 接下服务端的问题清单，并按每个问题的 `kind` 准备输入位。
+ *
+ * `resetInput = false` 时会把已经填过的内容带过来：这一条是给「表单过期」用的——
+ * 服务端说这份草案变了（409），页面重新读一份问题，但用户刚才填的东西不能丢。
+ * 只加不减：新清单里没有的位置自然被丢掉，已有的位置保留原值。
+ */
+function applyQuestions(body: DraftQuestionsResult, resetInput = true) {
+  questions.value = body.questions ?? []
+  questionsDraftId.value = body.draft_id ?? null
+  questionsDraftHash.value = body.draft_hash ?? ''
+  const carrier = resetInput ? {} : answerInput.value
+  const nextInput: Record<string, any> = {}
+  const nextUnknown: Record<string, boolean> = {}
+  for (const item of questions.value) {
+    const carried = carrier[item.slot]
+    if (item.kind === 'condition') {
+      nextInput[item.slot] = carried ?? { left: '', operator: '', right: '', period: '' }
+    } else if (item.kind === 'block') {
+      const block: Record<string, any> = {}
+      for (const key of item.keys) block[key.name] = carried?.[key.name] ?? ''
+      nextInput[item.slot] = block
+    } else {
+      nextInput[item.slot] = carried ?? ''
+    }
+    nextUnknown[item.slot] = answerStillUnknown.value[item.slot] ?? false
+  }
+  answerInput.value = nextInput
+  answerStillUnknown.value = nextUnknown
+}
+
+/** 读一次当前草案的问题。404 表示这条草案后端已经不在了。 */
+async function loadQuestions(resetInput = true) {
+  const draftId = currentDraftId.value
+  if (draftId === null || loadingQuestions.value) return
+  loadingQuestions.value = true
+  questionsError.value = ''
+  questionsDetail.value = ''
+  try {
+    const body = await api.draftQuestions(draftId)
+    // 读的这段时间里换了草案（作答成功、或用户打开了别的研究）：这份清单已经不属于当前草案。
+    if (currentDraftId.value !== draftId) return
+    applyQuestions(body, resetInput)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      questionsError.value = '这条草案后端已经找不到了：刷新「最近的研究」后重新打开这次研究。'
+    } else {
+      questionsError.value = '读编译器的问题失败。'
+      questionsDetail.value = e instanceof ApiError ? e.message : String(e)
+    }
+    questions.value = []
+    questionsDraftId.value = null
+    questionsDraftHash.value = ''
+  } finally {
+    loadingQuestions.value = false
+  }
+}
+
+/** 一个数字输入 → 服务端要的数字。空着 = 这一条先不回答。 */
+function numberInput(
+  raw: string,
+  label: string,
+  unit: string,
+  bounds: { minimum: number | null; maximum: number | null; exclusive_minimum: boolean; integer: boolean },
+): { value?: number; problem?: string } {
+  const text = raw.trim()
+  if (!text) return {}
+  const value = Number(text)
+  if (!Number.isFinite(value)) return { problem: `${label}要填一个数字，现在填的是「${text}」。` }
+  if (bounds.integer && !Number.isInteger(value)) {
+    return { problem: `${label}要填整数，现在填的是「${text}」。` }
+  }
+  if (bounds.minimum !== null) {
+    const tooSmall = bounds.exclusive_minimum ? value <= bounds.minimum : value < bounds.minimum
+    if (tooSmall) {
+      const word = bounds.exclusive_minimum ? '大于' : '不小于'
+      return { problem: `${label}必须${word} ${bounds.minimum}${unit}，现在填的是「${text}」。` }
+    }
+  }
+  if (bounds.maximum !== null && value > bounds.maximum) {
+    return { problem: `${label}不能超过 ${bounds.maximum}${unit}，现在填的是「${text}」。` }
+  }
+  return { value }
+}
+
+/** 条件输入（左值 / 比较 / 右值 / 可选周期）。整条留空 = 先不回答这一条。 */
+function conditionInput(slot: string, label: string): { value?: Record<string, unknown>; problem?: string } {
+  const raw = (answerInput.value[slot] ?? {}) as Record<string, string>
+  const left = String(raw.left ?? '').trim()
+  const operator = String(raw.operator ?? '').trim()
+  const rightText = String(raw.right ?? '').trim()
+  const periodText = String(raw.period ?? '').trim()
+  if (!left && !operator && !rightText && !periodText) return {}
+  if (!left || !operator || !rightText) {
+    return {
+      problem: `${label}要填齐三段：左值（用哪个指标或价格）、比较方式、右值。现在缺了${
+        !left ? '左值' : !operator ? '比较方式' : '右值'
+      }。`,
+    }
+  }
+  const right = /^-?\d+(\.\d+)?$/.test(rightText) ? Number(rightText) : rightText
+  const value: Record<string, unknown> = { left, operator, right }
+  if (periodText) {
+    const period = Number(periodText)
+    if (!Number.isInteger(period) || period <= 0) {
+      return { problem: `${label}的周期要填一个正整数，现在填的是「${periodText}」。` }
+    }
+    value.period = period
+  }
+  return { value }
+}
+
+/** 整块（风控 / 仓位）：服务端把这一块里能填的字段逐个列出来了，只收填了的那些。 */
+function blockInput(item: DraftQuestion): { value?: Record<string, unknown>; problem?: string } {
+  const raw = (answerInput.value[item.slot] ?? {}) as Record<string, any>
+  const value: Record<string, unknown> = {}
+  for (const key of item.keys) {
+    const text = String(raw[key.name] ?? '').trim()
+    if (!text) continue
+    if (key.kind === 'enum') {
+      if (!key.choices.includes(text)) {
+        return {
+          problem: `「${key.label}」只能从 ${key.choices.join('、')} 里选一个，现在填的是「${text}」。`,
+        }
+      }
+      value[key.name] = text
+      continue
+    }
+    const parsed = numberInput(text, `「${key.label}」`, key.unit, {
+      minimum: key.minimum,
+      maximum: key.maximum,
+      exclusive_minimum: key.exclusive_minimum,
+      integer: key.integer,
+    })
+    if (parsed.problem) return { problem: parsed.problem }
+    if (parsed.value !== undefined) value[key.name] = parsed.value
+  }
+  return Object.keys(value).length ? { value } : {}
+}
+
+/**
+ * 把表单收成服务端要的答案。
+ *
+ * 这里只拦得住本地就能看出来的错（空、不是数字、超出服务端给的范围、条件缺段）；
+ * 真正的裁判是服务端——它会拿当前报告重新核对每个 `code`+`slot`，并跑研究层门禁。
+ */
+function buildAnswers(): {
+  payload: DraftAnswerPayload[]
+  problems: Array<{ code: string; slot: string; message: string }>
+} {
+  const payload: DraftAnswerPayload[] = []
+  const problems: Array<{ code: string; slot: string; message: string }> = []
+  for (const item of answerableQuestions.value) {
+    if (answerStillUnknown.value[item.slot]) {
+      if (!item.value_optional) {
+        problems.push({
+          code: 'answer_incomplete',
+          slot: item.slot,
+          message: `「${item.label}」需要你给一个明确的值，不能只标记成「仍然不知道」。`,
+        })
+        continue
+      }
+      payload.push({ code: item.code, slot: item.slot, value: null })
+      continue
+    }
+    if (item.kind === 'number') {
+      const parsed = numberInput(String(answerInput.value[item.slot] ?? ''), `「${item.label}」`, item.unit, {
+        minimum: item.minimum,
+        maximum: item.maximum,
+        exclusive_minimum: item.exclusive_minimum,
+        integer: item.integer,
+      })
+      if (parsed.problem) {
+        problems.push({ code: 'answer_incomplete', slot: item.slot, message: parsed.problem })
+        continue
+      }
+      if (parsed.value === undefined) continue
+      payload.push({ code: item.code, slot: item.slot, value: parsed.value })
+      continue
+    }
+    if (item.kind === 'enum' || item.kind === 'timeframe') {
+      const text = String(answerInput.value[item.slot] ?? '').trim()
+      if (!text) continue
+      if (!item.choices.includes(text)) {
+        problems.push({
+          code: 'answer_incomplete',
+          slot: item.slot,
+          message: `「${item.label}」只能从 ${item.choices.join('、')} 里选一个，现在选的是「${text}」。`,
+        })
+        continue
+      }
+      payload.push({ code: item.code, slot: item.slot, value: text })
+      continue
+    }
+    if (item.kind === 'text') {
+      const text = String(answerInput.value[item.slot] ?? '').trim()
+      if (!text) continue
+      payload.push({ code: item.code, slot: item.slot, value: text })
+      continue
+    }
+    if (item.kind === 'condition') {
+      const parsed = conditionInput(item.slot, `「${item.label}」`)
+      if (parsed.problem) {
+        problems.push({ code: 'answer_incomplete', slot: item.slot, message: parsed.problem })
+        continue
+      }
+      if (parsed.value === undefined) continue
+      payload.push({ code: item.code, slot: item.slot, value: parsed.value })
+      continue
+    }
+    if (item.kind === 'block') {
+      const parsed = blockInput(item)
+      if (parsed.problem) {
+        problems.push({ code: 'answer_incomplete', slot: item.slot, message: parsed.problem })
+        continue
+      }
+      if (parsed.value === undefined) continue
+      payload.push({ code: item.code, slot: item.slot, value: parsed.value })
+    }
+  }
+  return { payload, problems }
+}
+
+/** 提交答案，换回一份**新**草案。旧草案不被改动，新草案要重新确认。 */
+async function submitAnswers() {
+  const draftId = questionsDraftId.value
+  if (draftId === null || answering.value) return
+  answerError.value = ''
+  answerDetail.value = ''
+  answerNotice.value = ''
+  answerProblems.value = []
+  answerViolations.value = []
+  const built = buildAnswers()
+  if (built.problems.length) {
+    answerProblems.value = built.problems
+    answerError.value = '有几处还没填对，先把下面这几条改好再提交；你填过的内容都还在。'
+    return
+  }
+  if (!built.payload.length) {
+    answerError.value =
+      '至少要回答一个问题，服务端才会生成新草案。没回答的位置会继续留在问题清单里。'
+    return
+  }
+  answering.value = true
+  try {
+    const body = await api.answerDraftQuestions(draftId, questionsDraftHash.value, built.payload)
+    appliedAnswers.value = body.applied ?? []
+    appliedFromDraftId.value = body.previous_draft_id
+    // 新草案还没有人工确认：旧草案的确认不授权它；旧草案那份编译报告也过期了。
+    compileOutcome.value = null
+    compileOutcomeDraftId.value = null
+    compileReport.value = null
+    compileError.value = ''
+    compileDetail.value = ''
+    const current = run.value
+    if (current) applyRun(await api.aiResearchRun(current.run_id))
+    notice.value = `已经按你的回答生成了新的一版草案（第 ${
+      run.value?.draft?.version ?? '?'
+    } 版）。旧的那一版原样保留，一个字都没有改。`
+    answerNotice.value =
+      '下面是这次真正写进新草案的内容。新草案还没有人工确认——旧草案的确认不算数，要编译它得先在上面「人工确认」里重新选「确认」。'
+    // 新草案的哈希要重新读一次（作答响应里没有），顺便把剩下还开着的问题拿回来。
+    await loadQuestions(true)
+    await loadRuns()
+  } catch (e) {
+    handleAnswerFailure(e)
+  } finally {
+    answering.value = false
+  }
+}
+
+/** 作答失败：按服务端的码说人话，并且**不动**用户已经填好的输入。 */
+function handleAnswerFailure(e: unknown) {
+  if (!(e instanceof ApiError)) {
+    answerError.value = '提交答案失败：网络或服务端出错了。你填的内容还留在页面上，可以再点一次。'
+    answerDetail.value = String(e)
+    return
+  }
+  if (e.status === 409) {
+    if (e.code === 'draft_hash_mismatch') {
+      answerError.value =
+        '这份草案在服务端已经变了（表单是在另一版上填的），所以这次回答没有被写入——服务端一个字节都没有改。正在按服务端当前的内容重新读一次问题，你填过的内容还留着。'
+      void loadQuestions(false)
+    } else if (e.code === 'draft_already_compiled') {
+      answerError.value = '这份草案已经编译成策略版本了，不能再往它上面作答。看一下上面那份编译报告。'
+      const current = run.value
+      if (current) {
+        void api
+          .aiResearchRun(current.run_id)
+          .then(applyRun)
+          .catch(() => undefined)
+      }
+    } else if (e.code === 'draft_detached') {
+      answerError.value =
+        '这份草案所在的那次研究已经和它脱钩了（研究被重新生成或删掉了）。刷新「最近的研究」，用最新那一份草案重试。'
+    } else {
+      answerError.value = '服务端拒绝了这次作答，什么都没有写入。'
+      answerDetail.value = e.message
+    }
+    return
+  }
+  if (e.status === 422 && e.code === 'answer_refused') {
+    answerError.value = '服务端没有接受这些答案（没有生成任何新草案）。下面每一条都说清了是哪一处、为什么。'
+    answerDetail.value = e.message
+    const raw = Array.isArray(e.details?.problems) ? e.details.problems : []
+    answerProblems.value = raw.map((item: any) => ({
+      code: String(item?.code ?? ''),
+      slot: String(item?.slot ?? ''),
+      message: String(item?.message ?? ''),
+    }))
+    return
+  }
+  if (e.status === 422 && e.code === 'answer_failed_the_gates') {
+    answerError.value =
+      '按你的回答生成的新草案没有通过研究层校验，所以没有生成任何草案。下面列出的是它没通过的地方。'
+    answerDetail.value = e.message
+    const raw = Array.isArray(e.details?.violations) ? e.details.violations : []
+    answerViolations.value = raw.map((item: any, index: number) => ({
+      code: String(item?.code ?? `violation-${index + 1}`),
+      message: String(item?.message ?? ''),
+    }))
+    return
+  }
+  if (e.status === 404) {
+    answerError.value = '这条草案后端已经找不到了。刷新「最近的研究」后重新打开这次研究。'
+    return
+  }
+  answerError.value = '服务端拒绝了这次作答，什么都没有写入。'
+  answerDetail.value = e.message
+}
+
 async function createStrategyInline() {
   const name = newStrategyName.value.trim()
   if (!name || creatingStrategy.value) return
@@ -1217,6 +1686,10 @@ async function handleCompileFailure(e: unknown) {
       result: e.body.result,
       report: (e.body.report ?? null) as Record<string, any> | null,
     }
+    // 记下这份报告是哪一份草案的：作答案换一版之后，它就不再是「当前报告」。
+    compileOutcomeDraftId.value = currentDraftId.value
+    // 「需要人来定」：当场把编译器问的问题读出来，省掉一次来回（ADR-211）。
+    if (e.body.result === 'NEEDS_USER_DECISION') void loadQuestions(true)
     return
   }
   const code = e instanceof ApiError ? e.code : null
@@ -2806,7 +3279,7 @@ onUnmounted(stopPolling)
       <p v-if="compileDetail" class="muted">后端原文：{{ compileDetail }}</p>
 
       <!-- 编译器拒绝（422）：说清是哪一类问题，原始报告收进折叠区 -->
-      <div v-if="compileOutcome" style="margin-top: 12px">
+      <div v-if="currentCompileOutcome" style="margin-top: 12px">
         <p class="verdict-line">
           <span class="verdict" :class="compileOutcomeTone">{{ compileOutcomeLabel }}</span>
         </p>
@@ -2823,14 +3296,200 @@ onUnmounted(stopPolling)
           </li>
         </ul>
         <p v-if="!compileRejections.length" class="muted">编译器没有列出具体原因。</p>
-        <p v-if="compileOutcome.result === 'NEEDS_USER_DECISION'" class="muted">
-          需要人定的事只能由你来定：回到上面的假设与草案，把含糊的地方写清楚，
-          可以用「需修改」记下你的意见，然后重新生成草案再编译。
+        <p v-if="currentCompileOutcome.result === 'NEEDS_USER_DECISION'" class="muted">
+          需要人定的事只能由你来定：编译器已经把要问的列在下面这张表里，逐条填好就能生成新的一版草案；
+          也可以用「需修改」记下你的意见，让 AI 重新生成草案。
         </p>
         <details v-if="compileReportText" style="margin-top: 8px">
           <summary class="muted">编译器完整报告（技术细节）</summary>
           <pre class="code-block" style="max-height: 320px; overflow: auto">{{ compileReportText }}</pre>
         </details>
+      </div>
+
+      <!-- G7 / ADR-211：编译器问的每一处，由你来定；答案写进**新的一版**草案 -->
+      <div v-if="!draftCompiledVersionId && run?.draft" style="margin-top: 16px">
+        <h4>把编译器问的这几处定下来</h4>
+        <p class="muted" style="margin-top: 4px">
+          下面每一条都是编译器拒绝替你猜的地方。你的回答**不会改这份草案**：服务端会按回答生成新的一版草案，
+          这一版原样保留（内容和哈希都不变）。新草案要重新做一次人工确认才能编译。
+        </p>
+
+        <div class="row" style="margin-top: 8px">
+          <button class="ghost" :disabled="loadingQuestions" @click="loadQuestions(true)">
+            {{ loadingQuestions ? '读取中…' : '看看编译器现在问什么' }}
+          </button>
+          <span v-if="questionsForCurrentDraft.length" class="muted">
+            编译器现在列了 {{ questionsForCurrentDraft.length }} 个问题，其中
+            {{ answerableQuestions.length }} 个可以由你在这里回答。
+          </span>
+        </div>
+
+        <p v-if="loadingQuestions" class="wait" style="margin-top: 8px">正在读编译器的问题…</p>
+        <p v-if="questionsError" class="error" style="margin-top: 8px">{{ questionsError }}</p>
+        <p v-if="questionsDetail" class="muted">后端原文：{{ questionsDetail }}</p>
+
+        <template v-if="!loadingQuestions && answerableQuestions.length">
+          <div
+            v-for="item in answerableQuestions"
+            :key="item.slot"
+            class="card-quiet"
+            style="margin-top: 10px"
+          >
+            <p style="margin: 0 0 4px">
+              <b>{{ item.label }}</b>
+              <span class="muted">（位置：{{ item.slot }}</span>
+              <template v-if="item.rule_ids?.length">
+                <span class="muted"> · 涉及规则 {{ item.rule_ids.join('、') }}</span>
+              </template>
+              <span class="muted">）</span>
+            </p>
+            <p v-if="item.detail" class="muted" style="margin: 0 0 6px">{{ item.detail }}</p>
+
+            <!-- 数字：范围与单位由服务端给 -->
+            <div v-if="item.kind === 'number'" class="row">
+              <input
+                v-model="answerInput[item.slot]"
+                type="text"
+                inputmode="decimal"
+                :placeholder="numberPlaceholder(item)"
+              />
+              <span class="muted">{{ numberRangeSentence(item) }}</span>
+            </div>
+
+            <!-- 枚举 / K 线周期：选项来自服务端 -->
+            <div v-else-if="item.kind === 'enum' || item.kind === 'timeframe'" class="row">
+              <select v-model="answerInput[item.slot]">
+                <option value="">（先不回答这一条）</option>
+                <option v-for="choice in item.choices" :key="choice" :value="choice">
+                  {{ item.choice_labels[choice] || choice }}
+                </option>
+              </select>
+            </div>
+
+            <!-- 文字：例如这条指标算在哪一列上 -->
+            <div v-else-if="item.kind === 'text'" class="row">
+              <input v-model="answerInput[item.slot]" type="text" placeholder="例如 close" />
+            </div>
+
+            <!-- 条件：左值 / 比较方式 / 右值（周期可空） -->
+            <div v-else-if="item.kind === 'condition'" class="row">
+              <input
+                v-model="answerInput[item.slot].left"
+                type="text"
+                placeholder="左值：指标或价格，例如 RSI"
+              />
+              <select v-model="answerInput[item.slot].operator">
+                <option value="">比较方式</option>
+                <option v-for="op in CONDITION_OPERATORS" :key="op.value" :value="op.value">
+                  {{ op.label }}
+                </option>
+              </select>
+              <input
+                v-model="answerInput[item.slot].right"
+                type="text"
+                placeholder="右值：数字或另一个指标"
+              />
+              <input v-model="answerInput[item.slot].period" type="text" placeholder="周期（可空）" />
+            </div>
+
+            <!-- 整块：这一块里能填的字段由服务端逐个列出，没列出来的不能填 -->
+            <div v-else-if="item.kind === 'block'">
+              <div v-for="key in item.keys" :key="key.name" class="row" style="margin-top: 6px">
+                <label class="muted" :for="`lab-answer-${item.slot}-${key.name}`">{{ key.label }}</label>
+                <select
+                  v-if="key.kind === 'enum'"
+                  :id="`lab-answer-${item.slot}-${key.name}`"
+                  v-model="answerInput[item.slot][key.name]"
+                >
+                  <option value="">（不填这一项）</option>
+                  <option v-for="choice in key.choices" :key="choice" :value="choice">
+                    {{ key.choice_labels[choice] || choice }}
+                  </option>
+                </select>
+                <input
+                  v-else
+                  :id="`lab-answer-${item.slot}-${key.name}`"
+                  v-model="answerInput[item.slot][key.name]"
+                  type="text"
+                  inputmode="decimal"
+                  :placeholder="numberPlaceholder(key)"
+                />
+                <span class="muted">{{ numberRangeSentence(key) }}</span>
+              </div>
+            </div>
+
+            <!-- 只确认「仍然不知道」：只对服务端标了 value_optional 的问题开放 -->
+            <label v-if="item.value_optional" class="muted" style="display: block; margin-top: 6px">
+              <input v-model="answerStillUnknown[item.slot]" type="checkbox" />
+              我不打算现在定这个值，确认这里仍然是「原文没说清」
+            </label>
+          </div>
+
+          <button :disabled="!canSubmitAnswers" style="margin-top: 12px" @click="submitAnswers">
+            {{ answering ? '正在生成新草案…' : '按我的回答生成新草案' }}
+          </button>
+          <p v-if="answerBlockedReason" class="muted" style="margin-top: 6px">{{ answerBlockedReason }}</p>
+          <p class="muted" style="margin-top: 6px">
+            这个按钮只生成新的一版草案，它不编译任何东西：编译仍然要在上面单独点，
+            而且要先把新草案重新确认一次——旧草案的确认对新草案不算数。
+          </p>
+
+          <p v-if="answering" class="wait" style="margin-top: 8px">
+            正在把答案写进一份新草案；这一步是确定性的，不调用 AI，也不产生费用。
+          </p>
+          <p v-if="answerError" class="error" style="margin-top: 8px">{{ answerError }}</p>
+          <p v-if="answerDetail" class="muted">后端原文：{{ answerDetail }}</p>
+          <ul v-if="answerProblems.length" class="answer-list">
+            <li v-for="(item, index) in answerProblems" :key="index">
+              {{ item.message }}
+              <span class="muted">（位置：{{ item.slot || '—' }} · {{ item.code }}）</span>
+            </li>
+          </ul>
+          <ul v-if="answerViolations.length" class="answer-list">
+            <li v-for="(item, index) in answerViolations" :key="index">
+              {{ item.message }} <span class="muted">（{{ item.code }}）</span>
+            </li>
+          </ul>
+        </template>
+
+        <p v-else-if="!loadingQuestions && !questionsError && !answerableQuestions.length" class="muted">
+          编译器现在没有列出可以由你在这里回答的问题。上面的按钮可以重新读一次；如果它一直说没有，
+          说明这份草案卡住的地方不是「答一个问题」能解决的（每一类原因都写在编译器完整报告里）。
+        </p>
+
+        <details v-if="unanswerableQuestions.length" style="margin-top: 10px">
+          <summary class="muted">
+            有 {{ unanswerableQuestions.length }} 个问题，这一版不能由你在这里回答
+          </summary>
+          <ul class="answer-list" style="margin-top: 6px">
+            <li v-for="item in unanswerableQuestions" :key="item.slot">
+              <b>{{ item.label }}</b> <span class="muted">（位置：{{ item.slot }}）</span>
+              <p class="muted" style="margin: 4px 0 0">{{ item.reason }}</p>
+            </li>
+          </ul>
+        </details>
+
+        <!-- 作答结果：这次真的改了什么 -->
+        <div v-if="appliedAnswers.length" class="notice" style="margin-top: 12px">
+          <p style="margin: 0 0 6px">
+            已经按你的回答生成了新的一版草案（第 {{ run?.draft?.version ?? '?' }} 版）：旧草案
+            #{{ appliedFromDraftId }} 原样保留，下面是这次真正写进新草案的内容。
+          </p>
+          <ul class="answer-list" style="margin: 0">
+            <li v-for="(item, index) in appliedAnswers" :key="index">
+              {{ item.label || item.slot }}：{{ item.summary || renderAnswerValue(item.value) }}
+              <span class="muted">
+                （位置：{{ item.slot }}
+                <template v-if="item.rule_id"> · 新建规则 {{ item.rule_id }}</template>
+                <template v-if="item.unknown_fields?.length">
+                  · 一并清掉「没说清」标记：{{ item.unknown_fields.join('、') }}
+                </template>
+                ）
+              </span>
+            </li>
+          </ul>
+          <p class="muted" style="margin: 6px 0 0">{{ answerNotice }}</p>
+        </div>
       </div>
     </div>
 

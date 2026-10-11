@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -769,6 +770,60 @@ def _researcher_step(
     raise AssertionError("unreachable: the attempt loop either returns or raises")
 
 
+def evaluate_draft_payload(
+    db: Session,
+    *,
+    run_id: int,
+    hypothesis_row: StrategyHypothesisRow,
+    payload: Mapping[str, Any],
+    hypothesis: gates.StrategyHypothesis | None = None,
+    sources: Mapping[str, str] | None = None,
+    source_hashes: Mapping[str, str] | None = None,
+) -> tuple[gates.StrategyDraft, gates.CapabilityDecision, gates.StrategyHypothesis]:
+    """Run the research gate over a draft payload.
+
+    This is the *only* place the payload/schema/provenance/capability gates are
+    applied, so a draft that came back from an architect call and a draft a person
+    answered (ADR-211) are judged by exactly the same rules. Raises
+    ``gates.ResearchRejected`` with every violation it found.
+    """
+
+    if sources is None or source_hashes is None:
+        stored_sources, _kinds, stored_hashes = _stored_material(db, run_id)
+        sources = stored_sources if sources is None else sources
+        source_hashes = stored_hashes if source_hashes is None else source_hashes
+    if hypothesis is None:
+        hypothesis = gates.parse_hypothesis(hypothesis_row.hypothesis_json or {})
+
+    payload_violations = _gate_payload(payload)
+    if payload_violations:
+        raise gates.ResearchRejected(payload_violations, step=gates.FORMALIZE_TASK)
+    draft = gates.parse_draft(payload)
+    violations = gates.validate_draft(
+        draft,
+        hypothesis=hypothesis,
+        sources=sources,
+        source_hashes=source_hashes,
+    )
+    decision = gates.assess_draft_capabilities(draft, hypothesis)
+    overclaims = decision.overclaims
+    if overclaims:
+        violations = list(violations) + [
+            gates.Violation(
+                code="capability_overclaim",
+                message=(
+                    f"'{item.capability}' is reported as supported while the registry "
+                    f"says {item.status}: {item.reason or 'not available'}"
+                ),
+                field_name=item.capability,
+            )
+            for item in overclaims
+        ]
+    if violations:
+        raise gates.ResearchRejected(violations, step=gates.FORMALIZE_TASK)
+    return draft, decision, hypothesis
+
+
 def _architect_step(
     db: Session,
     run: AIResearchRun,
@@ -810,32 +865,15 @@ def _architect_step(
         db.flush()
         claims = step.claims
         try:
-            payload_violations = _gate_payload(step.payload)
-            if payload_violations:
-                raise gates.ResearchRejected(payload_violations, step=gates.FORMALIZE_TASK)
-            draft = gates.parse_draft(step.payload)
-            violations = gates.validate_draft(
-                draft,
+            draft, decision, _hypothesis = evaluate_draft_payload(
+                db,
+                run_id=run.id,
+                hypothesis_row=hypothesis_row,
+                payload=step.payload,
                 hypothesis=hypothesis,
                 sources=sources,
                 source_hashes=source_hashes,
             )
-            decision = gates.assess_draft_capabilities(draft, hypothesis)
-            overclaims = decision.overclaims
-            if overclaims:
-                violations = list(violations) + [
-                    gates.Violation(
-                        code="capability_overclaim",
-                        message=(
-                            f"'{item.capability}' is reported as supported while the registry "
-                            f"says {item.status}: {item.reason or 'not available'}"
-                        ),
-                        field_name=item.capability,
-                    )
-                    for item in overclaims
-                ]
-            if violations:
-                raise gates.ResearchRejected(violations, step=gates.FORMALIZE_TASK)
         except gates.ResearchRejected as rejected:
             failures = [violation.message for violation in rejected.violations][:6]
             if attempt + 1 < MAX_ATTEMPTS:
@@ -890,6 +928,44 @@ def _store_hypothesis(
     return row
 
 
+def store_draft_revision(
+    db: Session,
+    *,
+    run: AIResearchRun,
+    hypothesis_row: StrategyHypothesisRow,
+    payload: Mapping[str, Any],
+    decision: gates.CapabilityDecision,
+    model_status: str | None = None,
+    ai_task_id: int | None = None,
+    model_name: str | None = None,
+) -> StrategyDraftRow:
+    """Append a new draft version to ``run`` (``version = N+1.0``).
+
+    The run's older drafts are never touched, so the previous one keeps its own
+    ``draft_json``, its own hash and its own human confirmation. ``ai_task_id`` /
+    ``model_name`` stay ``None`` for a draft that no model wrote (ADR-211: a person
+    answered, so nothing here may claim the model decided anything).
+    """
+
+    existing = db.scalars(select(StrategyDraftRow).where(StrategyDraftRow.run_id == run.id)).all()
+    row = StrategyDraftRow(
+        run_id=run.id,
+        hypothesis_id=hypothesis_row.id,
+        version=f"{len(existing) + 1}.0",
+        status=decision.verdict,
+        capability_status=decision.verdict,
+        model_status=model_status,
+        executable=False,
+        ai_task_id=ai_task_id,
+        model_name=model_name,
+        draft_json=payload,
+        capability_report_json=decision.as_dict(),
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
 def _store_draft(
     db: Session,
     run: AIResearchRun,
@@ -898,23 +974,16 @@ def _store_draft(
     decision: gates.CapabilityDecision,
     step: _StepResult,
 ) -> StrategyDraftRow:
-    existing = db.scalars(select(StrategyDraftRow).where(StrategyDraftRow.run_id == run.id)).all()
-    row = StrategyDraftRow(
-        run_id=run.id,
-        hypothesis_id=hypothesis_row.id,
-        version=f"{len(existing) + 1}.0",
-        status=decision.verdict,
-        capability_status=decision.verdict,
+    return store_draft_revision(
+        db,
+        run=run,
+        hypothesis_row=hypothesis_row,
+        payload=draft.model_dump(mode="json"),
+        decision=decision,
         model_status=draft.status,
-        executable=False,
         ai_task_id=step.task_id,
         model_name=step.model_name,
-        draft_json=draft.model_dump(mode="json"),
-        capability_report_json=decision.as_dict(),
     )
-    db.add(row)
-    db.flush()
-    return row
 
 
 # --------------------------------------------------------------------------- #

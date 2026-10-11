@@ -266,3 +266,108 @@ def test_the_page_no_longer_claims_it_cannot_read_the_web_or_pdf() -> None:
     assert "传一份 PDF" in LAB_TEXT
     # ... and what it still does not take, said out loud instead of quietly omitted.
     assert "GitHub" in LAB_TEXT
+
+
+# --------------------------------------------------------------------------- #
+# G7 / ADR-211: the compiler's questions, answered by a human
+#
+# The compiler has always emitted machine-readable questions (``rejections[]`` carrying
+# ``user_decidable``, plus the ``USER_REQUIRED`` slots); nothing accepted an answer, and
+# the only free-text channel there was (``confirmation.note``) is never read by the
+# architect prompt. ADR-211 adds that channel as *Option A*: answers are **not** compiler
+# input, and the server writes a **new** draft instead of editing the answered one.
+#
+# These guards pin the frontend half of that contract: the calls exist and carry the
+# draft hash they were filled on, the controls follow the server's question list rather
+# than a second copy of the mapping, the promise that the original is preserved is made
+# *before* the submit button, a stale compile report is not shown as the current one, and
+# answering never compiles.
+# --------------------------------------------------------------------------- #
+
+#: member name -> (path fragment, method) the client has to use.
+ANSWER_MEMBERS = {
+    "draftQuestions": ("`/ai/strategy/drafts/${draftId}/questions`", None),
+    "answerDraftQuestions": ("`/ai/strategy/drafts/${draftId}/answers`", "POST"),
+}
+
+
+def _lab_top_level(name: str) -> str:
+    """Return one top-level declaration's body from ``LabView.vue``.
+
+    The SFC is a flat ``<script setup>``, so a declaration ends where the next
+    top-level one begins. Matching that beats counting braces: these bodies contain
+    template literals, nested objects and arrow functions.
+    """
+
+    for pattern in (
+        f"\nasync function {name}(",
+        f"\nfunction {name}(",
+        f"\nconst {name} = computed(",
+    ):
+        start = LAB_TEXT.find(pattern)
+        if start != -1:
+            rest = LAB_TEXT[start + 1 :]
+            following = re.search(r"\n(?:async function |function |const |// ---)", rest)
+            return rest[: following.start()] if following else rest
+    raise AssertionError(f"LabView.vue has no top-level {name}")
+
+
+def test_the_client_can_read_the_compilers_questions() -> None:
+    """The question list comes from the server; the page never builds one itself."""
+
+    for name, (path, method) in ANSWER_MEMBERS.items():
+        body = _api_member(name)
+        assert path in body, name
+        if method is not None:
+            assert f"method: '{method}'" in body, name
+    # The answer call has to carry the hash of the draft the form was filled on: the
+    # server re-checks it and refuses with 409 without writing anything when it moved.
+    assert "answered_draft_hash" in _api_member("answerDraftQuestions")
+
+
+def test_the_page_renders_the_servers_questions_instead_of_a_second_copy() -> None:
+    assert "api.draftQuestions(" in LAB_TEXT
+    assert "api.answerDraftQuestions(" in LAB_TEXT
+    # The control follows the server's ``kind``; the page owns no mapping of its own.
+    for kind in ("'number'", "'enum'", "'text'", "'timeframe'", "'condition'", "'block'"):
+        assert f"item.kind === {kind}" in LAB_TEXT, kind
+    # What is answerable, and why something is not, is the server's call -- and the
+    # reason is printed rather than the question being quietly dropped.
+    assert "item.answerable" in LAB_TEXT
+    assert "item.reason" in LAB_TEXT
+
+
+def test_the_page_says_a_new_draft_will_be_created_before_submitting() -> None:
+    """ADR-211: the operator is told the original is preserved *before* they submit."""
+
+    assert "生成新的一版草案" in LAB_TEXT
+    assert "原样保留" in LAB_TEXT
+    assert "旧草案的确认对新草案不算数" in LAB_TEXT
+
+
+def test_answering_never_compiles_and_needs_a_fresh_confirmation() -> None:
+    body = _lab_top_level("submitAnswers")
+    assert "api.answerDraftQuestions(" in body
+    # Answering must not compile: the new draft has no confirmation yet, so the compile
+    # call would be refused -- and making it here would hide that the human gate exists.
+    assert "compileStrategyDraft(" not in body
+    assert "loadQuestions(" in body
+
+
+def test_a_stale_compile_report_is_not_shown_as_the_current_drafts_report() -> None:
+    """A refresh or deep link may not mistake the old draft's report for the new one's."""
+
+    assert "compileOutcomeDraftId" in LAB_TEXT
+    body = _lab_top_level("currentCompileOutcome")
+    assert "compileOutcomeDraftId.value === currentDraftId.value" in body
+
+
+def test_the_page_keeps_what_the_user_typed_when_the_server_refuses() -> None:
+    """409/422 must explain themselves in the reader's words without losing the form."""
+
+    body = _lab_top_level("handleAnswerFailure")
+    assert "draft_hash_mismatch" in body
+    # The mismatch case reloads the questions *without* resetting the inputs.
+    assert "loadQuestions(false)" in body
+    assert "answer_refused" in body
+    assert "answer_failed_the_gates" in body

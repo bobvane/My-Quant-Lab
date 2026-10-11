@@ -89,9 +89,12 @@ jobs:
       # the whole suite.
       #
       # A separate step, not another path on the line above: the trigger module
-      # migrates the scratch database and downgrades it to base when it finishes,
-      # so a shared pytest session would pull the schema out from under these
-      # tests. This step migrates to head itself (conftest) and leaves it there.
+      # migrates the scratch database and downgrades it when it finishes, so a
+      # shared pytest session would pull the schema out from under these tests.
+      # This step does not inherit that database's state either -- the fixture
+      # drops the schema before migrating to head, because CI run 38159825772
+      # started here with the version at 0003 and 0004's table still alive, and
+      # the upgrade died on DuplicateTable instead of running the tests.
       - name: Run G7 draft-answer tests on PostgreSQL
         env:
           DATABASE_URL: "sqlite+pysqlite:///:memory:"

@@ -62,6 +62,40 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+def _reset_schema(engine) -> None:
+    """Leave the scratch database looking like base, whatever a previous step did.
+
+    The job's other PostgreSQL module (``test_postgres_triggers.py``) downgrades
+    the same database when it finishes, but CI run 38159825772 showed the leftover
+    can be inconsistent: the version said ``0003_fix_triggers_json`` while 0004's
+    ``container_resource_samples`` was still there, and then ``upgrade head`` dies
+    on ``DuplicateTable`` instead of migrating. So the schema is dropped outright
+    rather than trusted, and this step no longer depends on the step before it.
+
+    The second branch is because this fixture is backend-agnostic on purpose: it
+    is what lets the same test module run on SQLite or on PostgreSQL.
+
+    PostgreSQL drops the schema rather than the tables the models declare: the
+    leftover above was a table no model knows about (it only exists in the
+    migration chain), so a metadata-driven drop cannot see it and the upgrade
+    would fail again.
+    """
+
+    if engine.dialect.name == "postgresql":
+        from sqlalchemy import text
+
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+        return
+
+    from sqlalchemy import MetaData
+
+    metadata = MetaData()
+    metadata.reflect(bind=engine)
+    metadata.drop_all(bind=engine)
+
+
 @pytest.fixture(scope="session")
 def _postgres_engine():
     """The scratch PostgreSQL, built by the real alembic chain, once per session.
@@ -89,9 +123,10 @@ def _postgres_engine():
 
         from alembic import command
 
-        command.upgrade(Config("alembic.ini"), "head")
         engine = db_module._build_engine(POSTGRES_URL)
         try:
+            _reset_schema(engine)
+            command.upgrade(Config("alembic.ini"), "head")
             yield engine
         finally:
             engine.dispose()

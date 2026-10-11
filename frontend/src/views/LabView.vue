@@ -1624,6 +1624,21 @@ function handleAnswerFailure(e: unknown) {
     } else if (e.code === 'draft_detached') {
       answerError.value =
         '这份草案所在的那次研究已经和它脱钩了（研究被重新生成或删掉了）。刷新「最近的研究」，用最新那一份草案重试。'
+    } else if (e.code === 'draft_superseded') {
+      answerError.value =
+        '这份草案已经不是这次研究的当前草案了（同一批研究里已经有更新的一版），所以这次回答没有被写入——服务端一个字节都没有改。正在打开最新那一版并重新读一次问题，你填过的内容还留着。'
+      const current = run.value
+      if (current) {
+        void api
+          .aiResearchRun(current.run_id)
+          .then(async (fresh) => {
+            applyRun(fresh)
+            await loadQuestions(false)
+          })
+          .catch(() => undefined)
+      } else {
+        void loadQuestions(false)
+      }
     } else {
       answerError.value = '服务端拒绝了这次作答，什么都没有写入。'
       answerDetail.value = e.message

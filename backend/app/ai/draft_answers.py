@@ -1311,6 +1311,23 @@ def answer_draft_questions(
             {"draft_id": draft.id},
         )
 
+    # A draft keeps its own bytes forever (that is the point of the hash check
+    # above), so "the run has already moved on" is invisible to it: a second
+    # browser tab still holding the old form would answer the *old* draft and
+    # produce a "new version" whose parent is not the previous new version --
+    # the version in between would silently drop out of the lineage. Answers may
+    # only be stacked on the run's current draft; anything older says so.
+    current_draft_id = run.draft_id
+    if current_draft_id is not None and current_draft_id != draft.id:
+        raise Refused(
+            409,
+            "draft_superseded",
+            f"这份草案已经被同一批研究里更新的一版（草案 {current_draft_id}）取代了："
+            "在它上面作答会跳过中间那一版，所以这次回答没有被写入，"
+            "服务端一个字节都没有改。请刷新到最新那一版，重新读一次问题再作答。",
+            {"draft_id": draft.id, "current_draft_id": current_draft_id},
+        )
+
     report = report_for_questions(payload, draft=draft)
     questions = build_questions(report, payload)
     outcome = apply_answers(payload, answers, questions=questions)

@@ -369,5 +369,8 @@ def test_the_page_keeps_what_the_user_typed_when_the_server_refuses() -> None:
     assert "draft_hash_mismatch" in body
     # The mismatch case reloads the questions *without* resetting the inputs.
     assert "loadQuestions(false)" in body
+    # A draft the run has moved past is refused too, and that branch has to open the
+    # current draft before it reloads the questions.
+    assert "draft_superseded" in body
     assert "answer_refused" in body
     assert "answer_failed_the_gates" in body

@@ -707,6 +707,58 @@ def test_a_stale_hash_is_a_conflict_that_writes_nothing(client, db_session) -> N
     assert _count(db_session, StrategyVersion) == 0
 
 
+def test_an_older_draft_cannot_be_answered_once_a_newer_one_exists(client, db_session) -> None:
+    """A second browser tab still holding the old form must not fork the lineage."""
+
+    run, draft = _store(db_session, _open_payload())
+    # Leave one question open so the new draft can be answered again below.
+    first = client.post(
+        ANSWERS_URL.format(draft_id=draft.id), json=_answers(draft, *_open_answers()[:-1])
+    )
+    assert first.status_code == 201
+    current_id = first.json()["draft"]["draft_id"]
+    assert [item["slot"] for item in first.json()["remaining_questions"]] == [
+        "execution.slippage_bps"
+    ]
+    before_audit = _count(db_session, AuditLog)
+    old_hash = draft_answers.draft_hash_of(_open_payload())
+
+    # The old draft's own bytes never change, so its hash still matches; the only
+    # thing that can refuse this is "the run has already moved on".
+    again = client.post(
+        ANSWERS_URL.format(draft_id=draft.id), json=_answers(draft, *_open_answers())
+    )
+
+    assert again.status_code == 409
+    assert again.json()["error"]["code"] == "draft_superseded"
+    assert again.json()["error"]["details"] == {
+        "draft_id": draft.id,
+        "current_draft_id": current_id,
+    }
+    assert [row.id for row in _draft_rows(db_session, run.id)] == [draft.id, current_id]
+    assert _count(db_session, AuditLog) == before_audit
+    db_session.expire_all()
+    assert run.draft_id == current_id
+    assert draft.draft_json == _open_payload()
+    assert draft_answers.draft_hash_of(draft.draft_json) == old_hash
+
+    # The guard only refuses the *old* draft: the current one still stacks a version.
+    new_row = db_session.get(StrategyDraft, current_id)
+    second = client.post(
+        ANSWERS_URL.format(draft_id=current_id),
+        json=_answers(new_row, ("missing_required_slot", "execution.slippage_bps", 5)),
+    )
+
+    assert second.status_code == 201
+    assert second.json()["previous_draft_id"] == current_id
+    assert second.json()["draft"]["version"] == "3.0"
+    assert [row.id for row in _draft_rows(db_session, run.id)] == [
+        draft.id,
+        current_id,
+        second.json()["draft"]["draft_id"],
+    ]
+
+
 def test_a_compiled_draft_cannot_be_answered_through_this_endpoint(client, db_session) -> None:
     run, draft = _store(db_session, _complete_payload(), confirmed=True)
     strategy = Strategy(name="Compiled target", slug="compiled-target")

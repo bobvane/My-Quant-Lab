@@ -62,6 +62,20 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+def pytest_report_header(config: pytest.Config) -> str:
+    """Say out loud which database the ``postgres`` tests will run against.
+
+    Every CI step and every local run prints this line, so "it passed on
+    PostgreSQL" is something the log states instead of something a reader infers
+    from a green tick. ``TEST_POSTGRES_URL`` holds a password, so only the part
+    after the last ``@`` is ever printed.
+    """
+
+    if not POSTGRES_URL:
+        return "postgres tests: not offered (TEST_POSTGRES_URL is unset)"
+    return f"postgres tests: {POSTGRES_URL.rsplit('@', 1)[-1]}"
+
+
 def _reset_schema(engine) -> None:
     """Leave the scratch database looking like base, whatever a previous step did.
 

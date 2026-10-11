@@ -1686,7 +1686,10 @@ export const api = {
     const filters: string[] = []
     if (symbol) filters.push(`symbol=${encodeURIComponent(symbol)}`)
     if (strategyVersionId != null) filters.push(`strategy_version_id=${strategyVersionId}`)
-    const query = filters.length ? `?${filters.join('&')}` : ''
+    // `?` 写在请求路径这一行里，别藏在 query 变量里：`tests/test_api_contract.py` 的
+    // `_path_literal` 只能看字面量，一个不含 `?` 的 `${query}` 会被它当成路径的一段
+    // （于是这扇门被读成 `/signals/outcome-summary{}`，守卫红）。运行时的 URL 一个字都
+    // 没变，改的只是它能不能被读出来（同一个写法见 `evaluateSignalOutcomes`）。
     return request<{
       symbol: string | null
       // 统计的「范围」由服务端回显，和数字来自同一次响应（ADR-065）：页面不拿本地状态
@@ -1697,7 +1700,9 @@ export const api = {
       undecided: number
       bars_after: number
       groups: Record<string, Record<string, any>>
-    }>(`/signals/outcome-summary${query}`)
+    }>(
+      `/signals/outcome-summary${filters.length ? `?${filters.join('&')}` : ''}`,
+    )
   },
   scanSignals: (persist = false) =>
     request<{ evaluated: number; created: number; signals: SignalIntent[]; disclaimer: string }>(

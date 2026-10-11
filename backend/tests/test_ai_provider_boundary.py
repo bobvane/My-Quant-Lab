@@ -38,11 +38,19 @@ HTTP_CALLERS = frozenset({"ai/provider.py", "data/ai_provider_service.py"})
 #: anything either: it reads an explanation and the facts it was built from, and
 #: refuses text that carries a number nobody computed. Putting it here keeps the
 #: check next to the contract it enforces.
+#:
+#: ``draft_answers.py`` joined with ADR-211 for the answer channel. It asks no
+#: model anything either: a person answers the questions the compiler refused to
+#: guess, and this module writes those answers into a copy of the draft. It
+#: belongs here because the artifact it rewrites -- ``strategy_drafts`` -- is
+#: this layer's, and because the new draft it produces is judged by the same
+#: ``research_schemas`` gate the architect's draft is judged by.
 AI_MODULES = frozenset(
     {
         "ai/__init__.py",
         "ai/budget.py",
         "ai/confirmation.py",
+        "ai/draft_answers.py",
         "ai/explain.py",
         "ai/explanation_guard.py",
         "ai/provider.py",

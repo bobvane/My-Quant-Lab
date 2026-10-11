@@ -59,6 +59,7 @@ def sync_market_data(symbols: list[str] | None = None) -> dict:
     end = dt.datetime.now(tz=dt.UTC)
     start = end - dt.timedelta(days=400)
     summary: dict[str, int] = {}
+    refreshed: dict[str, int] = {}
 
     with session_scope() as db:
         source = db.query(MarketDataSource).filter_by(name=provider.name).one_or_none()
@@ -107,7 +108,12 @@ def sync_market_data(symbols: list[str] | None = None) -> dict:
                     series = get_or_create_series(
                         db, asset=asset, timeframe="1d", source_id=source.id
                     )
-                    summary[symbol] = upsert_bars(db, series, frame_to_bars(frame))
+                    # Count what the upsert actually did, so a nightly sync that only
+                    # refreshed bars which have since closed (ADR-118) cannot read as
+                    # "nothing happened".
+                    report: dict[str, int] = {}
+                    summary[symbol] = upsert_bars(db, series, frame_to_bars(frame), report=report)
+                    refreshed[symbol] = report["updated"]
                     series.quality_status, _ = assess_bars_quality(
                         frame, timeframe=series.timeframe
                     )
@@ -117,7 +123,14 @@ def sync_market_data(symbols: list[str] | None = None) -> dict:
                 )
                 summary[symbol] = -1
                 continue
-    return {"provider": provider.name, "watchlist": targets, "inserted": summary}
+    return {
+        "provider": provider.name,
+        "watchlist": targets,
+        "inserted": summary,
+        # Bars that already existed but came back different — typically a candle that
+        # was stored while it was still forming and has now closed (ADR-118).
+        "updated": refreshed,
+    }
 
 
 @celery_app.task(name="quantlab.scan_signals")

@@ -27,6 +27,7 @@ from app.api.schemas import MarketDataSyncRequest
 from app.data.market_data_repo import (
     frame_to_bars,
     get_or_create_series,
+    latest_closed_bar_time,
     load_bars,
     upsert_bars,
 )
@@ -197,3 +198,39 @@ def test_a_later_sync_moves_the_closed_horizon_forward(client, db_session, monke
     assert second["updated"] == 1, "the previously forming bar is now final"
     assert second["still_forming_bars"] == 0
     assert len(_closed_bars(db_session, second["series_id"])) == 11
+
+
+def test_the_latest_closed_bar_is_not_the_series_end(db_session) -> None:
+    """``series_end`` counts the forming bar, so it cannot answer "how fresh is the data".
+
+    The horizon on screen is allowed to include the candle that is still running (that is
+    the point of storing it, ADR-118), while every closed-bar reader needs the newest
+    *finished* bar. The two answers therefore have to differ whenever the newest row is
+    still forming.
+    """
+
+    series = _series(db_session, "LATEST-CLOSED")
+    stamps = pd.date_range("2024-01-01", periods=3, freq="D", tz="UTC")
+    frame = _frame(stamps)
+    frame["is_closed"] = [True, True, False]
+
+    assert upsert_bars(db_session, series, frame_to_bars(frame)) == 3
+    db_session.commit()
+
+    stored = load_bars(db_session, series, only_closed=False)
+    assert list(stored.index) == list(stamps), "all three bars are stored, forming one included"
+    assert latest_closed_bar_time(db_session, series) == stamps[-2].to_pydatetime()
+
+
+def test_a_series_with_no_finished_bar_has_no_latest_closed_time(db_session) -> None:
+    """Nothing finished means no answer -- not the stamp of the candle still running."""
+
+    series = _series(db_session, "LATEST-CLOSED-EMPTY")
+    stamps = pd.date_range("2024-02-01", periods=2, freq="D", tz="UTC")
+    frame = _frame(stamps)
+    frame["is_closed"] = [False, False]
+
+    assert upsert_bars(db_session, series, frame_to_bars(frame)) == 2
+    db_session.commit()
+
+    assert latest_closed_bar_time(db_session, series) is None

@@ -277,10 +277,10 @@ def test_sync_market_data_survives_a_conflicting_row(db_session, monkeypatch, sa
     provider = _FixedFrameProvider(sample_bars)
     real_upsert = worker_tasks.upsert_bars
 
-    def _collide_or_write(db, series, bars):
+    def _collide_or_write(db, series, bars, *, report=None):
         if series.asset_id == assets["BBB"].id:
             raise IntegrityError("INSERT INTO market_bars", {}, Exception("duplicate key"))
-        return real_upsert(db, series, bars)
+        return real_upsert(db, series, bars, report=report)
 
     monkeypatch.setattr(worker_tasks, "get_market_data_provider", lambda: provider)
     monkeypatch.setattr(worker_tasks, "resolve_watchlist", lambda provider, symbols: ["BBB", "AAA"])
@@ -300,6 +300,38 @@ def test_sync_market_data_survives_a_conflicting_row(db_session, monkeypatch, sa
     assert db_session.scalars(select(MarketDataSource)).all()
     surviving = db_session.scalars(select(MarketDataSeries)).all()
     assert [series.asset_id for series in surviving] == [assets["AAA"].id]
+    # The refreshed counts ride along too, so a symbol that only had bars updated is not
+    # reported as an empty sync.
+    assert result["updated"]["AAA"] == 0
+
+
+def test_a_nightly_sync_reports_the_bars_it_refreshed(db_session, monkeypatch, sample_bars):
+    """``inserted: 0`` cannot tell "nothing to do" from "the same window closed".
+
+    A bar stored while it was still forming has to be updated in place once the provider
+    returns it finished (ADR-118). The nightly task used to hand ``upsert_bars`` no report
+    at all, so a sync whose only work was those refreshes read exactly like an empty one.
+    """
+
+    asset = Asset(symbol="CCC", asset_class="stock")
+    db_session.add(asset)
+    db_session.commit()
+
+    provider = _FixedFrameProvider(sample_bars)
+    monkeypatch.setattr(worker_tasks, "get_market_data_provider", lambda: provider)
+    monkeypatch.setattr(worker_tasks, "resolve_watchlist", lambda provider, symbols: ["CCC"])
+    monkeypatch.setattr(worker_tasks, "session_scope", lambda: _worker_scope(db_session))
+
+    first = worker_tasks.sync_market_data()
+    assert first["inserted"]["CCC"] == len(sample_bars)
+    assert first["updated"]["CCC"] == 0
+    db_session.commit()
+
+    # The same window comes back with final prices: no new rows, but real work done.
+    provider._frame = sample_bars.assign(volume=sample_bars["volume"] + 1.0)
+    second = worker_tasks.sync_market_data()
+    assert second["inserted"]["CCC"] == 0
+    assert second["updated"]["CCC"] == len(sample_bars)
 
 
 # --------------------------------------------------------------------------- #

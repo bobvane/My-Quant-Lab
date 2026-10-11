@@ -3868,3 +3868,24 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 浏览器 UAT（`%TEMP%\mql-accept\dead-ends-uat.mjs`，本机栈：uvicorn 127.0.0.1:8080（真入口 `app.api.main:app`、sqlite UAT 库 `mql-g7.sqlite3`、合成行情）+ 镜像 vite 127.0.0.1:5173 + 无头 Chrome CDP 9222）⇒ **14/14 通过**。读数：打开 `/this-page-does-not-exist-7f31` ⇒ 页面上出现「这个地址没有对应的页面」、把 `this-page-does-not-exist-7f31` 原样写出来、写出「服务端没有收到过这个地址的请求」、侧栏十条仍在、三个按钮 `["回到研究首页","去「研究策略」","去「AI 研究实验室」"]` 都在，而且这一趟**没有发出任何 API 请求**（`http errors: []`）；点「回到研究首页」⇒ 地址回到 `/` 且仪表盘真的渲染出「① 我在研究什么」。失败那一条：用 `%TEMP%\mql-seed-failed-run.py` 往 UAT 库写一行服务端真会留下的失败记录（`status='failed'`、`error_message='ai_not_configured'`，与「没有配置 AI 供应商」时那一行同形），刷新 `/lab` ⇒ 列表里该行旁出现「AI 供应商还没配好：去「系统管理」里选一个可用的供应商、填好密钥，再把这次研究重新提交一遍。这次没有调用任何模型。」，页面文本里**没有** `ai_not_configured`；接口侧 `GET /ai/research?limit=100` 的该行确实带 `"error_message":"ai_not_configured"`（机器码留在 API，人话留给页面）；点开这一条 ⇒ 详情段显示同一句人话。整趟 `console errors: []`、`http errors: []`。
 
 - 一条要记住的 UAT 教训：**改了后端就必须重启跑 UAT 的那个服务端**。这一趟第一次跑是 11/14：前端 vite 是热更新的，所以「详情页说出人话」这条过了，而列表页那条一直失败——因为 8080 上那个 uvicorn 还是改动之前启动的进程，`GET /ai/research` 根本没返回 `error_message`。重启 uvicorn 之后再跑即 14/14。前端热更新会掩盖「后端没重启」，于是症状看起来像「前端有 bug」。（第二条：`airs`——本机 `pytest` 仍要带 `--basetemp`，否则 `%TEMP%\pytest-of-bobvane\pytest-current` 那个坏符号链接会让收尾抛 `PermissionError: [WinError 5]`，摘要行不打印。）
+
+## ADR-217：「最新已收盘」要真的读已收盘的 K 线，夜间同步要说出它刷新了几根
+
+- 背景：两处「读数和计数没有说真话」的地方，都出自全项目结构审计。**其一**：`backend/app/data/market_data_repo.py` 的 `latest_closed_bar_time(series)` 直接 `return series.series_end`，而 `series_end` 是**存进来的最新时间戳**，按 ADR-118 它可以是一根还在走的 K 线（`is_closed=False`）——也就是说，这个函数的名字承诺「最新已收盘」，返回的却可能是那根没走完的。函数在 `__all__` 里导出、全仓零调用者，所以它此刻没有造成错误数据，但它是一个随时会被当成正确答案拿去用的陷阱（`test_bar_lifecycle.py` 的模块文档恰好写着「屏幕上的水平线看起来是新的，因为 `series_end` 把没走完的那根也算进去了」）。**其二**：夜间同步任务 `quantlab.sync_market_data`（`backend/app/workers/tasks.py`）调 `upsert_bars(db, series, frame_to_bars(frame))` 时**没有**传 `report`，而同一个函数在 API 路径（`backend/app/api/routers/market_data.py:229-230`）是传的。`upsert_bars` 的 `report` 存在的唯一理由，就是文档里那句「让调用方分得清『无事可做』和『同一个窗口带着最终价格又来了』」。于是夜间任务把「这次刷新了 N 根昨天还在走的 K 线」这一事实丢掉了，日志与任务返回值里只剩 `inserted` 的个数。
+
+- 决策：
+  1. `latest_closed_bar_time(db, series)` 改为**真的去读已收盘的 K 线**：复用 `load_bars(db, series, only_closed=True, limit=1)`，取该帧的最后一根时间戳；没有已收盘 K 线时返回 `None`。不再看 `series_end`。
+  2. 文档字符串写明为什么 `series_end` 不能回答这个问题（它把没走完的那根也算进去，而那正是已收盘读者最不该拿到的时间戳），并说明它走的是「所有已收盘读者用的同一个装载器」。
+  3. 夜间任务改为把 `report` 传下去，把每个标的的 `updated` 计数收集起来，并在任务返回值里新增 `"updated"` 键（与既有 `"inserted"` 并列，形状相同：symbol → 计数）。失败/空帧的标的同样有 `-1`/`0` 的既有语义，`updated` 里也有对应项。
+  4. 注释写明这个计数的用途：一根「存进来时还在走、现在已经收盘」的 K 线被就地刷新（ADR-118），没有这个计数时，一次只做了这类刷新的同步读起来和空同步一模一样。
+  5. 新增三条测试：`backend/tests/test_bar_lifecycle.py::test_the_latest_closed_bar_is_not_the_series_end`（三根 K 线、最后一根 `is_closed=False`；断言三根都存着，而「最新已收盘」是第二根）、`::test_a_series_with_no_finished_bar_has_no_latest_closed_time`（两根都没走完 ⇒ `None`，不是那根还在走的）、`backend/tests/test_task_idempotency.py::test_a_nightly_sync_reports_the_bars_it_refreshed`（第一次同步 `inserted=N, updated=0`；同一个窗口带着改过的 volume 再来一次 ⇒ `inserted=0, updated=N`）。
+
+- 理由：①**名字就是契约**：`latest_closed_bar_time` 一旦返回未收盘的时间戳，任何按它判断「数据新鲜到哪一天」的读者都会多算一根，而这类读者（信号扫描、结果评估）正是靠 `is_closed` 才安全的——留着这个陷阱比删掉它更贵，因为它看起来已经是对的。改造要走既有的装载器：`load_bars(only_closed=True)` 就是「什么算已收盘」的唯一真相，自己再写一个 SQL 判断等于开第二份标准。②**空集合要回 `None`**：一根都没走完时，正确的答案是没有答案，而不是「那就是新的一根」——这与 ADR-214 是同一条规矩（没有读数就不许造一个）。③**`series_end` 不该被改掉**：它服务的是「这条 series 存到了什么时候」这个真问题（水平线、刷新判断都在用），两件事都对，只是不能互相冒充。④**计数必须从产生它的地方取**：`report` 由 `upsert_bars` 在合并循环里就地填写（`inserted`/`updated`），让夜间任务自己再数一遍等于把同一个判断写两处，而且它没有「哪根被刷新了」的信息。⑤**返回形状保持并列**：`inserted` 的每个标的键都保留原语义（`-1` = 冲突跳过、`0` = 没写），新键只是把已经算出来的 `updated` 露出来，所以既有调用方（`tests/test_task_idempotency.py:293-296` 读 `result["inserted"][symbol]`）一个字都不用改。
+
+- 影响与兼容：改 `backend/app/data/market_data_repo.py`（`latest_closed_bar_time` 签名多一个 `db` 参数，+9/−2）、`backend/app/workers/tasks.py`（+13/−3）、`backend/tests/test_bar_lifecycle.py`（+37，import 多一项）、`backend/tests/test_task_idempotency.py`（+29，测试内的假 `upsert_bars` 补上 `report` 关键字）。`latest_closed_bar_time` 全仓零调用者，所以签名变化不破坏任何调用点；夜间任务的返回值**新增**一个键，既有键的语义不变。没有迁移、没有新字段、没有新依赖、没有改 `version.txt`。
+
+- 测试：`pytest tests/test_bar_lifecycle.py tests/test_task_idempotency.py tests/test_market_data_quality.py tests/test_market_data_providers.py` ⇒ **61 passed in 18.27s**（改完格式化后单跑这两个模块 19 passed in 16.64s）；`ruff check app tests` ⇒ `All checks passed!`；`ruff format --check app tests` ⇒ `246 files already formatted`。**测试数据的坑（值得记）**：第一次写这条新用例时我把「同一个窗口带着最终价格又来了」造成 `close + 1.0`，结果 `ck_bars_high_ge_close` 检查约束直接失败、被任务的 `except IntegrityError` 收成 `inserted = -1`；换成 `volume + 1.0` 才是在合法范围内制造一次「要刷新」的差异。
+
+- 浏览器 UAT：本项不改变任何用户可见的交互或页面读数（`latest_closed_bar_time` 还没有页面消费者，夜间任务的返回值只进日志与任务结果），所以没有单独跑浏览器；同一批提交里的 ADR-216 跑了真实浏览器（`dead-ends-uat.mjs`，14/14 通过）。
+
+- 一条要记住的 UAT/bug 教训：**「函数名承诺的事」和「它读的字段」必须分开核对**。`latest_closed_bar_time` 之所以一直没出事，只是因为没人调用它——一个零调用者的错误函数在审计里最容易被判成「无影响」而放过，可它正是未来某个人会信任的那个名字。

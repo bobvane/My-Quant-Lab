@@ -432,8 +432,19 @@ def resolve_series(
     return series
 
 
-def latest_closed_bar_time(series: MarketDataSeries) -> dt.datetime | None:
-    return series.series_end
+def latest_closed_bar_time(db: Session, series: MarketDataSeries) -> dt.datetime | None:
+    """The newest bar in this series that is actually finished.
+
+    ``series.series_end`` cannot answer this: it counts a bar stored while it was
+    still forming too (ADR-118), and that unfinished stamp is exactly what a
+    closed-bar reader must not be handed. Read the closed rows instead, through the
+    same loader every other closed-bar reader uses.
+    """
+
+    frame = load_bars(db, series, only_closed=True, limit=1)
+    if frame.empty:
+        return None
+    return frame.index[-1].to_pydatetime()
 
 
 def refresh_series_content_hash(db: Session, series: MarketDataSeries) -> str | None:

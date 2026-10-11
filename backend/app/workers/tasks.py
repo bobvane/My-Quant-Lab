@@ -108,7 +108,9 @@ def sync_market_data(symbols: list[str] | None = None) -> dict:
                         db, asset=asset, timeframe="1d", source_id=source.id
                     )
                     summary[symbol] = upsert_bars(db, series, frame_to_bars(frame))
-                    series.quality_status, _ = assess_bars_quality(frame)
+                    series.quality_status, _ = assess_bars_quality(
+                        frame, timeframe=series.timeframe
+                    )
             except IntegrityError:
                 logger.warning(
                     "sync for %s collided with a concurrent sync; symbol skipped", symbol

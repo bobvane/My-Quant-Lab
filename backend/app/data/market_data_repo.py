@@ -42,19 +42,43 @@ _REFRESHABLE_BAR_FIELDS = ("open", "high", "low", "close", "volume", "is_closed"
 # (2 days) and most holidays (<=4 days) stay below it.
 GAP_THRESHOLD_DAYS = 5
 
+# A hole can only be judged against the cadence of the series it is in: weekly bars
+# are ~7 days apart, so the daily allowance calls every clean weekly series
+# ``partial`` -- a false alarm on a field the user reads, and one that made the
+# quality of a perfectly good weekly sync look broken. Timeframes whose bars are
+# farther apart than the daily allowance therefore bring their own limit (a missed
+# week is one *extra* period: >10 days). Everything intraday and daily keeps the
+# weekend/holiday allowance above.
+GAP_THRESHOLD_DAYS_BY_TIMEFRAME: dict[str, int] = {"1w": 10}
+
+
+def gap_threshold_days_for(timeframe: str | None) -> int:
+    """The largest jump between consecutive bars that is still normal for this cadence."""
+
+    return GAP_THRESHOLD_DAYS_BY_TIMEFRAME.get(timeframe or "", GAP_THRESHOLD_DAYS)
+
 
 def assess_bars_quality(
-    frame: pd.DataFrame, *, gap_threshold_days: int = GAP_THRESHOLD_DAYS
+    frame: pd.DataFrame,
+    *,
+    timeframe: str | None = None,
+    gap_threshold_days: int | None = None,
 ) -> tuple[str, dict[str, object]]:
     """Classify a bar frame as ``valid`` / ``partial`` / ``invalid`` (docs/11).
 
     * invalid  — any bar with non-positive or NaN OHLC, or high < low.
-    * partial  — a hole larger than ``gap_threshold_days`` between consecutive bars.
+    * partial  — a hole larger than the threshold between consecutive bars.
     * valid    — everything else.
+
+    The threshold comes from ``timeframe`` (``gap_threshold_days_for``) unless the
+    caller passes an explicit ``gap_threshold_days``.
     """
 
     if frame is None or frame.empty:
         return "unknown", {"bars": 0}
+
+    if gap_threshold_days is None:
+        gap_threshold_days = gap_threshold_days_for(timeframe)
 
     ohlc = frame[["open", "high", "low", "close"]].astype(float)
     non_positive = (ohlc <= 0).any(axis=1)

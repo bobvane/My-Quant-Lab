@@ -317,6 +317,18 @@ function isLiveStatus(status: string | null | undefined): boolean {
   return status === 'queued' || status === 'running' || status === 'pending'
 }
 
+/**
+ * 后端在失败时存的是机器码（`run.error_message`），自由文本的异常已经是句子。
+ * 列表页和详情页都直接显示这个字段，所以码必须在这里变成人话——否则「没有跑完」
+ * 旁边会躺着一行 `ai_not_configured`（ADR-138）。认不出的文本原样显示，不编。
+ */
+const RESEARCH_FAILURE_REASONS: Record<string, string> = {
+  ai_not_configured:
+    'AI 供应商还没配好：去「系统管理」里选一个可用的供应商、填好密钥，再把这次研究重新提交一遍。这次没有调用任何模型。',
+  ai_key_unreadable:
+    '配置里的 AI 密钥读不出来（多半是 SECRET_KEY 换过）：去「系统管理」里重新填一次密钥。',
+}
+
 const liveSentence = computed(() => {
   const status = run.value?.status
   if (status === 'queued') {
@@ -327,6 +339,12 @@ const liveSentence = computed(() => {
   }
   return ''
 })
+
+/** 失败原因的人话版；认不出来的原样返回。 */
+function researchFailureText(message: string | null | undefined): string {
+  if (!message) return ''
+  return RESEARCH_FAILURE_REASONS[message] ?? message
+}
 
 const statusSentence = computed(() => {
   const status = run.value?.status
@@ -2844,14 +2862,14 @@ onUnmounted(stopPolling)
 
       <!-- 没跑完：照实显示后端给的原因。 -->
       <p v-if="run.status === 'failed'" class="error" style="margin-top: 10px">
-        {{ run.error_message || '后端没有给出具体原因。' }}
+        {{ researchFailureText(run.error_message) || '后端没有给出具体原因。' }}
       </p>
       <p
         v-else-if="run.error_message && run.status !== 'rejected'"
         class="muted"
         style="margin-top: 10px"
       >
-        后端附注：{{ run.error_message }}
+        后端附注：{{ researchFailureText(run.error_message) }}
       </p>
 
       <!-- 警告不是拒绝：材料被截断、或模型写了没算过的数字。 -->
@@ -3621,7 +3639,15 @@ onUnmounted(stopPolling)
           <tr v-for="item in runs" :key="item.run_id">
             <td class="muted">{{ formatDateTime(item.created_at) }}</td>
             <td>{{ item.question }}</td>
-            <td>{{ statusLabel(item.status) }}</td>
+            <td>
+              {{ statusLabel(item.status) }}
+              <span
+                v-if="item.status === 'failed' && item.error_message"
+                class="muted"
+                style="display: block"
+                >{{ researchFailureText(item.error_message) }}</span
+              >
+            </td>
             <td>{{ verdictLabelOf(item.capability_status) }}</td>
             <td v-if="isAdvanced" class="mono">#{{ item.run_id }}</td>
             <td>

@@ -46,11 +46,11 @@ const rawLoading = ref<number | null>(null)
 const QUALITY_MEANING: Array<{ status: string; text: string }> = [
   {
     status: 'valid',
-    text: '每一根 K 线的开高低收都是正数，相邻两根之间没有超过 5 天的空洞。',
+    text: '每一根 K 线的开高低收都是正数，相邻两根之间没有超出这个周期正常节奏的空洞。',
   },
   {
     status: 'partial',
-    text: '数据本身没问题，但中间有超过 5 天的空洞（停牌、缺的交易日，或数据源没有给）。',
+    text: '数据本身没问题，但中间有超出这个周期正常节奏的空洞（停牌、缺的交易日，或者数据源没有给）。',
   },
   {
     status: 'invalid',

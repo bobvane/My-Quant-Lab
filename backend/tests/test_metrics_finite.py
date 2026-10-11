@@ -101,6 +101,32 @@ def test_a_flat_curve_still_reports_zero_volatility() -> None:
     assert metrics.max_drawdown == 0.0
 
 
+def test_a_book_with_no_winning_trade_has_no_average_win() -> None:
+    """「平均每笔赚多少」在一笔都没赚的时候没有值，0.0 说的是另一件事（ADR-007）。"""
+
+    trades = [{"pnl": -50.0, "holding_bars": 2}, {"pnl": -25.0, "holding_bars": 1}]
+    metrics = compute_metrics(np.array([1000.0, 950.0, 925.0]), trades, timeframe="1d")
+
+    assert metrics.win_rate == 0.0, "0 of 2 trades won: this zero is real"
+    assert metrics.avg_win is None, "the mean of an empty set is undefined, not 0"
+    assert any("average win is undefined" in note for note in metrics.notes)
+    assert metrics.avg_loss == pytest.approx(-37.5)
+    assert metrics.profit_factor == 0.0, "no gross profit against a real gross loss"
+    _finite_payload([1000.0, 950.0, 925.0], trades)
+
+
+def test_a_book_with_no_losing_trade_has_no_average_loss() -> None:
+    trades = [{"pnl": 80.0, "holding_bars": 2}, {"pnl": 20.0, "holding_bars": 1}]
+    metrics = compute_metrics(np.array([1000.0, 1080.0, 1100.0]), trades, timeframe="1d")
+
+    assert metrics.win_rate == 1.0
+    assert metrics.avg_loss is None
+    assert metrics.avg_win == pytest.approx(50.0)
+    assert metrics.profit_factor is None
+    assert any("average loss and profit factor are undefined" in note for note in metrics.notes)
+    _finite_payload([1000.0, 1080.0, 1100.0], trades)
+
+
 def test_the_timeframe_still_selects_its_own_periods() -> None:
     assert BARRS_PER_YEAR["1d"] == 252.0
     metrics = compute_metrics(np.array([1000.0, 1010.0]), [], timeframe="1w")

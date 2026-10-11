@@ -54,6 +54,7 @@ STYLE = (SRC / "style.css").read_text(encoding="utf-8")
 STRATEGY_DETAIL = (VIEWS / "StrategyDetailView.vue").read_text(encoding="utf-8")
 EXPERIMENTS = (VIEWS / "ExperimentsView.vue").read_text(encoding="utf-8")
 LAB = (VIEWS / "LabView.vue").read_text(encoding="utf-8")
+NOT_FOUND = (VIEWS / "NotFoundView.vue").read_text(encoding="utf-8")
 VITE_CONFIG = (REPO_ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
 ENV_DTS = (SRC / "env.d.ts").read_text(encoding="utf-8")
 
@@ -745,6 +746,29 @@ def test_the_navigation_splits_research_from_the_strategy_library() -> None:
     assert '"/strategy/"' in STRATEGIES or "/strategy/" in STRATEGIES
 
     assert "/research" in UI_SPEC and "/data" in UI_SPEC and "/market" in UI_SPEC
+
+
+def test_a_wrong_address_gets_a_page_that_says_so() -> None:
+    """An unknown path used to render an empty ``RouterView`` (ADR-216).
+
+    Nothing on the page said whether it was still loading, broken, or simply a wrong
+    link -- and the shell's sidebar made it look like a real page with no content. The
+    catch-all is last in the table so every real route still wins, and the view reads no
+    API: there is no data to fetch, so there is no loading state that can hang.
+    """
+
+    assert "{ path: '/:pathMatch(.*)*'" in MAIN_TS
+    assert "name: 'not-found'" in MAIN_TS
+    assert "component: NotFoundView" in MAIN_TS
+    # Last on purpose: a catch-all anywhere else would swallow the routes after it.
+    assert MAIN_TS.index("pathMatch(.*)*") > MAIN_TS.index("path: '/strategy/:strategyId'")
+
+    assert "这个地址没有对应的页面" in NOT_FOUND
+    assert "route.fullPath" in NOT_FOUND, "name the address the reader actually opened"
+    assert "还在加载" in NOT_FOUND, "rule out the wrong diagnosis by name (ADR-138)"
+    for way_back in ("router.push('/')", "router.push('/research')", "router.push('/lab')"):
+        assert way_back in NOT_FOUND, way_back
+    assert "api." not in NOT_FOUND, "no data to read means nothing to wait for"
 
 
 def test_the_research_page_walks_four_steps_and_hands_off_to_the_backtest() -> None:

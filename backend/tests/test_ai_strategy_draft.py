@@ -512,6 +512,10 @@ def test_research_without_a_provider_says_so(client, db_session):
     assert db_session.scalar(select(func.count()).select_from(AIResearchRun)) == 1
     listed = client.get("/api/v1/ai/research").json()["runs"]
     assert [entry["status"] for entry in listed] == ["failed"]
+    # "失败" with no reason is a dead end: the list has to say why (ADR-138, ADR-216).
+    # The API keeps the machine code; the page turns it into words
+    # (`RESEARCH_FAILURE_REASONS` in LabView.vue).
+    assert listed[0]["error_message"] == "ai_not_configured"
 
 
 def test_research_input_is_validated_before_any_model_call(client, monkeypatch):

@@ -374,3 +374,29 @@ def test_the_page_keeps_what_the_user_typed_when_the_server_refuses() -> None:
     assert "draft_superseded" in body
     assert "answer_refused" in body
     assert "answer_failed_the_gates" in body
+
+
+def test_a_run_that_did_not_finish_says_why_in_the_list_too() -> None:
+    """A row that only says 「没有跑完」 is a dead end (ADR-138, ADR-216).
+
+    The list is where a failed run is first seen, so the summary carries the reason and
+    the page turns the machine code into a sentence. Neither half is optional: the server
+    keeping only a code, or the page printing the code as-is, both leave the reader with
+    `ai_not_configured` next to a failure label.
+    """
+
+    assert "error_message?: string | null" in API_TEXT
+    assert "error_message" in (REPO_ROOT / "backend" / "app" / "ai" / "research.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "RESEARCH_FAILURE_REASONS" in LAB_TEXT
+    assert "ai_not_configured" in LAB_TEXT
+    body = _lab_top_level("researchFailureText")
+    assert "RESEARCH_FAILURE_REASONS[message] ?? message" in body, (
+        "an unrecognised reason must be shown as it came, never replaced by a guess"
+    )
+    # Both places that print the reason go through the translation.
+    assert LAB_TEXT.count("researchFailureText(") >= 3
+    assert "{{ item.error_message }}" not in LAB_TEXT
+    assert "{{ run.error_message }}" not in LAB_TEXT

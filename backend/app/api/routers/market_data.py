@@ -228,7 +228,7 @@ def sync_market_data(payload: MarketDataSyncRequest, db: Session = Depends(get_d
     series = get_or_create_series(db, asset=asset, timeframe=payload.timeframe, source_id=source.id)
     report: dict[str, int] = {}
     inserted = upsert_bars(db, series, frame_to_bars(frame), report=report)
-    quality_status, quality = assess_bars_quality(frame)
+    quality_status, quality = assess_bars_quality(frame, timeframe=series.timeframe)
     series.quality_status = quality_status
     db.commit()
     return {

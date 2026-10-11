@@ -1436,7 +1436,12 @@ def recent_runs(db: Session, *, limit: int = 20) -> list[AIResearchRun]:
 
 
 def run_summary(run: AIResearchRun) -> dict[str, Any]:
-    """The list-view projection: no hypothesis body, no draft body."""
+    """The list-view projection: no hypothesis body, no draft body.
+
+    ``error_message`` is the exception to "no body": a failed run whose reason is only
+    visible after opening it makes the list a dead end -- the reader sees "失败" and has
+    to guess (ADR-138).
+    """
 
     return {
         "run_id": run.id,
@@ -1447,6 +1452,7 @@ def run_summary(run: AIResearchRun) -> dict[str, Any]:
         "attempts": run.attempts,
         "violation_count": len(run.violations_json or []),
         "warning_count": len(run.warnings_json or []),
+        "error_message": run.error_message,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
     }

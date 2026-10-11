@@ -60,3 +60,34 @@ def test_empty_frame_is_unknown() -> None:
     status, details = assess_bars_quality(pd.DataFrame(columns=["open", "high", "low", "close"]))
     assert status == "unknown"
     assert details["bars"] == 0
+
+
+def test_regular_weekly_bars_are_not_called_partial() -> None:
+    """周线的两根 K 线本来就隔 7 天：按日线的 5 天标准会把它误判成有洞（ADR-215）。"""
+
+    dates = pd.date_range("2024-01-01", periods=8, freq="7D", tz="UTC")
+    status, details = assess_bars_quality(_bars(dates), timeframe="1w")
+
+    assert status == "valid"
+    assert details["gaps"] == 0
+    assert details["gap_threshold_days"] == 10
+    # 同一份数据按日线口径仍然算有洞 —— 门槛是跟着周期走的，不是把标准降下来。
+    assert assess_bars_quality(_bars(dates), timeframe="1d")[0] == "partial"
+
+
+def test_a_missed_week_is_still_a_gap() -> None:
+    first = pd.date_range("2024-01-01", periods=6, freq="7D", tz="UTC")
+    second = pd.date_range("2024-03-01", periods=6, freq="7D", tz="UTC")
+    status, details = assess_bars_quality(_bars(first.append(second)), timeframe="1w")
+
+    assert status == "partial"
+    assert details["gaps"] == 1
+
+
+def test_an_explicit_threshold_still_wins_over_the_timeframe() -> None:
+    dates = pd.date_range("2024-01-01", periods=3, freq="7D", tz="UTC")
+
+    status, details = assess_bars_quality(_bars(dates), timeframe="1w", gap_threshold_days=1)
+
+    assert status == "partial"
+    assert details["gap_threshold_days"] == 1

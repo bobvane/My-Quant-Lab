@@ -3802,3 +3802,69 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 浏览器 UAT（`%TEMP%\mql-accept\g7-stale-tab-uat.mjs`，本机栈：uvicorn 127.0.0.1:8080（真入口 `app.api.main:app`、sqlite UAT 库、合成行情、`AI_RESEARCH_ASYNC=false`）+ 本地 OpenAI 兼容桩 127.0.0.1:8899（G7 模式：产一份「有省略」的草案）+ 镜像 vite 127.0.0.1:5173 + 无头 Chrome CDP 9222）⇒ **13/13 通过**。这一趟把「第二个标签页」演出来：页面先把草案 #22（v1.0）的八条问题渲染成 8 张表单卡（基线 `.card-quiet` 1 张 ⇒ 共 9 张），用户在 `execution.fee_bps` 填 `7`、在 `execution.slippage_bps` 填 `3`；随后**另一个客户端**用 #22 自己的哈希作答（只答 `execution.fee_bps = 5`）⇒ `201 previous_draft_id=22 → 23 version=2.0`；这时页面上那张仍属于 #22 的表单点提交 ⇒ **`409 draft_superseded`**，`error.details = {draft_id: 22, current_draft_id: 23}`；页面按新的分支给出中文说明（「已经不是这次研究的当前草案」「服务端一个字节都没有改」），并自己切到 #23、重新读出剩下的 **7** 条问题（已答的那条消失），用户填在仍然开放的那条上的 `3` **还在**；整趟结束后 #22 的哈希与版本仍是原样（`1.0`）、运行仍指 #23 且没有出现第三个草案、什么都没有被编译。走查里的 4xx 只有这一次**故意**制造的 409（`console errors: ["Failed to load resource: the server responded with a status of 409 (Conflict)"]`、`http errors: ["409 POST …/drafts/22/answers"]`），没有别的意外错误。
 
 - 一条要记住的 UAT 教训：**「用户手里的那张表单」和「服务端认为的当前版本」是两件事**。G7 的表单是按某一份草案的哈希生成的，而草案不可变，所以那张表单永远不会「过期」——它只会变成**属于过去某一版**的表单。凡是「提交时才能发现的前置条件」，都要在服务端显式比对「它属于哪一版」与「现在哪一版才算数」；只在客户端「加载时检查一次」的话，第二个标签页、返回键与深链会绕过它，而症状是静默的世系分叉，不是报错。
+
+## ADR-214：一笔都没赚过的时候，「平均每笔盈利」没有值
+
+- 背景：`backend/app/research/metrics.py` 的 `compute_metrics` 在算逐笔统计时把「空集合的均值」写成了 `0.0`：`metrics.avg_win = float(np.mean(wins)) if wins else 0.0`（`avg_loss` 同样）。同一段代码对 `profit_factor` 的处理却是对的——没有亏损单时它是 `None` 并附一条 note。于是同一张回测结果卡上出现两种口径：`win_rate = 0.0` 是真的（2 笔里 0 笔赢），而 `avg_win = 0.0` 说的是另一件事——「这个账户平均每笔赚 0 元」。前端把它当金额渲染（`frontend/src/format.ts:49-55` 的 `MONEY_METRICS`），读起来就是一个具体而错误的结论。这正是红线「未知不是 0」（ADR-007）要挡的东西，而 `Metrics` 数据类本来就写成 `avg_win: float | None = None`（`metrics.py:67`）——类型一直是允许 `None` 的，只是这条分支没走。
+
+- 决策：
+  1. `avg_win` 在没有盈利单时取 `None`，`avg_loss` 在没有亏损单时取 `None`；`win_rate` 不动（0.0 在这里是真话）。
+  2. 两种情形各追加一条 note（`no winning trades: average win is undefined` / `no losing trades: average loss and profit factor are undefined`），沿用 `compute_metrics` 既有的 `notes` 通道，和 `profit_factor` 的说明并在一起。
+  3. `profit_factor` 的取值与 note 合并进同一段判断，不再分成两个分支写两遍。
+  4. 前端不加任何新逻辑：`formatMetric(null)` 已经统一渲染 `—`（`frontend/src/format.ts:68`），所以页面上显示的是「没有这个读数」，不是 `0.00%`。
+  5. 新增两条测试：`backend/tests/test_metrics_finite.py::test_a_book_with_no_winning_trade_has_no_average_win` 与 `::test_a_book_with_no_losing_trade_has_no_average_loss`，每条都同时断言「真的 0 仍然是 0」（`win_rate == 0.0`、`profit_factor == 0.0`）与「没有值的字段是 None」，并穿过 `_finite_payload` 确认整份结果仍是可序列化的有限数字。
+
+- 理由：①**同一个字段不能有两种含义**：`win_rate` 的 0 是计数结果，`avg_win` 的 0 是金额断言，把后者写成 0 等于替用户编了一个他并没有得到的事实。②**同类读数已经这样处理**：`profit_factor`、`sharpe`（样本不足时）早就用 `None`，不一致本身就是缺陷；统一到「有样本才算，没有就没有」不需要新概念。③**契约没变**：`Metrics` 的字段类型一直是 `float | None`，这次只是让一条分支真的返回 `None`，所以没有改 API 形状、没有改前端类型、没有迁移。④**改在计算层而不是渲染层**：如果只在页面上把 `0.0` 显示成 `—`，任何别的消费者（实验对比、样本外汇总、导出的结果 JSON）拿到的仍然是假数字。⑤**顺带修掉了「note 只在没有亏损单时出现」的不对称**：既然 `avg_win` 也可以没有值，说明也必须覆盖那一种。
+
+- 影响与兼容：改 `backend/app/research/metrics.py`（+6/−4）、`backend/tests/test_metrics_finite.py`（+26）。`avg_win`/`avg_loss` 在「全是盈利单」「全是亏损单」「一笔都没有」这三种结果里从 `0.0` 变成 `null`，任何把 `null` 当作 0 消费的下游都会改显示成「未知」——那正是正确的显示。没有迁移、没有新字段、没有新依赖、没有改 `version.txt`。
+
+- 测试：`pytest tests/test_metrics_finite.py tests/test_market_data_quality.py tests/test_market_data_providers.py tests/test_backtest.py tests/test_backtest_status.py tests/test_ai_strategy_draft.py` ⇒ **97 passed in 21.34s**；契约守卫组（`test_ui_promises.py test_api_spec_truth.py test_frontend_contracts.py test_lab_journey_contracts.py test_migration_revisions.py test_examples.py`）⇒ **108 passed in 15.29s**；`ruff check app tests` ⇒ `All checks passed!`；`ruff format --check app tests` ⇒ `246 files already formatted`。
+
+- 浏览器 UAT：本项不新增交互，它改的是读数本身，所以没有单独跑一趟浏览器；同一批的 ADR-215/216 走了真实浏览器（见各自条目，`dead-ends-uat.mjs` 14/14）。这一项的可核对证据是 API 与渲染层两端的实测读数：全是盈利单的回测在 `compute_metrics` 上给出 `avg_loss is None`、`profit_factor is None` 且 note 里点名两者（`test_a_book_with_no_losing_trade_has_no_average_loss` 逐条断言），而 `frontend/src/format.ts:68` 对 `null`/`undefined` 一律返回 `—`——页面不会把它印成 `0.00`。
+
+- 一条要记住的 UAT 教训：**「哪一端返回 0」和「页面显示 0」是两个不同的问题**。这一项在 API 层修好之后，页面之所以自动跟着对，是因为它早就有一条「null 就是没有读数」的统一格式化；如果当初前端是各自 `?? 0`，这次后端改对了、页面反而会继续显示 0。
+
+## ADR-215：空洞要按这条 series 自己的节奏量
+
+- 背景：数据质量判定 `assess_bars_quality`（`backend/app/data/market_data_repo.py`）用的是一个写死的日历阈值 `GAP_THRESHOLD_DAYS = 5`（给日线留出周末与节假日），而调用方根本不告诉它这条 series 是什么周期——`backend/app/api/routers/market_data.py:231` 与 `backend/app/workers/tasks.py:111` 都只把 K 线帧递进去。周线的两根相邻 K 线本来就隔 7 天，于是**每一份正常的周线都是 `partial`**：实测同一批干净的 8 根周线（`7D` 等距）判成 `('partial', {'bars': 8, 'invalid_bars': 0, 'gaps': 7, 'gap_threshold_days': 5})`，同一批时间戳按 `1d` 口径同样是 `partial`（7 个洞）。这是一个高噪声的假警报：`partial` 是用户会在「数据」页读到的字段，而它把「数据源少给了几周」和「这本来就是周线」混成同一句话；`frontend/src/views/DataView.vue:49-53` 与 `frontend/src/views/ResearchView.vue:94` 还把「超过 5 天」写死在文案里，等于把这个错误口径当作事实讲给用户。
+
+- 决策：
+  1. 新增 `GAP_THRESHOLD_DAYS_BY_TIMEFRAME: dict[str, int] = {"1w": 10}`：比日线间隔更大的周期自己带阈值。周线的门槛取 10 天，即「缺一整周」才算出洞（错过一根是 7 天，正常；连着一周没有才是 14 天）。
+  2. 新增 `gap_threshold_days_for(timeframe: str | None) -> int`，认不出的周期（含 `None`）落回日线的 5 天；`assess_bars_quality(frame, *, timeframe=None, gap_threshold_days=None)` 在调用方没显式给阈值时用它。
+  3. 两个调用方都补上 `timeframe=series.timeframe`（`market_data.py` 传 `series.timeframe`，`workers/tasks.py` 传 `series.timeframe`）。
+  4. 阈值仍然出现在返回的 `details["gap_threshold_days"]` 里，页面与排障都能看到「这次是按什么标准量的」。
+  5. 两处文案（`DataView.vue` 的 `QUALITY_MEANING`、`ResearchView.vue` 的 `dataWarning`）把「超过 5 天」改成「超出这个周期正常节奏的空洞」——因为阈值已经不再是一个全局常数，写死数字就成了第二处会过期的真相。
+  6. 新增三条测试：`test_regular_weekly_bars_are_not_called_partial`（周线判 `valid`、`gap_threshold_days == 10`，且**同一份时间戳按 `1d` 仍然算 `partial`**——证明是「按周期量」而不是「把标准调松」）、`test_a_missed_week_is_still_a_gap`（缺一整周仍然是 `partial`、`gaps == 1`）、`test_an_explicit_threshold_still_wins_over_the_timeframe`（显式阈值优先，保持这个参数的既有含义）。
+
+- 理由：①**一个数字量的东西必须知道自己量的是什么**：把日线的日历标准套在周线上，产出的不是「更严」而是「错的」；判定要跟着 series 的节奏走。②**不能靠放宽全体阈值解决**：把 5 改成 10 会让日线漏掉真正的缺口，所以阈值按周期分表，日线口径一个字不动。③**必须有「洞还在」的对照组**：只加一条「周线不再报警」的测试，等于给「悄悄降标准」留了后门，所以另加一条缺整周仍判 `partial` 的测试，并让同一份数据在 `1d` 口径下仍算出洞。④**保留显式参数**：`gap_threshold_days` 原本就是一个可注入的参数，其它调用方（测试、将来的体检脚本）靠它指定口径，所以优先级定为「显式 > 周期 > 日线默认」。⑤**文案跟着机制走**：阈值已经不是一个常数，继续在页面上写「超过 5 天」会让用户在周线上读到与判定不符的解释——把具体数字换成「这个周期的正常节奏」，真相只剩代码一处。
+
+- 影响与兼容：改 `backend/app/data/market_data_repo.py`（+24/−3）、`backend/app/api/routers/market_data.py`（1 行）、`backend/app/workers/tasks.py`（2 行）、`frontend/src/views/DataView.vue`（2 行文案）、`frontend/src/views/ResearchView.vue`（1 行文案）、`backend/tests/test_market_data_quality.py`（+31）。日线及所有日内周期的判定与文案含义不变（阈值仍是 5）；周线的 `quality_status` 会从 `partial` 变成 `valid`（若数据本来就完整），这正是修的东西。没有迁移、没有新字段、没有新依赖。
+
+- 测试：同上 97 passed / 108 passed / ruff 干净。**这是纯计算函数的改动，本机就以函数返回值作证**：`pytest tests/test_market_data_quality.py` 里那三条新测试逐条断言 `('valid', gaps=0, threshold=10)`、`('partial', gaps=1)` 与「显式阈值优先」。
+
+- 浏览器 UAT：本项改的是判定与一句文案，没有新增交互，所以没有单独跑；同一批的 ADR-216 走了真实浏览器（`dead-ends-uat.mjs` 14/14）。页面上「数据质量」这一列的含义由 `docs/11` 与 `DataView.vue` 的 `QUALITY_MEANING` 解释，两处已在同一次改动里对齐。
+
+- 一条要记住的 UAT 教训：**「这个阈值是给哪个周期定的」必须写在参数上，不能藏在调用方的默认值里**。`assess_bars_quality` 的签名里原本只有 K 线帧，于是「5 天」悄悄变成了「所有周期的 5 天」；这类缺陷在日线上永远看不出来，只有在有人真的同步了一份周线数据时才会以假警报的形式出现。
+
+## ADR-216：失败和走错路都不能是一条死路
+
+- 背景：全局审计（`docs/35_OVERALL_COMPLETION_AUDIT.md`）查出两处「用户看到结论，却看不到原因、也没有下一步」的地方，它们同属一条规矩（ADR-138：点不动的按钮必须说明为什么）。**其一**：`frontend/src/main.ts` 的路由表只给 `/market` 留了一条重定向，其余任何拼错的地址都会落到空的路由出口上——侧栏还在、内容区一片空白，读者分不清「还在加载」「服务端出错」和「这个链接本来就是错的」，而且这种空白会一直留着（没有加载态会自己结束）。**其二**：研究列表（`GET /ai/research`）的摘要投影刻意「不含正文」，`backend/app/ai/research.py` 的 `run_summary` 因此没有 `error_message`；一次失败的研究在列表里只有「没有跑完」三个字，失败原因（例如 `ai_not_configured`）只存在于打开之后的详情里——而用户正是在列表上先看到「失败」的。同一个字段在详情页还是以机器码原文出现（`frontend/src/views/LabView.vue:2846-2854` 直接渲染 `run.error_message`），所以即便打开了，读到的也是 `ai_not_configured` 这种句子。
+
+- 决策：
+  1. 新增 `frontend/src/views/NotFoundView.vue`：把打开的地址原样写出来，点名排除「还在加载」与「服务端出错」两种误判（并说明「服务端没有收到过这个地址的请求」），给三条回去的路（研究首页 / 研究策略 / AI 研究实验室），并提示「如果是从页面上的按钮跳过来的，那个按钮是坏的」。它**不调用任何接口**——没有数据要读就没有会卡住的加载态。
+  2. `frontend/src/main.ts` 在路由表**最后**加兜底 `{ path: '/:pathMatch(.*)*', name: 'not-found', component: NotFoundView }`：放在最后，上面每一条真实路由照旧先命中。
+  3. `run_summary` 增加 `error_message`（`backend/app/ai/research.py`），并在 docstring 里说明它是「不含正文」这条规则的唯一例外及其理由（列表上只说「失败」等于死路）。
+  4. `frontend/src/api.ts` 的 `AIResearchRunSummary` 补上 `error_message?: string | null`。
+  5. `frontend/src/views/LabView.vue` 新增 `RESEARCH_FAILURE_REASONS`（机器码 → 中文句子，含 `ai_not_configured` 与 `ai_key_unreadable`）与 `researchFailureText()`（认不出的原因原样返回，绝不猜），列表行与详情段都经它渲染——所以「失败」旁边是「去「系统管理」里选一个可用的供应商、填好密钥，再重新提交一遍」，而不是 `ai_not_configured`。
+  6. `docs/12_API_SPEC.md` 的 `GET /ai/research` 那一行补上 `error_message` 并写明它为什么是唯一的例外；`docs/13_UI_UX.md` §1 新增一段说明兜底路由（带参数的路由也必须被本文件点名，ADR-114）。
+  7. 守卫：`backend/tests/test_frontend_contracts.py::test_a_wrong_address_gets_a_page_that_says_so`（兜底必须在路由表最后、页面必须点名误判、必须给三条回路、**不得**出现 `api.`）、`backend/tests/test_lab_journey_contracts.py::test_a_run_that_did_not_finish_says_why_in_the_list_too`（摘要类型必须带字段、页面必须有词表、认不出时必须原样返回、两处渲染都必须走 `researchFailureText`，且 `{{ item.error_message }}`/`{{ run.error_message }}` 这种直出不得存在）、`backend/tests/test_ai_strategy_draft.py` 里那条既有用例补断言（失败运行在列表里带着 `ai_not_configured`）。
+
+- 理由：①**空白不是一种状态**：一个既不说明也没出口的页面会被读成「系统坏了」，而它其实是「地址错了」——诊断信息本身就是修复的一部分。②**失败原因属于先被看到的那一层**：用户是在列表上看到「失败」的，把原因藏在打开之后，等于要求他在死路里再走一步；`run_summary` 的「不含正文」是为了不把假设与草案正文塞进列表，一条错误字符串不违背这条意图，所以它是被写明的例外。③**机器码不该出现在界面**：`ai_not_configured` 是服务端的词，翻成人话是显示层的职责，而且必须给下一步（去哪、做什么）——这也是 ADR-138 一贯的做法（`COMPILE_ERROR_REASONS`/`REJECTION_REASONS` 早就是这么做的）。④**认不出的原因原样显示**：失败原因也可能是异常原文（`f"{type(exc).__name__}: {exc}"`），一个查表失败绝不能变成「未知错误」把信息丢掉。⑤**兜底放在路由表最后并补文档**：`/market` 那条重定向已经证明「旧地址要接住」，而兜底页本身也是一个页面，所以它照样要进 `docs/13`、照样被守卫钉住，不能成为「没人知道存在的页面」。
+
+- 影响与兼容：新增 `frontend/src/views/NotFoundView.vue`（35 行）；改 `frontend/src/main.ts`（+5）、`frontend/src/api.ts`（+2）、`frontend/src/views/LabView.vue`（+22/−4）、`backend/app/ai/research.py`（+7/−5）、`docs/12_API_SPEC.md`（1 行）、`docs/13_UI_UX.md`（+2 行）；测试 +3 处。`GET /ai/research` 的响应多一个 `error_message` 键（成功运行时为 `null`），不加参数、不改状态码、无迁移、无新依赖；兜底路由只影响此前「无人认领」的地址，任何真实路由仍然优先。
+
+- 测试：`pytest tests/test_ui_promises.py tests/test_api_spec_truth.py tests/test_frontend_contracts.py tests/test_lab_journey_contracts.py tests/test_migration_revisions.py tests/test_examples.py` ⇒ **108 passed in 15.29s**（其中 `test_ui_promises.py::test_the_navigation_tree_is_the_shipped_navigation` 正是要求带参数的路由必须出现在 `docs/13` 的那条守卫，加兜底路由时它先红了一次，补文档后转绿——守卫按设计工作）；`pytest tests/test_metrics_finite.py tests/test_market_data_quality.py tests/test_market_data_providers.py tests/test_backtest.py tests/test_backtest_status.py tests/test_ai_strategy_draft.py` ⇒ **97 passed in 21.34s**；`ruff check app tests` ⇒ `All checks passed!`；`scripts\Invoke-FrontendChecks.ps1` ⇒ `== FRONTEND OK: typecheck + build passed ==`（628 modules transformed、`dist/assets/index-uPl1-LuZ.js` 1,640.90 kB / gzip 541.44 kB）。
+
+- 浏览器 UAT（`%TEMP%\mql-accept\dead-ends-uat.mjs`，本机栈：uvicorn 127.0.0.1:8080（真入口 `app.api.main:app`、sqlite UAT 库 `mql-g7.sqlite3`、合成行情）+ 镜像 vite 127.0.0.1:5173 + 无头 Chrome CDP 9222）⇒ **14/14 通过**。读数：打开 `/this-page-does-not-exist-7f31` ⇒ 页面上出现「这个地址没有对应的页面」、把 `this-page-does-not-exist-7f31` 原样写出来、写出「服务端没有收到过这个地址的请求」、侧栏十条仍在、三个按钮 `["回到研究首页","去「研究策略」","去「AI 研究实验室」"]` 都在，而且这一趟**没有发出任何 API 请求**（`http errors: []`）；点「回到研究首页」⇒ 地址回到 `/` 且仪表盘真的渲染出「① 我在研究什么」。失败那一条：用 `%TEMP%\mql-seed-failed-run.py` 往 UAT 库写一行服务端真会留下的失败记录（`status='failed'`、`error_message='ai_not_configured'`，与「没有配置 AI 供应商」时那一行同形），刷新 `/lab` ⇒ 列表里该行旁出现「AI 供应商还没配好：去「系统管理」里选一个可用的供应商、填好密钥，再把这次研究重新提交一遍。这次没有调用任何模型。」，页面文本里**没有** `ai_not_configured`；接口侧 `GET /ai/research?limit=100` 的该行确实带 `"error_message":"ai_not_configured"`（机器码留在 API，人话留给页面）；点开这一条 ⇒ 详情段显示同一句人话。整趟 `console errors: []`、`http errors: []`。
+
+- 一条要记住的 UAT 教训：**改了后端就必须重启跑 UAT 的那个服务端**。这一趟第一次跑是 11/14：前端 vite 是热更新的，所以「详情页说出人话」这条过了，而列表页那条一直失败——因为 8080 上那个 uvicorn 还是改动之前启动的进程，`GET /ai/research` 根本没返回 `error_message`。重启 uvicorn 之后再跑即 14/14。前端热更新会掩盖「后端没重启」，于是症状看起来像「前端有 bug」。（第二条：`airs`——本机 `pytest` 仍要带 `--basetemp`，否则 `%TEMP%\pytest-of-bobvane\pytest-current` 那个坏符号链接会让收尾抛 `PermissionError: [WinError 5]`，摘要行不打印。）

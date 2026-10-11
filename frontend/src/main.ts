@@ -12,6 +12,7 @@ import SettingsView from './views/SettingsView.vue'
 import StrategyDetailView from './views/StrategyDetailView.vue'
 import LabView from './views/LabView.vue'
 import ExperimentsView from './views/ExperimentsView.vue'
+import NotFoundView from './views/NotFoundView.vue'
 import './style.css'
 
 const router = createRouter({
@@ -34,6 +35,10 @@ const router = createRouter({
     // The nine-part strategy detail page: a detail route reached from /strategies, not
     // an eleventh navigation entry (docs/13_UI_UX.md §1 and §3, ADR-114).
     { path: '/strategy/:strategyId', name: 'strategy-detail', component: StrategyDetailView },
+    // A wrong address used to render an empty RouterView: no page, no explanation, and no
+    // way to tell "still loading" from "this link is wrong" (ADR-216). The catch-all is
+    // last on purpose so every real route above wins.
+    { path: '/:pathMatch(.*)*', name: 'not-found', component: NotFoundView },
   ],
 })
 

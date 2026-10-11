@@ -91,7 +91,7 @@ const dataWarning = computed(() => {
     return '这份数据里有坏 K 线（非正数或缺失的开高低收）。先修数据，结论才有意义。'
   }
   if (option.quality === 'partial') {
-    return `这份数据的质量是 partial：相邻两根 K 线之间有超过 5 天的空洞。结论只在数据真正覆盖的地方成立。`
+    return `这份数据的质量是 partial：相邻两根 K 线之间有超出这个周期正常节奏的空洞。结论只在数据真正覆盖的地方成立。`
   }
   if (option.quality === 'unknown') {
     return '这一系列还没有 K 线：可能是刚建档，或者上一次同步没有取到数据。'

@@ -35,6 +35,8 @@ v1.9.3 把原来那一页「行情与策略」按评审 §7 拆成三页：`/res
 
 唯一的例外是第 3 节的策略详情页：它有自己的一条路由 `/strategy/:strategyId`（`frontend/src/main.ts:34`），但**不占导航**——它从 `/strategies` 策略库每一行的「详情」进入，所以上面的十条仍然是十条。守卫把带参数的路由与导航路由分开核对：详情路由不得改变导航树的行数，但必须在本文件里被点名（ADR-114）。
 
+路由表最后一条是兜底：`/:pathMatch(.*)*` → `NotFoundView`（`frontend/src/main.ts`，ADR-216）。此前任何拼错的地址都会落到一个**空的** RouterView 上：侧栏还在、内容区一片空白，读者分不清是「还在加载」「服务端坏了」还是「这个链接本来就是错的」。现在它是一页正常的说明：把打开的地址原样写出来、点名排除上面两种误判、给三条回去的路（研究首页 / 研究策略 / AI 研究实验室）。它**不请求任何接口**（没有数据要读，也就没有会卡住的加载态），也不占导航条目——它是十条之外的那一条「路走错了」，守卫照旧要求它被本文件点名。
+
 侧栏底部、页脚与 `/settings` 的「系统信息 → 版本」三处在 v1.9.5 改成显示同一个构建期常量：`frontend/vite.config.ts` 从 `frontend/package.json` 读出 `version` 并 `define` 成 `__APP_VERSION__`，`frontend/src/App.vue` 与 `frontend/src/views/SettingsView.vue` 各自 `const APP_VERSION = __APP_VERSION__`（ADR-136）。此前侧栏读 `health?.version ?? '—'`、页脚回退到 `0.0.1`，后端响应还没回来的那一瞬就会在界面上写出一个不存在的版本号，切页时数字还会变；版本号是构建事实，不是运行时读数，所以它由构建决定并钉在源码上。
 
 ## 2. Dashboard

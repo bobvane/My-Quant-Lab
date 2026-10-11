@@ -1289,6 +1289,8 @@ export interface AIResearchRunSummary {
   attempts?: number
   violation_count?: number
   warning_count?: number
+  /** 失败的原因：列表页也给得出，否则「失败」在列表上是一条死路（ADR-216）。 */
+  error_message?: string | null
   created_at?: string | null
   completed_at?: string | null
 }

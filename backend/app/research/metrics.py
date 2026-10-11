@@ -217,15 +217,19 @@ def compute_metrics(
         wins = [p for p in pnl_values if p > 0]
         losses = [p for p in pnl_values if p < 0]
         metrics.win_rate = len(wins) / len(pnl_values)
-        metrics.avg_win = float(np.mean(wins)) if wins else 0.0
-        metrics.avg_loss = float(np.mean(losses)) if losses else 0.0
+        # `win_rate` is a real 0 here (0 of N trades won). The averages are not:
+        # "the mean of an empty set" has no value, and reporting 0.0 would read as
+        # "this account's average win is zero currency", which is a different -- and
+        # false -- statement (ADR-007: 未知 is not 0). Same rule as `profit_factor`.
+        metrics.avg_win = float(np.mean(wins)) if wins else None
+        metrics.avg_loss = float(np.mean(losses)) if losses else None
+        if not wins:
+            notes.append("no winning trades: average win is undefined")
+        if not losses:
+            notes.append("no losing trades: average loss and profit factor are undefined")
         gross_profit = float(sum(wins))
         gross_loss = abs(float(sum(losses)))
-        if gross_loss > 0:
-            metrics.profit_factor = gross_profit / gross_loss
-        else:
-            metrics.profit_factor = None
-            notes.append("no losing trades: profit factor is undefined")
+        metrics.profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
         metrics.expectancy = float(np.mean(pnl_values))
         metrics.max_consecutive_losses = _max_consecutive_losses(pnl_values)
     else:

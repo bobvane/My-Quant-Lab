@@ -46,6 +46,15 @@ OPEN_SLOTS = (
     "execution.slippage_bps",
 )
 
+#: The same assertions, run twice: in-memory SQLite always, and -- when the CI job
+#: offers a scratch PostgreSQL through ``TEST_POSTGRES_URL`` -- PostgreSQL on the
+#: real migration chain. The answer channel writes a JSON payload into a row of a
+#: dozen columns and appends an audit entry, which is exactly the shape that has
+#: twice shipped green here and failed on the deployed database: a column narrower
+#: than the value written to it (ADR-064, ADR-186). ``conftest.db_session`` decides
+#: the backend; nothing in this module knows the difference.
+pytestmark = pytest.mark.postgres
+
 
 def _entry_rule(**overrides: Any) -> dict[str, Any]:
     rule: dict[str, Any] = {

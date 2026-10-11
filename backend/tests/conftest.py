@@ -5,6 +5,15 @@ services. PostgreSQL-specific behaviour (triggers, timestamptz) is exercised by
 ``test_postgres_triggers.py`` when ``TEST_POSTGRES_URL`` is set, and by the
 Docker Compose smoke test in CI.
 
+A test module marked ``postgres`` asks for the stronger version of the same
+thing: when a scratch PostgreSQL is provided through ``TEST_POSTGRES_URL``
+(the CI job's ``postgres:16-alpine`` service), the *same* assertions run against
+PostgreSQL, on the real migration chain. On SQLite the marker does nothing, so
+one run keeps both backends' verdicts comparable (ADR-212). A too-narrow column
+and a dialect-only JSON comparison have both shipped green here while failing on
+the deployed NAS (ADR-064/ADR-186), which is why "the tests pass" has to mean
+"on both".
+
 The environment is pinned here, *before* any application module is imported,
 so the suite is hermetic: it must not depend on whatever happens to be in the
 developer's shell or ``.env``. Without this, a machine whose default market
@@ -40,15 +49,89 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from app.core.db import Base, get_db  # noqa: E402
 from app.domain import models as _models  # noqa: E402, F401  (register all tables)
 
+#: The scratch PostgreSQL of the CI job, when it is offered at all. Read after the
+#: imports because it only exists in the job that runs the ``postgres`` tests.
+POSTGRES_URL = os.environ.get("TEST_POSTGRES_URL")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "postgres: when TEST_POSTGRES_URL is set, run this test against that scratch "
+        "PostgreSQL instead of in-memory SQLite (same assertions, both backends)",
+    )
+
+
+@pytest.fixture(scope="session")
+def _postgres_engine():
+    """The scratch PostgreSQL, built by the real alembic chain, once per session.
+
+    ``None`` (and therefore in-memory SQLite everywhere) whenever the CI job did
+    not offer a database, which is every local run and the ordinary CI job.
+
+    The URL is handed to the application's own engine constructor and to alembic
+    the same way ``test_postgres_triggers.py`` does it: ``alembic/env.py`` reads
+    ``settings.database_url``, not the environment, so the setting is what moves
+    (ADR-098).
+    """
+
+    if not POSTGRES_URL:
+        yield None
+        return
+
+    from app.core import db as db_module
+    from app.core.config import settings
+
+    original_url = settings.database_url
+    settings.database_url = POSTGRES_URL  # type: ignore[assignment]
+    try:
+        from alembic.config import Config
+
+        from alembic import command
+
+        command.upgrade(Config("alembic.ini"), "head")
+        engine = db_module._build_engine(POSTGRES_URL)
+        try:
+            yield engine
+        finally:
+            engine.dispose()
+    finally:
+        settings.database_url = original_url  # type: ignore[assignment]
+
+
+def _empty_tables(session) -> None:
+    """Leave the scratch PostgreSQL as empty as a fresh ``:memory:`` would be.
+
+    SQLite hands every test its own database because the fixture creates one;
+    PostgreSQL is migrated once per session, so the rows are deleted instead --
+    in reverse dependency order, which is what ``sorted_tables`` already gives
+    (parents first, so it is walked backwards). ``alembic_version`` is not in the
+    metadata and is deliberately left alone.
+    """
+
+    for table in reversed(Base.metadata.sorted_tables):
+        session.execute(table.delete())
+    session.commit()
+
 
 @pytest.fixture()
-def db_session(tmp_path):
-    """In-memory SQLite shared across threads.
+def db_session(request, tmp_path, _postgres_engine):
+    """The database one test writes to: in-memory SQLite, or the scratch PostgreSQL.
 
-    ``StaticPool`` is required because Starlette runs sync endpoints in a worker
-    thread: with the default pool each thread would get its *own* empty
-    ``:memory:`` database.
+    ``StaticPool`` is required for the SQLite path because Starlette runs sync
+    endpoints in a worker thread: with the default pool each thread would get its
+    *own* empty ``:memory:`` database.
     """
+
+    if _postgres_engine is not None and request.node.get_closest_marker("postgres"):
+        session = sessionmaker(bind=_postgres_engine, autoflush=False, expire_on_commit=False)()
+        try:
+            _empty_tables(session)
+            yield session
+        finally:
+            session.rollback()
+            session.close()
+        return
 
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",

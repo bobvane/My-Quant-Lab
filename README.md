@@ -9,6 +9,22 @@
 
 ---
 
+## 先读哪几份文档
+
+按这个顺序读就够了，**不需要**从历史版本、修补记录或审计报告开始。
+
+| 顺序 | 文档 | 内容 |
+|---|---|---|
+| 1 | 本文件 `README.md` | 部署步骤、版本与发布节奏、安全与暴露面 |
+| 2 | [docs/PROJECT_OVERVIEW.md](./docs/PROJECT_OVERVIEW.md) | 项目是什么、能做什么、当前可用状态、已知限制 |
+| 3 | [docs/DEVELOPMENT_PLAN.md](./docs/DEVELOPMENT_PLAN.md) | 当前开发计划：已完成 / 未完成 / 未来计划 / 需要你决定的事项 |
+| 4 | [docs/DEVELOPMENT_GUIDE.md](./docs/DEVELOPMENT_GUIDE.md) | 目录与模块、开发测试与发布流程、数据库迁移、安全边界、冻结契约 |
+| 5 | [docs/USER_MANUAL.md](./docs/USER_MANUAL.md) | **零基础使用手册**：部署、更新、日常操作、排错、备份 |
+| 6 | 与当前任务直接相关的设计与契约 | 例如 [docs/04_STRATEGY_DSL.md](./docs/04_STRATEGY_DSL.md)、[docs/12_API_SPEC.md](./docs/12_API_SPEC.md)、[docs/13_UI_UX.md](./docs/13_UI_UX.md)、[docs/29_STRATEGY_COMPILER_CONTRACT.md](./docs/29_STRATEGY_COMPILER_CONTRACT.md)（**冻结**） |
+| 7 | 历史记录 | [docs/17_DECISIONS.md](./docs/17_DECISIONS.md)（ADR 决策日志）、`docs/3x` 审计与验收报告、[docs/README.md](./docs/README.md)（开发文档包索引）——只在需要追溯历史决策时读 |
+
+---
+
 ## 五条不可逾越的红线
 
 | # | 红线 | 实现方式 |
@@ -99,7 +115,7 @@ bash scripts/preflight.sh --compose /vol1/1000/Docker/My-Quant-Lab/docker-compos
 默认 `MQL_VERSION=latest`（每次 pull 都是最新发布版）。想锁定版本防意外升级：
 
 ```ini
-MQL_VERSION=v0.9.0
+MQL_VERSION=v2.7.0
 ```
 
 ### 访问
@@ -108,12 +124,12 @@ MQL_VERSION=v0.9.0
 - **API 文档**：http://<NAS-IP>:8081/docs（经 `quantlab-app` 容器内的 nginx 代理；API 直连端口默认只绑本机）
 - **存活探针**：http://<NAS-IP>:8081/healthz
 
-首次进入「行情与策略」页面：
+首次进入系统（页面逐步说明见 [docs/USER_MANUAL.md](./docs/USER_MANUAL.md)）：
 
-1. 点击 **同步日线数据**（`.env.example` 默认 `MARKET_DATA_PROVIDER=yahoo_finance`，真实行情、无需 API Key；想用演示代码 `DEMO-AAPL` 离线跑通全流程，就把 `.env` 改成 `synthetic`）
-2. 编辑左侧 DSL → **校验 DSL** → **创建策略与版本**
-3. 回到「研究仪表盘」→ **立即扫描** 查看信号
-4. 到「回测实验室」运行回测并查看权益曲线
+1. 打开左侧「**数据**」→ **同步行情**（`.env.example` 默认 `MARKET_DATA_PROVIDER=yahoo_finance`，真实行情、无需 API Key；想用演示代码 `DEMO-AAPL` 离线跑通全流程，就把 `.env` 改成 `synthetic`）
+2. 打开「**我的策略**」→ 编辑策略定义（可粘贴仓库里的 `examples/strategies/ema-cross-trend.json`）→ **校验 DSL** → **创建策略与版本**
+3. 打开「**研究首页**」看今天有什么需要注意的；要手动走一次研究就用「**研究策略**」的四步，要「从一句想法开始」就用「**AI 研究实验室**」
+4. 打开「**回测**」看结论、风险与曲线；对比不同配置用「**实验**」；试跑策略用「**模拟验证**」和「**信号**」
 
 排查问题：
 

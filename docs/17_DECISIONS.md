@@ -3889,3 +3889,45 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 浏览器 UAT：本项不改变任何用户可见的交互或页面读数（`latest_closed_bar_time` 还没有页面消费者，夜间任务的返回值只进日志与任务结果），所以没有单独跑浏览器；同一批提交里的 ADR-216 跑了真实浏览器（`dead-ends-uat.mjs`，14/14 通过）。
 
 - 一条要记住的 UAT/bug 教训：**「函数名承诺的事」和「它读的字段」必须分开核对**。`latest_closed_bar_time` 之所以一直没出事，只是因为没人调用它——一个零调用者的错误函数在审计里最容易被判成「无影响」而放过，可它正是未来某个人会信任的那个名字。
+
+## ADR-218：「可复现」要在 CI 里真的跑两次，而不是只断言它跑起来了
+
+- 背景：全项目结构审计（`docs/35_OVERALL_COMPLETION_AUDIT.md`）的第 13 条查出：容器冒烟测试的 `Smoke 4/5: run backtest`（`.github/workflows/ci.yml:422`）只断言 `d['status']=='completed'`（`:438`），从头到尾**没有读过 `result_hash`**。而 `result_hash` 是五条红线里「回测可复现」的唯一机器证据，它的定义就在代码里：`backend/app/research/engine.py:519-532` 把 `{strategy_version, dataset_hash, engine_version, feature_version, parameters, metrics, trade_count}` 用 `sort_keys=True` 序列化后取 sha256——刻意**不含**时间戳、不含 run id、不含任何一次性的东西。也就是说，「同一个请求在这个容器里跑两次，必须得到同一个 hash」是这条实现自己许下的承诺，而它从来没有被任何自动化验证过：CI 只证明了「它算出了一个 hash」，没有证明「它算出的 hash 是同一个」。
+
+- 决策：
+  1. 在 `Smoke 4/5: run backtest` 步骤里，第一次 `POST /backtests` 之后把 `result_hash` 读出来，并断言它的形状：是 `str`、长度 64、且每个字符都属于 `0123456789abcdef`（读到 `null`、读到空串、读到别的长度都算失败）。
+  2. 用**逐字相同**的请求体再发一次 `POST /backtests`（同样的 `strategy_version_id`、`symbol`、`timeframe`），第二次同样要求 HTTP 200，并同样先断言 `status=='completed'`。
+  3. 断言两次的 `result_hash` 完全相等；不相等就把两个值都打印出来并 `exit 1`。
+  4. 两次请求都沿用这段步骤里既有的失败诊断（HTTP 不是 200 时打印 `quantlab-app` 的最近 200 行日志）。
+  5. 不改任何应用代码、不加步骤、不加服务、不改超时。
+
+- 理由：①**「跑起来了」与「可复现」是两件事**：`status=='completed'` 只说明这次回测没抛异常，而 `docs/07_BACKTEST_ENGINE.md` 要求的可复现是**跨次相等**，必须有一个真的比较动作才能叫验证过。②**断言形状，不只是存在**：一个 `status=='completed'` 的运行完全可能带着 `result_hash=null`（例如未来某条分支忘了写），先钉住「64 位小写十六进制」才能让下一步的比较有意义，而不是让两个 `None` 互相「相等」地通过。③**比较必须用同一个请求**：另造一个「应该等价」的请求会把两个变量一起改掉，只有逐字相同的请求体才把「输入相同」这件事固定住。④**第二次也要 `status=='completed'`**：否则一次失败的第二次运行会以「两次都是 null」的形态假通过。⑤**放在既有步骤里**：可复现性的验证成本是「同一份合成数据上的第二次回测」，秒级；新增一个 job 或一个新服务只会让这条守卫更容易被跳过。
+
+- 影响与兼容：只改 `.github/workflows/ci.yml` 的 `Smoke 4/5: run backtest` 步骤（+20 行，多一次 POST `/backtests`），应用代码、接口契约、数据库 schema、迁移链、依赖、`version.txt` 全部未动。多出的那一次回测跑在同一个容器里、同一份演示数据上（`DEMO-AAPL`/`1d`），不新增 job、不新增服务、不改超时与并发设置。步骤名未变，所以 `backend/tests/test_app_container.py` 按名字取步骤的方式不受影响。
+
+- 测试：本机**没有 Docker**（也没有 WSL），所以这条断言本身只能在 CI 里被执行——本机做到的是两件事：其一，`python -c "yaml.safe_load(...)"` 解析改后的工作流 ⇒ 合法（`jobs=4 steps=35`，`Smoke 4/5` 步骤仍在）；其二，`pytest tests/test_app_container.py tests/test_release_pipeline.py` ⇒ **19 passed in 10.60s**（这两个模块按步骤名与内容解析 `ci.yml`）；另跑 `ruff check app tests` ⇒ `All checks passed!`。这条守卫**实际通过与否以 CI 的 `docker compose smoke test` job 为准**，最终报告会如实区分「本地核对」与「CI 实测」。
+
+- 浏览器 UAT：本项不改任何用户可见的交互或页面读数（只有 CI 的一个步骤多了一次回测请求），所以没有单独跑浏览器。
+
+- 一条要记住的教训：**「验证了什么」和「验证了它的存在」不是同一件事**。审计里最容易漏的一类缺口，就是断言只覆盖「对象存在」（非空、非 null、状态对），而对象里那个真正承载承诺的字段（`result_hash`、`hash`、`dataset_hash`）从未被读过；把它们读出来并**比较**，成本往往只有几行。
+
+## ADR-219：迁移链要能从 head 一路退回 base，再走上来
+
+- 背景：全项目结构审计的第 14 条：`backend/tests/test_migrations_sqlite.py:45` 只跑 `command.upgrade(..., "head")`，CI 与容器入口也只会往上走，于是 21 个 `downgrade()` 从来没有被执行过一次。补上这条守卫时它立刻红了一次，断点在 `backend/alembic/versions/0009_drop_dead_schema.py:58-65`：这个 revision 的 `upgrade()` 用 `op.batch_alter_table("backtest_runs", recreate="auto")` 删掉 `parameters_id`（`:45-46`），而 `downgrade()` 却用**非 batch** 的 `op.add_column` + `op.create_foreign_key` 把它加回去。SQLite 的 `SQLiteImpl.add_constraint` 对非 batch 的加约束直接 `raise NotImplementedError("No support for ALTER of constraints in SQLite dialect. Please refer to the batch mode feature...")`，所以降级走到 `0009 → 0008` 时抛异常，链子断在那里。PostgreSQL 支持 `ALTER TABLE ... ADD CONSTRAINT`，所以生产回滚从来不受伤——这正是它一直没被发现的原因：坏掉的只有「我们真的用来跑测试的那个方言」。
+
+- 决策：
+  1. 把 `0009_drop_dead_schema.downgrade()` 里「加列 + 加外键」两步放进同一个 `with op.batch_alter_table("backtest_runs", recreate="auto") as batch:`（`create_foreign_key` 用 `batch.create_foreign_key`）。`recreate="auto"` 保留原意：PostgreSQL 上仍然发两条普通 `ALTER TABLE`，行为与改动前逐字相同；只有 SQLite 才走 copy-and-move 重建。
+  2. 新增 `backend/tests/test_migrations_sqlite.py::test_every_revision_can_be_walked_back_down_to_base`：从 head 开始，按 `ScriptDirectory.walk_revisions()` 的顺序**逐条** `command.downgrade(config, "-1")`，每一步之后读 `alembic_version` 并断言它正好落在下一级 revision；最后一步断言版本表里没有任何行、且应用表（以 `strategy_drafts` 为样本）已经不存在。
+  3. 走到底之后再 `command.upgrade(config, "head")`，断言版本表回到 head、应用表回来了——一条只能退不能进的链不算回滚路径。
+  4. 这个测试用 `tmp_path` 上的独立 SQLite 文件，并在运行期间临时替换 `settings.database_url`（该模块的既有 fixture 早就是这么做的），跑完恢复原值；同时断言 `len(revisions) >= 21` 与 `head == revisions[0]`，这样「链子被换掉或走空」也会失败。
+  5. 不改任何 `revision` / `down_revision` / 迁移编号 / head。
+
+- 理由：①**升级方向被反复验证，降级方向零次**：一条只会在「某个凌晨需要回滚」时才被走的路，不能靠「读起来对」；审计里它是最难被人工发现的一类，因为没有任何红灯。②**断在 SQLite 而不是 PostgreSQL，恰恰因为它从没被执行**：守卫要覆盖的方言是**我们真的用来跑测试的那个**；生产方言由 CI 的 PostgreSQL job（`backend/tests/test_postgres_triggers.py:79` 的 `command.downgrade(cfg, "base")`）覆盖，两个方言合起来才是完整答案。③**逐条 `-1` 而不是一次 `base`**：一次到底会把「哪一级坏」藏起来，逐条走能让失败信息直接指向那个 revision，也让每一步的落点都被断言过。④**最后必须再走上来**：回滚路径的真实用法是「退下去、修好、再上来」，只验一个方向等于只验一半。⑤**`recreate="auto"` 而不是 `recreate="always"`**：生产库不该为了修测试方言的可逆性而被整表重建，PostgreSQL 的 DDL 必须逐字不变。
+
+- 影响与兼容：改 `backend/alembic/versions/0009_drop_dead_schema.py`（只动 `downgrade()`，+13/−9）、`backend/tests/test_migrations_sqlite.py`（新增 1 个测试，+66 行，文件共 207 行）。**迁移版本图一个字没改**（revision / down_revision / head / 迁移号全未动），所以 `backend/tests/test_migration_revisions.py` 的单 head 与 revision-id 长度守卫仍然成立；PostgreSQL 上的 DDL 与改动前相同（`recreate="auto"` 只在方言不支持时才重建）；只有「在 SQLite 上回退经过 0009」这一条路会走 copy-and-move。无新依赖、无新迁移、不改 `version.txt`、不碰 NAS。
+
+- 测试：`pytest tests/test_migrations_sqlite.py tests/test_migration_revisions.py` ⇒ **11 passed in 14.57s**（其中新增的那条从 head 逐条退到 base 再升回 head，全程 21 次 downgrade + 1 次 upgrade）；迁移相关整组 `pytest tests/test_migrations_sqlite.py tests/test_migration_revisions.py tests/test_postgres_triggers.py tests/test_source_snapshot_migration.py tests/test_strategy_experiments_migration.py` ⇒ **32 passed, 5 skipped in 20.70s**（5 个 skip 都是需要 `TEST_POSTGRES_URL` 的 PostgreSQL 用例，本机没有 PostgreSQL）；`ruff check app tests` ⇒ `All checks passed!`；`ruff format --check tests/test_migrations_sqlite.py` ⇒ `1 file already formatted`（`alembic/versions/0009_drop_dead_schema.py` 在改动**之前**就已经不是 `ruff format` 的形状，`alembic/` 也不在 CI 的 ruff 范围内，所以没有顺手重排它，避免无关的格式化噪声）。
+
+- 浏览器 UAT：本项不改变任何用户可见的交互或页面读数（迁移链只在启动与回滚时执行），所以没有单独跑浏览器。
+
+- 一条要记住的教训：**「没跑过的方向」和「不存在的功能」一样危险，但它看起来更安全**。21 个 `downgrade()` 全部写着、全部可读、全部「看起来对称」，而其中一条在真实方言上根本执行不了；把守卫写出来（而不是读一遍代码）是唯一能发现它的方式——这条守卫第一次运行就红了，且红在第一处断点。**第二条**：修 SQLite 的可逆性时用 `recreate="auto"`，是为了让「修测试方言」这件事对生产方言零影响；迁移文件里任何 `recreate="always"` 的顺手上瘾都会让生产回滚变成整表重建。

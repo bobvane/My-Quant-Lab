@@ -55,14 +55,20 @@ def downgrade() -> None:
         batch.add_column(
             sa.Column("supports_structured_output", sa.Boolean(), nullable=False)
         )
-    op.add_column("backtest_runs", sa.Column("parameters_id", sa.Integer(), nullable=True))
-    op.create_foreign_key(
-        "fk_backtest_runs_parameters_id",
-        "backtest_runs",
-        "strategy_parameters",
-        ["parameters_id"],
-        ["id"],
-    )
+    # The column and its foreign key go back in one batch step. ``create_foreign_key``
+    # cannot run as a plain ALTER on SQLite at all (``SQLiteImpl.add_constraint`` raises
+    # NotImplementedError), which made this the one revision the chain could not walk
+    # back down on SQLite while ``recreate="auto"`` kept PostgreSQL on plain ALTER TABLE
+    # statements. See ``tests/test_migrations_sqlite.py``: the whole chain is now walked
+    # down to base and up again.
+    with op.batch_alter_table("backtest_runs", recreate="auto") as batch:
+        batch.add_column(sa.Column("parameters_id", sa.Integer(), nullable=True))
+        batch.create_foreign_key(
+            "fk_backtest_runs_parameters_id",
+            "strategy_parameters",
+            ["parameters_id"],
+            ["id"],
+        )
 
     op.create_table(
         "features",

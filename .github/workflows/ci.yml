@@ -436,6 +436,26 @@ jobs:
             exit 1
           fi
           python3 -c "import json;d=json.load(open('/tmp/backtest.json'));assert d['status']=='completed', d"
+          # ADR-007 / ADR-218：可复现不是「跑起来了」，而是「同样的输入在这个容器里
+          # 得到同一个 result_hash」。第一次只检查它真的落下来，第二次用同样的请求
+          # 重跑一遍，两次必须一模一样。
+          HASH1=$(python3 -c "import json;d=json.load(open('/tmp/backtest.json'));h=d.get('result_hash');assert isinstance(h,str) and len(h)==64 and all(c in '0123456789abcdef' for c in h), d;print(h)")
+          echo "result_hash = $HASH1"
+          code=$(curl -sS -o /tmp/backtest2.json -w '%{http_code}' -X POST "$API/backtests" \
+            -H 'Content-Type: application/json' \
+            -d "{\"strategy_version_id\": $VID, \"symbol\": \"DEMO-AAPL\", \"timeframe\": \"1d\"}")
+          echo "HTTP $code (second run)"
+          if [ "$code" != "200" ]; then
+            echo "--- api logs ---"
+            docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env.example logs --no-color --tail 200 quantlab-app
+            exit 1
+          fi
+          HASH2=$(python3 -c "import json;d=json.load(open('/tmp/backtest2.json'));assert d['status']=='completed', d;print(d['result_hash'])")
+          echo "result_hash (second run) = $HASH2"
+          if [ "$HASH1" != "$HASH2" ]; then
+            echo "the same backtest request produced two different result hashes: $HASH1 vs $HASH2"
+            exit 1
+          fi
 
       - name: "Smoke 5/5: scan signals"
         env:

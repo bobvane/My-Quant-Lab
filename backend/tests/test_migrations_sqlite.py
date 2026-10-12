@@ -137,3 +137,71 @@ def test_sqlite_column_type_is_integer(migrated_session: Session) -> None:
     ).all()
     assert rows, "resource_events.id not found"
     assert rows[0][1].upper() == "INTEGER", rows
+
+
+def test_every_revision_can_be_walked_back_down_to_base(tmp_path) -> None:
+    """The chain must be reversible, not only forward (ADR-218).
+
+    ``upgrade`` is the only direction anything has ever run: CI, the container
+    entrypoint and this file all start at base and walk up. A broken ``downgrade()``
+    therefore cannot surface before the night someone has to roll a deployment back.
+    This walks the whole chain down one revision at a time — the same step a human
+    would take — checking after each step that ``alembic_version`` landed on the
+    revision below, and that the last step really left no application tables behind.
+    Then it walks back up to head, because a chain that can go down but not up again
+    is not a rollback path.
+    """
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import create_engine, inspect
+
+    from alembic import command
+    from app.core.config import settings
+
+    config = Config("alembic.ini")
+    script = ScriptDirectory.from_config(config)
+    head = script.get_current_head()
+    # ``walk_revisions()`` starts at the head and walks down to the base revision.
+    revisions = [revision.revision for revision in script.walk_revisions()]
+    assert head == revisions[0], "walk_revisions() no longer starts at the head"
+    assert len(revisions) >= 21, f"the chain shrank to {len(revisions)} revisions"
+
+    url = f"sqlite+pysqlite:///{tmp_path / 'rollback.sqlite3'}"
+    original_url = settings.database_url
+    settings.database_url = url  # type: ignore[assignment]
+    engine = create_engine(url, future=True)
+    try:
+        command.upgrade(config, "head")
+        assert inspect(engine).has_table("strategy_drafts")
+
+        for index, revision in enumerate(revisions):
+            command.downgrade(config, "-1")
+            with engine.connect() as connection:
+                landed = (
+                    connection.execute(text("SELECT version_num FROM alembic_version"))
+                    .scalars()
+                    .all()
+                )
+            expected = revisions[index + 1] if index + 1 < len(revisions) else None
+            if expected is None:
+                assert landed == [], f"leaving {revision} left alembic_version at {landed}"
+                assert not inspect(engine).has_table("strategy_drafts"), (
+                    "the base revision still leaves application tables behind"
+                )
+            else:
+                assert landed == [expected], (
+                    f"leaving {revision} landed on {landed}, expected {expected}"
+                )
+
+        # And back up again: every revision's upgrade() must still work after a
+        # full round trip, not just from a pristine database.
+        command.upgrade(config, "head")
+        assert inspect(engine).has_table("strategy_drafts")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == head
+            )
+    finally:
+        engine.dispose()
+        settings.database_url = original_url  # type: ignore[assignment]

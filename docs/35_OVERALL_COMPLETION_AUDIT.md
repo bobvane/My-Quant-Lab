@@ -78,7 +78,8 @@
 | 「可复现」从来没被真的验证过 | CI 的 `Smoke 4/5` 只断言 `status=='completed'`，`result_hash` 从未被读过、从未被比较过 | 已修：同一请求重跑一遍，两次 `result_hash` 必须相等（ADR-218，提交 `4da5b205e`） |
 | 迁移链的降级方向从未执行过 | `test_migrations_sqlite.py` 只跑 `upgrade`，CI 与容器入口也只往上走 ⇒ 21 个 `downgrade()` 零覆盖 | 已修：全链逐条降级到 base 再升回 head；补守卫后立刻在 `0009` 断掉（见下条） |
 | `0009` 的降级在 SQLite 上执行不了 | `downgrade()` 用非 batch 的 `op.create_foreign_key`，而 `SQLiteImpl.add_constraint` 对非 batch 加约束直接 `NotImplementedError`（`upgrade()` 对同一张表用的是 `batch_alter_table`） | 已修：加列 + 加外键放进同一个 `batch_alter_table(recreate="auto")`（ADR-219，提交 `4da5b205e`） |
-| 读一条实验失败时，屏幕上还留着上一条的读数 | `LabView.vue:2241 openExperimentById` 只有 404 分支清 `openExperiment`，其他失败（500 / 后端没起来 / 代理 502 / 网络断）只写一句红字 ⇒ 红字下面是上一条的名称、指标、敏感性网格与原始 JSON | 已修：失败分支也清显示层、空态改说这次没读出来（ADR-220，本批） |
+| 读一条实验失败时，屏幕上还留着上一条的读数 | `LabView.vue:2241 openExperimentById` 只有 404 分支清 `openExperiment`，其他失败（500 / 后端没起来 / 代理 502 / 网络断）只写一句红字 ⇒ 红字下面是上一条的名称、指标、敏感性网格与原始 JSON | 已修：失败分支也清显示层、空态改说这次没读出来（ADR-220，提交 `4d11d82a3`） |
+| 同一个信号可以重复成交（部分平仓能反复扣仓位） | `execute_signal` 不按 `signal_id` 去重，`paper_orders` 上也没有唯一约束 ⇒ 重复 POST 再成交一次、再建一条 `PaperTrade`；既有测试的第二次 422 其实是「中间把账户关了」造成的假象 | 已修：唯一索引 `uq_paper_order_signal`（迁移 `0022`，升级前预检重复且不删任何行）+ 幂等返回第一次的原订单、零写入；并发输家撞索引或撞业务校验都回到赢家订单（ADR-221，提交 `b19194027`） |
 
 ---
 
@@ -91,6 +92,7 @@
 | `69c7b1258` | ADR-217 | 「最新已收盘」真读已收盘 K 线；夜间同步报出刷新几根 |
 | `4da5b205e` | ADR-218/219 | CI 里真的跑两次回测比 `result_hash`；迁移链能逐条退回 base 再走上来（并修好 `0009` 在 SQLite 上的降级断点） |
 | `4d11d82a3` | ADR-220 | 读实验失败时不再留着上一条实验的读数：失败分支清显示层、空态改说这次没读出来（守卫 + 浏览器 UAT 10/10） |
+| `b19194027` | ADR-221 | 模拟执行有了幂等键：`paper_orders.signal_id` 唯一索引（迁移 `0022`）+ 重复执行零写入地返回第一次的原订单；并发、重试、部分平仓都有测试，两个方言行为一致 |
 
 每个提交只包含本任务明确产生的文件；用户自有文档与 `AGENTS.md`/`docs/agents/` 全程留在工作区未提交。每次提交前都比对了开始时的 sha256 指纹快照（`%TEMP%\mql-audit-workspace-state.txt`），六个用户文件指纹一致。
 
@@ -110,9 +112,14 @@
 | `pytest tests/test_migrations_sqlite.py tests/test_migration_revisions.py tests/test_postgres_triggers.py tests/test_source_snapshot_migration.py tests/test_strategy_experiments_migration.py` | 32 passed, 5 skipped（5 个 skip 需 `TEST_POSTGRES_URL`） |
 | `pytest tests/test_app_container.py tests/test_release_pipeline.py`（`ci.yml` 的步骤解析守卫） | 19 passed |
 | `pytest tests/test_lab_journey_contracts.py`（ADR-220 新增 1 个守卫，本批） | 25 passed |
+| `pytest tests/test_paper_idempotency.py`（ADR-221 新建，含 4 线程并发、部分平仓重复调用、失败重试、`signal_id` 为 NULL 的手工订单） | 12 passed |
+| paper 回归组（`test_paper_engine.py` `test_paper_fills.py` `test_paper_trade_provenance.py` `test_paper_isolation.py` `test_paper_idempotency.py` `test_paper_account_binding.py` `test_paper_equity_curve.py` `test_paper_performance.py` `test_signal_semantics.py` `test_signal_list_filters.py`） | 127 passed |
+| `pytest tests/test_migrations_sqlite.py tests/test_migration_revisions.py`（含 ADR-221 的两个迁移用例：索引在且唯一、存量重复时迁移拒绝执行且一行不删） | 34 passed, 5 skipped |
+| `pytest tests/test_api_spec_truth.py tests/test_ui_promises.py`（改 `docs/12` 之后再跑一遍） | 17 passed |
+| `pytest tests/test_frontend_contracts.py`（ADR-221 新增 1 个守卫） | 56 passed |
 | `python -c "yaml.safe_load(ci.yml)"`（改后工作流仍可解析） | 合法：`jobs=4 steps=35`，`Smoke 4/5` 步骤仍在 |
-| 契约守卫组（`test_ui_promises.py test_api_spec_truth.py test_frontend_contracts.py test_lab_journey_contracts.py test_migration_revisions.py test_examples.py`） | 108 passed |
-| `ruff check app tests` / `ruff format --check app tests` | All checks passed! / 246 files already formatted |
+| 契约守卫组（`test_ui_promises.py test_api_spec_truth.py test_frontend_contracts.py test_lab_journey_contracts.py test_migration_revisions.py test_examples.py`，含 ADR-220/221 新增的两条守卫） | 110 passed |
+| `ruff check app tests` / `ruff format --check app tests` | All checks passed! / 247 files already formatted |
 | `scripts\Invoke-FrontendChecks.ps1`（typecheck + build） | FRONTEND OK |
 
 **浏览器（本机栈：uvicorn `app.api.main:app` + 镜像 vite + AI 桩 + CDP Chrome）：**
@@ -122,10 +129,11 @@
 | `%TEMP%\mql-accept\g7-stale-tab-uat.mjs`（ADR-213） | **13/13 通过** |
 | `%TEMP%\mql-accept\dead-ends-uat.mjs`（ADR-216） | **14/14 通过** |
 | `%TEMP%\mql-accept\experiment-read-failure-uat.mjs`（ADR-220，本批） | **10/10 通过** |
+| `%TEMP%\mql-accept\paper-idempotency-uat.mjs`（ADR-221，本批） | **23/23 通过**（证据 `%TEMP%\mql-adr221-uat.json`；含「同一个信号点两次只成交一次」、页面说明这次没有新成交、直接 POST 手工订单仍被索引拒绝、迁移在有数据的 UAT 库上跑过 0021→0022） |
 
-**CI（GitHub Actions，`ci.yml` 四个 job）：**`3f17d2550` 的 run `38166968679` 四个 job 全绿；`76df625e0` 的 run `38166635700` 全绿；`d882b80c6` 的 run `38187803501` 四个 job 全绿（`frontend build` / `celery redelivery` / `backend tests + lint`（含 `Ruff lint`、`Run tests`、`Run PostgreSQL regression tests`、**`Run G7 draft-answer tests on PostgreSQL`**）/ `docker compose smoke test`（含 `Smoke 4/5: run backtest` 的两次 `result_hash` 比较与 ADR-219 之后的启动））；`4d11d82a3`（ADR-220 的代码提交）的 run `38188345692` 四个 job 全绿。`93974cace` 是 `d882b80c6` 之后补记 ADR-218/219 读数的那次 docs 提交。
+**CI（GitHub Actions，`ci.yml` 四个 job）：**`3f17d2550` 的 run `38166968679` 四个 job 全绿；`76df625e0` 的 run `38166635700` 全绿；`d882b80c6` 的 run `38187803501` 四个 job 全绿；`4d11d82a3`（ADR-220 的代码提交）的 run `38188345692` 四个 job 全绿；`b19194027`（ADR-221）的 run `38199009460` 四个 job 全绿，逐步读数：Ruff lint `All checks passed!`、Ruff format check `247 files already formatted`、`Run tests`（SQLite 全量）**1786 passed, 6 skipped in 306.96s**、`Run PostgreSQL regression tests` 5 passed（`postgres tests: localhost:5433/quantlab_test`）、`Run G7 draft-answer tests on PostgreSQL` 47 passed、**`Run paper idempotency tests on PostgreSQL` 12 passed in 2.35s**（ADR-221 的新步骤，真 PostgreSQL）、`frontend build` 的 typecheck + build 通过、`celery redelivery` 通过。`docker compose smoke test` 的 `Smoke 4/5: run backtest` 这一步现在真的跑两次回测并比较哈希，两次都是 `163708dac7a42e2079fd0a9430236d12573ed6b4b753a168ec65d8898957be4c`（ADR-218 由此在 CI 里得到实证，不再只是「以 CI 为准」）。`93974cace` 是 `d882b80c6` 之后补记 ADR-218/219 读数的那次 docs 提交。
 
-**未验证（如实声明）**：PostgreSQL 上只有 `tests/test_postgres_triggers.py` 与 `tests/test_draft_answers.py` 两个步骤在 CI 里跑；本轮新增/修改的行情、指标、任务相关测试**只在 SQLite 上验证过**，没有在本机 PostgreSQL 上跑过（本机无 Docker/PG，且禁止连生产 NAS 代替测试）。ADR-218 新增的那次 `result_hash` 比较也只能在 CI 的 `docker compose smoke test` job 里执行——本机没有 Docker，做到的只是「工作流 YAML 合法 + `ci.yml` 步骤解析守卫通过 + 断言逻辑逐行核对」，**它是否真的通过以 CI 为准**。ADR-219 的降级链在 SQLite 上实测通过（21 次 `downgrade` + 1 次 `upgrade` 全绿），PostgreSQL 上的降级继续由既有 `tests/test_postgres_triggers.py` 的 `command.downgrade(cfg, "base")` 覆盖（该用例本机 skip）。
+**未验证（如实声明）**：PostgreSQL 上只有 `tests/test_postgres_triggers.py`、`tests/test_draft_answers.py` 与新增的 `tests/test_paper_idempotency.py` 三个步骤在 CI 里跑；本轮新增/修改的行情、指标、任务相关测试**只在 SQLite 上验证过**，没有在本机 PostgreSQL 上跑过（本机无 Docker/PG，且禁止连生产 NAS 代替测试）。ADR-221 的并发语义（两个线程同时执行同一个信号）在 SQLite 上是真的用 4 个线程 + `Barrier` 跑过的，但 SQLite 只有单写者，**PostgreSQL 上的真实并发行为**由 CI 的 `Run paper idempotency tests on PostgreSQL` 覆盖——run `38199009460` 里这一步 **12 passed**；迁移 `0022` 也是先在 SQLite 上验的（含「存量重复时拒绝执行且一行不删」）。ADR-218 新增的那次 `result_hash` 比较也只能在 CI 的 `docker compose smoke test` job 里执行——本机没有 Docker，做到的只是「工作流 YAML 合法 + `ci.yml` 步骤解析守卫通过 + 断言逻辑逐行核对」；**它已经在 CI run `38199009460` 里真的跑过并通过**（两次哈希逐字符相同，见上表），但这是 CI 的证据，不是本机的。ADR-219 的降级链在 SQLite 上实测通过（21 次 `downgrade` + 1 次 `upgrade` 全绿），PostgreSQL 上的降级继续由既有 `tests/test_postgres_triggers.py` 的 `command.downgrade(cfg, "base")` 覆盖（该用例本机 skip）。生产库里是否已经有重复 `signal_id` 的订单**没有验证过**（本任务禁止连 NAS）：迁移升级时会自己预检，有重复就抛错并点名 ids，不会删除任何一行。
 
 ---
 

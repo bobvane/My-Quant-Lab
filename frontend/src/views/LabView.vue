@@ -2251,6 +2251,12 @@ async function openExperimentById(id: number) {
       rememberOpenExperiment(null)
       await loadExperiments()
     } else {
+      // 读失败时不能把上一条实验留在屏幕上：那会让「读不到这条实验」的红字和上一条
+      // 的指标、曲线、原始 JSON 同时出现，读者只能把它们当成这一条的内容（ADR-220）。
+      // 只清「当前显示的是哪一条」，不动地址栏记住的 id —— 那条实验在服务端还在，
+      // 重新点一次「打开」就会再读一次。
+      openExperiment.value = null
+      openExperimentId.value = null
       experimentDetailError.value = `读不到这条实验：${(e as Error).message}`
     }
   } finally {
@@ -3907,6 +3913,9 @@ onUnmounted(stopPolling)
 
       <h4 style="margin-top: 18px">② 这次实验的结果</h4>
       <p v-if="loadingExperiment" class="wait">正在读这条实验…</p>
+      <p v-else-if="!openExperiment && experimentDetailError" class="muted">
+        这一条没有读出来：原因见上面的红字。下面的列表还在，再点一次「打开」会重新读一次。
+      </p>
       <p v-else-if="!openExperiment" class="muted">
         还没有打开任何一条实验：上面跑一次，或者到下面的「最近的实验」里打开一条。
       </p>

@@ -400,3 +400,24 @@ def test_a_run_that_did_not_finish_says_why_in_the_list_too() -> None:
     assert LAB_TEXT.count("researchFailureText(") >= 3
     assert "{{ item.error_message }}" not in LAB_TEXT
     assert "{{ run.error_message }}" not in LAB_TEXT
+
+
+def test_a_failed_read_does_not_leave_the_previous_experiment_on_screen() -> None:
+    """读到一条实验失败时，屏幕上不能还留着上一条的内容（ADR-220）。
+
+    `openExperimentById` 的 404 分支本来就清空 `openExperiment`，其他失败（500、网络
+    断、后端没起来）却一度只写错误文字：于是「读不到这条实验」的红字下面接着渲染上一条
+    的指标、曲线与原始 JSON，读者只能把那些数字当成这一条的结果。守卫钉两半 —— 失败
+    分支清掉当前显示的那一条；空态在错误存在时另说一句话，不再说「还没有打开任何一条
+    实验」。
+    """
+
+    body = _lab_top_level("openExperimentById")
+    else_branch = body.split("} else {", 1)[-1]
+    assert "openExperiment.value = null" in else_branch, (
+        "读失败的 else 分支必须清掉上一条实验的详情，否则它会和错误提示同时留在屏幕上"
+    )
+    # 只清「当前显示的是哪一条」：地址栏记住的 id 不动，那条实验在服务端还在，
+    # 重新点一次「打开」就能再读一次。
+    assert "rememberOpenExperiment(null)" not in else_branch
+    assert "!openExperiment && experimentDetailError" in LAB_TEXT

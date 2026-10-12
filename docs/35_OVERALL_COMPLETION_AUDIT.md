@@ -78,6 +78,7 @@
 | 「可复现」从来没被真的验证过 | CI 的 `Smoke 4/5` 只断言 `status=='completed'`，`result_hash` 从未被读过、从未被比较过 | 已修：同一请求重跑一遍，两次 `result_hash` 必须相等（ADR-218，提交 `4da5b205e`） |
 | 迁移链的降级方向从未执行过 | `test_migrations_sqlite.py` 只跑 `upgrade`，CI 与容器入口也只往上走 ⇒ 21 个 `downgrade()` 零覆盖 | 已修：全链逐条降级到 base 再升回 head；补守卫后立刻在 `0009` 断掉（见下条） |
 | `0009` 的降级在 SQLite 上执行不了 | `downgrade()` 用非 batch 的 `op.create_foreign_key`，而 `SQLiteImpl.add_constraint` 对非 batch 加约束直接 `NotImplementedError`（`upgrade()` 对同一张表用的是 `batch_alter_table`） | 已修：加列 + 加外键放进同一个 `batch_alter_table(recreate="auto")`（ADR-219，提交 `4da5b205e`） |
+| 读一条实验失败时，屏幕上还留着上一条的读数 | `LabView.vue:2241 openExperimentById` 只有 404 分支清 `openExperiment`，其他失败（500 / 后端没起来 / 代理 502 / 网络断）只写一句红字 ⇒ 红字下面是上一条的名称、指标、敏感性网格与原始 JSON | 已修：失败分支也清显示层、空态改说这次没读出来（ADR-220，本批） |
 
 ---
 
@@ -89,6 +90,7 @@
 | `3f17d2550` | ADR-214/215/216 | 未知不入 0；空洞按周期量；失败原因进列表；未知地址有出口 |
 | `69c7b1258` | ADR-217 | 「最新已收盘」真读已收盘 K 线；夜间同步报出刷新几根 |
 | `4da5b205e` | ADR-218/219 | CI 里真的跑两次回测比 `result_hash`；迁移链能逐条退回 base 再走上来（并修好 `0009` 在 SQLite 上的降级断点） |
+| 本批 | ADR-220 | 读实验失败时不再留着上一条实验的读数：失败分支清显示层、空态改说这次没读出来（守卫 + 浏览器 UAT 10/10） |
 
 每个提交只包含本任务明确产生的文件；用户自有文档与 `AGENTS.md`/`docs/agents/` 全程留在工作区未提交。每次提交前都比对了开始时的 sha256 指纹快照（`%TEMP%\mql-audit-workspace-state.txt`），六个用户文件指纹一致。
 
@@ -107,6 +109,7 @@
 | `pytest tests/test_migrations_sqlite.py tests/test_migration_revisions.py` | 11 passed（含新增的全链降级） |
 | `pytest tests/test_migrations_sqlite.py tests/test_migration_revisions.py tests/test_postgres_triggers.py tests/test_source_snapshot_migration.py tests/test_strategy_experiments_migration.py` | 32 passed, 5 skipped（5 个 skip 需 `TEST_POSTGRES_URL`） |
 | `pytest tests/test_app_container.py tests/test_release_pipeline.py`（`ci.yml` 的步骤解析守卫） | 19 passed |
+| `pytest tests/test_lab_journey_contracts.py`（ADR-220 新增 1 个守卫，本批） | 25 passed |
 | `python -c "yaml.safe_load(ci.yml)"`（改后工作流仍可解析） | 合法：`jobs=4 steps=35`，`Smoke 4/5` 步骤仍在 |
 | 契约守卫组（`test_ui_promises.py test_api_spec_truth.py test_frontend_contracts.py test_lab_journey_contracts.py test_migration_revisions.py test_examples.py`） | 108 passed |
 | `ruff check app tests` / `ruff format --check app tests` | All checks passed! / 246 files already formatted |
@@ -118,8 +121,9 @@
 | --- | --- |
 | `%TEMP%\mql-accept\g7-stale-tab-uat.mjs`（ADR-213） | **13/13 通过** |
 | `%TEMP%\mql-accept\dead-ends-uat.mjs`（ADR-216） | **14/14 通过** |
+| `%TEMP%\mql-accept\experiment-read-failure-uat.mjs`（ADR-220，本批） | **10/10 通过** |
 
-**CI（GitHub Actions，`ci.yml` 四个 job）：**`3f17d2550` 的 run `38166968679` 四个 job 全绿；`76df625e0` 的 run `38166635700` 全绿。
+**CI（GitHub Actions，`ci.yml` 四个 job）：**`3f17d2550` 的 run `38166968679` 四个 job 全绿；`76df625e0` 的 run `38166635700` 全绿；`d882b80c6` 的 run `38187803501` 四个 job 全绿（`frontend build` / `celery redelivery` / `backend tests + lint`（含 `Ruff lint`、`Run tests`、`Run PostgreSQL regression tests`、**`Run G7 draft-answer tests on PostgreSQL`**）/ `docker compose smoke test`（含 `Smoke 4/5: run backtest` 的两次 `result_hash` 比较与 ADR-219 之后的启动））。
 
 **未验证（如实声明）**：PostgreSQL 上只有 `tests/test_postgres_triggers.py` 与 `tests/test_draft_answers.py` 两个步骤在 CI 里跑；本轮新增/修改的行情、指标、任务相关测试**只在 SQLite 上验证过**，没有在本机 PostgreSQL 上跑过（本机无 Docker/PG，且禁止连生产 NAS 代替测试）。ADR-218 新增的那次 `result_hash` 比较也只能在 CI 的 `docker compose smoke test` job 里执行——本机没有 Docker，做到的只是「工作流 YAML 合法 + `ci.yml` 步骤解析守卫通过 + 断言逻辑逐行核对」，**它是否真的通过以 CI 为准**。ADR-219 的降级链在 SQLite 上实测通过（21 次 `downgrade` + 1 次 `upgrade` 全绿），PostgreSQL 上的降级继续由既有 `tests/test_postgres_triggers.py` 的 `command.downgrade(cfg, "base")` 覆盖（该用例本机 skip）。
 
@@ -152,8 +156,8 @@
 15. `/health` 的 `status` 不含 redis/workers（`backend/app/api/routers/health.py:167-168`）。
 16. 证据校验的兜底：`backend/app/ai/research_schemas.py:1140` 在 `text_hash` 为 NULL 时用本次读到的正文自算哈希（未知 ref 已先判 `evidence_unknown_source`，不可伪造，但缺 `text_hash` 时应改判 violation）。
 17. 「只有两条草案写入路径」靠约定维持（`research.py:951`），没有静态断言钉住。
-18. `frontend/src/views/LabView.vue` 的 `openExperimentById`：只有 404 分支清 `openExperiment`，其它错误会同时显示上一次的实验详情与「读不到这条实验」。
-19. `docs/13_UI_UX.md` 的欠账节写着「（无）」，与实际不符。
+18. ~~`frontend/src/views/LabView.vue` 的 `openExperimentById`：只有 404 分支清 `openExperiment`，其它错误会同时显示上一次的实验详情与「读不到这条实验」。~~ **已修**（ADR-220，本批）：失败分支也清 `openExperiment`/`openExperimentId`（但不动 `rememberOpenExperiment` 记下的 id），空态在错误存在时另说「这一条没有读出来…」；守卫 `backend/tests/test_lab_journey_contracts.py::test_a_failed_read_does_not_leave_the_previous_experiment_on_screen` + 浏览器 UAT 10/10。
+19. ~~`docs/13_UI_UX.md` 的欠账节写着「（无）」，与实际不符。~~ **核实后不成立（本批自纠）**：`docs/13_UI_UX.md:281-285` 的 §16 按它自己的规则只汇总**本文件里**尚未实现的承诺，而本文件各节的状态行全是「已实现」——守卫 `backend/tests/test_ui_promises.py::test_the_outstanding_list_covers_exactly_the_unfinished_sections` 正是这么核对的（它按 `（第 N 节` 引用比对两份清单），所以「（无）」是对的。审计当时把「产品里还有 G8/G9 等未做项」误当成了「这份 UI 规格的欠账清单是假的」。产品级欠账在 `docs/34_RESEARCH_JOURNEY_CLOSURE.md`（G8/G9）与本报告 §6 里，**不改 `docs/13`**（往 §16 写计划还会同时违反它自己的那句「新的计划写在别处」）。
 20. `backend/app/data/market_data_repo.py` 的 `latest_closed_bar_time` 全仓零调用者（ADR-217 已把它改对，但没消费者）。
 
 ### 文档陈旧快照（已核实，暂不改）
@@ -183,7 +187,7 @@
 ## 8. 后续推荐顺序
 
 1. （P0）模拟执行幂等键 —— 需先定语义（等第 3 项回答）。
-2. （P1）前端 404 之外的两处小修：`LabView.vue openExperimentById`、`docs/13_UI_UX.md` 欠账节；这两项无需决策。
+2. ~~（P1）前端 404 之外的两处小修：`LabView.vue openExperimentById`、`docs/13_UI_UX.md` 欠账节；这两项无需决策。~~ **已完成**：`openExperimentById` 由 ADR-220 修好（本批）；`docs/13` 欠账节经核实**不需要改**（§6 第 19 条的自纠）。
 3. （P1）`result_hash` 口径 + `ENGINE_VERSION`（等第 5 项回答）。
 4. （P1）`quality_status` 的下游语义（等第 4 项回答）。
 5. （P1）标的表达能力（等第 1 项回答）—— 这是唯一一处「用户流程无法自行走完」的结构缺口。

@@ -3931,3 +3931,24 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 浏览器 UAT：本项不改变任何用户可见的交互或页面读数（迁移链只在启动与回滚时执行），所以没有单独跑浏览器。
 
 - 一条要记住的教训：**「没跑过的方向」和「不存在的功能」一样危险，但它看起来更安全**。21 个 `downgrade()` 全部写着、全部可读、全部「看起来对称」，而其中一条在真实方言上根本执行不了；把守卫写出来（而不是读一遍代码）是唯一能发现它的方式——这条守卫第一次运行就红了，且红在第一处断点。**第二条**：修 SQLite 的可逆性时用 `recreate="auto"`，是为了让「修测试方言」这件事对生产方言零影响；迁移文件里任何 `recreate="always"` 的顺手上瘾都会让生产回滚变成整表重建。
+
+## ADR-220：读不到实验时，屏幕上不能留着上一条的读数
+
+- 背景：全项目结构审计的第 18 条（P2，无需用户决策）。`frontend/src/views/LabView.vue:2241 openExperimentById` 里 404 分支会清 `openExperiment`/`openExperimentId` 并 `rememberOpenExperiment(null)`，**其他失败**只写一句 `experimentDetailError`（`:2260`）。而这条红字渲染在实验卡顶部（`:3682`），详情块在它下面、由 `v-else-if="!openExperiment"` 决定渲不渲染：`openExperiment` 还指向上一条时，页面同时出现「读不到这条实验：…」和上一条的名称、指标、敏感性网格与原始 JSON。触发它不需要任何罕见条件——500、后端没起来、反向代理 502、网络断，都是 `ApiError` 之外的普通失败。
+
+- 决策：
+  1. 非 404 失败分支也清 `openExperiment`/`openExperimentId`，让显示层不再指向任何一条（`frontend/src/views/LabView.vue:2253-2261`）。
+  2. 但**不**调 `rememberOpenExperiment(null)`：读失败不等于这条实验不存在，地址栏记住的 id 不该被一次失败抹掉，重新点一次「打开」就再读一次。
+  3. 空态拆成两句：`v-else-if="!openExperiment && experimentDetailError"` 说「这一条没有读出来：原因见上面的红字。下面的列表还在，再点一次「打开」会重新读一次」（`frontend/src/views/LabView.vue:3916-3918`）；原来的 `!openExperiment` 才说「还没有打开任何一条实验」（`:3919-3921`）。
+  4. 加文本守卫 `backend/tests/test_lab_journey_contracts.py::test_a_failed_read_does_not_leave_the_previous_experiment_on_screen`：`_lab_top_level("openExperimentById")` 的 else 分支必须有 `openExperiment.value = null`、不得出现 `rememberOpenExperiment(null)`，且 `!openExperiment && experimentDetailError` 必须出现在 LabView.vue。
+  5. 404 分支与 `closeExperiment()` 一个字不改。
+
+- 理由：①**红字和上一条的读数并存，是页面自己制造的两个来源**：一个说读不到，一个给出数字，读者没有任何办法分辨那串数字属于哪条实验——这比单纯报错更坏，因为它看上去像一次成功。②**「读不到」不等于「不存在」**：404 才是不存在，那个分支本来就清 id 并重读列表；其他失败清掉显示层就够了，把记住的 id 也忘掉反而会让地址栏指着一条真实存在的实验却打不开。③**空态分两句**是 ADR-138 在另一处的应用：可恢复的失败不能被说成「你还没有做过这件事」。④**守卫钉在 else 分支的文本上**，因为要防的正是「以后有人把这两行赋值删掉」这类回归，而这一页没有前端测试框架可用（`docs/34_RESEARCH_JOURNEY_CLOSURE.md` 缺口 G9），能依赖的只有文本扫描。⑤**不动 404 与 `closeExperiment`**，是因为「哪条路清什么」必须保持一行能读完；顺手统一它们只会让下一次改动更容易误伤。
+
+- 影响与兼容：只改 `frontend/src/views/LabView.vue`（`openExperimentById` 的 else 分支 +3 行、空态 +3 行，文件共 +9 行）与 `backend/tests/test_lab_journey_contracts.py`（+1 个测试，文件从 402 行到 423 行）。不改 API、不改后端、不改数据库、不改实验契约；`GET /experiments/{id}` 的 404 语义、`rememberOpenExperiment` 的地址栏行为、`closeExperiment()` 全都不变；无新依赖、无迁移、不改 `version.txt`、不碰 NAS。
+
+- 测试：`pytest tests/test_lab_journey_contracts.py` ⇒ **25 passed in 1.02s**；`ruff check tests/test_lab_journey_contracts.py` ⇒ `All checks passed!`；`scripts\Invoke-FrontendChecks.ps1`（typecheck + build）⇒ `FRONTEND OK: typecheck + build passed`（628 modules，`dist/assets/index-C3XtwtCS.js 1,641.12 kB`）。
+
+- 浏览器 UAT（`%TEMP%\mql-accept\experiment-read-failure-uat.mjs`，本机栈：uvicorn `app.api.main:app` on 127.0.0.1:8080 + sqlite UAT 库 `mql-uat.sqlite3`（实验 #1 `Phase C UAT - run A`、#2 `Phase C UAT - run B`）+ 镜像 vite on 127.0.0.1:5173 + 无头 Chrome CDP 9222，用 `page.route(...).abort('failed')` 在浏览器侧掐断 `GET /api/v1/experiments/{id}`）⇒ **10/10 通过**：打开 #1 真的渲染出「关键指标 / 存下 1 条结果」；掐断后红字「读不到这条实验」出现、「② 这次实验的结果」区域里 #1 的名称与指标全部消失、改说「这一条没有读出来…」而不再说「还没有打开任何一条实验」；实验列表仍在；恢复路由后再打开 #2 正常渲染且红字消失。浏览器控制台只有一条 `Failed to load resource: net::ERR_FAILED`——那正是被掐断的那次请求，是这次 UAT 的手段而不是缺陷；`httpErrors` 为空（掐断发生在浏览器侧，服务端没有给出响应码）。
+
+- 一条要记住的教训：**「报错」和「残留的上一次结果」同时出现，比报错本身更危险**，因为它看起来像一次成功。写失败分支时要问的不是「错误信息说清楚了没有」，而是「失败之前屏幕上有什么、失败之后它还在不在」；一个 `v-else` 挂在还指向旧对象的 ref 上，就会把上一次的数字留在这一次的位置上。

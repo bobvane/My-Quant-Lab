@@ -75,6 +75,9 @@
 | 未知地址是一片空白 | 没有 404 兜底路由 | 已修：`NotFoundView.vue` + `/:pathMatch(.*)*`（ADR-216） |
 | 「最新已收盘 K 线」可能返回没走完那根 | `latest_closed_bar_time` 直接 `return series.series_end` | 已修：走 `load_bars(only_closed=True, limit=1)`（ADR-217） |
 | 夜间同步丢「刷新了几根」 | `sync_market_data` 调 `upsert_bars` 没传 `report` | 已修：返回值带 `updated`（ADR-217） |
+| 「可复现」从来没被真的验证过 | CI 的 `Smoke 4/5` 只断言 `status=='completed'`，`result_hash` 从未被读过、从未被比较过 | 已修：同一请求重跑一遍，两次 `result_hash` 必须相等（ADR-218，提交 `4da5b205e`） |
+| 迁移链的降级方向从未执行过 | `test_migrations_sqlite.py` 只跑 `upgrade`，CI 与容器入口也只往上走 ⇒ 21 个 `downgrade()` 零覆盖 | 已修：全链逐条降级到 base 再升回 head；补守卫后立刻在 `0009` 断掉（见下条） |
+| `0009` 的降级在 SQLite 上执行不了 | `downgrade()` 用非 batch 的 `op.create_foreign_key`，而 `SQLiteImpl.add_constraint` 对非 batch 加约束直接 `NotImplementedError`（`upgrade()` 对同一张表用的是 `batch_alter_table`） | 已修：加列 + 加外键放进同一个 `batch_alter_table(recreate="auto")`（ADR-219，提交 `4da5b205e`） |
 
 ---
 
@@ -85,6 +88,7 @@
 | `76df625e0` | ADR-213 | 作答只能发生在这次研究**当前**那一版草案上（409 `draft_superseded`，零写入） |
 | `3f17d2550` | ADR-214/215/216 | 未知不入 0；空洞按周期量；失败原因进列表；未知地址有出口 |
 | `69c7b1258` | ADR-217 | 「最新已收盘」真读已收盘 K 线；夜间同步报出刷新几根 |
+| `4da5b205e` | ADR-218/219 | CI 里真的跑两次回测比 `result_hash`；迁移链能逐条退回 base 再走上来（并修好 `0009` 在 SQLite 上的降级断点） |
 
 每个提交只包含本任务明确产生的文件；用户自有文档与 `AGENTS.md`/`docs/agents/` 全程留在工作区未提交。每次提交前都比对了开始时的 sha256 指纹快照（`%TEMP%\mql-audit-workspace-state.txt`），六个用户文件指纹一致。
 
@@ -100,6 +104,10 @@
 | `pytest tests/test_metrics_finite.py tests/test_backtest.py tests/test_paper_engine.py` | 48 passed |
 | `pytest tests/test_market_data_quality.py tests/test_market_data_providers.py tests/test_series_resolution.py tests/test_series_content_hash.py tests/test_series_deletion.py` | 68 passed |
 | `pytest tests/test_bar_lifecycle.py tests/test_task_idempotency.py tests/test_market_data_quality.py tests/test_market_data_providers.py` | 61 passed |
+| `pytest tests/test_migrations_sqlite.py tests/test_migration_revisions.py` | 11 passed（含新增的全链降级） |
+| `pytest tests/test_migrations_sqlite.py tests/test_migration_revisions.py tests/test_postgres_triggers.py tests/test_source_snapshot_migration.py tests/test_strategy_experiments_migration.py` | 32 passed, 5 skipped（5 个 skip 需 `TEST_POSTGRES_URL`） |
+| `pytest tests/test_app_container.py tests/test_release_pipeline.py`（`ci.yml` 的步骤解析守卫） | 19 passed |
+| `python -c "yaml.safe_load(ci.yml)"`（改后工作流仍可解析） | 合法：`jobs=4 steps=35`，`Smoke 4/5` 步骤仍在 |
 | 契约守卫组（`test_ui_promises.py test_api_spec_truth.py test_frontend_contracts.py test_lab_journey_contracts.py test_migration_revisions.py test_examples.py`） | 108 passed |
 | `ruff check app tests` / `ruff format --check app tests` | All checks passed! / 246 files already formatted |
 | `scripts\Invoke-FrontendChecks.ps1`（typecheck + build） | FRONTEND OK |
@@ -113,7 +121,7 @@
 
 **CI（GitHub Actions，`ci.yml` 四个 job）：**`3f17d2550` 的 run `38166968679` 四个 job 全绿；`76df625e0` 的 run `38166635700` 全绿。
 
-**未验证（如实声明）**：PostgreSQL 上只有 `tests/test_postgres_triggers.py` 与 `tests/test_draft_answers.py` 两个步骤在 CI 里跑；本轮新增/修改的行情、指标、任务相关测试**只在 SQLite 上验证过**，没有在本机 PostgreSQL 上跑过（本机无 Docker/PG，且禁止连生产 NAS 代替测试）。
+**未验证（如实声明）**：PostgreSQL 上只有 `tests/test_postgres_triggers.py` 与 `tests/test_draft_answers.py` 两个步骤在 CI 里跑；本轮新增/修改的行情、指标、任务相关测试**只在 SQLite 上验证过**，没有在本机 PostgreSQL 上跑过（本机无 Docker/PG，且禁止连生产 NAS 代替测试）。ADR-218 新增的那次 `result_hash` 比较也只能在 CI 的 `docker compose smoke test` job 里执行——本机没有 Docker，做到的只是「工作流 YAML 合法 + `ci.yml` 步骤解析守卫通过 + 断言逻辑逐行核对」，**它是否真的通过以 CI 为准**。ADR-219 的降级链在 SQLite 上实测通过（21 次 `downgrade` + 1 次 `upgrade` 全绿），PostgreSQL 上的降级继续由既有 `tests/test_postgres_triggers.py` 的 `command.downgrade(cfg, "base")` 覆盖（该用例本机 skip）。
 
 ---
 
@@ -139,8 +147,8 @@
 
 11. `dataset_version` 永远是 `"v1"`（`models.py:132`；`market_data_repo.py:152,161,171` 无人传参），而 `BacktestRun.dataset_version_id` 实际存的是 `series.id`（`backtest_service.py:245`、`experiment_service.py:304`）⇒ 改名/补注释即可。
 12. `fill_model` 是死配置却在前端当「执行模型」展示（`backend/app/strategies/dsl.py:218` 定义、`compiler.py:842-854` 回显，`engine.py:273` 与 `backend/app/research/ensemble.py:209` 只读 `entry_order_type`；`frontend/src/views/BacktestView.vue:3269` 展示）。
-13. CI 的 `Smoke 4/5: run backtest`（`.github/workflows/ci.yml:422`）只断言 `status=='completed'`（`:438`），不校验 `result_hash`。
-14. CI 没有前端测试步骤；迁移链只被 `upgrade` 覆盖（`backend/tests/test_migrations_sqlite.py:45` 只跑 `command.upgrade(...,"head")`），21 个 `downgrade()` 从未执行。
+13. ~~CI 的 `Smoke 4/5: run backtest`（`.github/workflows/ci.yml:422`）只断言 `status=='completed'`（`:438`），不校验 `result_hash`。~~ **已修**（ADR-218，提交 `4da5b205e`）：同一请求再发一次，两次的 `result_hash` 必须逐字符相等，且先断言它是 64 位小写十六进制。
+14. ~~迁移链只被 `upgrade` 覆盖（`backend/tests/test_migrations_sqlite.py:45` 只跑 `command.upgrade(...,"head")`），21 个 `downgrade()` 从未执行。~~ **已修**（ADR-219，提交 `4da5b205e`）：`test_every_revision_can_be_walked_back_down_to_base` 从 head 逐条退到 base（每步断言 `alembic_version` 正好落在下一级）再升回 head；补上守卫后立刻暴露出 `0009_drop_dead_schema` 在 SQLite 上的降级断点，一并修好。**更正**：CI **有**前端步骤——`.github/workflows/ci.yml:117-139` 的 `frontend build` job 跑 `npm run typecheck` 与 `npm run build`（后者 = `vue-tsc -b && vite build`）；早期审计记录里「CI 无前端测试步骤」的说法经核实不成立（这是本级审计里的一条自纠）。
 15. `/health` 的 `status` 不含 redis/workers（`backend/app/api/routers/health.py:167-168`）。
 16. 证据校验的兜底：`backend/app/ai/research_schemas.py:1140` 在 `text_hash` 为 NULL 时用本次读到的正文自算哈希（未知 ref 已先判 `evidence_unknown_source`，不可伪造，但缺 `text_hash` 时应改判 violation）。
 17. 「只有两条草案写入路径」靠约定维持（`research.py:951`），没有静态断言钉住。
@@ -179,7 +187,7 @@
 3. （P1）`result_hash` 口径 + `ENGINE_VERSION`（等第 5 项回答）。
 4. （P1）`quality_status` 的下游语义（等第 4 项回答）。
 5. （P1）标的表达能力（等第 1 项回答）—— 这是唯一一处「用户流程无法自行走完」的结构缺口。
-6. （P2）`dataset_version` 命名、`fill_model` 展示口径、CI 冒烟校验 `result_hash`、迁移 `downgrade` 覆盖、`/health` readiness 字段、`text_hash` 兜底改 violation。
+6. （P2）`dataset_version` 命名、`fill_model` 展示口径、`/health` readiness 字段、`text_hash` 兜底改 violation（CI 冒烟校验 `result_hash`、迁移 `downgrade` 覆盖两项已在 `4da5b205e` 完成）。
 7. （P2）前端测试框架与默认认证（等第 7 项回答）。
 
 ---

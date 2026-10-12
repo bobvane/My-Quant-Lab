@@ -128,6 +128,19 @@ v2.1.0 起用户可以显式提供 URL / PDF 让平台去读（`POST /ai/sources
 SSRF 回归矩阵由 `backend/tests/test_source_ssrf.py`（76 例）承担；`docs/19` 的
 "迁移改动另加" 一节旁边另有 SSRF 改动的回归要求。
 
+### 4.2 管理员令牌 ADMIN_TOKEN（ADR-218）
+
+`API_AUTH_TOKEN` 证明的是「这个请求经过了 App 自带的 nginx」，不是「这个人有权做危险操作」：nginx 会把它注入每一个 `/api` 请求，所以能打开 `8081` 的浏览器本来就带着它。新的危险操作（数据导出与恢复、维护模式）因此改用一把独立的钥匙 `ADMIN_TOKEN`：
+
+- 只从 `X-Admin-Token` 请求头读取，不接受查询参数、cookie、请求体或前端存储；
+- 由 `app/api/admin_auth.py` 的 `require_admin_token` 依赖校验，常量时间比较；
+- **未配置 = 拒绝**：`503 admin_token_not_configured`，绝不退回用 `API_AUTH_TOKEN`；
+- 校验失败 `401 admin_token_invalid`，响应体与其它错误同为 `{"error": {code, message, details}}`；
+- 它不会被代理注入：`docker/app.nginx.conf` 与 `docker/entrypoint.sh` 都不涉及这个变量；
+- 明文 HTTP 下它不防同网段抓包，只防「能打开页面的人顺手按了危险按钮」。
+
+V-B0 只交付这个开关、校验与测试；第一批真正使用它的是维护模式与导出/恢复端点（后续批次）。
+
 ## 5. Network
 
 默认只有：

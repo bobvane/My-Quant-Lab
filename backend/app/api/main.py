@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.gzip import GZipMiddleware
 
+from app.api.admin_auth import AdminGateError, admin_gate_error_handler
 from app.api.routers import (
     ai as ai_router,
 )
@@ -215,6 +216,12 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Dangerous operations are gated by ADMIN_TOKEN, a credential the bundled
+    # nginx never injects (unlike API_AUTH_TOKEN, ADR-097). The refusal is
+    # reported in the API's own error envelope, the same one the auth middleware
+    # and the compile errors use (ADR-218).
+    app.add_exception_handler(AdminGateError, admin_gate_error_handler)
 
     @app.exception_handler(SeriesNotResolved)
     async def series_not_resolved_handler(request: Request, exc: SeriesNotResolved):

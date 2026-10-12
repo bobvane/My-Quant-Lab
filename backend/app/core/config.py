@@ -129,6 +129,16 @@ class Settings(BaseSettings):
     # nginx — not the LAN clients that use it (ADR-097). Close the
     # deployment where it is open: WEB_BIND=127.0.0.1, or a firewall in front.
     api_auth_token: str | None = None
+    # Administrators' own token, for *new* dangerous operations only (data
+    # export/restore, maintenance windows -- see ADR-218). It is deliberately
+    # separate from `api_auth_token`, which the bundled nginx injects into every
+    # /api request: anyone who can reach :8081 already presents that one, so it
+    # could never gate a destructive button (ADR-097). This token is never
+    # injected by the proxy and never accepted from a query string, a cookie or a
+    # body; `X-Admin-Token` is the only carrier. Empty (the default) means "not
+    # configured", and admin-only endpoints then answer 503
+    # `admin_token_not_configured` instead of falling back to the API token.
+    admin_token: str | None = None
     # Per-IP limit for mutating API requests (POST/PUT/DELETE). 0 disables it;
     # skipped entirely under APP_ENVIRONMENT=test. Read endpoints (GET) are not
     # limited so dashboards and polling keep working.
@@ -273,6 +283,26 @@ class Settings(BaseSettings):
             raise ValueError("API_AUTH_TOKEN must be at least 8 characters")
         if not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", text):
             raise ValueError("API_AUTH_TOKEN contains unsupported characters")
+        return text
+
+    @field_validator("admin_token", mode="before")
+    @classmethod
+    def _normalise_admin_token(cls, value: object) -> object:
+        """Same character and length rules as `api_auth_token`.
+
+        The message names `ADMIN_TOKEN` so an operator who mistyped one of the
+        two variables can tell which one the process refused to start with.
+        """
+
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if len(text) < 8:
+            raise ValueError("ADMIN_TOKEN must be at least 8 characters")
+        if not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", text):
+            raise ValueError("ADMIN_TOKEN contains unsupported characters")
         return text
 
     @field_validator("market_data_watchlist", mode="before")

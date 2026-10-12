@@ -40,6 +40,10 @@ x-app-env: &app-env
   # When set, the App's own nginx injects it into the /api, /docs and
   # /openapi.json proxies, so the browser still never sends it (ADR-103).
   API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
+  # Administrator token for *new* dangerous operations (ADR-218). Empty = those
+  # endpoints refuse with 503 admin_token_not_configured. Unlike API_AUTH_TOKEN,
+  # the proxy never injects this one: the operator sends X-Admin-Token itself.
+  ADMIN_TOKEN: ${ADMIN_TOKEN:-}
   # Per-IP limit for mutating API requests (0 disables).
   RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
   MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-synthetic}

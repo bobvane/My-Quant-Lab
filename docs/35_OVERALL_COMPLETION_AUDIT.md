@@ -90,7 +90,7 @@
 | `3f17d2550` | ADR-214/215/216 | 未知不入 0；空洞按周期量；失败原因进列表；未知地址有出口 |
 | `69c7b1258` | ADR-217 | 「最新已收盘」真读已收盘 K 线；夜间同步报出刷新几根 |
 | `4da5b205e` | ADR-218/219 | CI 里真的跑两次回测比 `result_hash`；迁移链能逐条退回 base 再走上来（并修好 `0009` 在 SQLite 上的降级断点） |
-| 本批 | ADR-220 | 读实验失败时不再留着上一条实验的读数：失败分支清显示层、空态改说这次没读出来（守卫 + 浏览器 UAT 10/10） |
+| `4d11d82a3` | ADR-220 | 读实验失败时不再留着上一条实验的读数：失败分支清显示层、空态改说这次没读出来（守卫 + 浏览器 UAT 10/10） |
 
 每个提交只包含本任务明确产生的文件；用户自有文档与 `AGENTS.md`/`docs/agents/` 全程留在工作区未提交。每次提交前都比对了开始时的 sha256 指纹快照（`%TEMP%\mql-audit-workspace-state.txt`），六个用户文件指纹一致。
 
@@ -123,7 +123,7 @@
 | `%TEMP%\mql-accept\dead-ends-uat.mjs`（ADR-216） | **14/14 通过** |
 | `%TEMP%\mql-accept\experiment-read-failure-uat.mjs`（ADR-220，本批） | **10/10 通过** |
 
-**CI（GitHub Actions，`ci.yml` 四个 job）：**`3f17d2550` 的 run `38166968679` 四个 job 全绿；`76df625e0` 的 run `38166635700` 全绿；`d882b80c6` 的 run `38187803501` 四个 job 全绿（`frontend build` / `celery redelivery` / `backend tests + lint`（含 `Ruff lint`、`Run tests`、`Run PostgreSQL regression tests`、**`Run G7 draft-answer tests on PostgreSQL`**）/ `docker compose smoke test`（含 `Smoke 4/5: run backtest` 的两次 `result_hash` 比较与 ADR-219 之后的启动））。
+**CI（GitHub Actions，`ci.yml` 四个 job）：**`3f17d2550` 的 run `38166968679` 四个 job 全绿；`76df625e0` 的 run `38166635700` 全绿；`d882b80c6` 的 run `38187803501` 四个 job 全绿（`frontend build` / `celery redelivery` / `backend tests + lint`（含 `Ruff lint`、`Run tests`、`Run PostgreSQL regression tests`、**`Run G7 draft-answer tests on PostgreSQL`**）/ `docker compose smoke test`（含 `Smoke 4/5: run backtest` 的两次 `result_hash` 比较与 ADR-219 之后的启动））；`4d11d82a3`（ADR-220 的代码提交）的 run `38188345692` 四个 job 全绿。`93974cace` 是 `d882b80c6` 之后补记 ADR-218/219 读数的那次 docs 提交。
 
 **未验证（如实声明）**：PostgreSQL 上只有 `tests/test_postgres_triggers.py` 与 `tests/test_draft_answers.py` 两个步骤在 CI 里跑；本轮新增/修改的行情、指标、任务相关测试**只在 SQLite 上验证过**，没有在本机 PostgreSQL 上跑过（本机无 Docker/PG，且禁止连生产 NAS 代替测试）。ADR-218 新增的那次 `result_hash` 比较也只能在 CI 的 `docker compose smoke test` job 里执行——本机没有 Docker，做到的只是「工作流 YAML 合法 + `ci.yml` 步骤解析守卫通过 + 断言逻辑逐行核对」，**它是否真的通过以 CI 为准**。ADR-219 的降级链在 SQLite 上实测通过（21 次 `downgrade` + 1 次 `upgrade` 全绿），PostgreSQL 上的降级继续由既有 `tests/test_postgres_triggers.py` 的 `command.downgrade(cfg, "base")` 覆盖（该用例本机 skip）。
 

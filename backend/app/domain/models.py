@@ -688,7 +688,17 @@ class PaperOrder(Base):
     account: Mapped[PaperAccount] = relationship(back_populates="orders")
     asset: Mapped[Asset] = relationship()
 
-    __table_args__ = (CheckConstraint("side in ('BUY','SELL')", name="ck_paper_order_side"),)
+    # One signal, one order (ADR-221). The name is on the *database* side on
+    # purpose: two requests that both read "no order yet" and both write would
+    # produce two fills for one signal, and only the database can refuse the
+    # second one. A unique index rather than a table constraint, for two
+    # reasons: SQLite cannot ALTER TABLE ADD CONSTRAINT (see ADR-219), and an
+    # index lets ``signal_id`` stay NULL for orders that came from no signal at
+    # all — both dialects treat NULLs as distinct, so those never collide.
+    __table_args__ = (
+        CheckConstraint("side in ('BUY','SELL')", name="ck_paper_order_side"),
+        Index("uq_paper_order_signal", "signal_id", unique=True),
+    )
 
 
 class PaperTrade(Base):

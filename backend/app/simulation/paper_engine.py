@@ -16,6 +16,9 @@ Accounting contract:
 * SELL : proceeds = qty * fill - fee ; cash += proceeds ; the open PaperTrade is
   closed with ``pnl = proceeds - (qty * avg_cost + buy_fee)`` — i.e. the realised
   P&L already nets both sides' fees. A SELL with no open position is refused.
+* REPEAT: one signal produces exactly one order. Executing the same signal again
+  writes nothing and answers with the order the first execution created, which the
+  database enforces with a unique index on ``paper_orders.signal_id`` (ADR-221).
 
 Sizing: by default an order is all-in — a BUY deploys the whole cash balance (times
 ``max_position_pct``) and a SELL closes the whole position. A caller may instead name
@@ -33,6 +36,7 @@ from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.data.strategy_service import record_audit
@@ -94,6 +98,52 @@ def _fill_moment(signal: Signal, now: dt.datetime | None) -> dt.datetime:
     return now if now is not None else _aware(signal.bar_timestamp)
 
 
+def _existing_order(db: Session, signal_id: int) -> PaperOrder | None:
+    """The order an earlier execution of this signal already created, if any."""
+
+    return db.scalar(select(PaperOrder).where(PaperOrder.signal_id == signal_id))
+
+
+def _replay(db: Session, order: PaperOrder) -> dict[str, Any]:
+    """Answer a repeat execution with the order the first one created (ADR-221).
+
+    Nothing here writes, re-prices or re-sizes: the answer has to describe the fill
+    that already happened. ``realized_pnl`` is summed from the trades this order
+    produced, because a partial close realises only part of a position and the order's
+    own trades are the only honest source for how much.
+    """
+
+    if order.fill_price is None:
+        # Orders written by this engine always carry the price they filled at. A row
+        # without one was not written here, and reporting 0 would be inventing a price.
+        raise PaperError(f"order {order.id} has no fill to report")
+    account = db.get(PaperAccount, order.account_id)
+    if account is None:
+        # paper_orders.account_id is a CASCADE foreign key: this cannot happen through
+        # the API, and if it did, the account's balance is not something to guess at.
+        raise PaperError(f"the account behind order {order.id} is gone")
+    # cash is Numeric(24, 8) and the session may still hold the balance as it was computed
+    # before the commit rounded it, so the row is read back for the same reason the fresh
+    # answer does it: the number reported has to be the one the ledger holds.
+    stored = db.scalar(select(PaperAccount.cash).where(PaperAccount.id == order.account_id))
+    realised = Decimal(0)
+    for pnl in db.scalars(select(PaperTrade.pnl).where(PaperTrade.order_id == order.id)):
+        if pnl is not None:
+            realised += _dec(pnl)
+    return {
+        "side": order.side,
+        "order_id": order.id,
+        "account_id": order.account_id,
+        "quantity": _dec(order.quantity),
+        "fill_price": _dec(order.fill_price),
+        "fees": _dec(order.fees),
+        "slippage": _dec(order.slippage),
+        "realized_pnl": realised,
+        "cash": _dec(stored),
+        "idempotent_replay": True,
+    }
+
+
 def execute_signal(
     db: Session,
     account: PaperAccount,
@@ -113,6 +163,15 @@ def execute_signal(
 
     limits = settings or PaperExecutionSettings()
     moment = _fill_moment(signal, now)
+
+    # Idempotency is checked before the refusals and before anything is written
+    # (ADR-221): a signal with an order already has its answer, and asking again must
+    # not be able to change it — not even when the account has since been closed, the
+    # position has since been sold, or the caller now asks for a different size. The
+    # first execution decided all of that.
+    existing = _existing_order(db, signal.id)
+    if existing is not None:
+        return _replay(db, existing)
 
     # The refusals below keep their order and wording: callers (and the API's 422
     # messages) already depend on them, so a new reason to refuse must come after them.
@@ -138,50 +197,73 @@ def execute_signal(
     version = db.get(StrategyVersion, signal.strategy_version_id)
     version_label = f"{version.strategy_id}@{version.version}" if version is not None else None
 
-    if signal.state == "BUY":
-        result = _open_long(
+    try:
+        if signal.state == "BUY":
+            result = _open_long(
+                db,
+                account,
+                signal,
+                base_price,
+                slip,
+                fee_rate,
+                limits,
+                moment,
+                version_label,
+                quantity=quantity,
+                notional=notional,
+            )
+        else:
+            result = _close_long(
+                db,
+                account,
+                signal,
+                base_price,
+                slip,
+                fee_rate,
+                moment,
+                position,
+                quantity=quantity,
+                notional=notional,
+            )
+        result["account_id"] = account.id
+        result["idempotent_replay"] = False
+        record_audit(
             db,
-            account,
-            signal,
-            base_price,
-            slip,
-            fee_rate,
-            limits,
-            moment,
-            version_label,
-            quantity=quantity,
-            notional=notional,
+            event_type="paper_order_executed",
+            entity_type="paper_account",
+            entity_id=str(account.id),
+            action="execute",
+            payload={
+                "side": result["side"],
+                "asset_id": signal.asset_id,
+                "signal_id": signal.id,
+                "quantity": str(result["quantity"]),
+                "fill_price": str(result["fill_price"]),
+                "fees": str(result["fees"]),
+                "slippage": str(result["slippage"]),
+            },
         )
-    else:
-        result = _close_long(
-            db,
-            account,
-            signal,
-            base_price,
-            slip,
-            fee_rate,
-            moment,
-            position,
-            quantity=quantity,
-            notional=notional,
-        )
-    record_audit(
-        db,
-        event_type="paper_order_executed",
-        entity_type="paper_account",
-        entity_id=str(account.id),
-        action="execute",
-        payload={
-            "side": result["side"],
-            "asset_id": signal.asset_id,
-            "signal_id": signal.id,
-            "quantity": str(result["quantity"]),
-            "fill_price": str(result["fill_price"]),
-            "fees": str(result["fees"]),
-            "slippage": str(result["slippage"]),
-        },
-    )
-    db.commit()
+        db.commit()
+        # The balance is read back from the ledger rather than taken from the session:
+        # ``cash`` is Numeric(24, 8), so an all-in buy's last-place dust is rounded by
+        # the column, and answering with the pre-commit number would report a balance
+        # the account cannot hold — and one a later replay would contradict (ADR-221).
+        stored = db.scalar(select(PaperAccount.cash).where(PaperAccount.id == account.id))
+        result["cash"] = _dec(stored)
+    except (IntegrityError, PaperError):
+        # Two calls for one signal can both read "no order yet" before either of them
+        # commits, and a read-then-write check cannot see an uncommitted row. Two things
+        # can then go wrong for the loser: the unique index on paper_orders.signal_id
+        # refuses its insert, or a business check trips on the position the winner has
+        # just created ("already holding this asset"). Both mean the same thing — this
+        # signal was executed by someone else a moment ago — so both are answered with
+        # that order instead of failing (ADR-221). A refusal on its own still stands: the
+        # re-read below finds no order and the original error is raised unchanged.
+        db.rollback()
+        winner = _existing_order(db, signal.id)
+        if winner is None:
+            raise
+        return _replay(db, winner)
     return result
 
 

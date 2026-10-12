@@ -145,10 +145,37 @@ def test_the_account_level_payload_leaves_out_its_own_address(db_session) -> Non
     assert payload["signal_id"] == signal.id
 
 
+def _another_signal(db, asset: Asset, first: Signal) -> Signal:
+    """A second signal for the same asset.
+
+    One signal produces exactly one order (ADR-221, enforced by a unique index), so a
+    test that wants several orders has to seed several signals -- and that is the shape
+    this page actually sees: a different signal is a different fill.
+    """
+
+    clone = Signal(
+        strategy_version_id=first.strategy_version_id,
+        asset_id=asset.id,
+        timeframe=first.timeframe,
+        bar_timestamp=first.bar_timestamp + dt.timedelta(days=1),
+        state="BUY",
+        direction="LONG",
+        price_reference=first.price_reference,
+        feature_snapshot_hash="q" * 64,
+        data_source="test",
+    )
+    db.add(clone)
+    db.flush()
+    return clone
+
+
 def test_the_whole_page_costs_one_order_lookup(db_session) -> None:
-    account, asset, signal = _seed(db_session)
+    account, asset, first = _seed(db_session)
+    signals = [first]
+    for _ in range(4):
+        signals.append(_another_signal(db_session, asset, signals[-1]))
     trades = []
-    for _ in range(5):
+    for signal in signals:
         order = _order(db_session, account, asset, signal_id=signal.id)
         trades.append(_trade(db_session, account, asset, order_id=order.id))
 
@@ -166,4 +193,4 @@ def test_the_whole_page_costs_one_order_lookup(db_session) -> None:
         event.remove(bind, "before_cursor_execute", _record)
 
     assert len(statements) == 1, statements
-    assert [row["signal_id"] for row in payloads] == [signal.id] * 5
+    assert [row["signal_id"] for row in payloads] == [signal.id for signal in signals]

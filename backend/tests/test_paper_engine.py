@@ -254,17 +254,52 @@ def test_api_execute_positions_and_status(client, db_session) -> None:
     )
     assert executed.status_code == 200, executed.text
     assert executed.json()["side"] == "BUY"
+    assert executed.json()["idempotent_replay"] is False
 
     positions = client.get(f"/api/v1/paper/accounts/{account['id']}/positions").json()
     assert len(positions) == 1
+
+    # Asking for the same signal again is a replay: the same order, the same balance,
+    # no second fill (ADR-221).
+    replayed = client.post(
+        f"/api/v1/paper/accounts/{account['id']}/execute", json={"signal_id": signal_id}
+    )
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["idempotent_replay"] is True
+    assert replayed.json()["order_id"] == executed.json()["order_id"]
+    assert replayed.json()["quantity"] == executed.json()["quantity"]
+    assert replayed.json()["cash"] == executed.json()["cash"]
+
+    # A second signal for the same asset: closing the account still refuses a *new*
+    # execution, while the signal that already has an order keeps answering with it.
+    second = Signal(
+        strategy_version_id=version.id,
+        asset_id=asset["id"],
+        timeframe="1d",
+        bar_timestamp=dt.datetime(2026, 1, 3, tzinfo=dt.UTC),
+        state="BUY",
+        direction="LONG",
+        price_reference=50.0,
+        feature_snapshot_hash="y" * 64,
+        data_source="test",
+    )
+    db_session.add(second)
+    db_session.commit()
 
     closed = client.post(f"/api/v1/paper/accounts/{account['id']}/close")
     assert closed.json()["status"] == "closed"
 
     blocked = client.post(
-        f"/api/v1/paper/accounts/{account['id']}/execute", json={"signal_id": signal_id}
+        f"/api/v1/paper/accounts/{account['id']}/execute", json={"signal_id": second.id}
     )
     assert blocked.status_code == 422
+
+    still_replayed = client.post(
+        f"/api/v1/paper/accounts/{account['id']}/execute", json={"signal_id": signal_id}
+    )
+    assert still_replayed.status_code == 200, still_replayed.text
+    assert still_replayed.json()["idempotent_replay"] is True
+    assert still_replayed.json()["order_id"] == executed.json()["order_id"]
 
     reopened = client.post(f"/api/v1/paper/accounts/{account['id']}/reopen")
     assert reopened.json()["status"] == "active"

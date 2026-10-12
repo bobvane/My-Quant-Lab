@@ -1887,3 +1887,18 @@ def test_a_paper_account_remembers_the_experiment_it_was_opened_from() -> None:
         "an account with no experiment (or whose experiment is gone) must say so rather "
         "than render a link that lands nowhere (ADR-138/ADR-209)"
     )
+
+
+def test_the_paper_page_says_when_a_repeat_did_not_fill() -> None:
+    """ADR-221: one signal, one order — and the page has to say so.
+
+    A repeat execution is answered with the order the first one created instead of
+    filling again. If the page ignored ``idempotent_replay`` it would report a second
+    fill that never happened, which is exactly the confusion this rule exists to end;
+    and a repeat that changed nothing must not read like a new trade either.
+    """
+
+    assert "idempotent_replay: boolean" in API_TEXT
+    assert "r.idempotent_replay" in PAPER
+    assert "没有产生新的成交" in PAPER
+    assert "第一次那笔订单 #${r.order_id}" in PAPER

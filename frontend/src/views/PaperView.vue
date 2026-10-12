@@ -790,7 +790,11 @@ async function executeSignal(account: PaperAccount) {
     const r = await api.executePaperSignal(account.id, id, sizingPayload())
     lastFill.value = r
     fillAccount.value = account.id
-    info.value = `${account.name} 已执行信号 #${id}`
+    // ADR-221：同一个信号只产生一笔订单。第二次点「执行」不会再成交，返回的是第一次那笔
+    // 订单——页面必须说清楚，否则用户会以为又建了一笔。
+    info.value = r.idempotent_replay
+      ? `${account.name} 之前已经执行过信号 #${id}：这次没有产生新的成交，返回的是第一次那笔订单 #${r.order_id}。`
+      : `${account.name} 已执行信号 #${id}`
     await refreshAfterExecution(account.id)
   } catch (e) {
     error.value = (e as Error).message
@@ -1513,6 +1517,9 @@ async function bootstrap() {
         </p>
 
         <p v-if="lastFill && fillAccount === selectedAccount.id" class="notice" style="margin-top: 8px">
+          <span v-if="lastFill.idempotent_replay">
+            这一次没有产生新的成交：同一个信号只认一笔订单，回到的是第一次那笔订单的读数。
+          </span>
           上次成交（订单 #{{ lastFill.order_id }}）：{{ lastFill.side }} · 成交价
           {{ formatNumber(lastFill.fill_price) }} · 数量 {{ formatNumber(lastFill.quantity) }} · 费用
           {{ formatNumber(lastFill.fees) }} · 滑点 {{ formatNumber(lastFill.slippage) }} · 已实现盈亏

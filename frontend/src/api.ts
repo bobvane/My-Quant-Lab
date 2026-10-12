@@ -833,6 +833,8 @@ export interface PaperExecution {
   slippage: number
   realized_pnl: number
   cash: number
+  /** ADR-221：同一个信号重复执行时不会再成交，返回的是第一次那笔订单。 */
+  idempotent_replay: boolean
 }
 
 /* ------------------------------------------------------------------ *

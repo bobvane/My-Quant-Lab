@@ -17,7 +17,7 @@
 | Phase 1 — Market Data + Quant Core | `backend/app/data/providers.py`、`backend/app/data/market_data_repo.py`、`backend/app/api/routers/{market_data,assets}.py`、`backend/app/workers/tasks.py`、`backend/app/research/metrics.py` | **部分实现或流程未闭环**（质量不参与下游判定） |
 | Phase 2 — Backtest Lab | 无 `backend/app/backtest/` 目录；实现在 `backend/app/research/engine.py` + `backend/app/data/backtest_service.py` + `backend/app/api/routers/{backtests,backtest_metrics}.py` | 已实现但缺完整验证（`result_hash` 口径偏窄） |
 | Phase 3 — Ghostfolio | `backend/app/ghostfolio/`、`backend/app/api/routers/ghostfolio.py` | 已完成并有测试证据（本轮未深入复审计） |
-| Phase 4 — Paper Trading | 无 `backend/app/paper/`；实现在 `backend/app/simulation/paper_engine.py` + `backend/app/api/routers/paper.py` | 已实现但缺完整验证（**执行无幂等键**） |
+| Phase 4 — Paper Trading | 无 `backend/app/paper/`；实现在 `backend/app/simulation/paper_engine.py` + `backend/app/api/routers/paper.py` | 已完成并有测试证据（执行幂等，ADR-221） |
 | Phase 5 — AI Layer | `backend/app/ai/**` + `backend/app/api/routers/ai.py` | 已完成并有测试证据（G7 作答闭环 = ADR-211…213） |
 | Phase 6 — GitHub Strategy Importer | `backend/app/importer/**` + `backend/app/sources/**` + `backend/app/api/routers/importer.py` | 已完成并有测试证据（四道防线），但自动激活语义待决 |
 | Phase 7 — Live Signal | `backend/app/simulation/signal_engine.py`、`backend/app/simulation/outcome_evaluator.py`、`backend/app/api/routers/{signals,research}.py` | 已完成并有测试证据（信号→模拟账户为人工交接） |
@@ -40,7 +40,7 @@
 | M04 Strategy Library | ✓ | ✓ | ✓ | ✓ | `backend/app/data/strategy_service.py:228 make_current`、`:257` 参数快照；`backend/app/domain/immutability.py:43` 触发器 |
 | M05 GitHub Importer | ✓ | ✓ | ✓ | 部分 | `backend/app/importer/github_client.py:38 ALLOWED_HOSTS`、`:44 STRATEGY_EXTENSIONS`、`:46-50` 三个上限、`:424 _assert_allowed`；`github_client.py:189-201` 只在请求头用 client token |
 | M06 Backtest | ✓ | ✓ | ✓ | 部分 | `backend/app/research/engine.py:519-532 result_hash`、`:48 ENGINE_VERSION="1.2.1"`；`test_backtest.py:38 test_backtest_is_deterministic` |
-| M07 Paper Trading | ✓ | ✓ | 部分 | ✗ | `backend/app/simulation/paper_engine.py:97 execute_signal`；**无幂等键** |
+| M07 Paper Trading | ✓ | ✓ | ✓ | 部分 | `backend/app/simulation/paper_engine.py:97 execute_signal`；幂等键已落地（ADR-221：`uq_paper_order_signal` 唯一索引 + 重复执行返回原订单） |
 | M08 Signal Engine | ✓ | ✓ | ✓ | 部分 | `backend/app/simulation/signal_engine.py`；`paper.py:753` 是唯一执行入口（人工） |
 | M09 AI | ✓ | ✓ | ✓ | ✓ | `backend/app/ai/provider.py:72-79`（AI 不产数字）、`:99 UNTRUSTED_SOURCE_HEADER`、`:107-127 wrap_untrusted`；G7 闭环 ADR-211…213 |
 | M10 Ghostfolio | ✓ | ✓ | ✓ | ✓ | `backend/app/ghostfolio/**` |
@@ -62,7 +62,7 @@
 6. **策略版本 → 回测**：连通。`backend/app/data/backtest_service.py:245`、`:340 result_hash`。
 7. **回测 → 风险与结果解释**：连通。`backend/app/api/routers/backtest_metrics.py` 直传 `metrics_json`；缺值一律走 `None`（ADR-214 修掉了两处例外）。
 8. **回测 → 实验比较**：连通。`backend/app/domain/models.py:495-522 ExperimentResult`（`:513 backtest_run_id` 是「实验→回测」的真相）。
-9. **信号 → 模拟账户 → 结果归因**：**链路最后一段无自动交接**。`backend/app/simulation/paper_engine.py:97 execute_signal` 的唯一调用者是 `backend/app/api/routers/paper.py:753`（`POST /paper/accounts/{id}/execute`），必须由人按一次；账户能追溯到实验/回测（`paper.py:292-302`），但执行本身**没有幂等键**。
+9. **信号 → 模拟账户 → 结果归因**：**链路最后一段仍无自动交接**。`backend/app/simulation/paper_engine.py:97 execute_signal` 的唯一调用者是 `backend/app/api/routers/paper.py:753`（`POST /paper/accounts/{id}/execute`），必须由人按一次；账户能追溯到实验/回测（`paper.py:292-302`）。**重复执行已不再是缺口**（ADR-221）：同一个 `signal_id` 只有一笔订单，第二次调用幂等返回原订单、零写入。
 
 ### 3.1 已发现的断点（本轮已修）
 
@@ -133,7 +133,7 @@
 
 ### P0
 
-1. **模拟执行没有幂等键**（未修，需用户决策）。`backend/app/simulation/paper_engine.py:97 execute_signal` 全文没有 `signal_id` 去重；`backend/alembic/versions/0001_initial_schema.py:439-461` 建 `paper_orders` 时没有 `UniqueConstraint(signal_id)`；部分平仓可重复扣（`paper_engine.py:394-420` 每次调用新建一条 `PaperTrade`）；只有全仓口径被应用层挡住（`:239-240` 重复 BUY、`:335-336` 空仓 SELL）。既有测试 `backend/tests/test_paper_engine.py:250-267` 的第二次 422 是因为中间把**账户**关了（`:261-262`），掩盖了这个问题。
+1. **模拟执行没有幂等键**（**已修，ADR-221**，用户已定语义）。原来 `backend/app/simulation/paper_engine.py:97 execute_signal` 全文没有 `signal_id` 去重；`backend/alembic/versions/0001_initial_schema.py:439-461` 建 `paper_orders` 时没有唯一约束；部分平仓可重复扣（每次调用新建一条 `PaperTrade`）；只有全仓口径被应用层挡住（重复 BUY、空仓 SELL）。既有测试 `backend/tests/test_paper_engine.py:250-267` 的第二次 422 是因为中间把**账户**关了，掩盖了这个问题。现在：迁移 `0022_paper_order_signal_unique` 建唯一索引 `uq_paper_order_signal`（升级前预检重复 `signal_id`，有重复就抛错且不删任何行）；`execute_signal` 先按 `signal_id` 查已有订单，命中就零写入地返回原订单（响应新增 `idempotent_replay: true`），并发下写失败由 `IntegrityError` 兜住并回到原订单。测试见 `backend/tests/test_paper_idempotency.py`（含 4 线程并发、部分平仓重复调用、失败重试、`signal_id` 为 NULL 的手工订单）。**生产存量是否已有重复 `signal_id` 尚未验证**（本任务不允许连 NAS，迁移会在升级时自己拒绝并点名）。
 
 ### P1
 
@@ -173,7 +173,7 @@
 
 1. **草案点名标的（`universe`/`markets`）会进入无法通过作答修复的终止状态**。这是**冻结契约的既定行为**，不是实现缺陷：`backend/app/compiler/compiler.py:958-990` 的 `_read_market_block` 与 `:601-627` 的 `_map_market_rule` 对它记 `not_expressible`（结构码，永远不出现为可回答问题）；`docs/29_STRATEGY_COMPILER_CONTRACT.md:208-210`、`:230`、**`:791`（明令禁止把 `universe="BTC"` 偷换成 symbol）**、`:809`（`test_martin_scenario_stays_uncompilable`）把它钉死。矛盾在于 **AI 层自己的契约要求填这两个字段**：`backend/app/ai/contracts/STRATEGY_ARCHITECT.md:58`、`backend/app/ai/contracts/RESEARCHER.md:30,44`。⇒ 两条出路都越界（改 AI 契约语义，或改冻结 `docs/29`），故不自行实施。需要用户选：**(a)** 明确「标的不是策略内容，草案不许点名标的」（改 AI 契约与提示词）；**(b)** 给 DSL 加标的字段（改冻结契约，等于扩展策略表达能力）；**(c)** 保持现状，只把 UI 文案说得更准（当前只能笼统说「无法用这套策略语言表达」，且不能承诺「重新生成一版就好」）。
 2. **`market.allow_short` 不是可回答问题**：`backend/app/ai/draft_answers.py` 的 `UNSUPPORTED_SLOTS` 明确拒绝并给出中文原因（草案格式没有承载它的字段、编译器不读它）。做空能力本身需要产品决策。
-3. **模拟执行幂等**（P0-1）：重复请求应当 409 还是幂等返回原单？历史重复数据如何处置？
+3. **模拟执行幂等**（P0-1）：**用户已决定**（正式语义 = 同一个 `signal_id` 只产生一笔模拟订单，重复执行幂等返回第一次的原订单，不用 409），已由 ADR-221 实施。**仍待用户的是存量数据**：生产库是否已有重复 `signal_id` 无法在本机验证（本任务不允许连 NAS）；迁移 `0022` 会在升级时预检并**拒绝**、点名重复的 `signal_id`，绝不删除或合并。若生产确实有重复，需要用户决定怎么处置那几笔历史订单。
 4. **`quality_status` 是否应拦住回测/信号**（P1-2、P1-3）：拦住会让既有回测突然不可用。
 5. **`ENGINE_VERSION` 与 `result_hash` 口径**（P1-4）：是否接受一次口径变更与随之而来的历史可比性断裂。
 6. **GitHub 监视器是否自动激活**（P1-6）：自动激活等于外部代码直接成为当前策略。
@@ -186,7 +186,7 @@
 
 ## 8. 后续推荐顺序
 
-1. （P0）模拟执行幂等键 —— 需先定语义（等第 3 项回答）。
+1. ~~（P0）模拟执行幂等键 —— 需先定语义。~~ **已完成**（ADR-221，本批）：唯一索引 + 幂等返回原订单 + 并发/部分平仓/重试测试；剩下的是生产存量重复数据的处置（等第 3 项）。
 2. ~~（P1）前端 404 之外的两处小修：`LabView.vue openExperimentById`、`docs/13_UI_UX.md` 欠账节；这两项无需决策。~~ **已完成**：`openExperimentById` 由 ADR-220 修好（本批）；`docs/13` 欠账节经核实**不需要改**（§6 第 19 条的自纠）。
 3. （P1）`result_hash` 口径 + `ENGINE_VERSION`（等第 5 项回答）。
 4. （P1）`quality_status` 的下游语义（等第 4 项回答）。

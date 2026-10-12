@@ -103,6 +103,20 @@ jobs:
           APP_ENVIRONMENT: test
         run: pytest -o addopts= tests/test_draft_answers.py -v
 
+      # ADR-221. One signal may only produce one paper order, and the thing that
+      # enforces it is a unique index -- the case a read-then-write check cannot
+      # cover. The module is marked `postgres` so these assertions run against the
+      # service above, where the loser of the race *is* answered with the winner's
+      # order; on SQLite a loser can legitimately be told the database is busy, and
+      # the test says so rather than pretending the two dialects behave alike.
+      - name: Run paper idempotency tests on PostgreSQL
+        env:
+          DATABASE_URL: "sqlite+pysqlite:///:memory:"
+          TEST_POSTGRES_URL: postgresql+psycopg://quantlab_test:quantlab_test@localhost:5433/quantlab_test
+          MARKET_DATA_PROVIDER: synthetic
+          APP_ENVIRONMENT: test
+        run: pytest -o addopts= tests/test_paper_idempotency.py -v
+
       - name: Upload coverage
         # `if: always()` is deliberate: the report matters most when the suite failed.
         # The artifact must then really exist -- a missing coverage.xml is a failure of

@@ -23,6 +23,7 @@ import datetime as dt
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 
@@ -202,6 +203,91 @@ def test_every_revision_can_be_walked_back_down_to_base(tmp_path) -> None:
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == head
             )
+    finally:
+        engine.dispose()
+        settings.database_url = original_url  # type: ignore[assignment]
+
+
+# --------------------------------------------------------------------------- #
+# 0022: one signal, one order (ADR-221)
+# --------------------------------------------------------------------------- #
+def _insert_order(connection, signal_id: int | None) -> None:
+    """A minimal paper order; foreign keys are not enforced on this SQLite file."""
+
+    connection.execute(
+        text(
+            "INSERT INTO paper_orders (account_id, signal_id, asset_id, side, order_type, "
+            "quantity, status, fees, slippage, created_at) "
+            "VALUES (1, :signal_id, 1, 'BUY', 'market', 1, 'filled', 0, 0, "
+            "'2026-01-02 00:00:00')"
+        ),
+        {"signal_id": signal_id},
+    )
+
+
+def test_the_migration_makes_one_signal_mean_one_order(migrated_session: Session) -> None:
+    """The index is there, it is unique, and it only covers rows that name a signal."""
+
+    listed = {
+        row[0]: row[1]
+        for row in migrated_session.execute(
+            text("SELECT name, \"unique\" FROM pragma_index_list('paper_orders')")
+        ).all()
+    }
+    assert listed.get("uq_paper_order_signal") == 1, listed
+    index_info = text("SELECT name FROM pragma_index_info('uq_paper_order_signal')")
+    columns = migrated_session.execute(index_info).scalars().all()
+    assert columns == ["signal_id"], columns
+
+    _insert_order(migrated_session, 7001)
+    with pytest.raises(IntegrityError):
+        _insert_order(migrated_session, 7001)
+    migrated_session.rollback()
+
+    # Orders that came from no signal are not part of the rule, and both dialects treat
+    # NULLs as distinct, so any number of them still fit.
+    _insert_order(migrated_session, None)
+    _insert_order(migrated_session, None)
+    migrated_session.commit()
+
+    assert (
+        migrated_session.execute(
+            text("SELECT COUNT(*) FROM paper_orders WHERE signal_id IS NULL")
+        ).scalar()
+        == 2
+    )
+
+
+def test_the_migration_refuses_to_index_orders_that_already_share_a_signal(tmp_path) -> None:
+    """A duplicate stops the upgrade and is named; nothing is deleted, merged or picked."""
+
+    from alembic.config import Config
+
+    from alembic import command
+    from app.core.config import settings
+
+    config = Config("alembic.ini")
+    url = f"sqlite+pysqlite:///{tmp_path / 'duplicates.sqlite3'}"
+    original_url = settings.database_url
+    settings.database_url = url  # type: ignore[assignment]
+    engine = create_engine(url, future=True)
+    try:
+        # One revision short of the index, which is the only way to write a duplicate.
+        command.upgrade(config, "0021_paper_account_experiment")
+        with engine.begin() as connection:
+            _insert_order(connection, 4242)
+            _insert_order(connection, 4242)
+
+        with pytest.raises(RuntimeError) as failure:
+            command.upgrade(config, "head")
+
+        message = str(failure.value)
+        assert "signal_id=4242 有 2 笔订单" in message, message
+        with engine.connect() as connection:
+            kept = connection.execute(
+                text("SELECT COUNT(*) FROM paper_orders WHERE signal_id = 4242")
+            ).scalar()
+        assert kept == 2, "the migration must not delete or merge existing orders"
     finally:
         engine.dispose()
         settings.database_url = original_url  # type: ignore[assignment]

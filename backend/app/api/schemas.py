@@ -847,6 +847,10 @@ class PaperExecutionOut(BaseModel):
     slippage: float
     realized_pnl: float
     cash: float
+    # True when this signal had already been executed and the order below is the one
+    # that first execution created: nothing was filled again (ADR-221). Additive, so a
+    # caller that does not know the field still reads the same numbers as before.
+    idempotent_replay: bool = False
 
 
 class SignalOut(BaseModel):

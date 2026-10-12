@@ -761,7 +761,10 @@ def execute(
     except PaperError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return PaperExecutionOut(
-        account_id=account_id,
+        # The order's own account and balance, not the path account: a repeat execution
+        # answers with the order the first execution created, and that order knows which
+        # account it belongs to (ADR-221).
+        account_id=int(result["account_id"]),
         side=result["side"],
         order_id=result["order_id"],
         quantity=float(result["quantity"]),
@@ -769,7 +772,8 @@ def execute(
         fees=float(result["fees"]),
         slippage=float(result["slippage"]),
         realized_pnl=float(result["realized_pnl"]),
-        cash=float(account.cash),
+        cash=float(result["cash"]),
+        idempotent_replay=bool(result["idempotent_replay"]),
     )
 
 

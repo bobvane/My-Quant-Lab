@@ -117,6 +117,71 @@ jobs:
           APP_ENVIRONMENT: test
         run: pytest -o addopts= tests/test_paper_idempotency.py -v
 
+      # ADR-222. The delete guard is dialect-sensitive in one specific way: SQLite only
+      # enforces foreign keys when the pragma is on, so the SQLite half of the B1 matrix
+      # cannot prove that the rows the guard refuses to touch would really have been
+      # protected by the database. This step runs the PostgreSQL half and settles the
+      # verdict from pytest's own exit code plus the exact numbers in its summary line,
+      # requiring 5 passed / 0 failed / 0 skipped / 0 errors: a green step that proved
+      # nothing is exactly the failure mode an unset TEST_POSTGRES_URL used to hide
+      # (B1-T11, and the round-2 review's P1 finding).
+      - name: Run B1 delete guard tests on PostgreSQL
+        env:
+          DATABASE_URL: "sqlite+pysqlite:///:memory:"
+          TEST_POSTGRES_URL: postgresql+psycopg://quantlab_test:quantlab_test@localhost:5433/quantlab_test
+          MARKET_DATA_PROVIDER: synthetic
+          APP_ENVIRONMENT: test
+        run: |
+          # The verdict is settled by pytest's own exit code plus the JUnit XML it writes,
+          # parsed by Python's standard library -- never by parsing the human-readable
+          # summary text. Count-via-regex was fragile under `-q`/`-v` and pytest version
+          # drift, and a "skipped" substring search could not tell 5 tests from 0.
+          #
+          # The exit code is taken from `$?` on the very next statement, with errexit
+          # off around the run, so no pipeline or PIPESTATUS sits between pytest and the
+          # number that decides the verdict. pytest output is kept on disk for diagnosis.
+          set -uo pipefail
+          EXPECTED_TESTS=5
+          LOG=/tmp/b1-postgres.log
+          XML=/tmp/b1-postgres.xml
+          MAX_LINES=400
+          set +e
+          pytest -o addopts= tests/test_delete_guards_postgres.py -v -rs --color=no \
+            --junitxml="$XML" >"$LOG" 2>&1
+          pytest_exit=$?
+          set -e
+          echo "----- pytest output -----"
+          cat "$LOG"
+          echo "----- end of pytest output -----"
+          if [ "$pytest_exit" -ne 0 ]; then
+            echo "::error::pytest exited $pytest_exit: at least one B1 PostgreSQL test failed, or the session could not reach PostgreSQL / migrate the scratch database"
+            tail -n "$MAX_LINES" "$LOG"
+            exit 1
+          fi
+
+          # pytest exit code 0 means "the run finished". It does NOT mean the verdict is
+          # the one we require, so the JUnit XML is parsed by the helper and every count
+          # is enforced. The verdict logic lives in scripts/verify_b1_junit.py rather than
+          # a heredoc here, so the workflow's YAML block scalar stays valid and the rule
+          # is reviewable and testable on its own (ADR-222).
+          set +e
+          verdict="$(python3 scripts/verify_b1_junit.py "$XML" 2>&1)"
+          verify_exit=$?
+          set -e
+          if [ "$verify_exit" -ne 0 ]; then
+            echo "::error::could not verify the B1 PostgreSQL JUnit report (scripts/verify_b1_junit.py exited $verify_exit): $verdict"
+            tail -n "$MAX_LINES" "$LOG"
+            exit 1
+          fi
+          read -r t f e s <<< "$verdict"
+          if [ "$t" -ne "$EXPECTED_TESTS" ] || [ "$f" -ne 0 ] || [ "$e" -ne 0 ] || [ "$s" -ne 0 ]; then
+            echo "::error::the B1 PostgreSQL half of the delete-guard matrix did not meet the verdict: expected tests==$EXPECTED_TESTS, failures==0, errors==0, skipped==0; got tests=$t failures=$f errors=$e skipped=$s"
+            tail -n "$MAX_LINES" "$LOG"
+            exit 1
+          fi
+
+          echo "::notice::B1 delete-guard matrix ran on PostgreSQL: $t passed, $f failed, $e errors, $s skipped"
+
       - name: Upload coverage
         # `if: always()` is deliberate: the report matters most when the suite failed.
         # The artifact must then really exist -- a missing coverage.xml is a failure of

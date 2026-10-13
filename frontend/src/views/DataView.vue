@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, type Asset } from '@/api'
+import { api, deleteBlockedHint, type Asset } from '@/api'
 import { formatDateTime } from '@/format'
 import { isAdvanced } from '@/mode'
 import { defaultSymbolFor, providerLabel, qualityLabel } from '@/wording'
@@ -15,6 +15,8 @@ const assets = ref<Asset[]>([])
 const series = ref<Array<Record<string, unknown>>>([])
 const error = ref('')
 const info = ref('')
+//: 删除成功后要如实说明「这次删除顺带改变了什么」（ADR-222）。
+const deleteNotices = ref<string[]>([])
 // 默认代码跟着当前行情源走（评审报告 P1-7）：演示数据源只服务 DEMO-AAPL / DEMO-BTC，
 // 真行情源用真实代码。用户自己输入过之后就不再动它。
 const symbol = ref('')
@@ -122,14 +124,17 @@ async function deleteSeries(id: number, symbol: string) {
   if (!ok) return
   error.value = ''
   info.value = ''
+  deleteNotices.value = []
   try {
     const result = await api.deleteSeries(id)
     info.value = result.archived
       ? `${result.message}（${result.blocking_runs} 次回测仍在引用它）`
       : `已删除 ${result.symbol} 的行情数据（系列 #${id}）`
+    deleteNotices.value = result.warnings ?? []
     await load()
   } catch (e) {
-    error.value = (e as Error).message
+    const hint = deleteBlockedHint(e)
+    error.value = hint ? `${(e as Error).message} ${hint}` : (e as Error).message
   }
 }
 
@@ -171,6 +176,9 @@ onMounted(load)
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="info" class="notice">{{ info }}</p>
+    <ul v-if="deleteNotices.length" class="notice">
+      <li v-for="(item, index) in deleteNotices" :key="index">{{ item }}</li>
+    </ul>
 
     <div class="card card-quiet">
       <h3>同步行情</h3>

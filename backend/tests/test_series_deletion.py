@@ -200,9 +200,14 @@ def test_purging_a_used_series_is_refused_with_a_reason(client, db_session) -> N
     response = client.delete(f"{PREFIX}/series/{series_id}?purge=true")
 
     assert response.status_code == 409, response.text
-    detail = response.json()["detail"]
-    assert "3" in detail, "the refusal must name how many runs depend on it"
-    assert "回测" in detail
+    body = response.json()
+    message = body["error"]["message"]
+    assert "3" in message, "the refusal must name how many runs depend on it"
+    assert "回测" in message
+    assert body["error"]["details"]["entity"] == "series"
+    assert body["error"]["details"]["blockers"] == [
+        {"table": "backtest_runs", "kind": "backtest", "label": "回测记录", "count": 3}
+    ]
     assert db_session.get(MarketDataSeries, series_id) is not None
     assert _count(db_session, BacktestRun) == 3
 

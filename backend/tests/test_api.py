@@ -553,7 +553,9 @@ def test_delete_strategy_with_backtests_refused(client) -> None:
     )
     response = client.delete(f"/api/v1/strategies/{strategy['id']}")
     assert response.status_code == 409
-    assert "回测" in response.json()["detail"]
+    body = response.json()
+    assert body["error"]["code"] == "delete_blocked"
+    assert "回测" in body["error"]["message"]
 
 
 def test_delete_backtest(client) -> None:

@@ -168,3 +168,169 @@ def test_the_release_smoke_test_pulls_the_version_it_is_releasing():
 
     body = _step(_text(RELEASE), "Smoke test the released images")
     assert '"${APP_IMAGE}:${VERSION}"' in body, "the app image is not pulled at the released tag"
+
+
+# --------------------------------------------------------------------------- #
+# WP-C-2: the moving tags move only after the smoke test proved the image boots
+# --------------------------------------------------------------------------- #
+def test_the_candidate_is_published_under_tags_that_name_this_build_only() -> None:
+    """`latest` and `2.7` are pointers a deployment follows, not build identities.
+
+    They used to be pushed by the same step that builds the image -- before the
+    smoke test runs -- so a build whose stack never came up still became what
+    `MQL_VERSION=latest` (the documented default) resolved to. The candidate now
+    carries only `vX.Y.Z` / `X.Y.Z`; the moving tags are promoted afterwards.
+    """
+
+    body = _uncommented(_step(_text(RELEASE), "App metadata"))
+    assert "type=ref,event=tag" in body, "the immutable tag reference is gone"
+    assert "pattern={{version}}" in body, "the immutable version tag is gone"
+    assert "latest" not in body, "the candidate still pushes `latest` before it is tested"
+    assert "major}}.{{minor" not in body, "the candidate still moves the `X.Y` release line"
+
+
+def test_the_moving_tags_are_promoted_only_after_a_successful_smoke_test() -> None:
+    text = _text(RELEASE)
+    body = _step(text, "Promote the verified image")
+    assert "if: steps.smoke.outcome == 'success'" in body, (
+        "the moving tags are promoted without the smoke verdict, so a failed build "
+        "still becomes the default deployment target"
+    )
+    # Order: the image is built, then booted, then promoted -- never before.
+    assert text.index("Build and push app image") < text.index("Smoke test the released images")
+    assert text.index("Smoke test the released images") < text.index("Promote the verified image")
+
+
+def test_the_promotion_retags_the_digest_that_was_tested() -> None:
+    """A rebuild would promote bytes nobody booted; a registry-side retag cannot."""
+
+    body = _step(_text(RELEASE), "Promote the verified image")
+    assert "imagetools create" in body, "the promotion rebuilds instead of retagging"
+    assert '"${APP_IMAGE}:${version}"' in body, "the promotion does not name the tested image"
+
+
+def test_the_promotion_respects_the_prerelease_and_latest_gates() -> None:
+    body = _step(_text(RELEASE), "Promote the verified image")
+    assert "PRERELEASE" in body and 'PRERELEASE}" = "false' in body, (
+        "a pre-release could move the `X.Y` release line"
+    )
+    assert "TAG_LATEST" in body and 'TAG_LATEST}" = "true' in body, (
+        "a release that does not own `latest` could move it"
+    )
+    assert "no moving tag applies" in body, "the no-op path is missing"
+
+
+def test_the_release_notes_say_whether_the_moving_tags_advanced() -> None:
+    """The release is still published on failure (deliberate); silence is not allowed.
+
+    Whether `latest` moved decides what an unpinned `docker compose pull` gets, so
+    the page a reader actually opens has to say it.
+    """
+
+    notes = _step(_text(RELEASE), "Generate release notes")
+    assert "not** moved" in notes or "not moved" in notes, (
+        "the notes never say the moving tags were withheld"
+    )
+    assert "MQL_VERSION=${version}" in notes, "the notes do not say how to try the build anyway"
+
+
+def test_the_release_notes_report_the_promotion_outcome_not_the_smoke_outcome() -> None:
+    """A note that claims the moving tags advanced must be based on the step that
+    moves them.
+
+    The smoke test can pass and the promotion still fail (the tag command errors
+    out, a registry write fails); a note worded off the smoke verdict would tell
+    the reader `latest` moved when it did not.
+    """
+
+    notes = _step(_text(RELEASE), "Generate release notes")
+    assert "steps.promote.outcome" in notes, "the notes do not read the promotion step's outcome"
+    # The success claim must come from the promotion's success, not the smoke's.
+    assert 'if [ "${promote}" = "success" ]' in notes, (
+        "the notes claim the tags advanced without the promotion step having succeeded"
+    )
+    # All three states must be reported: promoted; smoke passed but promotion did
+    # not; neither.
+    assert "did not succeed" in notes, (
+        "the notes have no branch for a failed promotion after a passed smoke test"
+    )
+
+
+def test_the_release_rechecks_latest_ownership_before_moving_it() -> None:
+    """Releases are not serialised, so `latest` is re-checked at the point it moves.
+
+    Ownership is decided before the build (the highest tag cannot be outranked yet)
+    and re-asserted by the promotion step: a newer tag published while this build
+    was in flight must not be undone by an older one finishing last.
+    """
+
+    promote = _step(_text(RELEASE), "Promote the verified image")
+    assert "git tag --list 'v*' --sort=-v:refname" in promote, (
+        "the promotion does not re-check the tag ordering it depends on"
+    )
+    assert "no longer the highest tag" in promote, (
+        "a release that lost `latest` ownership is not told it stayed put"
+    )
+    # And that re-check must be narrower than the release step that decides it: the
+    # re-check sits inside the step that moves the tag.
+    assert 'moves+=("latest")' in promote
+    assert "highest" in promote.split('moves+=("latest")')[0]
+
+
+def test_the_promotion_step_is_the_only_writer_of_the_moving_tags() -> None:
+    """The moving tags have exactly one writer, and it runs after the smoke test.
+
+    `docker buildx imagetools create` retags the registry; anything else that
+    pushes a moving tag is a second writer that can interleave with this one and
+    undo it. Comments that mention the command are not writers.
+    """
+
+    text = _text(RELEASE)
+    live_invocations = [
+        line
+        for line in text.splitlines()
+        if "docker buildx imagetools create" in line and not line.lstrip().startswith("#")
+    ]
+    assert len(live_invocations) == 1, (
+        f"the moving tags are written from {len(live_invocations)} live invocation sites; "
+        "two independent writers can interleave and overwrite each other"
+    )
+    assert "if: steps.smoke.outcome == 'success'" in text, (
+        "the moving-tag writer is not gated on the smoke test, so a failed build "
+        "could still advance the default deployment target"
+    )
+
+
+def test_release_runs_are_serialised_across_versions() -> None:
+    """Different versions queue behind each other; none may run two at a time.
+
+    A per-version concurrency group (`release-${{ github.ref }}`) would let two
+    releases build and smoke-test side by side, and whichever finished LAST would
+    win the write to `latest` -- an older release overwriting a newer one. The
+    group must therefore not key on the triggering ref: all release runs share
+    one group, and `cancel-in-progress: false` keeps the queue loss-free (a run
+    in flight is never replaced by a queued one).
+
+    `queue: max` additionally keeps up to 100 waiting runs in the group instead of
+    letting the default queue policy drop runs it considers stale. Queue ordering
+    follows when a run entered the waiting state, not strictly by version number
+    or trigger time, so this caps loss, it does not reorder by recency.
+    """
+
+    text = _text(RELEASE)
+    concurrency = [
+        line for line in text.splitlines() if "group:" in line and "concurrency" not in line
+    ]
+    groups = [line.split("group:")[-1].strip() for line in concurrency]
+    assert len(groups) == 1, f"multiple concurrency groups declared: {groups}"
+    assert "github.ref" not in groups[0], (
+        "the concurrency group keys on the ref, so two releases run in parallel; "
+        "an older one can then overwrite the newer one's `latest`"
+    )
+    assert "cancel-in-progress: false" in text, (
+        "a queued release would be CANCELLED in favour of a newer one, so a "
+        "legitimate release could be lost"
+    )
+    assert "queue: max" in text, (
+        "the group would drop runs it considers stale instead of holding up to 100 waiting runs"
+    )

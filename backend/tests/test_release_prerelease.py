@@ -234,20 +234,149 @@ def test_a_candidate_never_owns_latest_and_does_not_block_the_release_after_it(
     )
 
 
+def _stub_docker(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """A fake `docker` on PATH that records its arguments instead of talking to a daemon.
+
+    The promotion step's decision -- which tags it would move -- is what has to be
+    right, and that decision is shell. Stubbing the client lets the real step run and
+    the log say what it would have promoted, without a registry.
+    """
+
+    bin_dir = tmp_path / "stubbin"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "docker.log"
+    stub = bin_dir / "docker"
+    stub.write_text(
+        f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "{log.as_posix()}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return bin_dir, log
+
+
+def _init_git_tags(directory: pathlib.Path, *tags: str) -> None:
+    """A git checkout with the given tags -- what the promotion step's re-check reads."""
+
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is not available on this host")
+    env = dict(os.environ)
+    # pytest's tmp dir sits under a checkout of this repo; keep git from walking
+    # up and touching the parent repository's refs while it builds its fixture.
+    env["GIT_CEILING_DIRECTORIES"] = str(directory.parent)
+    env["GIT_DIR"] = str(directory / ".git")
+    env["GIT_WORK_TREE"] = str(directory)
+    subprocess.run(
+        [git, "init", "-q"],
+        cwd=directory,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            git,
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+        cwd=directory,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    # `git tag` takes one name per call; anchor every fixture tag at the empty commit.
+    for tag in tags:
+        subprocess.run(
+            [git, "tag", tag, "HEAD"],
+            cwd=directory,
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+
+
 @needs_bash
-def test_the_line_tag_is_moved_only_by_a_released_version() -> None:
-    """`2.5` is a pin for a release line; a candidate must not move it."""
+def test_the_line_tag_is_moved_only_by_a_released_version(tmp_path: pathlib.Path) -> None:
+    """`2.5` is a pin for a release line; a candidate must not move it.
+
+    The gate used to ride on `docker/metadata-action`'s `enable=` expression. It now
+    lives in the promotion step, which runs only after the smoke test passed, so the
+    rule is asserted by RUNNING that step with a stubbed `docker` and reading back the
+    tags it asked for -- the same way the rest of this file exercises the release
+    rules rather than reading their prose (WP-C-2).
+    """
 
     text = _text(RELEASE)
-    gated = (
-        "type=semver,pattern={{major}}.{{minor}},"
-        "enable=${{ steps.version.outputs.prerelease == 'false' }}"
-    )
-    # One gated line per published image: v2.6.0 merged the images into one App image
-    # (ADR-190), so a complete release moves exactly one `X.Y` line tag.
-    assert text.count(gated) == 1, "not every published image gates its `X.Y` line tag"
     assert "type=semver,pattern={{major}}.{{minor}}\n" not in text, (
         "an ungated `X.Y` tag line is left, so a candidate would move the release line"
+    )
+    app_meta = _step("App metadata")
+    assert "{{major}}.{{minor}}" not in app_meta, (
+        "the candidate build still claims the `X.Y` line tag before it is tested"
+    )
+
+    bin_dir, log = _stub_docker(tmp_path)
+    path = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+    # The re-check inside the step reads the tag ordering `git` reports; a bare
+    # temp dir reports nothing, so plant the highest stable tag it compares against.
+    _init_git_tags(tmp_path, "v2.4.9", "v2.5.0")
+
+    def promoted(prerelease: str, tag_latest: str) -> list[str]:
+        log.write_text("", encoding="utf-8")
+        result, _, _ = _run(
+            "Promote the verified image",
+            cwd=tmp_path,
+            version="v2.5.0",
+            env_extra={
+                "PATH": path,
+                "APP_IMAGE": "ghcr.io/bobvane/my-quant-lab-app",
+                "VERSION": "v2.5.0",
+                "PRERELEASE": prerelease,
+                "TAG_LATEST": tag_latest,
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        # Each stub call is `buildx imagetools create --tag <image>:<tag> <image>:<ver>`;
+        # only the token after `--tag` is a tag this step decided to move.
+        targets: list[str] = []
+        for line in log.read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            for index, part in enumerate(parts):
+                if part == "--tag" and index + 1 < len(parts):
+                    targets.append(parts[index + 1])
+        return targets
+
+    image = "ghcr.io/bobvane/my-quant-lab-app"
+
+    # A candidate moves nothing: not the `X.Y` line, and never `latest`.
+    assert promoted("true", "false") == [], "a candidate promoted a moving tag"
+
+    # A released version that owns `latest` moves both.
+    both = promoted("false", "true")
+    assert sorted(both) == sorted([f"{image}:2.5", f"{image}:latest"]), (
+        f"a released version did not promote both moving tags: {both}"
+    )
+
+    # A released version that does NOT own `latest` must leave `latest` alone.
+    only_line = promoted("false", "false")
+    assert only_line == [f"{image}:2.5"], (
+        f"a release that does not own `latest` did not promote exactly the line tag: {only_line}"
+    )
+
+    # An older version must not be able to overwrite `latest` after a newer one was
+    # published while it was still building: the in-step re-check reads the tag
+    # ordering that `git` reports at the moment it runs.
+    _init_git_tags(tmp_path, "v2.5.1")
+    outworn = promoted("false", "true")
+    assert outworn == [f"{image}:2.5"], (
+        f"an older release promoted `latest` on top of a newer tag: {outworn}"
     )
 
 

@@ -16,9 +16,26 @@ permissions:
   contents: write
   packages: write
 
+# Every release run joins ONE shared group, so runs for different tags can never
+# run in parallel: an older release always queues behind a newer one instead of
+# racing it to the moving tags. (A per-tag group -- `release-${{ github.ref }}` --
+# let two releases build and smoke-test side by side, and whichever finished last
+# won the write to `latest`, undoing the other's promotion.)
+#
+# `cancel-in-progress: false` keeps the queue loss-free: a run already in flight
+# is never replaced by a queued one, and queued runs execute in the order they
+# were created. The promotion step re-checks `latest` ownership right before it
+# moves, so even a run that queued first still defers to a tag published while
+# it was waiting. The residual window that closes here is between two QUEUED runs
+# (the older one finishing its build/smoke while the newer one is still queued);
+# a tag pushed after a run has already passed its re-check is a separate,
+# documented risk, not a release-vs-release race.
 concurrency:
-  group: release-${{ github.ref }}
+  group: mql-release
   cancel-in-progress: false
+  # Keep up to 100 queued runs in the group rather than letting the default queue
+  # policy drop runs it considers stale.
+  queue: max
 
 env:
   REGISTRY: ghcr.io
@@ -146,11 +163,14 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.APP_IMAGE }}
+          # Only tags that name THIS build. `2.7` (a release line) and `latest` are
+          # MOVING pointers -- they are what `MQL_VERSION=latest` and a pinned line
+          # resolve to -- so they are promoted separately, AFTER the smoke test, by
+          # the promotion step further down this job. A build that cannot boot
+          # therefore never becomes what the default deployment pulls (WP-C-2).
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.version.outputs.prerelease == 'false' }}
-            type=raw,value=latest,enable=${{ steps.latest.outputs.tag_latest }}
 
       - name: Build and push app image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -242,6 +262,55 @@ jobs:
           fi
           echo "SMOKE_TEST_OK"
 
+      # WP-C-2. The image was published above under tags that NAME this build
+      # (`vX.Y.Z`, `X.Y.Z`). The tags a deployment actually follows are the moving
+      # ones, and they move HERE -- only after the smoke test booted the very image
+      # being released. Before this step, a build whose stack never came up would
+      # silently become what `MQL_VERSION=latest` pulls.
+      #
+      # `docker buildx imagetools create` retags registry-side: no rebuild, no new
+      # layers, and the digest the smoke test booted is the digest the moving tag
+      # points at. A failure here fails the run; it never creates a tag.
+      - name: Promote the verified image to the moving tags
+        id: promote
+        if: steps.smoke.outcome == 'success'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          TAG_LATEST: ${{ steps.latest.outputs.tag_latest }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          moves=()
+          # `2.7` follows a release line, so only a released version may move it;
+          # a candidate (`v2.5.0-rc.1`) publishes its own tags and nothing else.
+          if [ "${PRERELEASE}" = "false" ]; then
+            moves+=("${version%.*}")
+          fi
+          # `latest` belongs to the newest stable release only. That was decided
+          # before the build, and builds are NOT serialised (each tag gets its own
+          # concurrency group), so a newer release can be published while this one
+          # is still being smoke-tested. Re-check ownership HERE, immediately before
+          # the tag moves, or an older release could undo the newer one's `latest`.
+          if [ "${TAG_LATEST}" = "true" ]; then
+            highest="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]$' | head -n1 || true)"
+            if [ "v${version}" = "${highest}" ]; then
+              moves+=("latest")
+            else
+              echo "not promoting 'latest': v${version} is no longer the highest tag (${highest})"
+            fi
+          fi
+          if [ "${#moves[@]}" -eq 0 ]; then
+            echo "no moving tag applies to ${VERSION}; nothing to promote"
+            exit 0
+          fi
+          for tag in "${moves[@]}"; do
+            docker buildx imagetools create \
+              --tag "${APP_IMAGE}:${tag}" \
+              "${APP_IMAGE}:${version}"
+            echo "promoted ${APP_IMAGE}:${version} -> ${APP_IMAGE}:${tag}"
+          done
+
       - name: Generate release notes
         id: notes
         if: always() && steps.version.outputs.version != ''
@@ -252,6 +321,7 @@ jobs:
           # reader who never opens the run log must still be told whether the image
           # below was seen to boot (ADR-102).
           smoke="${{ steps.smoke.outcome }}"
+          promote="${{ steps.promote.outcome }}"
           {
             echo "## My Quant Lab ${version}"
             echo
@@ -259,6 +329,21 @@ jobs:
               echo "> **Smoke test: passed.** This image booted and served \`scripts/verify-stack.sh\` in this run."
             else
               echo "> **Smoke test: ${smoke:-not run}.** This release was published anyway, but the stack was not seen to boot. Read the \`Smoke test the released images\` step of the release run before deploying, and consider the previous tag."
+            fi
+            echo
+            # WP-C-2: the moving tags are what an unpinned deployment follows, so whether
+            # they advanced decides what `docker compose pull` gets with no MQL_VERSION at
+            # all. Saying it here means a reader who never opens the run log still learns
+            # whether the default deployment target moved.
+            # The promotion step has its own outcome: the smoke test can pass and the
+            # promotion still fail, and the notes must not claim a tag moved when the
+            # command that moves it failed.
+            if [ "${promote}" = "success" ]; then
+              echo "> The moving tags (\`latest\`, the \`X.Y\` release line) were promoted to this build."
+            elif [ "${smoke}" = "success" ]; then
+              echo "> **The moving tags were not moved**: the smoke test passed but the promotion step did not succeed. \`latest\` still resolves to the previous release; read the \`Promote the verified image to the moving tags\` step. To use this build, pin \`MQL_VERSION=${version}\`."
+            else
+              echo "> The moving tags (\`latest\`, the \`X.Y\` release line) were **not** moved, so the default \`MQL_VERSION=latest\` still resolves to the previous release. To try this build anyway, pin \`MQL_VERSION=${version}\`."
             fi
             echo
             echo "Personal quantitative research laboratory — research, backtesting, walk-forward and paper trading. **No auto trading.**"

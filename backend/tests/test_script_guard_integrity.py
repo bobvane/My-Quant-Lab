@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
+import sys
+import tempfile
 
 import yaml
 
@@ -150,6 +153,196 @@ def test_the_frontend_checks_do_not_read_a_variable_nobody_sets() -> None:
     assert re.search(r"if\s*\(\s*\$needsMirror\s+-and\s+-not\s+\$KeepMirror\s*\)", text), (
         "the mirror cleanup no longer keys off the variable that decides mirroring"
     )
+
+
+def test_every_postgres_step_settles_its_verdict_from_the_junit_report() -> None:
+    """A `postgres` step that only reads pytest's exit code goes green when it skips.
+
+    The modules run against the CI service through `TEST_POSTGRES_URL`; unset, they
+    are marked `postgres` and skip, and pytest exits 0 -- so the step reports success
+    while proving nothing about PostgreSQL. ADR-212 (a column narrower than its value)
+    and ADR-221 (a unique index) were both that shape. The B1 step already settled its
+    verdict from `--junitxml` + `scripts/verify_b1_junit.py`; every `postgres` step now
+    has to, and the expected count has to be stated rather than inferred.
+    """
+
+    workflow = yaml.safe_load(_text(CI))
+    steps = (workflow.get("jobs") or {})["backend"]["steps"]
+    postgres_steps = [
+        step
+        for step in steps
+        if str(step.get("env", {}).get("TEST_POSTGRES_URL", "")).startswith("postgresql")
+    ]
+    assert len(postgres_steps) >= 4, (
+        f"only {len(postgres_steps)} PostgreSQL steps found; the scan broke"
+    )
+
+    for step in postgres_steps:
+        name = step.get("name", "<unnamed>")
+        body = step.get("run", "")
+        assert "--junitxml=" in body, (
+            f"{name!r} never writes a JUnit report, so a skip is indistinguishable from a pass"
+        )
+        assert "verify_b1_junit.py" in body or "verify_pg_junit.py" in body, (
+            f"{name!r} writes a JUnit report but never reads it"
+        )
+        assert "--expect" in body or "EXPECTED_TESTS=" in body, (
+            f"{name!r} does not state the test count it requires"
+        )
+
+
+def test_every_postgres_step_expects_the_count_pytest_actually_collects() -> None:
+    """`--expect N` is a claim about reality; collection is the reality, so read it.
+
+    A `def test_` count is not the collected count: `@pytest.mark.parametrize` turns one
+    function into several tests, so a hand-written expectation drifts from the module it
+    guards. The expectation would then fail a legitimate green run -- or, worse, be
+    quietly relaxed until it stopped meaning anything. These numbers are derived from
+    `pytest --collect-only`, so a new parametrize case is caught here instead of in CI.
+    """
+
+    workflow = yaml.safe_load(_text(CI))
+    steps = (workflow.get("jobs") or {})["backend"]["steps"]
+
+    # Gather every (step, module, expected) first, then collect in ONE pytest process:
+    # four separate collections cost a minute of importing `app` for no extra evidence.
+    wants: list[tuple[str, str, int]] = []
+    for step in steps:
+        if not str(step.get("env", {}).get("TEST_POSTGRES_URL", "")).startswith("postgresql"):
+            continue
+        body = str(step.get("run", ""))
+        module = re.search(r"(tests/test_[A-Za-z0-9_]+\.py)", body)
+        assert module, f"{step.get('name')!r} names no test module; cannot derive a count"
+        expected = re.search(r"--expect\s+(\d+)", body) or re.search(r"EXPECTED_TESTS=(\d+)", body)
+        assert expected, f"{step.get('name')!r} states no expected count"
+        wants.append((str(step.get("name")), module.group(1), int(expected.group(1))))
+
+    assert len(wants) >= 4, f"only {len(wants)} PostgreSQL steps checked; the scan broke"
+
+    collected = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-o",
+            "addopts=",
+            *[module for _, module, _ in wants],
+            "--collect-only",
+            "-q",
+            "--color=no",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=REPO_ROOT / "backend",
+        capture_output=True,
+        text=True,
+    )
+    assert collected.returncode == 0, (
+        f"collecting the PostgreSQL modules failed:\n{collected.stdout}\n{collected.stderr}"
+    )
+
+    ids = [line for line in collected.stdout.splitlines() if "::" in line]
+    for name, module, expected in wants:
+        # `::` lines look like `tests/test_x.py::test_y`; normalise the separator win/posix.
+        actual = len([line for line in ids if line.replace("\\", "/").startswith(module)])
+        assert expected == actual, (
+            f"{name!r} expects {expected} tests but {module} collects {actual}; the "
+            "expectation would fail a green run or was relaxed to hide a skip"
+        )
+
+
+def test_every_postgres_step_proves_the_backend_from_the_pytest_header() -> None:
+    """A `... on PostgreSQL` step must prove PostgreSQL, not just count green tests.
+
+    `test_draft_answers.py` and `test_paper_idempotency.py` are backend-agnostic by
+    design: with no `TEST_POSTGRES_URL` they run on in-memory SQLite and pass, so the
+    JUnit counts are right and `skipped == 0` while PostgreSQL was never touched. The
+    counts cannot tell the two runs apart; `conftest.pytest_report_header` can, because
+    it prints `postgres tests: <host>` only when a database was actually offered.
+    Every PostgreSQL step therefore has to read that line back out of its own log.
+    """
+
+    workflow = yaml.safe_load(_text(CI))
+    steps = (workflow.get("jobs") or {})["backend"]["steps"]
+    postgres_steps = [
+        step
+        for step in steps
+        if str(step.get("env", {}).get("TEST_POSTGRES_URL", "")).startswith("postgresql")
+    ]
+    assert len(postgres_steps) >= 4, (
+        f"only {len(postgres_steps)} PostgreSQL steps found; the scan broke"
+    )
+
+    for step in postgres_steps:
+        name = step.get("name", "<unnamed>")
+        body = str(step.get("run", ""))
+        assert "verify_pg_dialect.py" in body, (
+            f"{name!r} never proves the backend was PostgreSQL, so a run that quietly "
+            "used SQLite passes while claiming to be a PostgreSQL test"
+        )
+        assert '"$LOG"' in body, f"{name!r} has no captured pytest log to read the header from"
+        assert "-x" not in body.split("pytest")[1].split("\n")[0], (
+            f"{name!r} passes a pytest flag that would change what the log contains"
+        )
+
+
+def test_the_dialect_verifier_refuses_a_run_that_never_offered_postgresql() -> None:
+    """The verifier is the guard, so its own accepting and refusing must be pinned.
+
+    Synthetic logs on purpose: this proves the rule, and cannot be mistaken for proof
+    that a real PostgreSQL CI run happened.
+    """
+
+    verifier = REPO_ROOT / "backend" / "scripts" / "verify_pg_dialect.py"
+    assert verifier.exists(), "scripts/verify_pg_dialect.py is missing"
+
+    header_ok = "============================= test session starts =============================\n"
+    cases = [
+        # (label, log body, expected exit code)
+        ("offered: real host", header_ok + "postgres tests: localhost:5433/quantlab_test\n", 0),
+        (
+            "not offered: the silent-SQLite run",
+            header_ok + "postgres tests: not offered (TEST_POSTGRES_URL is unset)\n",
+            1,
+        ),
+        ("absent: no header at all (e.g. -q)", header_ok + "47 passed in 10.55s\n", 1),
+        ("empty log", "", 1),
+        (
+            "offered but also refused: contradiction refuses",
+            "postgres tests: localhost:5433/quantlab_test\n"
+            "postgres tests: not offered (TEST_POSTGRES_URL is unset)\n",
+            1,
+        ),
+        (
+            "indented mention is not the header",
+            header_ok + "    postgres tests: localhost:5433/quantlab_test\n",
+            1,
+        ),
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for label, body, expected in cases:
+            log = pathlib.Path(tmp) / "probe.log"
+            log.write_text(body, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(verifier), str(log)],
+                cwd=REPO_ROOT / "backend",
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == expected, (
+                f"{label!r}: expected exit {expected}, got {result.returncode}\n"
+                f"stdout={result.stdout}\nstderr={result.stderr}"
+            )
+
+        missing = pathlib.Path(tmp) / "does-not-exist.log"
+        result = subprocess.run(
+            [sys.executable, str(verifier), str(missing)],
+            cwd=REPO_ROOT / "backend",
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1, "a missing log must fail closed, not pass"
 
 
 def test_the_release_notes_do_not_point_at_a_port_that_serves_nobody() -> None:

@@ -24,10 +24,17 @@ RUN npm run build
 # --- stage 2: the runtime (was docker/Dockerfile.backend) -------------------
 FROM python:3.12-slim AS runtime
 
+# The Git commit this image is built from. Pipelines pass `github.sha`; a local
+# build with no `--build-arg` keeps "unknown". The value lands in the container's
+# `BUILD_COMMIT` env, which `config.Settings.build_commit` reads and `/health`
+# reports, so a running instance can say exactly which commit it came from.
+ARG BUILD_COMMIT=unknown
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    BUILD_COMMIT=${BUILD_COMMIT}
 
 WORKDIR /app
 

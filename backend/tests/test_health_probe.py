@@ -175,9 +175,12 @@ def test_health_still_publishes_the_same_keys(monkeypatch, client, workers, expe
 
     body = client.get("/api/v1/health").json()
 
+    # build_commit is a build-time constant reported verbatim, not a dependency probe;
+    # it must stay in the exact key set too (WP-C-1).
     assert set(body) == {
         "status",
         "version",
+        "build_commit",
         "database",
         "migration",
         "redis",

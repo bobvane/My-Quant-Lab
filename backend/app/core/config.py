@@ -69,6 +69,14 @@ class Settings(BaseSettings):
     # keeps in step with the released git tag. Hard-coding it here meant the API
     # reported 0.0.1 forever, so a running NAS could not be told apart by build.
     app_version: str = package_version.lstrip("v")
+    # The Git commit this image was built from. It comes in as an explicit build
+    # argument (`BUILD_COMMIT`) set by the release and build pipelines to
+    # `github.sha`; a local build without one keeps the "unknown" default. It is
+    # never derived from the version or a timestamp, and never a guess: a running
+    # instance reports exactly the commit its image was built from, or says it
+    # does not know. This is what lets a deployment be told apart from its sibling
+    # images and lets an operator answer "which commit is this really running?".
+    build_commit: str = "unknown"
     # The deployment sets APP_ENVIRONMENT (see .env.example / compose). Without
     # an explicit alias pydantic-settings would only look at ENVIRONMENT, so
     # production detection silently stayed "development" and 500 responses

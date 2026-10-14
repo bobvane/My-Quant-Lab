@@ -160,6 +160,11 @@ jobs:
           push: true
           tags: ${{ steps.app_meta.outputs.tags }}
           labels: ${{ steps.app_meta.outputs.labels }}
+          # The exact commit this release's source was at, so a pulled image can
+          # answer "which commit is this?" at /health instead of only a version
+          # number (WP-C-1).
+          build-args: |
+            BUILD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

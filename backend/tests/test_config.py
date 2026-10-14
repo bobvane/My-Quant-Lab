@@ -92,3 +92,21 @@ def test_app_version_comes_from_the_package() -> None:
 def test_explicit_env_version_overrides_package_default(monkeypatch) -> None:
     monkeypatch.setenv("APP_VERSION", "9.9.9")
     assert Settings(_env_file=None).app_version == "9.9.9"
+
+
+def test_build_commit_defaults_to_unknown_when_not_injected() -> None:
+    """No BUILD_COMMIT build arg means the image cannot know its commit.
+
+    The value must be the explicit "unknown" marker, never a guess derived from the
+    version number or a timestamp (WP-C-1).
+    """
+
+    assert Settings(_env_file=None).build_commit == "unknown"
+
+
+def test_build_commit_reads_the_injected_value(monkeypatch) -> None:
+    """A real 40-hex SHA passed as the build arg is reported verbatim."""
+
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    monkeypatch.setenv("BUILD_COMMIT", sha)
+    assert Settings(_env_file=None).build_commit == sha

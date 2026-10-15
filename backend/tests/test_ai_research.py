@@ -9,6 +9,7 @@ offline, and the Martin scenario from the plan is the reference case.
 from __future__ import annotations
 
 import hashlib
+import pathlib
 
 import pytest
 from research_payloads import (
@@ -43,6 +44,31 @@ from app.domain.models import (
 from app.domain.models import (
     StrategyHypothesis as StrategyHypothesisRow,
 )
+
+
+def _failure_reason_codes(path: str) -> set[str]:
+    """The machine codes a frontend failure-reasons map knows about.
+
+    Reads the Vue / TS source as text (the same contract-guard technique as
+    test_frontend_contracts) so this backend test pins that the code we raise is
+    actually mapped to human words on the page -- not just that we raise it.
+    """
+
+    import re
+
+    text = pathlib.Path(path).read_text(encoding="utf-8")
+    # Match the leading quoted key of each entry inside a *_FAILURE_REASONS map.
+    return {m.group(1) for m in re.finditer(r"^\s{2,}([a-z_]+):\s", text, re.M)}
+
+
+def lab_failure_reasons() -> set[str]:
+    root = pathlib.Path(__file__).resolve().parents[2]
+    return _failure_reason_codes(root / "frontend" / "src" / "views" / "LabView.vue")
+
+
+def wording_failure_reasons() -> set[str]:
+    root = pathlib.Path(__file__).resolve().parents[2]
+    return _failure_reason_codes(root / "frontend" / "src" / "wording.ts")
 
 
 @pytest.fixture
@@ -553,3 +579,57 @@ def test_a_provider_failure_leaves_a_failed_run_not_a_hypothesis(db_session, pro
     task = db_session.scalars(select(AITask)).one()
     assert task.status == "failed"
     assert task.research_run_id == run.id
+
+
+def test_an_undecryptable_key_is_a_distinct_failure(db_session, monkeypatch):
+    """A provider row exists but its stored key no longer decrypts.
+
+    ``get_active_providers`` silently skips such a row, so the run must still
+    carry the truth: the failure is ``ai_key_unreadable`` (re-enter the key /
+    restore SECRET_KEY), NOT ``ai_not_configured`` (which would send the operator
+    hunting for a provider row that is already there). This is the code the Lab
+    failed card maps to the "去系统管理" link.
+    """
+
+    from app.ai.explain import AI_KEY_UNREADABLE
+
+    # The stored key cannot be read -- exactly what happens after a SECRET_KEY
+    # change. explain.py imports decrypt_secret directly, so we break that
+    # reference rather than the module in secrets: the genuine
+    # get_active_providers -> unusable_provider_key -> _provider_failure_code
+    # chain then decides the code.
+    def _boom(ciphertext: str) -> str:
+        raise RuntimeError("cannot decrypt")
+
+    monkeypatch.setattr("app.ai.explain.decrypt_secret", _boom)
+    make_provider(db_session)
+    db_session.commit()
+
+    # The synchronous prepare path records the run as failed with the right code.
+    run = service.prepare_research(
+        db_session, question=QUESTION, inputs=note_inputs(), ingest=lambda *a, **k: ({}, [], [])
+    )
+    db_session.commit()
+
+    assert run.status == "failed"
+    assert run.error_message == AI_KEY_UNREADABLE
+    assert run.error_message != AI_UNCONFIGURED
+
+    # The worker's execute_research path returns the same failed code for a run
+    # that was prepared before the key broke (the queue is the only thing between
+    # prepare and execute in async mode).
+    fresh = service.prepare_research(
+        db_session,
+        question=QUESTION,
+        inputs=note_inputs(),
+        ingest=lambda *a, **k: ({}, [], []),
+    )
+    db_session.commit()
+    executed = service.execute_research(db_session, fresh)
+    assert executed.status == "failed"
+    assert executed.error_message == AI_KEY_UNREADABLE
+
+    # The frontend's two humanized maps must agree on the code, so the card and
+    # the researchFailureText helper both point the user at 系统管理.
+    assert "ai_key_unreadable" in lab_failure_reasons()
+    assert "ai_key_unreadable" in wording_failure_reasons()

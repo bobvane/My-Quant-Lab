@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ai.explain import (
+    AI_KEY_UNREADABLE,
     AI_UNCONFIGURED,
     KEY_EMPTY,
     KEY_UNDECRYPTABLE,
@@ -711,9 +712,11 @@ def _raise_for_unserved_run(db: Session, run: Any) -> None:
     that would only rediscover it.
     """
 
-    if run.status == "failed" and run.error_message == AI_UNCONFIGURED:
+    if run.status == "failed" and run.error_message in (AI_UNCONFIGURED, AI_KEY_UNREADABLE):
         # The run row stays: it records that the request was made and why it
-        # could not be answered.
+        # could not be answered. A provider whose key cannot be decrypted names
+        # the row and the SECRET_KEY change; a missing provider gets the generic
+        # note -- both come from _unavailable_detail.
         raise HTTPException(status_code=503, detail=_unavailable_detail(db))
     if run.status == "rejected" and run.current_step == "ingest":
         raise HTTPException(status_code=422, detail=_refused_run_detail(run))
@@ -845,7 +848,10 @@ def formalize_hypothesis_endpoint(
         raise HTTPException(status_code=422, detail=rejected.as_dict()) from rejected
     except RuntimeError as exc:
         db.commit()
-        if str(exc) == AI_UNCONFIGURED:
+        if str(exc) in (AI_UNCONFIGURED, AI_KEY_UNREADABLE):
+            # A provider that exists but whose key cannot be decrypted is a
+            # configuration problem (re-enter the key under Settings), so it joins
+            # "not configured" as a 503 with the provider-naming detail.
             raise HTTPException(status_code=503, detail=_unavailable_detail(db)) from exc
         logger.warning("AI formalization failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"AI provider call failed: {exc}") from exc

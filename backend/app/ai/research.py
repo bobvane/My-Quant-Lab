@@ -29,7 +29,12 @@ from sqlalchemy.orm import Session
 
 from app.ai import research_schemas as gates
 from app.ai.confirmation import confirmation_view
-from app.ai.explain import AI_UNCONFIGURED, get_active_providers
+from app.ai.explain import (
+    AI_KEY_UNREADABLE,
+    AI_UNCONFIGURED,
+    get_active_providers,
+    unusable_provider_key,
+)
 from app.ai.provider import AIRequest, BudgetExceeded, UntrustedSource
 from app.ai.role_contracts import contract_for_role, system_contract
 from app.ai.runtime import run_task
@@ -1006,6 +1011,22 @@ def _finish(
     return run
 
 
+def _provider_failure_code(db: Session) -> str:
+    """The machine code for "no AI can answer this run".
+
+    ``get_active_providers`` silently skips any provider whose stored key no longer
+    decrypts, so an empty list can mean two different things: no provider is
+    configured at all, or a provider *is* configured but its key cannot be read.
+    The second case is ``ai_key_unreadable`` -- the operator must re-enter the key
+    (usually after a SECRET_KEY change), not go hunting for a row they can already
+    see -- so it gets its own code instead of hiding behind ``ai_not_configured``.
+    """
+
+    if unusable_provider_key(db) is not None:
+        return AI_KEY_UNREADABLE
+    return AI_UNCONFIGURED
+
+
 def prepare_research(
     db: Session,
     *,
@@ -1078,8 +1099,11 @@ def prepare_research(
     live = providers if providers is not None else get_active_providers(db)
     if not live:
         # Nothing can answer this deployment. The run records the request and why it
-        # could not be served, and no worker is asked to fail again later.
-        return _finish(db, run, "failed", "failed", error=AI_UNCONFIGURED)
+        # could not be served, and no worker is asked to fail again later. A provider
+        # that exists but whose key cannot be decrypted is a different failure (see
+        # _provider_failure_code), so it keeps its own code rather than masquerading
+        # as "not configured".
+        return _finish(db, run, "failed", "failed", error=_provider_failure_code(db))
     return run
 
 
@@ -1111,7 +1135,10 @@ def execute_research(
 
     live = providers if providers is not None else get_active_providers(db)
     if not live:
-        return _finish(db, run, "failed", "failed", error=AI_UNCONFIGURED)
+        # A provider row may exist but its key cannot be decrypted (SECRET_KEY
+        # changed); that is ai_key_unreadable, not ai_not_configured (see
+        # _provider_failure_code). The run must carry the truth so the UI can name it.
+        return _finish(db, run, "failed", "failed", error=_provider_failure_code(db))
 
     try:
         run.status = "running"
@@ -1256,7 +1283,9 @@ def formalize_hypothesis(
 
     live = providers if providers is not None else get_active_providers(db)
     if not live:
-        raise RuntimeError(AI_UNCONFIGURED)
+        # A provider that exists but whose key cannot be decrypted is
+        # ai_key_unreadable, not ai_not_configured (see _provider_failure_code).
+        raise RuntimeError(_provider_failure_code(db))
 
     run.current_step = "architect"
     db.flush()

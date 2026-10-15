@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "AI_UNCONFIGURED",
     "BACKTEST_EXPLANATION_SCHEMA",
+    "AI_KEY_UNREADABLE",
     "EXPLAINER_ROLE",
     "PERFORMANCE_EXPLANATION_SCHEMA",
     "ExplanationRejected",
@@ -65,6 +66,12 @@ __all__ = [
 ]
 
 AI_UNCONFIGURED = "ai_not_configured"
+# A provider row exists (and is enabled) but its stored key no longer decrypts --
+# almost always because SECRET_KEY changed after the key was saved. This is a
+# different situation from "no provider configured": the operator must re-enter the
+# key, not go looking for a row they can already see. The research worker raises it
+# so a failed run carries the truth instead of masquerading as ai_not_configured.
+AI_KEY_UNREADABLE = "ai_key_unreadable"
 
 EXPLAINER_ROLE = "EXPLAINER"
 

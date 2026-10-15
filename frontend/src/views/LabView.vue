@@ -35,7 +35,13 @@ import {
 import MetricHint from '@/components/MetricHint.vue'
 import { isAdvanced } from '@/mode'
 import { formatDateTime, formatMetric, toneOf } from '@/format'
-import { metricKeyLabel, qualityLabel, timeframeLabel, validationLabel } from '@/wording'
+import {
+  labRunIsLive,
+  metricKeyLabel,
+  qualityLabel,
+  timeframeLabel,
+  validationLabel,
+} from '@/wording'
 
 // 「AI 研究实验室」（§17 + v2.4.0 的编译/激活）：把一条最小但诚实的链路走完——
 // 研究输入 → AI 理解 → 策略假设 → 策略草案 → 人工确认 → 编译 → 策略版本 → 激活 → 回测。
@@ -320,15 +326,21 @@ function statusLabel(status: string | null | undefined): string {
   return STATUS_LABELS[status] ?? status
 }
 
-/** 还在跑（或还没开始跑）的状态：轮询只在这些状态上有意义。 */
+/** 排队中（尚未被 worker 拾起）的专属说明：和「正在分析」是两件事。 */
+const PENDING_SENTENCE =
+  '这次研究还在排队，还没有 AI 开始读材料。队列空了会自动轮到它，这一页不用守着，也可以先去忙别的。'
+
+/** 还在跑（或还没开始跑）的状态：轮询只在这些状态上有意义。与首页共用同一份（wording.ts）。 */
 function isLiveStatus(status: string | null | undefined): boolean {
-  return status === 'queued' || status === 'running' || status === 'pending'
+  return labRunIsLive(status)
 }
 
 /**
  * 后端在失败时存的是机器码（`run.error_message`），自由文本的异常已经是句子。
  * 列表页和详情页都直接显示这个字段，所以码必须在这里变成人话——否则「没有跑完」
  * 旁边会躺着一行 `ai_not_configured`（ADR-138）。认不出的文本原样显示，不编。
+ * 本地保留一份（与 `wording.ts` 里 `LAB_RUN_FAILURE_REASONS` 同值）：
+ * `test_lab_journey_contracts.py` 钉住了这个本地常量名，搬走会让守卫红。
  */
 const RESEARCH_FAILURE_REASONS: Record<string, string> = {
   ai_not_configured:
@@ -337,8 +349,17 @@ const RESEARCH_FAILURE_REASONS: Record<string, string> = {
     '配置里的 AI 密钥读不出来（多半是 SECRET_KEY 换过）：去「系统管理」里重新填一次密钥。',
 }
 
+/** 失败原因的人话版；认不出来的原样返回。 */
+function researchFailureText(message: string | null | undefined): string {
+  if (!message) return ''
+  return RESEARCH_FAILURE_REASONS[message] ?? message
+}
+
 const liveSentence = computed(() => {
   const status = run.value?.status
+  if (status === 'pending') {
+    return PENDING_SENTENCE
+  }
   if (status === 'queued') {
     return '这次研究已经排队，后台正在准备执行。这一步不需要你等着：页面可以关掉，稍后在下面的「最近的研究」里重新打开就能看到结果。'
   }
@@ -348,17 +369,12 @@ const liveSentence = computed(() => {
   return ''
 })
 
-/** 失败原因的人话版；认不出来的原样返回。 */
-function researchFailureText(message: string | null | undefined): string {
-  if (!message) return ''
-  return RESEARCH_FAILURE_REASONS[message] ?? message
-}
-
 const statusSentence = computed(() => {
   const status = run.value?.status
   if (status === 'completed') return 'AI 已经读完材料，下面是它给出的理解、假设、草案和能力结论。'
   if (status === 'rejected') return 'AI 的回答没有通过校验。系统没有替它修改，也没有把这份回答当成结论存下来。'
   if (status === 'failed') return '这次研究没有跑完，下面是后端记下来的原因。'
+  if (status === 'pending') return '这次研究还在排队，等 worker 空出来就会自动开始，不用守着。'
   if (status === 'queued' || status === 'running') return '这次研究还在后台跑，页面会自动更新状态。'
   return ''
 })
@@ -2539,6 +2555,13 @@ const nextStep = computed<{ text: string; to: NextStepTarget; linkText: string }
     }
   }
   if (isLiveStatus(current.status)) {
+    if (current.status === 'pending') {
+      return {
+        text: '这次研究还在排队，worker 一空出来就自动开始，不用守着。可以先去做别的，稍后在「最近的研究」里重新打开就能看到结果。',
+        to: '',
+        linkText: '',
+      }
+    }
     return {
       text: '这次研究在后台跑着，状态每 2 秒自动更新一次。这一页可以关掉，稍后在「最近的研究」里重新打开它。',
       to: '',
@@ -2896,10 +2919,19 @@ onUnmounted(stopPolling)
         </p>
       </div>
 
-      <!-- 没跑完：照实显示后端给的原因。 -->
-      <p v-if="run.status === 'failed'" class="error" style="margin-top: 10px">
-        {{ researchFailureText(run.error_message) || '后端没有给出具体原因。' }}
-      </p>
+      <!-- 没跑完：照实显示后端给的原因，并给出下一步（去查配置 / 修改输入重试）。 -->
+      <div v-if="run.status === 'failed'" class="card card-quiet" style="margin-top: 10px">
+        <p class="error">{{ researchFailureText(run.error_message) || '后端没有给出具体原因。' }}</p>
+        <p class="muted" style="margin-top: 6px">
+          下一步：
+          <template v-if="run.error_message === 'ai_not_configured' || run.error_message === 'ai_key_unreadable'">
+            到「系统管理」把 AI 提供方或密钥修好，再点上面的「开始研究」重新提交。
+          </template>
+          <template v-else>
+            看一下上面的原因，把研究问题或材料改一改再试一次；也可以先在「最近的研究」里看看别的。
+          </template>
+        </p>
+      </div>
       <p
         v-else-if="run.error_message && run.status !== 'rejected'"
         class="muted"

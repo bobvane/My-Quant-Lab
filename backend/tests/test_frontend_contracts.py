@@ -2048,3 +2048,34 @@ def test_the_paper_page_says_when_a_repeat_did_not_fill() -> None:
     assert "r.idempotent_replay" in PAPER
     assert "没有产生新的成交" in PAPER
     assert "第一次那笔订单 #${r.order_id}" in PAPER
+
+
+def test_home_page_lab_card_uses_real_capability_verdicts() -> None:
+    """PR #9 homepage lab card must reflect the backend's real capability verdicts, not the
+    obsolete `user_required` placeholder and not collapse live / failed / awaiting into one.
+
+    The backend emits `capability_status` of `NEEDS_CAPABILITY` / `PARTIALLY_SUPPORTED`
+    (research_schemas.CapabilityVerdict), never `user_required`. The card must branch on the
+    real values so a completed-but-incapable run is not shown as "waiting for your answer".
+    """
+
+    # The dead `user_required` value must not appear anywhere in the home page lab logic.
+    assert "user_required" not in DASHBOARD, (
+        "'user_required' was a PR #9 placeholder; the backend produces NEEDS_CAPABILITY / "
+        "PARTIALLY_SUPPORTED, so the homepage card must not filter on it"
+    )
+    # The card reads the runs and branches on the three real states.
+    assert "labRuns" in DASHBOARD
+    assert "labLive" in DASHBOARD
+    assert "labFailed" in DASHBOARD
+    assert "labAwaitingDecisions" in DASHBOARD
+    # The awaiting filter uses the real capability verdicts.
+    assert "NEEDS_CAPABILITY" in DASHBOARD
+    assert "PARTIALLY_SUPPORTED" in DASHBOARD
+    # The three states are not merged: the card shows one line per bucket.
+    assert "条研究跑完了，但能力检查说系统缺能力或只能部分支持" in DASHBOARD
+    assert "条研究没有跑完" in DASHBOARD
+    assert "条研究在后台跑着" in DASHBOARD
+    # The shared status/live helpers live in wording.ts so the home page and lab agree.
+    assert "export function labRunIsLive" in WORDING
+    assert "export function labRunFailureText" in WORDING

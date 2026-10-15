@@ -1914,14 +1914,14 @@ def test_the_lab_result_says_which_parts_are_ai_vs_evidence() -> None:
 
     # ② card: understanding followed by the AI-not-engine disclaimer.
     idx = LAB.index("hypothesisContent.understanding")
-    block = LAB[idx: idx + 400]
+    block = LAB[idx : idx + 400]
     assert "由它自己总结" in block, (
         "the ② understanding must be labelled as AI's own summary, not engine output"
     )
 
     # ④ card: understanding_of_original gets the same treatment.
     idx4 = LAB.index("draftContent.understanding_of_original")
-    block4 = LAB[idx4: idx4 + 400]
+    block4 = LAB[idx4 : idx4 + 400]
     assert "由它自己总结" in block4, (
         "the ④ understanding must also be labelled as AI's reading, not engine output"
     )
@@ -1941,7 +1941,7 @@ def test_the_lab_result_has_a_three_way_summary() -> None:
         assert header in LAB, f"missing bucket header: {header}"
 
     # The summary says it has not run any backtest, so no fake numbers.
-    summary_block = LAB[LAB.index("结果小结"):]
+    summary_block = LAB[LAB.index("结果小结") :]
     assert "没有跑过任何回测" in summary_block, (
         "the 结果小结 must say no backtest was run, so no numbers can appear there"
     )

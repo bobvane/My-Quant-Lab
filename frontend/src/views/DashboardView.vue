@@ -312,10 +312,18 @@ const conclusionMissing = computed(() =>
 const nextStep = computed(() => {
   const lifecycle = focusLifecycle.value
   const stage = lifecycle?.suggested_next
+  // 把「去回测」带上当前聚焦策略的版本，避免多策略用户跳过去后停在 strategies[0] 上、
+  // 以为首页说的就是那一版（首页始终聚焦一个策略，深链要把它带过去）。
+  // `BacktestView` 读 `?strategy_version_id=<id>` 并据此落到对应策略（ADR-191）。
+  const focusVersion = (focusVersions.value.find((v) => v.is_current) ?? focusVersions.value[0] ?? null)
+  const backtestTo =
+    focusStrategy.value && focusVersion
+      ? { path: '/backtest', query: { strategy_version_id: String(focusVersion.id) } }
+      : '/backtest'
   if (stage) {
     // 样本外验证（OOS）的真实入口在「回测」页的高级模式里，不是模拟盘；
     // 所以 `oos_tested` 阶段指向回测页，让用户能真正进入 OOS 工具，而不是跳去模拟盘。
-    const to = stage === 'oos_tested' ? '/backtest' : stagePage(stage)?.to ?? ''
+    const to = stage === 'oos_tested' ? backtestTo : stagePage(stage)?.to ?? ''
     const linkText = stage === 'oos_tested' ? `去「${OOS_PAGE}」` : stagePage(stage)?.label ?? ''
     return {
       text: nextStepText(stage),
@@ -325,13 +333,13 @@ const nextStep = computed(() => {
     }
   }
   if (focusStrategy.value && latestRun.value) {
-    return { text: nextStepText('backtested'), reason: '', to: '/backtest', linkText: '去「回测」' }
+    return { text: nextStepText('backtested'), reason: '', to: backtestTo, linkText: '去「回测」' }
   }
   if (focusStrategy.value) {
     return {
       text: nextStepText('validated'),
       reason: '',
-      to: '/backtest',
+      to: backtestTo,
       linkText: '去「回测」',
     }
   }

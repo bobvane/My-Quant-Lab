@@ -2079,3 +2079,37 @@ def test_home_page_lab_card_uses_real_capability_verdicts() -> None:
     # The shared status/live helpers live in wording.ts so the home page and lab agree.
     assert "export function labRunIsLive" in WORDING
     assert "export function labRunFailureText" in WORDING
+
+
+def test_home_page_backtest_link_keeps_the_focused_strategy() -> None:
+    """A lay user reads the home page's "next step" as "my strategy → 回测".
+
+    The page always focuses one strategy, and BacktestView defaults to strategies[0]
+    when it is opened with no context. If the home page links to bare /backtest, a
+    multi-strategy user lands on the wrong strategy and silently loses the one the
+    home page was talking about. The link must carry the focused strategy's version
+    so BacktestView opens the right one (ADR-191 reads ?strategy_version_id).
+    """
+
+    # The home page builds the backtest target from the focused version when it has one.
+    assert "focusVersion" in DASHBOARD
+    assert "strategy_version_id" in DASHBOARD
+    # The two "去回测" branches (已回测 / 已校验) both route through that same context-aware target.
+    assert "backtestTo" in DASHBOARD
+    # Bare '/backtest' is still the fallback only when there is no focused strategy.
+    assert "focusStrategy.value && focusVersion" in DASHBOARD
+
+
+def test_lab_failed_card_links_to_settings_for_ai_config() -> None:
+    """When a run failed on AI configuration, the "next step" must be a real link.
+
+    The failed card tells the reader to go fix the AI provider in 系统管理, but a plain
+    sentence with no link leaves a lay user hunting for the page. The LabView failed card
+    must render an actual <RouterLink to="/settings"> for the ai_not_configured /
+    ai_key_unreadable reasons so the user can act in one click.
+    """
+
+    # The failed card renders a RouterLink to settings for the config-related failures.
+    assert '<RouterLink to="/settings">到「系统管理」</RouterLink>' in LAB
+    # The other (non-config) failure path still just asks the reader to revise the input.
+    assert "把研究问题或材料改一改再试一次" in LAB

@@ -2925,7 +2925,7 @@ onUnmounted(stopPolling)
         <p class="muted" style="margin-top: 6px">
           下一步：
           <template v-if="run.error_message === 'ai_not_configured' || run.error_message === 'ai_key_unreadable'">
-            到「系统管理」把 AI 提供方或密钥修好，再点上面的「开始研究」重新提交。
+            <RouterLink to="/settings">到「系统管理」</RouterLink>把 AI 提供方或密钥修好，再点上面的「开始研究」重新提交。
           </template>
           <template v-else>
             看一下上面的原因，把研究问题或材料改一改再试一次；也可以先在「最近的研究」里看看别的。

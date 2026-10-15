@@ -3980,3 +3980,23 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 浏览器 UAT（`%TEMP%\mql-accept\paper-idempotency-uat.mjs`，本机栈：uvicorn `app.api.main:app` on 127.0.0.1:8080 + 已迁移到 0022 的 sqlite UAT 库 + 镜像 vite on 127.0.0.1:5173 + 无头 Chrome CDP 9222；夹具 = 账户 #3（绑定策略版本 1、现金 10000、无持仓）与未成交的 BUY 信号 #1，账户 #1 早已成交信号 #4 为订单 #1）⇒ **23/23 通过**：第一次按「执行」得到真实成交（订单 #2、成交价 105.59、数量 94.61、成交后现金 0.00）且页首说「已执行信号 #1」；第二次按同一个按钮，页首改说「之前已经执行过信号 #1：这次没有产生新的成交，返回的是第一次那笔订单 #2」，成交回执顶部出现「这一次没有产生新的成交：同一个信号只认一笔订单，回到的是第一次那笔订单的读数」，订单号与现金读数与第一次完全一致；直接 `POST /paper/accounts/3/execute` 得到 200 且 `idempotent_replay: true`、`order_id: 2`，库里仍然只有这一笔订单；跨账户执行（账户 #2 执行已被账户 #1 成交的信号 #4）返回的是账户 #1 的订单 #1（`account_id: 1`）且账户 #2 没有新增持仓；刷新 `/paper?account=3` 后流水只有一行、来源列仍链回 `/signals?signal_id=1`，且这一页在没人再按按钮之前不声称发生过成交；没有非预期的 4xx/5xx，控制台无错误。
 
 - 一条要记住的教训：**「先查再写」不是幂等，只是一个大部分时候够用的检查**。真正的规则必须由数据库持有——唯一索引不是「再加一道校验」，而是这条业务语义的载体；Python 里那份检查的作用只是让正常路径不必去撞异常。第二条：**改写一个既有测试的期望之前，先问它原来在证明什么**。`test_api_execute_positions_and_status` 里那个 422 看起来正是「重复执行被拒绝」的证据，实际上它证明的是「关掉的账户不能成交」；把它的场景换成新信号，原意图完整保留，而新语义由新测试正面证明。
+
+## ADR-222：研究失败的错误码要区分「未配置 Provider」与「密钥读不出来」
+
+- 背景：commit `124bd4567` 修正了一个分类错误——一次 AI 研究在没有可用 Provider 时失败，后端却把「密钥读不出来」也归到了 `ai_not_configured`。根因在 `backend/app/ai/research.py`：`get_active_providers(db)` 会**静默跳过**任何密钥解不开的 Provider 行（ADR-194 已让解密失败不再静默，但研究路径仍只看它返回的列表），于是「配了、启用中、但钥匙读不出」与「真的一个都没配」在 `get_active_providers` 返回的空列表上塌成同一件事；`prepare_research`/`execute_research`/`formalize_hypothesis` 三处一见空列表就 `raise RuntimeError("ai_not_configured")`（或 `_finish(..., error=AI_UNCONFIGURED)`）。后果：用户在「系统管理」里明明看到一行启用的 Provider，研究卡片却说「AI 供应商还没配好」并指向「去配一个供应商」——而正确动作是「重填一次密钥」。前端 `LabView.vue`/`wording.ts` 其实早准备了 `ai_key_unreadable` 这张映射（ADR-138 的失败原因词表），但后端从不发这个码，它一直是死分支。
+
+- 决策：
+  1. `backend/app/ai/explain.py` 新增常量 `AI_KEY_UNREADABLE = "ai_key_unreadable"`，与 `AI_UNCONFIGURED = "ai_not_configured"` 并列；后者语义锁定为「没有配置可用的 AI Provider」，前者锁定为「Provider 已配置、但其密钥无法解密」。
+  2. `backend/app/ai/research.py` 新增 `_provider_failure_code(db)`：当 `get_active_providers(db)` 返回空时，先问 `unusable_provider_key(db)`——若命中（存在一个启用行、但其密钥解不开），返回 `AI_KEY_UNREADABLE`；否则返回 `AI_UNCONFIGURED`。`prepare_research`、`execute_research`、`formalize_hypothesis` 三处共用这一判断，不再各写一句 `raise RuntimeError(AI_UNCONFIGURED)`。
+  3. 两种错误**保持独立语义，不合并**：即便前端某处想用一个分支同时处理，后端也始终发各自稳定的机器码；「为图前端省事而合并」是被禁止的回归方向。
+  4. 后端只负责识别真实故障原因并返回稳定错误码；把码翻成准确中文、并在需要时给出「系统管理」入口，是前端 `LabView.vue` 的 `researchFailureText()` 与 `wording.ts` 的 `labRunFailureText()` 的职责（`ai_not_configured`/`ai_key_unreadable` 各一句人话，密钥读不出那句带「去「系统管理」重填密钥」）。
+  5. 密钥读不出来的典型原因是 `SECRET_KEY` 变过（Fernet 解密抛 `InvalidToken`），但文案**不得**把它说成唯一原因——文案用「多半是 SECRET_KEY 换过」这种表述，给其它解密失败留出空间。
+  6. `backend/app/api/routers/ai.py` 的 503 拒绝路径（`_raise_for_unserved_run`）与 `formalize_hypothesis_endpoint` 的 `RuntimeError` 分支都同时认 `AI_UNCONFIGURED` 与 `AI_KEY_UNREADABLE`，两者都走 `_unavailable_detail(db)`（命中坏钥匙时点名 Provider、说明密钥读不出、指向「系统管理」）；状态码不变。
+
+- 理由：①「读不出钥匙」与「没配置」对用户是两个不同动作（ADR-194 的同一条口径延伸到研究失败卡片）：把②说成①会让用户去建一个重复的 Provider 行，而正确修复是重填密钥。②研究路径塌成 `ai_not_configured` 之所以危险，是它让一个「明明有 Provider」的部署看起来「没配 Provider」，直接误导下一步。③错误码是后端语义、中文是显示层职责——这一分工和 ADR-138 的 `RESEARCH_FAILURE_REASONS` 词表一致，且机器码留在 `run.error_message`、人话留给页面，不破坏 API 契约。④`unusable_provider_key` 已能把「坏行」与「没行」区分开，新增的 `_provider_failure_code` 只是把这个已有的区分接到研究的失败落点上，没有引入新的解密逻辑。
+
+- 影响与兼容：只新增一个常量与一个判断函数，并替换三处失败落点；不改变任何成功路径、路由、状态码、请求体、数据库结构、迁移、`version.txt`。`ai_not_configured` 的语义与既有测试（`backend/tests/test_ai_strategy_draft.py` 里「无 Provider → `ai_not_configured`」一例）一字未变，只新增了密钥读不出的分支。`SettingsView.vue` 的 `p.key_status === 'undecryptable'` 与 ADR-194 的字段不受影响；不碰 NAS、不建 tag/release。
+
+- 测试：新增 `backend/tests/test_ai_research.py::test_an_undecryptable_key_is_a_distinct_failure`：用 `monkeypatch.setattr("app.ai.explain.decrypt_secret", _boom)` 让解密真实抛错（复现 `SECRET_KEY` 变过后的解密失败，而不是伪造密文，从而走通 `get_active_providers → unusable_provider_key → _provider_failure_code` 的真实链路），断言 `prepare_research` 落到 `run.error_message == "ai_key_unreadable"`、`execute_research` 在已 prepare 的运行上也返回同一码，且 `run.error_message != "ai_not_configured"`；同一测试还钉住前端两张映射表（`LabView.vue` 与 `wording.ts`）都认 `ai_key_unreadable` 这个码，防止以后前端删掉这张映射却没人发现。回归：`tests/test_ai_research.py` 全套 24 例通过（含「无 Provider → `ai_not_configured`」一例）。本机未跑 `test_ai_provider_key_status.py` 等依赖 `cryptography` 的用例（本机未装该包），与本次行为无关；读数以 CI 为准。
+
+- 说明：本决策来自 commit `124bd4567` 的代码行为与上述测试，前端两张映射表的存在由文本扫描断言。本仓库前端无浏览器测试框架可用（ADR-138、`docs/34` 缺口），**本 ADR 不声称已经完成真实浏览器端到端点击验证**；卡片链接的可见行为按源码逻辑确认，未实跑浏览器。

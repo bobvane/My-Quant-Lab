@@ -23,6 +23,7 @@ import {
   accountStatusLabel,
   labRunFailureText,
   labRunIsLive,
+  MIN_TRADES_FOR_CONFIDENT_VERDICT,
   REFERENCE_PRICE_DISCLAIMER,
   SIGNAL_DISCLAIMER,
   nextStepText,
@@ -344,7 +345,7 @@ const warnings = computed<string[]>(() => {
     list.push('这个策略还没有回测结果：现在对它的一切判断都还没有依据。')
   } else if (run.status === 'completed') {
     const trades = run.number_of_trades ?? 0
-    if (trades < 30) {
+    if (trades < MIN_TRADES_FOR_CONFIDENT_VERDICT) {
       list.push(`这次回测只有 ${trades} 笔交易，样本偏少，收益率先别当真。`)
     }
     if ((run.max_drawdown ?? 0) < -0.2) {

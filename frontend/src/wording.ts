@@ -24,6 +24,17 @@ export function signalLabel(state: string | null | undefined): string {
 export const SIGNAL_DISCLAIMER = '这是策略研究信号，不是自动交易指令。'
 export const REFERENCE_PRICE_DISCLAIMER = '这是策略模型计算出的参考值，不代表未来价格预测。'
 
+/**
+ * 展示层「样本是否够厚」门槛：10–29 笔交易时，回测页不再只给绿色的「值得继续验证」，
+ * 而要明确提示「样本还偏少、收益参考意义有限」；首页 ④「需要你注意的事情」也用同一个数。
+ *
+ * 这只是前端展示口径，不是后端业务规则；最低结论门槛仍是 10 笔（见 BacktestView 的
+ * `MIN_MEANINGFUL_TRADES` 与 DashboardView 的 `MIN_TRADES_FOR_VERDICT`，两者与后端
+ * 生命周期 `min_backtest_trades = 10` 对齐）。30 这个数字只决定「能不能把结论说成值得继续验证」，
+ * 不决定「能不能下结论」——后者由 10 笔门槛负责。
+ */
+export const MIN_TRADES_FOR_CONFIDENT_VERDICT = 30
+
 /** Research lifecycle stages. Moved here from StrategiesView so both pages read one table. */
 export const STAGE_LABELS: Record<string, string> = {
   imported: '已导入',

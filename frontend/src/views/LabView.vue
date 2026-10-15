@@ -292,6 +292,14 @@ const draftCompiledVersionId = computed<number | null>(
   () => run.value?.draft?.compiled_strategy_version_id ?? null,
 )
 
+/** ②卡片小结里用：有几条规则是 AI 自己补的假设（不是你的原话）。 */
+const assumedRulesCount = computed(
+  () =>
+    (run.value?.hypothesis?.content?.rules ?? []).filter(
+      (r) => r.origin === 'ASSUMED',
+    ).length,
+)
+
 const DECISION_LABELS: Record<string, string> = {
   confirmed: '已确认',
   rejected: '已驳回',
@@ -2593,6 +2601,28 @@ const nextStep = computed<{ text: string; to: NextStepTarget; linkText: string }
     return { text: '这次草案编译过，但版本信息还没读回来：点「刷新状态」重试一次。', to: '', linkText: '' }
   }
   if (current.draft) {
+    // 能力检查缺项时：先告诉读者「系统做不到」，再给确认入口，避免让人误以为确认了就能编译。
+    if (current.capability_status === 'NEEDS_CAPABILITY' || current.capability_status === 'PARTIALLY_SUPPORTED') {
+      if (!confirmation.value) {
+        return {
+          text: '能力检查显示系统缺项或只能部分支持（详见上面的⑤）。人工确认仍然要做，但即使确认了，编译器遇到做不到的地方也会直接拒绝——不会替你补能力。',
+          to: '',
+          linkText: '',
+        }
+      }
+      if (confirmation.value.decision !== 'confirmed') {
+        return {
+          text: `能力检查缺项（见⑤），当前人工结论是「${decisionLabel(confirmation.value.decision)}」。要往下走请重新选「确认」，但编译器遇到做不到的地方仍会拒绝。`,
+          to: '',
+          linkText: '',
+        }
+      }
+      return {
+        text: '草案已确认，但能力检查显示系统缺项或只能部分支持：下面可以选目标策略点「编译」，编译器遇到做不到的地方会直接拒绝并列出原因，不会静默通过。',
+        to: '',
+        linkText: '',
+      }
+    }
     if (!confirmation.value) {
       return {
         text: '读一遍上面的草案，然后在「人工确认」里给出你的结论——只有「已确认」的草案才允许编译成策略版本。',
@@ -2926,6 +2956,9 @@ onUnmounted(stopPolling)
       <template v-if="hypothesisContent">
         <p class="conclusion-sentence">{{ hypothesisContent.understanding }}</p>
         <p class="muted">
+          这是 AI 对这次材料的理解，由它自己总结，不是引擎算出来的数字，也没有跑过任何回测。
+        </p>
+        <p class="muted">
           策略名字（AI 起的）：{{ hypothesisContent.strategy_name }}
           <template v-if="hypothesisContent.objective"> · 目标：{{ hypothesisContent.objective }}</template>
         </p>
@@ -2939,6 +2972,50 @@ onUnmounted(stopPolling)
       <p v-else-if="run.status === 'completed'" class="muted">
         这次运行没有留下可读的 AI 理解内容。
       </p>
+
+      <!-- 研究小结：把散在②③④⑤里的事实、假设、不确定分成三类，一眼能看出哪些是确定的、哪些是 AI 猜的 -->
+      <div v-if="run.status === 'completed' && hypothesisContent" class="card card-quiet" style="margin-top: 10px">
+        <h4 style="margin: 0">这次研究的结果小结</h4>
+        <p class="muted" style="margin: 6px 0">把上面几块的内容分成三类：哪些有依据、哪些是 AI 自己补的、哪些现在还不能定。</p>
+
+        <p class="muted"><b>有据可依的：</b></p>
+        <ul class="answer-list">
+          <li v-if="run.sources?.length">
+            读了 {{ run.sources.length }} 段材料：{{ run.sources.map((s, i) => sourceTitle(s, i)).join('、') }}。
+          </li>
+          <li v-if="hypothesisContent.rules.filter((r) => r.origin === 'EXPLICIT' || r.origin === 'INFERRED').length">
+            有 {{ hypothesisContent.rules.filter((r) => r.origin === 'EXPLICIT' || r.origin === 'INFERRED').length }} 条规则是从材料里读出来或推断出来的。
+          </li>
+        </ul>
+
+        <p class="muted"><b>AI 自己补的（不是你的原话）：</b></p>
+        <ul class="answer-list">
+          <li v-if="assumedRulesCount > 0 || hypothesisContent.assumptions.length">
+            {{ assumedRulesCount + hypothesisContent.assumptions.length > 0
+              ? `有 ${assumedRulesCount + hypothesisContent.assumptions.length} 条是 AI 自己补的假设（${assumedRulesCount} 条规则 + ${hypothesisContent.assumptions.length} 条假设）。这些需要你过目，确认哪些可以接受、哪些要改。`
+              : '没有 AI 自己补的假设。' }}
+          </li>
+          <li v-else>没有 AI 自己补的假设。</li>
+        </ul>
+
+        <p class="muted"><b>现在还不能定的：</b></p>
+        <ul class="answer-list">
+          <li v-if="hypothesisContent.unknowns.length || hypothesisContent.ambiguities.length">
+            {{ hypothesisContent.unknowns.length + hypothesisContent.ambiguities.length }} 处还没定：
+            {{ hypothesisContent.unknowns.length }} 处原文没说清楚，{{ hypothesisContent.ambiguities.length }} 处有几种读法需要你来定。
+          </li>
+          <li v-if="capability && (capability.missing.length || capability.partial.length)">
+            能力检查显示：{{ capability.missing.length + capability.partial.length }} 项系统目前做不到或只能部分做到。
+          </li>
+          <li v-if="!hypothesisContent.unknowns.length && !hypothesisContent.ambiguities.length && !(capability && (capability.missing.length || capability.partial.length))">
+            没有明显的未定项，也没有能力缺口。
+          </li>
+        </ul>
+
+        <p class="muted" style="margin-top: 8px">
+          这一小结没有跑过任何回测，里面不会有收益、回撤或胜率数字——那些只能由引擎算出来。
+        </p>
+      </div>
 
       <div v-if="run.sources?.length" style="margin-top: 10px">
         <h4>这次读了哪些材料</h4>
@@ -3050,6 +3127,9 @@ onUnmounted(stopPolling)
           <li v-for="(item, index) in hypothesisContent.limitations ?? []" :key="index">{{ item }}</li>
         </ul>
       </div>
+      <p v-else-if="run?.status === 'completed'" class="muted" style="margin-top: 10px">
+        这次研究没有列出局限，不代表没有——只是模型没有专门写。判断可信程度时仍要看下面的能力检查。
+      </p>
 
       <template v-if="isAdvanced">
         <p class="muted" style="margin-top: 10px">
@@ -3078,6 +3158,9 @@ onUnmounted(stopPolling)
 
       <p v-if="draftContent.understanding_of_original" class="conclusion-sentence">
         {{ draftContent.understanding_of_original }}
+      </p>
+      <p v-if="draftContent.understanding_of_original" class="muted">
+        这是 AI 对原文的理解，由它自己总结；不是引擎算出来的数字，也不是回测结果。
       </p>
       <p v-if="draftMarketSentence" class="muted">{{ draftMarketSentence }}</p>
 

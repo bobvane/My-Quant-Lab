@@ -71,9 +71,13 @@ const labRunsError = ref('')
 const labLive = computed(() => labRuns.value.filter((r) => labRunIsLive(r.status)))
 /** 最近一次没有跑完、但原因已经存下来的研究（ADR-216：列表页也给得出原因）。 */
 const labFailed = computed(() => labRuns.value.filter((r) => r.status === 'failed'))
-/** 最近一次跑完、但草案能力结论是「要人再答一轮问题」的研究：这是首页最能直接行动的一条。 */
-const labAwaitingAnswers = computed(() =>
-  labRuns.value.filter((r) => r.status === 'completed' && r.capability_status === 'user_required'),
+/** 跑完但能力结论是「缺能力 / 部分支持」的研究——编译器没法自动往下走，等人来定。 */
+const labAwaitingDecisions = computed(() =>
+  labRuns.value.filter(
+    (r) =>
+      r.status === 'completed' &&
+      (r.capability_status === 'NEEDS_CAPABILITY' || r.capability_status === 'PARTIALLY_SUPPORTED'),
+  ),
 )
 
 async function loadLabRuns() {
@@ -97,8 +101,10 @@ function labRunLine(run: AIResearchRunSummary): string {
   const statusNote =
     run.status === 'failed' && run.error_message
       ? `原因：${labRunFailureText(run.error_message)}`
-      : run.status === 'completed' && run.capability_status === 'user_required'
-        ? '草案还缺编译器要问的问题，答完才会生成下一版'
+      : run.status === 'completed' &&
+          (run.capability_status === 'NEEDS_CAPABILITY' ||
+            run.capability_status === 'PARTIALLY_SUPPORTED')
+        ? '能力检查显示缺项或只能部分支持，需要人来定编译器列出的问题'
         : ''
   return [question, started, statusNote].filter(Boolean).join(' · ')
 }
@@ -389,10 +395,12 @@ const warnings = computed<string[]>(() => {
 function labWarnings(): string[] {
   const list: string[] = []
   const failed = labFailed.value
-  const awaiting = labAwaitingAnswers.value
+  const awaiting = labAwaitingDecisions.value
   const live = labLive.value
   if (awaiting.length) {
-    list.push(`有 ${awaiting.length} 条研究等你的回答：草案还缺编译器要问的问题，去「AI 研究实验室」答完才会生成下一版。`)
+    list.push(
+      `有 ${awaiting.length} 条研究跑完了，但能力检查显示系统缺能力或只能部分支持：去「AI 研究实验室」把编译器列出的问题定下来，才能生成下一版草案。`,
+    )
   }
   if (failed.length) {
     list.push(`最近有 ${failed.length} 条研究没有跑完，原因都记下来了：去「AI 研究实验室」打开看看是额度、配置还是材料问题。`)
@@ -658,8 +666,8 @@ onMounted(loadLabRuns)
       <p v-if="labRunsError" class="error" style="margin: 8px 0 0">{{ labRunsError }}</p>
       <p v-else-if="labRunsLoading" class="muted" style="margin: 8px 0 0">正在读最近的研究记录…</p>
       <template v-else>
-        <p v-if="labAwaitingAnswers.length" class="answer-main">
-          {{ labAwaitingAnswers.length }} 条研究在等你回答编译器的问题，答完才会生成下一版草案。
+        <p v-if="labAwaitingDecisions.length" class="answer-main">
+          {{ labAwaitingDecisions.length }} 条研究跑完了，但能力检查说系统缺能力或只能部分支持——需要你去实验室把编译器列出的问题定下来，才能生成下一版草案。
         </p>
         <p v-if="labFailed.length" class="answer-main">
           {{ labFailed.length }} 条研究没有跑完，原因都记下来了，点开看看能不能处理。
@@ -667,12 +675,12 @@ onMounted(loadLabRuns)
         <p v-if="labLive.length" class="answer-main">
           {{ labLive.length }} 条研究在后台跑着，不用守着，跑完会在这里等你。
         </p>
-        <ul v-if="labAwaitingAnswers.length || labFailed.length || labLive.length" class="answer-list">
-          <li v-for="run in [...labAwaitingAnswers, ...labFailed, ...labLive].slice(0, 5)" :key="run.run_id">
+        <ul v-if="labAwaitingDecisions.length || labFailed.length || labLive.length" class="answer-list">
+          <li v-for="run in [...labAwaitingDecisions, ...labFailed, ...labLive].slice(0, 5)" :key="run.run_id">
             <RouterLink :to="labRunLink(run)">{{ labRunLine(run) }}</RouterLink>
           </li>
         </ul>
-        <p v-if="!labAwaitingAnswers.length && !labFailed.length && !labLive.length" class="muted" style="margin: 8px 0 0">
+        <p v-if="!labAwaitingDecisions.length && !labFailed.length && !labLive.length" class="muted" style="margin: 8px 0 0">
           没有正在跑或需要处理的 AI 研究。想从一句想法开始：点「到 AI 研究实验室」写一条新研究。
         </p>
       </template>

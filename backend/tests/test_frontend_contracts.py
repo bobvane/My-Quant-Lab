@@ -584,7 +584,8 @@ def test_the_backtest_and_home_page_agree_on_a_thin_sample() -> None:
     # （verdict 的注释里也写了「值得继续验证」，所以用真正的 return 语句来比对顺序。）
     ok_return = "return { tone: 'ok', label: '值得继续验证' }"
     assert ok_return in BACKTEST
-    assert BACKTEST.index("样本还偏少（${trades} 笔），收益参考意义有限") < BACKTEST.index(ok_return)
+    thin_branch = "样本还偏少（${trades} 笔），收益参考意义有限"
+    assert BACKTEST.index(thin_branch) < BACKTEST.index(ok_return)
     # 旧的 10 笔最低门槛仍然存在，没有被这次改动删掉。
     assert "MIN_MEANINGFUL_TRADES" in BACKTEST
 

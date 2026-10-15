@@ -1901,4 +1901,89 @@ def test_the_paper_page_says_when_a_repeat_did_not_fill() -> None:
     assert "idempotent_replay: boolean" in API_TEXT
     assert "r.idempotent_replay" in PAPER
     assert "没有产生新的成交" in PAPER
+
+
+def test_the_lab_result_says_which_parts_are_ai_vs_evidence() -> None:
+    """WP1: the lab result card must not let AI narration read like verified fact.
+
+    The ② card prints ``hypothesisContent.understanding`` as a plain sentence.  The
+    guard pins that a disclaimer sits immediately after it: the reader must see "this
+    is AI's reading, not an engine number" before scrolling into the rule list.  The
+    ④ card gets the same treatment for ``understanding_of_original``.
+    """
+
+    # ② card: understanding followed by the AI-not-engine disclaimer.
+    idx = LAB.index("hypothesisContent.understanding")
+    block = LAB[idx: idx + 400]
+    assert "由它自己总结" in block, (
+        "the ② understanding must be labelled as AI's own summary, not engine output"
+    )
+
+    # ④ card: understanding_of_original gets the same treatment.
+    idx4 = LAB.index("draftContent.understanding_of_original")
+    block4 = LAB[idx4: idx4 + 400]
+    assert "由它自己总结" in block4, (
+        "the ④ understanding must also be labelled as AI's reading, not engine output"
+    )
+
+
+def test_the_lab_result_has_a_three_way_summary() -> None:
+    """WP1: a completed run gets a 结果小结 that splits findings into three buckets.
+
+    The three buckets — 有据可依的 (evidence-backed), AI 自己补的 (assumed), 现在还不能定的
+    (undetermined) — must all appear so the reader can tell at a glance what is solid
+    and what is a guess.  The summary must not print any backtest numbers (win rate,
+    return, drawdown) because none have been computed yet.
+    """
+
+    # The three bucket headers are all present.
+    for header in ("有据可依的", "AI 自己补的", "现在还不能定的"):
+        assert header in LAB, f"missing bucket header: {header}"
+
+    # The summary says it has not run any backtest, so no fake numbers.
+    summary_block = LAB[LAB.index("结果小结"):]
+    assert "没有跑过任何回测" in summary_block, (
+        "the 结果小结 must say no backtest was run, so no numbers can appear there"
+    )
+
+
+def test_the_lab_next_step_covers_capability_gaps() -> None:
+    """WP2: when capability is NEEDS_CAPABILITY / PARTIALLY_SUPPORTED the next-step text
+    must say so explicitly instead of silently pointing at the confirm button as if
+    confirmation alone would make compilation succeed.
+    """
+
+    for status in ("NEEDS_CAPABILITY", "PARTIALLY_SUPPORTED"):
+        assert status in LAB, f"nextStep must branch on {status}"
+
+    # The wording must not promise that confirmation removes the gap.
+    assert "编译器遇到做不到的地方也会直接拒绝" in LAB or "编译器遇到做不到的地方仍会拒绝" in LAB
+
+
+def test_dashboard_lab_card_uses_real_capability_verdicts() -> None:
+    """WP2 fix: the dashboard's 'awaiting decisions' filter must use the backend's actual
+    capability verdicts (SUPPORTED / PARTIALLY_SUPPORTED / NEEDS_CAPABILITY), not the
+    nonexistent 'user_required' value that PR #9 shipped.
+    """
+
+    # The dead 'user_required' value must be gone from the dashboard.
+    assert "user_required" not in DASHBOARD, (
+        "'user_required' is not a backend capability verdict; the filter never matched"
+    )
+    # The real verdicts are the ones the backend actually produces.
+    assert "NEEDS_CAPABILITY" in DASHBOARD
+    assert "PARTIALLY_SUPPORTED" in DASHBOARD
+    # The computed is named for what it filters on.
+    assert "labAwaitingDecisions" in DASHBOARD
+
+
+def test_backtest_page_says_it_is_simulation_not_trading() -> None:
+    """WP3: the backtest page must tell the reader up front that what they are about to
+    run is a simulation on historical data, not live trading.
+    """
+
+    assert "回测是模拟验证" in BACKTEST
+    assert "不是实盘交易" in BACKTEST or "不会下单" in BACKTEST
+    # The handoff note from the lab also says it is simulation.
+    assert "是模拟验证，不会下单" in BACKTEST
     assert "第一次那笔订单 #${r.order_id}" in PAPER

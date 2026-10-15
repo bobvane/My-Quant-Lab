@@ -1915,6 +1915,7 @@ onMounted(async () => {
     <p class="page-sub">
       运行一次历史回测，然后看结论：这套策略过去表现如何、为什么、风险有多大、下一步该做什么。
       同一「策略版本 + 数据集 + 参数 + 引擎版本 + 特征版本」必然得到相同结果；样本不足的指标显示 N/A，不会编造。
+      回测是模拟验证，用历史数据算出来的结果，不是实盘交易，不会下单。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -2021,6 +2022,9 @@ onMounted(async () => {
 
       <p class="muted" style="margin: 8px 0 0">
         当前行情源：{{ providerLabel(marketProvider) }}
+      </p>
+      <p v-if="labHandoff" class="muted" style="margin: 6px 0 0">
+        这条回测是「AI 研究实验室」交过来的：用的是你选定的策略版本，跑的是历史数据，是模拟验证，不会下单。
       </p>
       <p v-if="runBlockedReason" class="muted" style="margin: 6px 0 0">{{ runBlockedReason }}</p>
 

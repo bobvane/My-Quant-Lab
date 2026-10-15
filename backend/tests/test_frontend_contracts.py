@@ -563,6 +563,39 @@ def test_the_backtest_result_answers_before_it_lists() -> None:
     assert "查看详细分析" in UI_SPEC
 
 
+def test_the_home_page_oos_next_step_points_at_the_real_entry() -> None:
+    """The home page ③ "next step" tells a lay user where OOS actually lives.
+
+    OOS is a tool inside the backtest page's advanced mode, not the simulation page and
+    not the backtest page's first screen. So when the lifecycle says the next step is OOS,
+    the home page must (a) name the page, the mode and the tool, (b) point the link at the
+    backtest page (the real entry), and (c) never claim OOS proves the strategy reliable.
+    """
+
+    # The shared vocabulary names the real entry exactly as the backtest page exposes it.
+    assert "export const OOS_PAGE = '回测'" in WORDING
+    assert "export const OOS_TOOL_LABEL = '样本外验证（OOS）'" in WORDING
+    assert "export const OOS_STEP_TEXT" in WORDING
+
+    # The backtest page's advanced OOS tool is the real destination referenced above.
+    marker = BACKTEST.index('<template v-if="isAdvanced">')
+    close = BACKTEST.index("\n    </template>", marker)
+    assert "样本外验证（OOS）" in BACKTEST[marker:close]
+
+    # The home page's `backtested` step now says where OOS lives (page + mode + tool),
+    # and does not hand-wave with the bare term "泛化能力".
+    assert "OOS_STEP_TEXT" in DASHBOARD
+    assert "样本外验证（OOS）" in DASHBOARD
+    assert "高级模式" in DASHBOARD
+    assert "泛化能力" not in DASHBOARD
+
+    # `oos_tested` must link to the backtest page (the OOS entry), not to /paper.
+    assert "/backtest" in DASHBOARD
+
+    # The guidance must not over-promise: OOS is another historical check, not proof.
+    assert "不代表未来" in DASHBOARD or "不代表未来" in WORDING
+
+
 def test_the_ai_summary_answers_five_questions_and_owes_none_of_them() -> None:
     """AI's job is to summarise stored facts, not to produce them (audit section 13, ADR-129).
 

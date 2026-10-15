@@ -23,6 +23,9 @@ import {
   REFERENCE_PRICE_DISCLAIMER,
   SIGNAL_DISCLAIMER,
   nextStepText,
+  OOS_PAGE,
+  OOS_TOOL_LABEL,
+  OOS_STEP_TEXT,
   qualityLabel,
   signalLabel,
   stageLabel,
@@ -251,11 +254,15 @@ const nextStep = computed(() => {
   const lifecycle = focusLifecycle.value
   const stage = lifecycle?.suggested_next
   if (stage) {
+    // 样本外验证（OOS）的真实入口在「回测」页的高级模式里，不是模拟盘；
+    // 所以 `oos_tested` 阶段指向回测页，让用户能真正进入 OOS 工具，而不是跳去模拟盘。
+    const to = stage === 'oos_tested' ? '/backtest' : stagePage(stage)?.to ?? ''
+    const linkText = stage === 'oos_tested' ? `去「${OOS_PAGE}」` : stagePage(stage)?.label ?? ''
     return {
       text: nextStepText(stage),
       reason: lifecycle?.blocked_reason ? `现在还不能推进：${lifecycle.blocked_reason}` : '',
-      to: stagePage(stage)?.to ?? '',
-      linkText: stagePage(stage)?.label ?? '',
+      to,
+      linkText,
     }
   }
   if (focusStrategy.value && latestRun.value) {
@@ -275,6 +282,17 @@ const nextStep = computed(() => {
     to: '/strategies',
     linkText: '去「我的策略」',
   }
+})
+
+/**
+ * ③「下一步」的实操说明：当下一步是做样本外验证时，普通用户需要知道去哪、怎么开始。
+ * 其他阶段不显示（OOS 工具在回测页高级模式里，这是首页唯一需要单独说明的导航断点）。
+ */
+const nextStepHow = computed(() => {
+  const stage = focusLifecycle.value?.suggested_next
+  if (stage !== 'oos_tested' && stage !== 'backtested') return ''
+  if (stage === 'backtested') return OOS_STEP_TEXT
+  return `进入「回测」页 → 打开「高级模式」→ 找到「${OOS_TOOL_LABEL}」。它只是用另一段历史数据再验证一次，不代表未来一定盈利。`
 })
 
 /** ④ 需要你注意的事情：能算出来的都算出来，算不出来的不编。 */
@@ -556,6 +574,7 @@ onMounted(load)
         <p v-if="nextStep.to">
           <RouterLink :to="nextStep.to">{{ nextStep.linkText }}</RouterLink>
         </p>
+        <p v-if="nextStepHow" class="muted" style="margin-top: 6px">{{ nextStepHow }}</p>
       </div>
 
       <div class="card">

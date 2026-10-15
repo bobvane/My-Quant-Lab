@@ -46,7 +46,7 @@ export function stageLabel(stage: string | null | undefined): string {
 const NEXT_STEPS: Record<string, string> = {
   normalized: '把这个策略补全成一个可校验的版本',
   validated: '运行一次历史回测，看它过去的表现',
-  backtested: '做样本外验证：用没参与调参的数据再测一次',
+  backtested: '做样本外验证：在「回测」页的「高级模式」里，用没参与调参的数据再测一次',
   oos_tested: '放进模拟盘跑一段时间，看真实成交环境下是什么样',
   paper_trading: '在模拟盘里积累足够多的交易，再和回测结果比较',
   reference_signal: '继续观察信号，把它当作研究信息而不是交易指令',
@@ -74,6 +74,19 @@ export function stagePage(stage: string | null | undefined): { to: string; label
   if (!stage) return null
   return STAGE_PAGES[stage] ?? null
 }
+
+/**
+ * 样本外验证（OOS）的真实入口与通俗步骤：OOS 工具位于「回测」页的「高级模式」里，
+ * 不在普通模式第一屏。首页 ③「下一步」对 `backtested` 阶段用这些常量把「去哪、怎么开始」
+ * 说清楚，避免普通用户到了回测页找不到入口（首页 OOS 入口可理解性改进）。
+ *
+ * 它只是用另一段历史数据再验证一次，并不代表未来一定盈利——任何文案都不得暗示
+ * 「做一次 OOS 就能证明策略可靠 / 有效」。
+ */
+export const OOS_PAGE = '回测'
+export const OOS_TOOL_LABEL = '样本外验证（OOS）'
+export const OOS_STEP_TEXT =
+  '在「回测」页的「高级模式」里，找到「样本外验证（OOS）」工具，用一段没有参与前期调参的数据再跑一次，看策略在这段新数据上的表现。它只是用另一段历史数据再验证一次，不代表未来一定盈利。'
 
 /** Timeframes: `1d` is a database value, 日线 is what a person says. */
 export const TIMEFRAME_LABELS: Record<string, string> = {

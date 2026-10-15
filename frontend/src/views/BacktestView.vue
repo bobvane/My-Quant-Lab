@@ -2464,6 +2464,10 @@ onMounted(async () => {
     <template v-if="isAdvanced">
     <div class="card" style="margin-top: 14px">
       <h3>样本外验证（OOS）</h3>
+      <p class="muted">
+        这就是首页「下一步」里说的「样本外验证」：用一段没有参与前期调参的历史数据再跑一次，
+        看策略在这段新数据上的表现。它只是多一次历史验证，不代表未来一定盈利。
+      </p>
       <div class="row">
         <input
           v-model.number="oosPct"

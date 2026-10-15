@@ -75,7 +75,12 @@ def test_a_signal_blocks_deleting_its_strategy(client, db_session) -> None:
     response = client.delete(f"/api/v1/strategies/{strategy_id}")
 
     assert response.status_code == 409, response.text
-    assert "信号记录" in response.json()["detail"]
+    body = response.json()
+    assert body["error"]["code"] == "delete_blocked"
+    assert "信号记录" in body["error"]["message"]
+    assert [(item["kind"], item["count"]) for item in body["error"]["details"]["blockers"]] == [
+        ("signal", 1)
+    ]
     assert client.get(f"/api/v1/strategies/{strategy_id}").status_code == 200
 
 
@@ -96,7 +101,11 @@ def test_a_paper_account_blocks_deleting_its_strategy(client, db_session) -> Non
     response = client.delete(f"/api/v1/strategies/{strategy_id}")
 
     assert response.status_code == 409, response.text
-    assert "模拟盘账户" in response.json()["detail"]
+    body = response.json()
+    assert "模拟盘账户" in body["error"]["message"]
+    assert [(b["table"], b["kind"], b["count"]) for b in body["error"]["details"]["blockers"]] == [
+        ("paper_accounts", "paper_account", 1)
+    ]
 
 
 def test_the_refusal_counts_every_referrer(client, db_session) -> None:
@@ -117,10 +126,15 @@ def test_the_refusal_counts_every_referrer(client, db_session) -> None:
     )
     db_session.flush()
 
-    detail = client.delete(f"/api/v1/strategies/{strategy_id}").json()["detail"]
+    body = client.delete(f"/api/v1/strategies/{strategy_id}").json()
+    message = body["error"]["message"]
 
-    assert "2 条信号记录" in detail
-    assert "1 条模拟盘账户" in detail
+    assert "2 条信号记录" in message
+    assert "1 条模拟盘账户" in message
+    assert {(b["kind"], b["count"]) for b in body["error"]["details"]["blockers"]} == {
+        ("signal", 2),
+        ("paper_account", 1),
+    }
 
 
 def test_a_strategy_nobody_points_at_still_deletes(client, db_session) -> None:

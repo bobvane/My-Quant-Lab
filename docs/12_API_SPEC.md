@@ -46,10 +46,75 @@ API base: `/api/v1`
 `GET /market-data/series` [已实现] —— 列出行情数据序列。
 `GET /market-data/series/{series_id}` [已实现] —— 取单条序列。
 `GET /market-data/series/{series_id}/bars` [已实现] —— 列出该序列的 K 线。
-`DELETE /market-data/series/{series_id}` [已实现] —— 归档一条序列，但绝不让可复现的回测变得不可复现：历史结果的 `backtest_runs.dataset_version_id` 就是「这份结果算自哪份数据」的证据。
+`DELETE /market-data/series/{series_id}` [已实现] —— 归档一条序列，但绝不让可复现的回测变得不可复现：历史结果的 `backtest_runs.dataset_version_id` 就是「这份结果算自哪份数据」的证据。（引用检查与响应形状见「删除的引用检查」；被策略实验引用时不再走归档，而是 409。）
 `POST /market-data/series/{series_id}/restore` [已实现] —— 把已归档的序列恢复回来。
 
 创建序列的请求体字段：asset_id、timeframe、provider、timezone。序列由同步创建，本族没有独立的创建端点。
+
+## 删除的引用检查（三条删除端点共用，ADR-222）
+
+策略删除、行情序列删除、回测删除共用一套引用检查。它不再各自记一份「我记得哪些表指向我」的
+清单，而是从外键图推导出**所有**指向被删对象的引用行，按显式业务策略分类，再用同一个响应形状
+回答。这样做的直接原因：旧的三处检查各有遗漏（漏掉策略实验、AI 任务、研究草案、按版本引用的
+模拟账户，以及行情序列上的策略实验），漏掉的那些会走到数据库层、撞上外键，用户看到的是
+`500 internal server error`。
+
+每一类引用只有四种结局：
+
+| 策略 | 含义 | 用户看到的 |
+|---|---|---|
+| `block` | 有引用就不能删 | 409，且**一行都不删** |
+| `archive` | 不删数据，改成归档（行情序列的既有行为） | 200 + `archived: true`；`?purge=true` 要求真删时反而 409 |
+| `set-null` | 删掉，并解除引用 | 200，且在 `warnings` 里说明解除了什么 |
+| `cascade` | 子行随父行一起删 | 200；子行不会被算作「拦路的引用」 |
+
+没有显式策略的引用一律按 `block` 处理（保守兜底），所以将来新增一张表指向这些对象，不会悄悄
+绕过检查；策略表本身还有一条反向守卫：`backend/tests/test_delete_guards.py` 会枚举外键图，
+新增外键而没归类就变红。
+
+**409 的形状**（三条端点一致，顶层只有 `error` 一个键）：
+
+```json
+{
+  "error": {
+    "code": "delete_blocked",
+    "message": "此策略被 2 条信号记录、1 个模拟盘账户 关联，不能直接删除。请先删除相关记录。",
+    "details": {
+      "entity": "strategy",
+      "id": 7,
+      "blockers": [
+        {"table": "signals", "kind": "signal", "label": "信号记录", "count": 2},
+        {"table": "paper_accounts", "kind": "paper_account", "label": "模拟盘账户", "count": 1}
+      ],
+      "next": [{"action": "manual_cleanup", "available": true}]
+    }
+  }
+}
+```
+
+- `blockers[].kind` 是稳定枚举：`backtest` / `experiment` / `signal` / `paper_account` /
+  `ai_task` / `draft` / `unknown`（`unknown` = 兜底命中的、还没有显式策略的引用）；同一张表
+  有多种 kind 时按 kind 分行。
+- `blockers` 可以是空数组（兜底命中但计数为 0 的边界），前端要按「没有明细」渲染；`next`
+  为空数组表示没有替代动作、只能先手工清理引用。
+- `next[].available` 说的是**这个端点今天是否真的提供那条路**（例如策略删除没有归档动作，
+  所以只有 `manual_cleanup`），它只是「你还能怎么办」的提示，前端据此决定要不要给按钮。
+- 409 **一定**带 `error`、**不带** `warnings`；200 **一定**带顶层 `warnings`（无内容时是
+  `[]`），两者互斥。
+
+**200 的形状**（保留各端点既有字段，追加顶层 `warnings`）：
+
+| 端点 | 成功体 |
+|---|---|
+| `/strategies/{strategy_id}` | `{"deleted": 7, "name": "…", "warnings": ["有 1 笔模拟成交记录了这版策略的版本号（字符串引用），删除策略不会删掉这些流水。"]}` |
+| `/market-data/series/{series_id}`（归档） | `{"deleted": null, "symbol": "AAPL", "archived": true, "blocking_runs": 3, "message": "…", "warnings": []}` |
+| `/market-data/series/{series_id}`（真删） | `{"deleted": 12, "symbol": "AAPL", "archived": false, "blocking_runs": 0, "message": "…", "warnings": []}` |
+| `/backtests/{run_id}` | `{"deleted": 5, "warnings": ["有 1 个模拟盘账户原本绑定这次回测，删除后绑定会被清空，账户本身保留。"]}` |
+
+`warnings` 固定放在响应顶层，前端三条删除入口都会把它显示出来。原因：回测删除会**静默**把
+`paper_accounts.backtest_run_id` 置空（外键 `ondelete="SET NULL"`），而模拟成交的
+`strategy_version`（形如 `7@1.0.0` 的字符串标签，不是外键）也不会随策略一起消失 —— 这两件事
+都不是错误，但都是用户需要知道的改变（ADR-007：不能把「被改变」当成「没发生」）。
 
 ## Features
 
@@ -62,7 +127,7 @@ API base: `/api/v1`
 `GET /strategies` [已实现] —— 列出策略。
 `POST /strategies` [已实现] —— 创建策略。
 `GET /strategies/{strategy_id}` [已实现] —— 取单个策略。
-`DELETE /strategies/{strategy_id}` [已实现] —— 删除策略及其全部版本。
+`DELETE /strategies/{strategy_id}` [已实现] —— 删除策略及其全部版本。被回测、信号、策略实验、AI 任务、研究草案或模拟盘账户（直接引用或经版本引用）指着的策略会得到 409，且一行都不删（见「删除的引用检查」）。
 `POST /strategies/{strategy_id}/versions` [已实现] —— 创建一个新的不可变策略版本。`make_current` 默认为 `true`，但只有本次校验结论是 `valid` 时才会成为当前版本：非 `valid` 且 `make_current=true` 时返回 422（`{"detail": "strategy version is '<status>', not 'valid'; pass make_current=false to record it without making it current"}`）且**一行都不写**（既不写版本，也不动原当前版本）；`make_current=false` 时 `valid`/`pending`/`invalid` 都可以被记录（ADR-171）。
 `GET /strategies/{strategy_id}/versions` [已实现] —— 列出某个策略的版本。
 `POST /strategies/validate` [已实现] —— 校验一份 DSL 文档（不落库）。请求体就是**裸 DSL 对象**本身（不是 `{dsl: …}` 包裹，也没有别的字段）；响应是 `StrategyValidationOut`：`is_valid`（没有任何 `error` 级问题时为真）、`issues`（每条形如 `{severity, code, message, path}`，`path` 可为 null）、`available_columns`（校验器认识的列名，排序后给出）。DSL 连结构都解析不了时返回 200 且 `is_valid=false`，只给一条 `code="schema_error"`、`path=null` 的 error，`available_columns` 为空 —— 400/422 只留给请求体本身不是 JSON 的情况。前端「从 GitHub 导入」的第 6 步渲染的就是这两个字段（ADR-113）。
@@ -84,7 +149,7 @@ API base: `/api/v1`
 `GET /backtests/compare` [已实现] —— 并排对比若干次回测运行（`?ids=1,2`）。
 `GET /backtests/comparisons/{comparison_id}` [计划] —— 对比为无状态即时计算，不持久化快照，v1.0 不做。
 `POST /backtests` [已实现] —— 运行一次回测。
-`DELETE /backtests/{run_id}` [已实现] —— 删除一次回测运行及其结果。
+`DELETE /backtests/{run_id}` [已实现] —— 删除一次回测运行及其结果。被策略实验的某个结果点引用时返回 409（ADR-174）；把模拟账户的回测绑定置空时会在 `warnings` 里说明（见「删除的引用检查」）。
 `POST /backtests/{run_id}/explain` [已实现] —— 解释一次已完成的回测。
 `POST /backtests/{run_id}/explain-performance` [已实现] —— 用普通人语言解释一次已完成回测的绩效 / 风险 / 买入持有对照（Phase C，`ExplainOut`）。数字全部来自 `GET /backtests/{run_id}/analysis`；AI 未配置、预算耗尽或被守卫拒绝（编造数字 / 预测措辞）时该端点返回错误，数字块照常显示。
 

@@ -7,6 +7,7 @@ import logging
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
@@ -28,9 +29,9 @@ from app.data.providers import (
     get_market_data_provider,
     mark_closed_bars,
 )
+from app.domain import references
 from app.domain.models import (
     Asset,
-    BacktestRun,
     FeatureSnapshot,
     MarketDataBar,
     MarketDataSeries,
@@ -288,19 +289,6 @@ def latest_bars(
     }
 
 
-def _blocking_runs(db: Session, series_id: int) -> int:
-    """How many completed backtests point at this series as their dataset."""
-
-    return int(
-        db.scalar(
-            select(func.count())
-            .select_from(BacktestRun)
-            .where(BacktestRun.dataset_version_id == series_id)
-        )
-        or 0
-    )
-
-
 def _symbol_of(db: Session, series: MarketDataSeries) -> str:
     asset = db.get(Asset, series.asset_id)
     return asset.symbol if asset else str(series.asset_id)
@@ -344,18 +332,21 @@ def delete_series(
     if series is None:
         raise HTTPException(status_code=404, detail="series not found")
     symbol = _symbol_of(db, series)
-    blocking = _blocking_runs(db, series_id)
+    # Everything that points at this series: a backtest keeps it reproducible (archive
+    # branch), an experiment refuses the delete, and anything else is named in the
+    # response instead of turning into a 500 (ADR-222).
+    report = references.collect(db, entity=references.SERIES, entity_id=series_id)
+    blocking_runs = sum(
+        blocker.count for blocker in report.archivable if blocker.kind == references.KIND_BACKTEST
+    )
 
-    if blocking and purge:
-        raise HTTPException(
+    if report.refuses_delete or (purge and report.archivable):
+        return JSONResponse(
             status_code=409,
-            detail=(
-                f"{symbol} 的行情数据被 {blocking} 次回测使用，不能直接删除。"
-                "请先删除相关回测记录，或改为归档（不带 purge 参数）。"
-            ),
+            content=references.error_body(report, references.refusal_message(report)),
         )
 
-    if blocking:
+    if report.archivable:
         series.is_archived = True
         record_audit(
             db,
@@ -363,24 +354,22 @@ def delete_series(
             entity_type="market_data_series",
             entity_id=str(series_id),
             action="archive",
-            payload={"symbol": symbol, "blocking_runs": blocking},
+            payload={"symbol": symbol, "blocking_runs": blocking_runs},
         )
         db.commit()
         logger.info(
             "archived market data series %s (%s): %d backtest run(s) depend on it",
             series_id,
             symbol,
-            blocking,
+            blocking_runs,
         )
         return {
             "deleted": None,
             "symbol": symbol,
             "archived": True,
-            "blocking_runs": blocking,
-            "message": (
-                f"{symbol} 的行情数据被 {blocking} 次回测使用，已归档并在行情同步中隐藏；"
-                "数据保留，回测结果仍可复现。"
-            ),
+            "blocking_runs": blocking_runs,
+            "message": references.archive_message(symbol, blocking_runs),
+            "warnings": report.warning_list(),
         }
 
     _hard_delete(db, series)
@@ -400,6 +389,7 @@ def delete_series(
         "archived": False,
         "blocking_runs": 0,
         "message": f"已删除 {symbol} 的行情数据（系列 #{series_id}）。",
+        "warnings": report.warning_list(),
     }
 
 
@@ -420,8 +410,13 @@ def restore_series(series_id: int, db: Session = Depends(get_db)) -> dict:
         payload={"symbol": _symbol_of(db, series)},
     )
     db.commit()
+    report = references.collect(db, entity=references.SERIES, entity_id=series_id)
     return {
         "id": series_id,
         "is_archived": bool(series.is_archived),
-        "blocking_runs": _blocking_runs(db, series_id),
+        "blocking_runs": sum(
+            blocker.count
+            for blocker in report.archivable
+            if blocker.kind == references.KIND_BACKTEST
+        ),
     }

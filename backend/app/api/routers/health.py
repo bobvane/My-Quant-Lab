@@ -169,6 +169,7 @@ def health(db: Session = Depends(get_db)) -> dict:
     return {
         "status": status,
         "version": settings.app_version,
+        "build_commit": settings.build_commit,
         "database": database,
         "migration": migration,
         "redis": redis_state,
@@ -184,6 +185,7 @@ def system_info() -> dict:
     return {
         "app_name": settings.app_name,
         "version": settings.app_version,
+        "build_commit": settings.build_commit,
         "environment": settings.environment,
         "market_data_provider": settings.market_data_provider,
         "default_currency": settings.default_currency,

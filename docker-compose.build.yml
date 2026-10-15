@@ -25,3 +25,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.app
+      # A local build may stamp its own commit; leave it out to get the "unknown"
+      # default. The release pipeline passes github.sha through the same arg.
+      args:
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}

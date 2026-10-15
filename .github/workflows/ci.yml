@@ -78,7 +78,48 @@ jobs:
           TEST_POSTGRES_URL: postgresql+psycopg://quantlab_test:quantlab_test@localhost:5433/quantlab_test
           MARKET_DATA_PROVIDER: synthetic
           APP_ENVIRONMENT: test
-        run: pytest -o addopts= tests/test_postgres_triggers.py -v
+        run: |
+          # The module is marked `postgres`: with TEST_POSTGRES_URL unset it skips and
+          # pytest exits 0, so the exit code alone cannot tell "ran on PostgreSQL" from
+          # "skipped everything". The verdict is settled by the JUnit report -- the exact
+          # test count and zero failures/errors/skipped (ADR-222). This step published a
+          # green check while proving nothing about PostgreSQL until now.
+          set -uo pipefail
+          LOG=/tmp/pg-triggers.log
+          XML=/tmp/pg-triggers.xml
+          set +e
+          pytest -o addopts= tests/test_postgres_triggers.py -v -rs --color=no \
+            --junitxml="$XML" >"$LOG" 2>&1
+          pytest_exit=$?
+          set -e
+          cat "$LOG"
+          if [ "$pytest_exit" -ne 0 ]; then
+            echo "::error::pytest exited $pytest_exit: a PostgreSQL regression test failed, or the session could not reach PostgreSQL"
+            exit 1
+          fi
+          set +e
+          verdict="$(python3 scripts/verify_b1_junit.py --expect 5 "$XML" 2>&1)"
+          verify_exit=$?
+          set -e
+          if [ "$verify_exit" -ne 0 ]; then
+            echo "::error::PostgreSQL regression verdict not met: $verdict"
+            exit 1
+          fi
+          # The counts cannot tell the PostgreSQL run from the SQLite one, and this
+          # module is not the only shape in this job: two of the four steps below run
+          # modules that are backend-agnostic, so they pass with skipped == 0 while
+          # using SQLite. The header conftest prints names the database the session was
+          # actually offered, so every PostgreSQL step has to read it back and refuse
+          # when it is absent -- silence is not evidence (verify_pg_dialect.py).
+          set +e
+          dialect="$(python3 scripts/verify_pg_dialect.py "$LOG" 2>&1)"
+          dialect_exit=$?
+          set -e
+          if [ "$dialect_exit" -ne 0 ]; then
+            echo "::error::the PostgreSQL regression step could not prove PostgreSQL was the backend: $dialect"
+            exit 1
+          fi
+          echo "PostgreSQL regression tests: $verdict (tests failures errors skipped) on $dialect"
 
       # ADR-212. The G7 answer channel writes a dozen-column row plus an audit
       # entry, and the two failures this repository has paid for were both of that
@@ -101,7 +142,45 @@ jobs:
           TEST_POSTGRES_URL: postgresql+psycopg://quantlab_test:quantlab_test@localhost:5433/quantlab_test
           MARKET_DATA_PROVIDER: synthetic
           APP_ENVIRONMENT: test
-        run: pytest -o addopts= tests/test_draft_answers.py -v
+        run: |
+          # This module is backend-agnostic *by design* -- "the same assertions, run
+          # twice: in-memory SQLite always, and PostgreSQL when the job offers one" --
+          # so with TEST_POSTGRES_URL unset it does NOT skip: it runs all 47 tests on
+          # SQLite, passes, and reports skipped == 0. The JUnit counts alone therefore
+          # cannot prove this step tested PostgreSQL at all; the report-header check
+          # below is what proves the database was really offered.
+          set -uo pipefail
+          LOG=/tmp/pg-draft-answers.log
+          XML=/tmp/pg-draft-answers.xml
+          set +e
+          pytest -o addopts= tests/test_draft_answers.py -v -rs --color=no \
+            --junitxml="$XML" >"$LOG" 2>&1
+          pytest_exit=$?
+          set -e
+          cat "$LOG"
+          if [ "$pytest_exit" -ne 0 ]; then
+            echo "::error::pytest exited $pytest_exit: a G7 draft-answer test failed, or the session could not reach PostgreSQL"
+            exit 1
+          fi
+          set +e
+          verdict="$(python3 scripts/verify_b1_junit.py --expect 47 "$XML" 2>&1)"
+          verify_exit=$?
+          set -e
+          if [ "$verify_exit" -ne 0 ]; then
+            echo "::error::G7 draft-answer PostgreSQL verdict not met: $verdict"
+            exit 1
+          fi
+          # The counts above are satisfied by the SQLite run too (see the note at the top
+          # of this step), so the database is proven separately from the pytest header.
+          set +e
+          dialect="$(python3 scripts/verify_pg_dialect.py "$LOG" 2>&1)"
+          dialect_exit=$?
+          set -e
+          if [ "$dialect_exit" -ne 0 ]; then
+            echo "::error::the G7 draft-answer step could not prove PostgreSQL was the backend: $dialect"
+            exit 1
+          fi
+          echo "G7 draft-answer tests: $verdict (tests failures errors skipped) on $dialect"
 
       # ADR-221. One signal may only produce one paper order, and the thing that
       # enforces it is a unique index -- the case a read-then-write check cannot
@@ -115,7 +194,122 @@ jobs:
           TEST_POSTGRES_URL: postgresql+psycopg://quantlab_test:quantlab_test@localhost:5433/quantlab_test
           MARKET_DATA_PROVIDER: synthetic
           APP_ENVIRONMENT: test
-        run: pytest -o addopts= tests/test_paper_idempotency.py -v
+        run: |
+          # Same verdict shape again (ADR-222). On SQLite a race loser can legitimately be
+          # told the database is busy, and this module adapts to either dialect rather
+          # than skipping one of them -- so a run that never reached PostgreSQL still
+          # passes every count. The header check below is what proves the backend.
+          set -uo pipefail
+          LOG=/tmp/pg-paper-idempotency.log
+          XML=/tmp/pg-paper-idempotency.xml
+          set +e
+          pytest -o addopts= tests/test_paper_idempotency.py -v -rs --color=no \
+            --junitxml="$XML" >"$LOG" 2>&1
+          pytest_exit=$?
+          set -e
+          cat "$LOG"
+          if [ "$pytest_exit" -ne 0 ]; then
+            echo "::error::pytest exited $pytest_exit: a paper idempotency test failed, or the session could not reach PostgreSQL"
+            exit 1
+          fi
+          set +e
+          verdict="$(python3 scripts/verify_b1_junit.py --expect 12 "$XML" 2>&1)"
+          verify_exit=$?
+          set -e
+          if [ "$verify_exit" -ne 0 ]; then
+            echo "::error::paper idempotency PostgreSQL verdict not met: $verdict"
+            exit 1
+          fi
+          # As above: the counts are met by the SQLite run too, so the backend is proven
+          # from the pytest header rather than inferred from the numbers.
+          set +e
+          dialect="$(python3 scripts/verify_pg_dialect.py "$LOG" 2>&1)"
+          dialect_exit=$?
+          set -e
+          if [ "$dialect_exit" -ne 0 ]; then
+            echo "::error::the paper idempotency step could not prove PostgreSQL was the backend: $dialect"
+            exit 1
+          fi
+          echo "Paper idempotency tests: $verdict (tests failures errors skipped) on $dialect"
+
+      # ADR-222. The delete guard is dialect-sensitive in one specific way: SQLite only
+      # enforces foreign keys when the pragma is on, so the SQLite half of the B1 matrix
+      # cannot prove that the rows the guard refuses to touch would really have been
+      # protected by the database. This step runs the PostgreSQL half and settles the
+      # verdict from pytest's own exit code plus the exact numbers in its summary line,
+      # requiring 5 passed / 0 failed / 0 skipped / 0 errors: a green step that proved
+      # nothing is exactly the failure mode an unset TEST_POSTGRES_URL used to hide
+      # (B1-T11, and the round-2 review's P1 finding).
+      - name: Run B1 delete guard tests on PostgreSQL
+        env:
+          DATABASE_URL: "sqlite+pysqlite:///:memory:"
+          TEST_POSTGRES_URL: postgresql+psycopg://quantlab_test:quantlab_test@localhost:5433/quantlab_test
+          MARKET_DATA_PROVIDER: synthetic
+          APP_ENVIRONMENT: test
+        run: |
+          # The verdict is settled by pytest's own exit code plus the JUnit XML it writes,
+          # parsed by Python's standard library -- never by parsing the human-readable
+          # summary text. Count-via-regex was fragile under `-q`/`-v` and pytest version
+          # drift, and a "skipped" substring search could not tell 5 tests from 0.
+          #
+          # The exit code is taken from `$?` on the very next statement, with errexit
+          # off around the run, so no pipeline or PIPESTATUS sits between pytest and the
+          # number that decides the verdict. pytest output is kept on disk for diagnosis.
+          set -uo pipefail
+          EXPECTED_TESTS=5
+          LOG=/tmp/b1-postgres.log
+          XML=/tmp/b1-postgres.xml
+          MAX_LINES=400
+          set +e
+          pytest -o addopts= tests/test_delete_guards_postgres.py -v -rs --color=no \
+            --junitxml="$XML" >"$LOG" 2>&1
+          pytest_exit=$?
+          set -e
+          echo "----- pytest output -----"
+          cat "$LOG"
+          echo "----- end of pytest output -----"
+          if [ "$pytest_exit" -ne 0 ]; then
+            echo "::error::pytest exited $pytest_exit: at least one B1 PostgreSQL test failed, or the session could not reach PostgreSQL / migrate the scratch database"
+            tail -n "$MAX_LINES" "$LOG"
+            exit 1
+          fi
+
+          # pytest exit code 0 means "the run finished". It does NOT mean the verdict is
+          # the one we require, so the JUnit XML is parsed by the helper and every count
+          # is enforced. The verdict logic lives in scripts/verify_b1_junit.py rather than
+          # a heredoc here, so the workflow's YAML block scalar stays valid and the rule
+          # is reviewable and testable on its own (ADR-222).
+          set +e
+          verdict="$(python3 scripts/verify_b1_junit.py "$XML" 2>&1)"
+          verify_exit=$?
+          set -e
+          if [ "$verify_exit" -ne 0 ]; then
+            echo "::error::could not verify the B1 PostgreSQL JUnit report (scripts/verify_b1_junit.py exited $verify_exit): $verdict"
+            tail -n "$MAX_LINES" "$LOG"
+            exit 1
+          fi
+          read -r t f e s <<< "$verdict"
+          if [ "$t" -ne "$EXPECTED_TESTS" ] || [ "$f" -ne 0 ] || [ "$e" -ne 0 ] || [ "$s" -ne 0 ]; then
+            echo "::error::the B1 PostgreSQL half of the delete-guard matrix did not meet the verdict: expected tests==$EXPECTED_TESTS, failures==0, errors==0, skipped==0; got tests=$t failures=$f errors=$e skipped=$s"
+            tail -n "$MAX_LINES" "$LOG"
+            exit 1
+          fi
+
+          # The counts are necessary but not sufficient: this module does skip without a
+          # database, yet the two backend-agnostic steps above would not, so the rule is
+          # applied uniformly -- the pytest header must state which database the session
+          # was offered. A missing header fails closed.
+          set +e
+          dialect="$(python3 scripts/verify_pg_dialect.py "$LOG" 2>&1)"
+          dialect_exit=$?
+          set -e
+          if [ "$dialect_exit" -ne 0 ]; then
+            echo "::error::the B1 PostgreSQL step could not prove PostgreSQL was the backend (scripts/verify_pg_dialect.py exited $dialect_exit): $dialect"
+            tail -n "$MAX_LINES" "$LOG"
+            exit 1
+          fi
+
+          echo "::notice::B1 delete-guard matrix ran on PostgreSQL: $t passed, $f failed, $e errors, $s skipped ($dialect)"
 
       - name: Upload coverage
         # `if: always()` is deliberate: the report matters most when the suite failed.

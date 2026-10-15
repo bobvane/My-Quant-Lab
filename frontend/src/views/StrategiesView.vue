@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import {
   api,
+  deleteBlockedHint,
   type GithubAnalysis,
   type GithubSnapshot,
   type GithubVersionPlan,
@@ -48,6 +49,8 @@ const strategies = ref<Strategy[]>([])
 const signals = ref<SignalIntent[]>([])
 const error = ref('')
 const info = ref('')
+//: 删除成功后要如实说明「这次删除顺带改变了什么」（ADR-222），例如绑定被清空。
+const deleteNotices = ref<string[]>([])
 
 const SAMPLE_DSL = {
   schema_version: '1.0',
@@ -190,12 +193,15 @@ async function deleteStrategy(id: number, name: string) {
   error.value = ''
   info.value = ''
   deletingStrategy.value = id
+  deleteNotices.value = []
   try {
     const result = await api.deleteStrategy(id)
     info.value = `已删除策略「${result.name}」`
+    deleteNotices.value = result.warnings ?? []
     await load()
   } catch (e) {
-    error.value = (e as Error).message
+    const hint = deleteBlockedHint(e)
+    error.value = hint ? `${(e as Error).message} ${hint}` : (e as Error).message
   } finally {
     deletingStrategy.value = null
   }
@@ -772,6 +778,9 @@ onMounted(load)
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="info" class="notice">{{ info }}</p>
+    <ul v-if="deleteNotices.length" class="notice">
+      <li v-for="(item, index) in deleteNotices" :key="index">{{ item }}</li>
+    </ul>
 
     <div class="grid cols-2">
       <div class="card card-quiet">

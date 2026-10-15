@@ -60,6 +60,35 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
+/** 删除类端点的成功回执：`warnings` 说的是「这次删除顺带改变了什么」（ADR-222）。 */
+export interface DeleteWarnings {
+  warnings: string[]
+}
+
+/**
+ * 409 `delete_blocked` 里「还能怎么办」的那几行，翻译成一句人话。
+ *
+ * 服务端给出的 `next[].available` 表示**这个端点今天是否真的提供那条路**，所以这里只把
+ * 真正可用的翻译成动作；不可用的（例如策略删除没有归档动作）不会被说成一条出路（ADR-138）。
+ */
+export function deleteBlockedHint(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.code !== 'delete_blocked') return null
+  const candidates = Array.isArray(error.details?.next) ? error.details.next : []
+  const labels: Record<string, string> = {
+    archive: '改为归档（数据保留，可从「显示已归档」恢复）',
+    purge: '明确要求彻底删除（?purge=true）',
+    detach: '先解绑引用它的记录',
+    manual_cleanup: '先手工清理引用它的记录（本页没有一键入口）',
+  }
+  const available = candidates
+    .filter((item: any) => item?.available)
+    .map((item: any) => labels[String(item.action)] ?? String(item.action))
+  if (!available.length) {
+    return '还能怎么办：本页没有替代操作，需要先在其他页面手工清理引用它的记录。'
+  }
+  return `还能怎么办：${available.join('；')}。`
+}
+
 export interface HealthResponse {
   status: string
   version: string
@@ -1477,6 +1506,7 @@ export const api = {
       archived: boolean
       blocking_runs: number
       message: string
+      warnings: string[]
     }>(`/market-data/series/${seriesId}${purge ? '?purge=true' : ''}`, {
       method: 'DELETE',
     }),
@@ -2045,9 +2075,11 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   deleteStrategy: (id: number) =>
-    request<{ deleted: number; name: string }>(`/strategies/${id}`, { method: 'DELETE' }),
+    request<DeleteWarnings & { deleted: number; name: string }>(`/strategies/${id}`, {
+      method: 'DELETE',
+    }),
   deleteBacktest: (id: number) =>
-    request<{ deleted: number }>(`/backtests/${id}`, { method: 'DELETE' }),
+    request<DeleteWarnings & { deleted: number }>(`/backtests/${id}`, { method: 'DELETE' }),
   createExperiment: (payload: ExperimentCreatePayload) =>
     request<ExperimentDetailOut>('/experiments', {
       method: 'POST',

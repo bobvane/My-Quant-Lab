@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   api,
+  type AIResearchRunSummary,
   type AIStatus,
   type BacktestAnalysis,
   type BacktestSummary,
@@ -20,6 +21,9 @@ import { formatDateTime, formatNumber, formatPaperPnlPct, formatPercent, signalD
 import { isAdvanced } from '@/mode'
 import {
   accountStatusLabel,
+  labRunFailureText,
+  labRunIsLive,
+  MIN_TRADES_FOR_CONFIDENT_VERDICT,
   REFERENCE_PRICE_DISCLAIMER,
   SIGNAL_DISCLAIMER,
   nextStepText,
@@ -55,6 +59,60 @@ const focusLifecycle = ref<StrategyLifecycle | null>(null)
 // 已记录的历史信号（`/signals` 的账本行），和 `signals` 那个「刚扫描出来的意图」
 // 不是同一种东西：账本行用 `bar_timestamp` 而不是 `bar_time`（ADR-127）。
 const recentSignals = ref<SignalRecord[]>([])
+
+// ---- AI 研究实验室（/lab）活动：让首页也能看见「待我处理 / 进行中 / 失败了」的研究 ----
+// 服务端 `GET /ai/research` 返回的就是列表页那份投影（没有假设与草案正文），这里只用它
+// 判断「需要我做什么」，不复制任何业务状态；详情与操作全部留在 `/lab`。
+// 状态词与「还在跑」判定统一走 `wording.ts`（与 LabView 共用同一份，不各自造）。
+const labRuns = ref<AIResearchRunSummary[]>([])
+const labRunsLoading = ref(false)
+const labRunsError = ref('')
+
+/** 排队中 / 运行中 / 等待开始：告诉读者「不用守着」，链接带回原页。 */
+const labLive = computed(() => labRuns.value.filter((r) => labRunIsLive(r.status)))
+/** 最近一次没有跑完、但原因已经存下来的研究（ADR-216：列表页也给得出原因）。 */
+const labFailed = computed(() => labRuns.value.filter((r) => r.status === 'failed'))
+/** 跑完但能力结论是「缺能力 / 部分支持」的研究——编译器没法自动往下走，等人来定。 */
+const labAwaitingDecisions = computed(() =>
+  labRuns.value.filter(
+    (r) =>
+      r.status === 'completed' &&
+      (r.capability_status === 'NEEDS_CAPABILITY' || r.capability_status === 'PARTIALLY_SUPPORTED'),
+  ),
+)
+
+async function loadLabRuns() {
+  labRunsLoading.value = true
+  labRunsError.value = ''
+  try {
+    const response = await api.aiResearchRuns(20)
+    labRuns.value = response.runs ?? []
+  } catch (e) {
+    labRuns.value = []
+    labRunsError.value = `研究实验室活动加载失败：${(e as Error).message}。这张卡片暂时没有内容，页面其余部分仍然可用。`
+  } finally {
+    labRunsLoading.value = false
+  }
+}
+
+function labRunLine(run: AIResearchRunSummary): string {
+  const question =
+    run.question.length > 40 ? `${run.question.slice(0, 40)}…` : run.question || `#${run.run_id}`
+  const started = run.created_at ? formatDateTime(run.created_at) : ''
+  const statusNote =
+    run.status === 'failed' && run.error_message
+      ? `原因：${labRunFailureText(run.error_message)}`
+      : run.status === 'completed' &&
+          (run.capability_status === 'NEEDS_CAPABILITY' ||
+            run.capability_status === 'PARTIALLY_SUPPORTED')
+        ? '能力检查显示缺项或只能部分支持，需要人来定编译器列出的问题'
+        : ''
+  return [question, started, statusNote].filter(Boolean).join(' · ')
+}
+
+function labRunLink(run: AIResearchRunSummary): { path: string; query: Record<string, string> } {
+  return { path: '/lab', query: { run: String(run.run_id) } }
+}
 
 function assetSymbol(assetId: number): string {
   return assets.value.find((a) => Number(a.id) === assetId)?.symbol ?? `#${assetId}`
@@ -279,15 +337,15 @@ const nextStep = computed(() => {
 
 /** ④ 需要你注意的事情：能算出来的都算出来，算不出来的不编。 */
 const warnings = computed<string[]>(() => {
+  const list = labWarnings()
   const strategy = focusStrategy.value
-  if (!strategy) return []
-  const list: string[] = []
+  if (!strategy) return list
   const run = latestRun.value
   if (!run) {
     list.push('这个策略还没有回测结果：现在对它的一切判断都还没有依据。')
   } else if (run.status === 'completed') {
     const trades = run.number_of_trades ?? 0
-    if (trades < 30) {
+    if (trades < MIN_TRADES_FOR_CONFIDENT_VERDICT) {
       list.push(`这次回测只有 ${trades} 笔交易，样本偏少，收益率先别当真。`)
     }
     if ((run.max_drawdown ?? 0) < -0.2) {
@@ -329,6 +387,30 @@ const warnings = computed<string[]>(() => {
   }
   return list
 })
+
+/**
+ * 「AI 研究实验室」那一侧的提醒：不依赖 focusStrategy，所以放在单独的计算里——
+ * 一个还没有任何策略、只有几条研究记录的人，也应该在这张卡里看见自己的研究动态。
+ * 只读服务端列表投影（ADR-216），不复制业务状态。
+ */
+function labWarnings(): string[] {
+  const list: string[] = []
+  const failed = labFailed.value
+  const awaiting = labAwaitingDecisions.value
+  const live = labLive.value
+  if (awaiting.length) {
+    list.push(
+      `有 ${awaiting.length} 条研究跑完了，但能力检查显示系统缺能力或只能部分支持：去「AI 研究实验室」把编译器列出的问题定下来，才能生成下一版草案。`,
+    )
+  }
+  if (failed.length) {
+    list.push(`最近有 ${failed.length} 条研究没有跑完，原因都记下来了：去「AI 研究实验室」打开看看是额度、配置还是材料问题。`)
+  }
+  if (live.length) {
+    list.push(`有 ${live.length} 条研究正在后台跑：不用守着，跑完会在「最近的研究」里等你。`)
+  }
+  return list
+}
 
 /**
  * 未配置 AI 时要说人话。后端 `note` 是英文原话（评审报告 P1-5），普通模式只给中文，
@@ -500,6 +582,7 @@ const bestReturnText = computed(() => {
 
 onMounted(loadRecentExperiments)
 onMounted(load)
+onMounted(loadLabRuns)
 </script>
 
 <template>
@@ -571,6 +654,38 @@ onMounted(load)
       现在这份数据只有 {{ dataSpanYears.toFixed(1) }} 年。
       <RouterLink to="/data">到「数据」同步更长的一段</RouterLink>，结论才更有分量。
     </p>
+
+    <!-- AI 研究实验室活动（Phase C）：只追加这一张卡，不动四问与既有面板。
+         它回答的是「我交出去的研究怎么样了 / 有没有等我处理的事」，这是四问里
+         ③ 下一步 与 ④ 需要你注意 都没有覆盖到的另一半：回测侧看得到结论，
+         研究侧（/lab）以前只在进入那一页之后才看得见。 -->
+    <div class="card" style="margin-top: 14px">
+      <div class="row" style="justify-content: space-between">
+        <h3 style="margin: 0">AI 研究实验室动态</h3>
+        <RouterLink to="/lab">到「AI 研究实验室」</RouterLink>
+      </div>
+      <p v-if="labRunsError" class="error" style="margin: 8px 0 0">{{ labRunsError }}</p>
+      <p v-else-if="labRunsLoading" class="muted" style="margin: 8px 0 0">正在读最近的研究记录…</p>
+      <template v-else>
+        <p v-if="labAwaitingDecisions.length" class="answer-main">
+          {{ labAwaitingDecisions.length }} 条研究跑完了，但能力检查说系统缺能力或只能部分支持——需要你去实验室把编译器列出的问题定下来，才能生成下一版草案。
+        </p>
+        <p v-if="labFailed.length" class="answer-main">
+          {{ labFailed.length }} 条研究没有跑完，原因都记下来了，点开看看能不能处理。
+        </p>
+        <p v-if="labLive.length" class="answer-main">
+          {{ labLive.length }} 条研究在后台跑着，不用守着，跑完会在这里等你。
+        </p>
+        <ul v-if="labAwaitingDecisions.length || labFailed.length || labLive.length" class="answer-list">
+          <li v-for="run in [...labAwaitingDecisions, ...labFailed, ...labLive].slice(0, 5)" :key="run.run_id">
+            <RouterLink :to="labRunLink(run)">{{ labRunLine(run) }}</RouterLink>
+          </li>
+        </ul>
+        <p v-if="!labAwaitingDecisions.length && !labFailed.length && !labLive.length" class="muted" style="margin: 8px 0 0">
+          没有正在跑或需要处理的 AI 研究。想从一句想法开始：点「到 AI 研究实验室」写一条新研究。
+        </p>
+      </template>
+    </div>
 
     <!-- 最近实验（Phase B）：只追加这一张卡；四问与下面既有面板都不动。 -->
     <div class="card" style="margin-top: 14px">

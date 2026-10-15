@@ -18,6 +18,7 @@ import datetime as dt
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -34,6 +35,7 @@ from app.data.backtest_service import (
     store_backtest,
     trade_dicts,
 )
+from app.domain import references
 from app.domain.models import BacktestRun
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
@@ -207,10 +209,25 @@ def delete_backtest(run_id: int, db: Session = Depends(get_db)) -> dict:
     if run is None:
         raise HTTPException(status_code=404, detail="backtest run not found")
 
-    # The cascade on BacktestResult and BacktestTrade handles the rest.
-    #
-    # An experiment_result that points at this run is NOT cascade deleted (ADR-174):
-    # the experiment keeps the historical record of which run it used.
+    # An experiment_result that points at this run is NOT cascade deleted (ADR-174): the
+    # experiment keeps the historical record of which run it used, so that reference has
+    # to refuse the delete here — otherwise the database raises after the delete started
+    # and the user sees a 500. A paper account bound to this run is the opposite case:
+    # its binding is cleared (``ondelete="SET NULL"``) and the caller is told through
+    # ``warnings`` instead (ADR-222).
+    report = references.collect(db, entity=references.BACKTEST_RUN, entity_id=run_id)
+    if report.refuses_delete:
+        return JSONResponse(
+            status_code=409,
+            content=references.error_body(report, references.refusal_message(report)),
+        )
+
+    # The cascade on BacktestResult and BacktestTrade handles the rest.  The account
+    # bindings are cleared here rather than left to ``ondelete="SET NULL"``: SQLite only
+    # enforces foreign keys while ``PRAGMA foreign_keys`` is on and the application never
+    # turns it on, so without this the 200 would promise "绑定会被清空" and leave the
+    # column pointing at a row that no longer exists (ADR-222).
+    references.apply_unbindings(db, report)
     db.delete(run)
 
     from app.data.strategy_service import record_audit
@@ -224,7 +241,7 @@ def delete_backtest(run_id: int, db: Session = Depends(get_db)) -> dict:
         payload={"strategy_version_id": run.strategy_version_id},
     )
     db.commit()
-    return {"deleted": run_id}
+    return {"deleted": run_id, "warnings": report.warning_list()}
 
 
 def _to_summary(run: BacktestRun) -> BacktestSummaryOut:

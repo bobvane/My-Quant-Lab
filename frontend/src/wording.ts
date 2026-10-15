@@ -24,6 +24,17 @@ export function signalLabel(state: string | null | undefined): string {
 export const SIGNAL_DISCLAIMER = '这是策略研究信号，不是自动交易指令。'
 export const REFERENCE_PRICE_DISCLAIMER = '这是策略模型计算出的参考值，不代表未来价格预测。'
 
+/**
+ * 展示层「样本是否够厚」门槛：10–29 笔交易时，回测页不再只给绿色的「值得继续验证」，
+ * 而要明确提示「样本还偏少、收益参考意义有限」；首页 ④「需要你注意的事情」也用同一个数。
+ *
+ * 这只是前端展示口径，不是后端业务规则；最低结论门槛仍是 10 笔（见 BacktestView 的
+ * `MIN_MEANINGFUL_TRADES` 与 DashboardView 的 `MIN_TRADES_FOR_VERDICT`，两者与后端
+ * 生命周期 `min_backtest_trades = 10` 对齐）。30 这个数字只决定「能不能把结论说成值得继续验证」，
+ * 不决定「能不能下结论」——后者由 10 笔门槛负责。
+ */
+export const MIN_TRADES_FOR_CONFIDENT_VERDICT = 30
+
 /** Research lifecycle stages. Moved here from StrategiesView so both pages read one table. */
 export const STAGE_LABELS: Record<string, string> = {
   imported: '已导入',
@@ -278,4 +289,45 @@ export function metricKeyLabel(key: string): string {
 export function termAlias(label: string): string {
   const fromKey = Object.values(METRIC_WORDING).find((entry) => entry.label === label)?.alias
   return fromKey ?? LABEL_ALIASES[label] ?? ''
+}
+
+// ---------------------------------------------------------------------------
+// AI 研究实验室运行状态（/lab 与首页共用同一套人话，不各自造一份）
+// ---------------------------------------------------------------------------
+
+/**
+ * 服务端 `AIResearchRun.status` 的人话。
+ * 本地保留一份（LabView.vue 的 `STATUS_LABELS` 是同一份值的另一份拷贝，
+ * `test_lab_journey_contracts.py` 钉住了那个本地常量，搬走会让守卫红）。
+ * 首页新代码直接走这份，避免再造第三个词表。
+ */
+export const LAB_RUN_STATUS_LABELS: Record<string, string> = {
+  pending: '已排队，还没开始',
+  queued: '已排队，正在后台执行',
+  running: 'AI 正在分析',
+  completed: '已完成',
+  rejected: '没有通过校验',
+  failed: '没有跑完',
+}
+
+export function labRunStatusLabel(status: string | null | undefined): string {
+  if (!status) return '未知'
+  return LAB_RUN_STATUS_LABELS[status] ?? status
+}
+
+/** 还在后台动（轮询有意义）的状态。 */
+export function labRunIsLive(status: string | null | undefined): boolean {
+  return status === 'queued' || status === 'running' || status === 'pending'
+}
+
+/** 失败原因机器码 → 人话（服务端 `run.error_message` 存的是机器码时；自由文本原样返回）。 */
+const LAB_RUN_FAILURE_REASONS: Record<string, string> = {
+  ai_not_configured:
+    'AI 供应商还没配好：去「系统管理」里选一个可用的供应商、填好密钥，再把这次研究重新提交一遍。这次没有调用任何模型。',
+  ai_key_unreadable: '配置里的 AI 密钥读不出来（多半是 SECRET_KEY 换过）：去「系统管理」里重新填一次密钥。',
+}
+
+export function labRunFailureText(message: string | null | undefined): string {
+  if (!message) return ''
+  return LAB_RUN_FAILURE_REASONS[message] ?? message
 }

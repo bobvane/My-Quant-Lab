@@ -114,6 +114,24 @@ def test_health_endpoint(client) -> None:
     assert body["status"] in {"healthy", "degraded"}
     assert body["version"]
     assert "feature_version" in body
+    # WP-C-1: the running commit is a stable, non-sensitive field. With no build arg
+    # it must be the explicit "unknown" marker, never a fabricated SHA.
+    assert body["build_commit"] in {"unknown", "0" * 40}
+
+
+def test_build_commit_is_reported_verbatim_when_injected(monkeypatch, client) -> None:
+    """The /health value is the exact build input, so a deployment is identifiable."""
+
+    import app.core.config as config_mod
+
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    monkeypatch.setenv("BUILD_COMMIT", sha)
+    config_mod.settings.build_commit = sha
+    try:
+        body = client.get("/api/v1/health").json()
+        assert body["build_commit"] == sha
+    finally:
+        config_mod.settings.build_commit = "unknown"
 
 
 def test_liveness_endpoint_is_dependency_free(client) -> None:
@@ -132,7 +150,11 @@ def test_liveness_endpoint_is_dependency_free(client) -> None:
 def test_system_info_lists_modules(client) -> None:
     response = client.get("/api/v1/system/info")
     assert response.status_code == 200
-    assert "features" in response.json()["modules"]
+    body = response.json()
+    assert "features" in body["modules"]
+    # WP-C-1: the same build commit the /health endpoint reports.
+    assert "build_commit" in body
+    assert body["build_commit"] == client.get("/api/v1/health").json()["build_commit"]
 
 
 def test_asset_crud(client) -> None:
@@ -553,7 +575,9 @@ def test_delete_strategy_with_backtests_refused(client) -> None:
     )
     response = client.delete(f"/api/v1/strategies/{strategy['id']}")
     assert response.status_code == 409
-    assert "回测" in response.json()["detail"]
+    body = response.json()
+    assert body["error"]["code"] == "delete_blocked"
+    assert "回测" in body["error"]["message"]
 
 
 def test_delete_backtest(client) -> None:

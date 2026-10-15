@@ -33,6 +33,7 @@ import { createPoller } from '@/polling'
 import {
   defaultSymbolFor,
   metricKeyLabel,
+  MIN_TRADES_FOR_CONFIDENT_VERDICT,
   nextStepText,
   providerLabel,
   stagePage,
@@ -1663,7 +1664,21 @@ const verdict = computed(() => {
     return { tone: 'warn', label: '这次回测没有算出收益，先看提醒' }
   }
   if (run.total_return <= 0) return { tone: 'bad', label: '历史回测没有赚钱，不建议继续' }
+  // 10–29 笔：已过最低结论门槛，但样本仍偏薄，不能只给绿色「值得继续验证」而不提示样本量。
+  if (trades < MIN_TRADES_FOR_CONFIDENT_VERDICT) {
+    return { tone: 'warn', label: `样本还偏少（${trades} 笔），收益参考意义有限` }
+  }
   return { tone: 'ok', label: '值得继续验证' }
+})
+
+/** 10–29 笔区间下，徽章之外再补一句：这只是有限历史样本，不代表未来收益。 */
+const thinSampleNote = computed(() => {
+  const run = detail.value
+  if (!run) return ''
+  const trades = run.number_of_trades ?? 0
+  if (trades < MIN_MEANINGFUL_TRADES) return ''
+  if (trades >= MIN_TRADES_FOR_CONFIDENT_VERDICT) return ''
+  return '这只是有限历史样本的表现，不代表未来收益。'
 })
 
 /** 最大风险（评审 §9）：回撤与最长连续亏损，两句话都来自已存读数。 */
@@ -1909,6 +1924,7 @@ onMounted(async () => {
     <p class="page-sub">
       运行一次历史回测，然后看结论：这套策略过去表现如何、为什么、风险有多大、下一步该做什么。
       同一「策略版本 + 数据集 + 参数 + 引擎版本 + 特征版本」必然得到相同结果；样本不足的指标显示 N/A，不会编造。
+      回测是模拟验证，用历史数据算出来的结果，不是实盘交易，不会下单。
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -2013,6 +2029,9 @@ onMounted(async () => {
       <p class="muted" style="margin: 8px 0 0">
         当前行情源：{{ providerLabel(marketProvider) }}
       </p>
+      <p v-if="labHandoff" class="muted" style="margin: 6px 0 0">
+        这条回测是「AI 研究实验室」交过来的：用的是你选定的策略版本，跑的是历史数据，是模拟验证，不会下单。
+      </p>
       <p v-if="runBlockedReason" class="muted" style="margin: 6px 0 0">{{ runBlockedReason }}</p>
 
       <div class="row" style="margin-top: 8px">
@@ -2095,6 +2114,7 @@ onMounted(async () => {
       <p class="verdict-line">
         <span class="verdict" :class="verdict.tone">{{ verdict.label }}</span>
       </p>
+      <p v-if="thinSampleNote" class="muted" style="margin: 4px 0 0">{{ thinSampleNote }}</p>
       <p class="conclusion-sentence">{{ conclusionHeadline }}</p>
       <!-- 这一屏的每一个数字都来自一次具体回测，而它跑的是某一版 DSL：
            把「哪一版」写成能点的链接，用户才回得到策略本身去改它（ADR-200）。 -->

@@ -596,6 +596,119 @@ def test_the_home_page_oos_next_step_points_at_the_real_entry() -> None:
     assert "不代表未来" in DASHBOARD or "不代表未来" in WORDING
 
 
+def test_the_lab_result_says_which_parts_are_ai_vs_evidence() -> None:
+    """WP1 (PR #11): the lab result card must not let AI narration read like verified fact.
+
+    The ② card prints ``hypothesisContent.understanding`` as a plain sentence.  The
+    guard pins that a disclaimer sits immediately after it: the reader must see "this
+    is AI's reading, not an engine number" before scrolling into the rule list.  The
+    ④ card gets the same treatment for ``understanding_of_original``.
+    """
+
+    # ② card: understanding followed by the AI-not-engine disclaimer.
+    idx = LAB.index("hypothesisContent.understanding")
+    block = LAB[idx : idx + 400]
+    assert "由它自己总结" in block, (
+        "the ② understanding must be labelled as AI's own summary, not engine output"
+    )
+
+    # ④ card: understanding_of_original gets the same treatment.
+    idx4 = LAB.index("draftContent.understanding_of_original")
+    block4 = LAB[idx4 : idx4 + 400]
+    assert "由它自己总结" in block4, (
+        "the ④ understanding must also be labelled as AI's reading, not engine output"
+    )
+
+
+def test_the_lab_result_has_a_three_way_summary() -> None:
+    """WP1 (PR #11): a completed run gets a 结果小结 that splits findings into three buckets.
+
+    The three buckets — 有据可依的 (evidence-backed), AI 自己补的 (assumed), 现在还不能定的
+    (undetermined) — must all appear so the reader can tell at a glance what is solid
+    and what is a guess.  The summary must not print any backtest numbers (win rate,
+    return, drawdown) because none have been computed yet.
+    """
+
+    # The three bucket headers are all present.
+    for header in ("有据可依的", "AI 自己补的", "现在还不能定的"):
+        assert header in LAB, f"missing bucket header: {header}"
+
+    # The summary says it has not run any backtest, so no fake numbers.
+    summary_block = LAB[LAB.index("结果小结") :]
+    assert "没有跑过任何回测" in summary_block, (
+        "the 结果小结 must say no backtest was run, so no numbers can appear there"
+    )
+
+
+def test_the_lab_next_step_covers_capability_gaps() -> None:
+    """WP2 (PR #11): when capability is NEEDS_CAPABILITY / PARTIALLY_SUPPORTED the next-step
+    text must say so explicitly instead of silently pointing at the confirm button as if
+    confirmation alone would make compilation succeed.
+    """
+
+    for status in ("NEEDS_CAPABILITY", "PARTIALLY_SUPPORTED"):
+        assert status in LAB, f"nextStep must branch on {status}"
+
+    # The wording must not promise that confirmation removes the gap.
+    assert "编译器遇到做不到的地方也会直接拒绝" in LAB or "编译器遇到做不到的地方仍会拒绝" in LAB
+
+
+def test_lab_uses_real_capability_verdicts_not_user_required() -> None:
+    """WP2 fix (PR #11): the AI research lab must use the backend's actual capability
+    verdicts (NEEDS_CAPABILITY / PARTIALLY_SUPPORTED), not the nonexistent 'user_required'
+    value.  On this branch the home-page lab card is not present (PR #9 is not merged),
+    so we pin the LabView side of the same truth.
+    """
+
+    # The dead 'user_required' value must be gone from the lab page.
+    assert "user_required" not in LAB, (
+        "'user_required' is not a backend capability verdict; the filter never matched"
+    )
+    # The real verdicts are the ones the backend actually produces.
+    assert "NEEDS_CAPABILITY" in LAB
+    assert "PARTIALLY_SUPPORTED" in LAB
+
+
+def test_backtest_page_says_it_is_simulation_not_trading() -> None:
+    """WP3 (PR #11): the backtest page must tell the reader up front that what they are
+    about to run is a simulation on historical data, not live trading.
+    """
+
+    assert "回测是模拟验证" in BACKTEST
+    assert "不是实盘交易" in BACKTEST or "不会下单" in BACKTEST
+    # The handoff note from the lab also says it is simulation.
+    assert "是模拟验证，不会下单" in BACKTEST
+
+
+def test_the_backtest_and_home_page_agree_on_a_thin_sample() -> None:
+    """PR #12: the home page warns that a <30-trade backtest is thin; the backtest page must
+    not contradict it by showing only a green '值得继续验证' for 10–29 trades.
+
+    Both pages share one display threshold (MIN_TRADES_FOR_CONFIDENT_VERDICT = 30) so the
+    two can never drift. The 10-trade floor (MIN_MEANINGFUL_TRADES / MIN_TRADES_FOR_VERDICT,
+    aligned with the backend's min_backtest_trades) is untouched — only the *upper* band where
+    a positive result may be called 'worth continuing' is gated.
+    """
+
+    # The shared threshold lives in wording.ts and is the single source of truth.
+    assert "export const MIN_TRADES_FOR_CONFIDENT_VERDICT = 30" in WORDING
+
+    # 回测页：导入共享常量，并在给出绿色「值得继续验证」之前先拦住 10–29 笔。
+    assert "MIN_TRADES_FOR_CONFIDENT_VERDICT" in BACKTEST
+    assert "样本还偏少（${trades} 笔），收益参考意义有限" in BACKTEST
+    assert "这只是有限历史样本的表现，不代表未来收益。" in BACKTEST
+    # 10–29 笔分支必须排在 `tone: 'ok'` 的「值得继续验证」return 之前，否则绿色徽章会先命中。
+    ok_return = "return { tone: 'ok', label: '值得继续验证' }"
+    assert ok_return in BACKTEST
+    thin_branch = "样本还偏少（${trades} 笔），收益参考意义有限"
+    assert BACKTEST.index(thin_branch) < BACKTEST.index(ok_return)
+    # 旧的 10 笔最低门槛仍然存在，没有被这次改动删掉。
+    assert "MIN_MEANINGFUL_TRADES" in BACKTEST
+
+    # 首页：用同一个共享常量，而不是写死 30。
+    assert "trades < MIN_TRADES_FOR_CONFIDENT_VERDICT" in DASHBOARD
+
+
 def test_the_ai_summary_answers_five_questions_and_owes_none_of_them() -> None:
     """AI's job is to summarise stored facts, not to produce them (audit section 13, ADR-129).
 

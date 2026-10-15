@@ -34,6 +34,7 @@ import { createPoller } from '@/polling'
 import {
   defaultSymbolFor,
   metricKeyLabel,
+  MIN_TRADES_FOR_CONFIDENT_VERDICT,
   nextStepText,
   providerLabel,
   stagePage,
@@ -1669,7 +1670,21 @@ const verdict = computed(() => {
     return { tone: 'warn', label: '这次回测没有算出收益，先看提醒' }
   }
   if (run.total_return <= 0) return { tone: 'bad', label: '历史回测没有赚钱，不建议继续' }
+  // 10–29 笔：已过最低结论门槛，但样本仍偏薄，不能只给绿色「值得继续验证」而不提示样本量。
+  if (trades < MIN_TRADES_FOR_CONFIDENT_VERDICT) {
+    return { tone: 'warn', label: `样本还偏少（${trades} 笔），收益参考意义有限` }
+  }
   return { tone: 'ok', label: '值得继续验证' }
+})
+
+/** 10–29 笔区间下，徽章之外再补一句：这只是有限历史样本，不代表未来收益。 */
+const thinSampleNote = computed(() => {
+  const run = detail.value
+  if (!run) return ''
+  const trades = run.number_of_trades ?? 0
+  if (trades < MIN_MEANINGFUL_TRADES) return ''
+  if (trades >= MIN_TRADES_FOR_CONFIDENT_VERDICT) return ''
+  return '这只是有限历史样本的表现，不代表未来收益。'
 })
 
 /** 最大风险（评审 §9）：回撤与最长连续亏损，两句话都来自已存读数。 */
@@ -2108,6 +2123,7 @@ onMounted(async () => {
       <p class="verdict-line">
         <span class="verdict" :class="verdict.tone">{{ verdict.label }}</span>
       </p>
+      <p v-if="thinSampleNote" class="muted" style="margin: 4px 0 0">{{ thinSampleNote }}</p>
       <p class="conclusion-sentence">{{ conclusionHeadline }}</p>
       <!-- 这一屏的每一个数字都来自一次具体回测，而它跑的是某一版 DSL：
            把「哪一版」写成能点的链接，用户才回得到策略本身去改它（ADR-200）。 -->

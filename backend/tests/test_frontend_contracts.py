@@ -563,6 +563,35 @@ def test_the_backtest_result_answers_before_it_lists() -> None:
     assert "查看详细分析" in UI_SPEC
 
 
+def test_the_backtest_and_home_page_agree_on_a_thin_sample() -> None:
+    """The home page warns that a <30-trade backtest is thin; the backtest page must not
+    contradict it by showing only a green '值得继续验证' for 10–29 trades.
+
+    Both pages share one display threshold (MIN_TRADES_FOR_CONFIDENT_VERDICT = 30) so the
+    two can never drift. The 10-trade floor (MIN_MEANINGFUL_TRADES / MIN_TRADES_FOR_VERDICT,
+    aligned with the backend's min_backtest_trades) is untouched — only the *upper* band where
+    a positive result may be called 'worth continuing' is gated.
+    """
+
+    # The shared threshold lives in wording.ts and is the single source of truth.
+    assert "export const MIN_TRADES_FOR_CONFIDENT_VERDICT = 30" in WORDING
+
+    # 回测页：导入共享常量，并在给出绿色「值得继续验证」之前先拦住 10–29 笔。
+    assert "MIN_TRADES_FOR_CONFIDENT_VERDICT" in BACKTEST
+    assert "样本还偏少（${trades} 笔），收益参考意义有限" in BACKTEST
+    assert "这只是有限历史样本的表现，不代表未来收益。" in BACKTEST
+    # 10–29 笔分支必须排在 `tone: 'ok'` 的「值得继续验证」return 之前，否则绿色徽章会先命中。
+    # （verdict 的注释里也写了「值得继续验证」，所以用真正的 return 语句来比对顺序。）
+    ok_return = "return { tone: 'ok', label: '值得继续验证' }"
+    assert ok_return in BACKTEST
+    assert BACKTEST.index("样本还偏少（${trades} 笔），收益参考意义有限") < BACKTEST.index(ok_return)
+    # 旧的 10 笔最低门槛仍然存在，没有被这次改动删掉。
+    assert "MIN_MEANINGFUL_TRADES" in BACKTEST
+
+    # 首页：用同一个共享常量，而不是写死 30。
+    assert "trades < MIN_TRADES_FOR_CONFIDENT_VERDICT" in DASHBOARD
+
+
 def test_the_ai_summary_answers_five_questions_and_owes_none_of_them() -> None:
     """AI's job is to summarise stored facts, not to produce them (audit section 13, ADR-129).
 

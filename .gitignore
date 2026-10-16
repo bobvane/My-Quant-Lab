@@ -49,3 +49,8 @@ Thumbs.db
 # project directory but must never reach a commit or CI (m21997).  Anything worth
 # keeping is written as a real document under docs/ instead.
 .scratch/
+
+# Written by backend/tests/test_lab_request_race.py at test time: the Lab
+# function bodies extracted from LabView.vue so Node can run them. Regenerated
+# on every test run, never edited by hand.
+frontend/lab_race_generated.mjs

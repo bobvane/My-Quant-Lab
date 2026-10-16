@@ -831,11 +831,16 @@ async function tick() {
     stopPolling()
     return
   }
+  // 轮询也是一次读取，用户在这期间换了记录（在途的这一次就过期了）。
+  // 不挡住的话，这次迟到的响应会把已经换上的新记录又刷回当前这一条，
+  // `applyRun()` 里的 `rememberOpenRun()` 还会把地址栏一起改回去。
+  const seq = runRequestSeq
   if (pollStartedAt.value !== null) {
     elapsedSeconds.value = Math.floor((Date.now() - pollStartedAt.value) / 1000)
   }
   try {
     const fresh = await api.aiResearchRun(current.run_id)
+    if (seq !== runRequestSeq) return
     pollFailures.value = 0
     applyRun(fresh)
     if (!isLiveStatus(fresh.status)) {
@@ -846,6 +851,8 @@ async function tick() {
       await loadRuns()
     }
   } catch (e) {
+    // 同上：过期的这一轮不该把新记录的状态判成「连续读不到」。
+    if (seq !== runRequestSeq) return
     pollFailures.value += 1
     // 连续读不到就停：一个永远转下去的圈比一句错误更糟。
     if (pollFailures.value >= POLL_FAILURE_LIMIT) {
@@ -917,15 +924,22 @@ async function submit() {
   stopPolling()
   busy.value = true
   run.value = null
+  // 发起一次新的研究就是一次新的「要看哪一条」：抓材料这段时间用户可能已经
+  // 打开了别的研究，抓完再把这次的结果盖上去就又是一次倒退（ADR-221）。
+  const seq = ++runRequestSeq
   try {
     const source = await buildSource()
     // 材料没准备好（网址抓不到 / 被拒绝）就到此为止：绝不拿一次失败的抓取去换一次 AI 调用。
     if (!source) return
     // 后端默认异步：这里拿到的大多是 202 + status="queued"，也可能（异步关闭时）
     // 直接是终态。applyRun 两种都处理：是终态就不轮询。
-    applyRun(await api.aiResearchStart({ question: question.value.trim(), sources: [source] }))
+    const fresh = await api.aiResearchStart({ question: question.value.trim(), sources: [source] })
+    if (seq !== runRequestSeq) return
+    applyRun(fresh)
     await loadRuns()
   } catch (e) {
+    // 过期了就别再说话：他看的是另一条研究，这次的错误不该盖到那一条上。
+    if (seq !== runRequestSeq) return
     handleFailure(e)
   } finally {
     busy.value = false
@@ -1283,16 +1297,38 @@ async function rerunResearch() {
   }
 }
 
+/**
+ * 「现在要显示哪一条研究」的请求序号。每一次发起新的读取就 +1。
+ *
+ * 慢请求可能比后发的请求更晚回来（列表连点、深链先慢后快）。没有这个序号时，
+ * 先发起的旧请求会覆盖新请求的结果，连带 `applyRun()` 里的 `rememberOpenRun()`
+ * 把地址栏改回旧记录——屏幕与地址栏一起倒退，用户看到的是另一条研究
+ * （ADR-221）。
+ *
+ * 判据是「发起顺序」而不是「返回的 id」：用户连续切换后可能又切回同一个 id，
+ * 那时旧请求的 id 和当前一样，用 id 比就会把过期结果当成新的照单全收。
+ * 这与 `polling.ts` 的 generation 是同一套做法：停止即作废所有在途响应。
+ */
+let runRequestSeq = 0
+
 async function openRun(runId: number) {
+  // 先作废旧请求，再做别的：新请求一发起，上一个的在途响应就已经失效了。
+  const seq = ++runRequestSeq
   resetNotices()
   stopPolling()
   loadingRun.value = true
   try {
-    applyRun(await api.aiResearchRun(runId))
+    const fresh = await api.aiResearchRun(runId)
+    // 迟到的旧请求就地丢弃：不碰详情、不碰地址栏、不碰错误与加载状态。
+    if (seq !== runRequestSeq) return
+    applyRun(fresh)
   } catch (e) {
+    // 同样的道理：一个已经不该再说话的老错误，不能盖掉当前这条记录的结果。
+    if (seq !== runRequestSeq) return
     handleFailure(e)
   } finally {
-    loadingRun.value = false
+    // 加载状态跟着当前这条请求走：老请求先结束不代表页面上已经没有东西在读了。
+    if (seq === runRequestSeq) loadingRun.value = false
   }
 }
 
@@ -1300,14 +1336,20 @@ async function openRun(runId: number) {
 async function refreshRun() {
   const current = run.value
   if (!current) return
+  // 刷新同样要占一个序号：刷新当前这条的途中如果用户点了别的研究，这次刷新就过期了，
+  // 否则它会把已经换上的新记录又刷回刷新发起时的那一条。
+  const seq = ++runRequestSeq
   loadingRun.value = true
   error.value = ''
   try {
-    applyRun(await api.aiResearchRun(current.run_id))
+    const fresh = await api.aiResearchRun(current.run_id)
+    if (seq !== runRequestSeq) return
+    applyRun(fresh)
   } catch (e) {
+    if (seq !== runRequestSeq) return
     handleFailure(e)
   } finally {
-    loadingRun.value = false
+    if (seq === runRequestSeq) loadingRun.value = false
   }
 }
 
@@ -1317,9 +1359,15 @@ async function formalize() {
   resetNotices()
   stopPolling()
   formalizing.value = true
+  // 改写草案期间用户可能已经打开了别的研究：这次的重新读取回来时若已过期就丢弃。
+  // 成功分支和 422 分支是同一次用户操作的先后两步，所以共用这一个序号——
+  // 否则第一步自己就会把第二步作废。
+  const seq = ++runRequestSeq
   try {
     await api.aiStrategyFormalize({ run_id: current.run_id })
-    applyRun(await api.aiResearchRun(current.run_id))
+    const fresh = await api.aiResearchRun(current.run_id)
+    if (seq !== runRequestSeq) return
+    applyRun(fresh)
     notice.value = '草案已经重新生成，下面是新的这一份。'
     await loadRuns()
   } catch (e) {
@@ -1327,12 +1375,17 @@ async function formalize() {
     // 这次运行上，所以重新读一次运行就能拿到真正的拒绝原因。
     if (e instanceof ApiError && e.status === 422) {
       try {
-        applyRun(await api.aiResearchRun(current.run_id))
+        const fresh = await api.aiResearchRun(current.run_id)
+        if (seq !== runRequestSeq) return
+        applyRun(fresh)
         notice.value = 'AI 这次给的草案没有通过校验，原因见下面的「AI 理解」卡片。'
       } catch {
+        // 已经过期的话，这次「读不到」也不再该说给用户听：他看的是另一条研究。
+        if (seq !== runRequestSeq) return
         error.value = '这次改写没有通过校验，而且重新读取运行详情也失败了。'
       }
     } else {
+      if (seq !== runRequestSeq) return
       handleFailure(e)
     }
   } finally {
@@ -1346,16 +1399,23 @@ async function confirmDraft(decision: AIResearchDraftDecision) {
   if (!current?.draft || confirming.value) return
   resetNotices()
   confirming.value = true
+  // 同 formalize：一次人工确认 = 一次「要看哪一条」，中途换记录就丢弃这次结果。
+  // 必须在 try 之前取：catch 里也要用它判断这次是不是已经过期。
+  const seq = ++runRequestSeq
   try {
     const note = confirmationNote.value.trim()
     await api.confirmStrategyDraft(current.draft.draft_id, decision, note || undefined)
-    applyRun(await api.aiResearchRun(current.run_id))
+    const fresh = await api.aiResearchRun(current.run_id)
+    if (seq !== runRequestSeq) return
+    applyRun(fresh)
     confirmationNote.value = ''
     notice.value =
       decision === 'confirmed'
         ? '这次人工决定已经记下来了：已确认。草案本身没有被改动；现在可以往下走「编译为策略版本」了。'
         : `这次人工决定已经记下来了：${decisionLabel(decision)}。草案本身没有被改动，也不会生成策略版本——服务端只接受「已确认」的草案去编译。`
   } catch (e) {
+    // 过期了就别再说话：他看的是另一条研究，这次的错误不该盖到那一条上。
+    if (seq !== runRequestSeq) return
     // 404 = 这条草案后端已经不在了；422 = 备注超长等可以在本地避免的输入问题。
     if (e instanceof ApiError && e.status === 404) {
       error.value = '这条草案后端已经找不到了：刷新「最近的研究」后重新打开这次研究。'
@@ -1625,8 +1685,14 @@ async function submitAnswers() {
     compileReport.value = null
     compileError.value = ''
     compileDetail.value = ''
+    // 提答案和重新读取是同一次操作的两步，共用一个序号：前一步不能作废后一步。
+    const seq = ++runRequestSeq
     const current = run.value
-    if (current) applyRun(await api.aiResearchRun(current.run_id))
+    if (current) {
+      const fresh = await api.aiResearchRun(current.run_id)
+      if (seq !== runRequestSeq) return
+      applyRun(fresh)
+    }
     notice.value = `已经按你的回答生成了新的一版草案（第 ${
       run.value?.draft?.version ?? '?'
     } 版）。旧的那一版原样保留，一个字都没有改。`
@@ -1656,11 +1722,16 @@ function handleAnswerFailure(e: unknown) {
       void loadQuestions(false)
     } else if (e.code === 'draft_already_compiled') {
       answerError.value = '这份草案已经编译成策略版本了，不能再往它上面作答。看一下上面那份编译报告。'
+      // 这次补读同样是一次「要看哪一条」：它回来得太晚就别去改用户已经换上的记录。
+      const seq = ++runRequestSeq
       const current = run.value
       if (current) {
         void api
           .aiResearchRun(current.run_id)
-          .then(applyRun)
+          .then((fresh) => {
+            if (seq !== runRequestSeq) return
+            applyRun(fresh)
+          })
           .catch(() => undefined)
       }
     } else if (e.code === 'draft_detached') {
@@ -1669,11 +1740,13 @@ function handleAnswerFailure(e: unknown) {
     } else if (e.code === 'draft_superseded') {
       answerError.value =
         '这份草案已经不是这次研究的当前草案了（同一批研究里已经有更新的一版），所以这次回答没有被写入——服务端一个字节都没有改。正在打开最新那一版并重新读一次问题，你填过的内容还留着。'
+      const seq = ++runRequestSeq
       const current = run.value
       if (current) {
         void api
           .aiResearchRun(current.run_id)
           .then(async (fresh) => {
+            if (seq !== runRequestSeq) return
             applyRun(fresh)
             await loadQuestions(false)
           })
@@ -1736,8 +1809,13 @@ async function createStrategyInline() {
   }
 }
 
-/** 编译拒绝时按码说人话；422 是编译器自己拒绝，正文是 `{result, report}`。 */
-async function handleCompileFailure(e: unknown) {
+/**
+ * 编译拒绝时按码说人话；422 是编译器自己拒绝，正文是 `{result, report}`。
+ *
+ * `seq` 是发起这次编译时取的请求序号：中途用户换了研究，这次补读和这句提示都
+ * 不该再改他正在看的那一条。
+ */
+async function handleCompileFailure(e: unknown, seq: number) {
   if (e instanceof ApiError && e.status === 422 && e.body && typeof e.body.result === 'string') {
     compileOutcome.value = {
       result: e.body.result,
@@ -1754,10 +1832,14 @@ async function handleCompileFailure(e: unknown) {
   if (known) {
     // 这两条说明页面上的认知已经过时了（还没确认 / 已经编译过）：跟着服务端重读一次。
     if (code === 'draft_not_confirmed' || code === 'draft_already_compiled') {
+      // 这次补读与调用它的那次编译是同一次用户操作，所以由调用方把序号传进来，
+      // 两步共用一张票：编译那一步不能作废它自己触发的这次补读。
       const current = run.value
       if (current) {
         try {
-          applyRun(await api.aiResearchRun(current.run_id))
+          const fresh = await api.aiResearchRun(current.run_id)
+          if (seq !== runRequestSeq) return
+          applyRun(fresh)
         } catch {
           /* 读不回来也不影响下面这句提示 */
         }
@@ -1778,16 +1860,20 @@ async function compile() {
   resetNotices()
   compiling.value = true
   compileReport.value = null
+  // 一次编译 = 一次「要看哪一条」：编译耗时可能很长，期间换了记录就不能再写回。
+  const seq = ++runRequestSeq
   try {
     const result = await api.compileStrategyDraft(draft.draft_id, strategyId)
     compileReport.value = result.report ?? null
     requestedVersionId.value = result.strategy_version_id
     await loadCompiledVersion(result.strategy_version_id)
+    const fresh = await api.aiResearchRun(current.run_id)
+    if (seq !== runRequestSeq) return
     notice.value = `编译成功：草案已经冻结成策略版本 ${result.version}。它还不是当前版本——要让它生效，在下面点「激活为当前版本」。`
-    applyRun(await api.aiResearchRun(current.run_id))
+    applyRun(fresh)
     await loadRuns()
   } catch (e) {
-    await handleCompileFailure(e)
+    await handleCompileFailure(e, seq)
   } finally {
     compiling.value = false
   }
@@ -2262,12 +2348,22 @@ function applyExperiment(detail: ExperimentDetailOut) {
   rememberOpenExperiment(detail.id)
 }
 
+/**
+ * 实验详情同理：慢的旧请求不能覆盖已经打开的那一条，也不能把它的详情清空
+ * （一次迟到的 404 会把当前实验连同地址栏一起抹掉）。判据同样是发起顺序。
+ */
+let experimentRequestSeq = 0
+
 async function openExperimentById(id: number) {
+  const seq = ++experimentRequestSeq
   loadingExperiment.value = true
   experimentDetailError.value = ''
   try {
-    applyExperiment(await api.experiment(id))
+    const detail = await api.experiment(id)
+    if (seq !== experimentRequestSeq) return
+    applyExperiment(detail)
   } catch (e) {
+    if (seq !== experimentRequestSeq) return
     if (e instanceof ApiError && e.status === 404) {
       openExperiment.value = null
       openExperimentId.value = null
@@ -2284,7 +2380,8 @@ async function openExperimentById(id: number) {
       experimentDetailError.value = `读不到这条实验：${(e as Error).message}`
     }
   } finally {
-    loadingExperiment.value = false
+    // 与 openRun 同一个道理：加载状态属于当前这条请求，老请求先结束不算数。
+    if (seq === experimentRequestSeq) loadingExperiment.value = false
   }
 }
 
@@ -2294,6 +2391,11 @@ function refreshOpenExperiment() {
 }
 
 function closeExperiment() {
+  // 关掉就是把「在看哪一条」作废：在途的那次读取回来后不该又把详情和地址栏填回来。
+  experimentRequestSeq += 1
+  // 那一次请求的 finally 因为序号已经过期不会再碰加载状态，所以这里要自己把
+  // 「正在读」收掉，否则关掉之后那个按钮会一直转下去。
+  loadingExperiment.value = false
   openExperiment.value = null
   openExperimentId.value = null
   experimentDetailError.value = ''
@@ -2308,8 +2410,13 @@ async function createExperiment() {
   experimentNotice.value = ''
   experimentDetailError.value = ''
   creatingExperiment.value = true
+  // 建实验同样是一次「要看哪一条」：这次请求很慢（引擎要真的跑一遍），
+  // 期间用户完全可以点开另一条实验；回来得晚就不该再把人拽回来。
+  // 取号放在 try 之前，catch 里也要靠它判断这次是不是已经过期。
+  const seq = ++experimentRequestSeq
   try {
     const detail = await api.createExperiment(payload)
+    if (seq !== experimentRequestSeq) return
     applyExperiment(detail)
     await loadExperiments()
     if (detail.status === 'failed') {
@@ -2321,6 +2428,8 @@ async function createExperiment() {
       experimentNotice.value = `实验「${detail.name}」跑完了：存下 ${detail.result_count} 条结果。`
     }
   } catch (e) {
+    // 过期了就别再说话：他看的是另一条实验，这次的错误不该盖到那一条上。
+    if (seq !== experimentRequestSeq) return
     handleExperimentFailure(e)
   } finally {
     creatingExperiment.value = false

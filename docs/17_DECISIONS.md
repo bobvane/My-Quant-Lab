@@ -4000,3 +4000,25 @@ v1.5.4 部署到 NAS 之后做体检（`http://192.168.2.2:8081`），对 web �
 - 测试：新增 `backend/tests/test_ai_research.py::test_an_undecryptable_key_is_a_distinct_failure`：用 `monkeypatch.setattr("app.ai.explain.decrypt_secret", _boom)` 让解密真实抛错（复现 `SECRET_KEY` 变过后的解密失败，而不是伪造密文，从而走通 `get_active_providers → unusable_provider_key → _provider_failure_code` 的真实链路），断言 `prepare_research` 落到 `run.error_message == "ai_key_unreadable"`、`execute_research` 在已 prepare 的运行上也返回同一码，且 `run.error_message != "ai_not_configured"`；同一测试还钉住前端两张映射表（`LabView.vue` 与 `wording.ts`）都认 `ai_key_unreadable` 这个码，防止以后前端删掉这张映射却没人发现。回归：`tests/test_ai_research.py` 全套 24 例通过（含「无 Provider → `ai_not_configured`」一例）。本机未跑 `test_ai_provider_key_status.py` 等依赖 `cryptography` 的用例（本机未装该包），与本次行为无关；读数以 CI 为准。
 
 - 说明：本决策来自 commit `124bd4567` 的代码行为与上述测试，前端两张映射表的存在由文本扫描断言。本仓库前端无浏览器测试框架可用（ADR-138、`docs/34` 缺口），**本 ADR 不声称已经完成真实浏览器端到端点击验证**；卡片链接的可见行为按源码逻辑确认，未实跑浏览器。
+
+## ADR-223：Lab 页面慢请求不能覆盖已经切换走的研究（共享请求序号守卫）
+
+- 背景：本 ADR 记录 commit `62700bfc2` 的 Lab 异步竞态修复。原任务设想补到 ADR-221，但 `docs/17_DECISIONS.md` 的 ADR-221 已是「同一个信号只产生一笔模拟订单」（后端唯一索引/迁移，与本次无关），故按「不重复同编号、不擅自改写既有决策含义」的规则，记为下一个可用编号 ADR-223。`frontend/src/views/LabView.vue` 存在多个异步请求并发改写「当前显示哪一条研究/实验」的情况：用户切换记录、深链先慢后快、列表连点、或执行后续操作时，旧请求可能晚于新请求返回。若响应回来时不校验自己是否仍是「当前那一个」，旧响应就会把详情、`rememberOpenRun` 的地址栏、错误信息和加载状态覆盖回用户已经离开的状态——症状没有报错，却把用户拽回了过去。
+
+- 决策：
+  1. 用与状态类别对应的**共享请求序号**：研究侧 `let runRequestSeq = 0`（`:1312`）、实验侧 `let experimentRequestSeq = 0`（`:2355`）。每个会改写「当前显示哪一条」的异步调用点，在 `await` 前 `const seq = ++runRequestSeq`（或 `++experimentRequestSeq`）取号；响应回来后 `if (seq !== runRequestSeq) return`，过期响应就地丢弃——不碰 `runDetail`/`experimentDetail`、不碰地址栏、不碰错误、不碰加载态。
+  2. 所有研究写入点共享 `runRequestSeq`、所有实验写入点共享 `experimentRequestSeq`；**禁止给每个调用点单独建互不关联的计数器**（那只会再次分裂「谁是当前」的真相）。守卫覆盖 `tick`(轮询)、`submit`、`openRun`、`refreshRun`、`formalize`、`confirmDraft`、`compile`(重读)、`createExperiment` 等。
+  3. `catch` 也必须遵守同一规则：过期的失败不能覆盖新请求的 error。`submit`/`openRun`/`refreshRun` 的 `catch` 改为先 `if (seq !== runRequestSeq) return`，再 `handleFailure(e)`；只写问题面板、不碰当前研究的作答失败（`submitAnswers → handleAnswerFailure` 写 `answerError`/`answerDetail`/`answerNotice`）保持原样，因为它不覆盖「当前显示哪条研究」。
+  4. `finally` 也不得隐形写入：慢请求先结束时，不能提前掐掉后发请求仍需要的加载态。`openRun`/`refreshRun`/`createExperiment` 的 `finally` 改为 `if (seq === runRequestSeq) loadingRun.value = false`（实验侧同理），只有「本请求仍是当前有效票」才收尾。`closeExperiment()` 自己把 `experimentRequestSeq += 1` 作废在途读取，因此必须自行 `loadingExperiment.value = false`，否则关闭后按钮会一直转。
+  5. 多步异步流程共用一张票：以发起方取到的 `seq` 贯穿整条流程。`formalize` 成功与 `422`（`_handleFormalizeRejected`）共用同一 `seq`；`compile` 发起、其「重读报告」(`handleCompileReRead`) 用 `compile` 的 `seq`。不只在最后一步加守卫，也不因中间某步过期就错误丢弃仍必要的当前流程。
+  6. 新增可控异步顺序测试：`backend/tests/test_lab_request_race.py` 在测试时从 `LabView.vue` 真实**提取 8 个函数体**（`backend/tests/lab_race_extract.py`），去 TS 语法后在 Node 下运行，复用已有 `vue` 依赖、无新依赖；`frontend/lab_race_env.mjs` + `frontend/lab_race_harness.mjs` 用 `settleAndFlush` 桩**决定响应返回顺序**，覆盖逆序返回（A 晚于 B）、失败-成功交错、过期 `finally`、同 id 重复请求、chained 多步（`formalize` 成功+422/`compile` 重读）、以及 `createExperiment` 被晚回响应抢占等 19 个场景。
+
+- 理由：①多个请求竞争同一份「当前页面状态」时，正确性必须由**同一个递增序号**裁决；每个调用点各数各的，等于把「谁是当前」又拆成多份真相，竞态会从另一个口子漏回来。②旧响应晚到会**静默覆盖**当前研究、地址栏、错误与加载态——没有报错，却把用户拽回过去，比显式错误更隐蔽（与 ADR-138「状态不能骗人」同型）。③`finally` 是最常被漏掉的「隐形写入」：一次慢请求先结束，若无条件清 loading，会掐掉后发请求仍需要的 spinner，制造「卡死」假象。④多步流程只保护最后一步等于没保护：`formalize` 的 422 若不沿用发起时的 `seq`，会把用户已经看到的「已正式化」又改回错误态；同理 `compile` 重读必须用同一票。⑤`createExperiment` 是真实慢路径（引擎真跑一遍），晚回的建实验响应同样能把人拽回刚建好的那条——这是探针实测复现的竞态，不是推测。
+
+- 影响与兼容：只改 `frontend/src/views/LabView.vue`（`runRequestSeq`/`experimentRequestSeq` 两处 `let` 声明、`applyRun`/`applyExperiment` 守卫、各调用点取号与 `catch`/`finally` 守卫、`createExperiment` 守卫；对照基线约 +143/-17 行）。新增 `backend/tests/lab_race_extract.py`、`backend/tests/test_lab_request_race.py`、`frontend/lab_race_env.mjs`、`frontend/lab_race_harness.mjs`，并把生成物 `frontend/lab_race_generated.mjs` 加进 `.gitignore`。无新依赖、无 CI 改动、无 API/后端/数据库/迁移变更、不改 `version.txt`、不碰 NAS。
+
+- 测试：有前端 `node_modules` 的环境 `pytest tests/test_lab_request_race.py` ⇒ **25 passed**（含「测试有牙」证据：临时去掉守卫 → 19 处错误，证明测试真的能抓 bug）。无前端依赖的 CI 后端作业下，该测试按既有 `skipif` 约定干净跳过：**rc=0，5 passed / 20 skipped，无 error**，纯 Python 测试照常。完整后端套件 **1847 passed, 6 skipped**；`npm run typecheck` 与 `npx vite build`（约 14.8s）通过；`ruff check app tests` 与 `ruff format --check app tests` 全绿；`git diff --check` 无残留。探针 `lab_probe_create.mjs`/`check_run.py` 已删除，未入库。
+
+- 浏览器 E2E 现状（诚实声明）：本 ADR **不声称已经完成真实浏览器端到端点击验证**。上述测试是「可控制异步顺序的模拟传输测试」，在 Node 下跑真实生产函数体、用桩决定响应顺序——它证明竞态逻辑正确，但**不替代**真实浏览器的路由、界面渲染与用户交互。真实浏览器 E2E 的可行性评估见后续调查报告（阶段 B），其实施不在本 ADR 范围。
+
+- 一条要记住的教训：**「多请求竞争同一份状态」时，正确性要由一个共享的、单调递增的裁决器决定，而不是让每个调用点各自记一个计数器**。同时，`catch` 和 `finally` 不是「安全屋」——它们和 `then` 一样会写状态，过期的失败与过期的收尾同样会污染当前页面；守卫要罩住整条生命周期，而不是只罩成功分支。

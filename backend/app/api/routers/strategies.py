@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -21,7 +22,8 @@ from app.data.strategy_service import (
     parse_spec,
     slugify,
 )
-from app.domain.models import BacktestRun, PaperAccount, Signal, Strategy, StrategyVersion
+from app.domain import references
+from app.domain.models import Strategy, StrategyVersion
 from app.strategies.validator import validate_strategy
 
 logger = logging.getLogger(__name__)
@@ -84,49 +86,6 @@ def get_strategy(strategy_id: int, db: Session = Depends(get_db)) -> StrategyOut
     return payload
 
 
-#: Rows that can block deleting a strategy, with the words the refusal message
-#: uses for them. Order is the order the message reports them in.
-_REFERENCE_LABELS = (
-    ("backtests", "回测记录"),
-    ("signals", "信号记录"),
-    ("paper_accounts", "模拟盘账户"),
-)
-
-
-def _blocking_references(db: Session, strategy_id: int) -> dict[str, int]:
-    """Count every row that points at this strategy, directly or through a version.
-
-    Deleting a strategy cascades to its versions (``Strategy.versions``), so a
-    row that references a *version* blocks the delete exactly as hard as one
-    that references the strategy itself. None of these columns carries
-    ``ON DELETE``, so a reference we fail to count is not left orphaned — the
-    database refuses the delete and the user sees a generic 500.
-    """
-    version_ids = select(StrategyVersion.id).where(StrategyVersion.strategy_id == strategy_id)
-    counted = {
-        "backtests": db.scalar(
-            select(func.count(BacktestRun.id)).where(
-                BacktestRun.strategy_version_id.in_(version_ids)
-            )
-        ),
-        "signals": db.scalar(
-            select(func.count(Signal.id)).where(Signal.strategy_version_id.in_(version_ids))
-        ),
-        "paper_accounts": db.scalar(
-            select(func.count(PaperAccount.id)).where(PaperAccount.strategy_id == strategy_id)
-        ),
-    }
-    return {name: int(count or 0) for name, count in counted.items() if count}
-
-
-def _blocked_delete_message(blocking: dict[str, int]) -> str:
-    labels = dict(_REFERENCE_LABELS)
-    detail = "、".join(
-        f"{blocking[name]} 条{labels[name]}" for name, _ in _REFERENCE_LABELS if blocking.get(name)
-    )
-    return f"此策略被 {detail} 关联，不能直接删除。请先删除相关记录。"
-
-
 @router.delete("/{strategy_id}", summary="Delete a strategy and all its versions")
 def delete_strategy(strategy_id: int, db: Session = Depends(get_db)) -> dict:
     from app.data.strategy_service import record_audit
@@ -135,12 +94,17 @@ def delete_strategy(strategy_id: int, db: Session = Depends(get_db)) -> dict:
     if strategy is None:
         raise HTTPException(status_code=404, detail="strategy not found")
 
-    # Refuse to delete a strategy that anything still points at. Counting only
-    # backtests is how signals and paper accounts got through: the guard has to
-    # count what points at the row, not what we happened to remember (ADR-083).
-    blocking = _blocking_references(db, strategy_id)
-    if blocking:
-        raise HTTPException(status_code=409, detail=_blocked_delete_message(blocking))
+    # Refuse to delete a strategy that anything still points at. What counts is derived
+    # from the model metadata instead of a list kept here: counting only backtests,
+    # signals and paper accounts is how experiments, AI tasks and research drafts got
+    # through to a bare 500 (ADR-083). None of those columns carries ON DELETE, so a
+    # reference we fail to count is not left orphaned — it becomes an error page.
+    report = references.collect(db, entity=references.STRATEGY, entity_id=strategy_id)
+    if report.refuses_hard_delete:
+        return JSONResponse(
+            status_code=409,
+            content=references.error_body(report, references.refusal_message(report)),
+        )
 
     name = strategy.name
     db.delete(strategy)
@@ -153,7 +117,9 @@ def delete_strategy(strategy_id: int, db: Session = Depends(get_db)) -> dict:
         payload={"name": name},
     )
     db.commit()
-    return {"deleted": strategy_id, "name": name}
+    # ``warnings`` names what changed only because a delete happened (a paper trade
+    # keeps a version *label*, not a foreign key) — ADR-222.
+    return {"deleted": strategy_id, "name": name, "warnings": report.warning_list()}
 
 
 @router.get(

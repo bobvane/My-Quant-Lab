@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   api,
+  deleteBlockedHint,
   type Asset,
   type BacktestAnalysis,
   type BacktestDetail,
@@ -45,6 +46,8 @@ const runs = ref<BacktestSummary[]>([])
 const onlyVersionFilter = ref(false)
 const detail = ref<BacktestDetail | null>(null)
 const error = ref('')
+//: 删除成功后要如实说明「这次删除顺带改变了什么」（ADR-222），例如绑定被清空。
+const deleteNotices = ref<string[]>([])
 const busy = ref(false)
 const route = useRoute()
 const router = useRouter()
@@ -1013,9 +1016,11 @@ async function removeRun(id: number) {
   const ok = window.confirm(`确定删除回测 #${id}？结果、指标与成交明细会一并删除，且不可恢复。`)
   if (!ok) return
   error.value = ''
+  deleteNotices.value = []
   busy.value = true
   try {
-    await api.deleteBacktest(id)
+    const result = await api.deleteBacktest(id)
+    deleteNotices.value = result.warnings ?? []
     runs.value = runs.value.filter((r) => r.id !== id)
     if (detail.value?.id === id || activeRun.value?.id === id) {
       // 删掉的正好是屏幕上这一次：先把还在问进度的循环停掉，否则它会一直问一个
@@ -1035,7 +1040,8 @@ async function removeRun(id: number) {
       await router.replace({ path: '/backtest' })
     }
   } catch (e) {
-    error.value = (e as Error).message
+    const hint = deleteBlockedHint(e)
+    error.value = hint ? `${(e as Error).message} ${hint}` : (e as Error).message
   } finally {
     busy.value = false
   }
@@ -1937,6 +1943,9 @@ onMounted(async () => {
     </p>
 
     <p v-if="error" class="error">{{ error }}</p>
+    <ul v-if="deleteNotices.length" class="notice">
+      <li v-for="(item, index) in deleteNotices" :key="index">{{ item }}</li>
+    </ul>
 
     <!-- 正在跑 / 失败 / 问不到状态的那一次回测：说清楚现在是哪一种，
          并且只给这一种状态下真实可用的按钮（ADR-138、ADR-180）。 -->

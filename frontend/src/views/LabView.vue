@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   api,
@@ -1946,21 +1946,21 @@ const openExperimentId = ref<number | null>(null)
 const compareExperimentIds = ref<number[]>([])
 const experimentCompare = ref<ExperimentCompareOut | null>(null)
 
-/** 地址栏里的 `?experiment=<id>`：刷新之后从这里回到当时打开的那一条。 */
-const requestedExperimentId = (() => {
-  const raw = route.query.experiment
+/**
+ * 地址栏里 `?experiment=<id>` / `?run=<id>` 的 id：刷新之后从这里回到当时打开的那一条。
+ * 两个键的解析规则本来完全一样，所以只有这一份实现，不各写一遍。
+ */
+function queryId(key: string): number | null {
+  const raw = route.query[key]
   const text = Array.isArray(raw) ? raw[0] : raw
   const parsed = text ? Number.parseInt(text, 10) : Number.NaN
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null
-})()
+}
 
-/** 地址栏里的 `?run=<id>`：刷新或换页面回来之后，重新落下当时那一次研究。 */
-const requestedRunId = (() => {
-  const raw = route.query.run
-  const text = Array.isArray(raw) ? raw[0] : raw
-  const parsed = text ? Number.parseInt(text, 10) : Number.NaN
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
-})()
+/** 首次进入这一页时地址栏指名的那一条实验。 */
+const requestedExperimentId = queryId('experiment')
+/** 首次进入这一页时地址栏指名的那一次研究。 */
+const requestedRunId = queryId('run')
 
 function experimentKindLabel(kind: string): string {
   return EXPERIMENT_KINDS.find((item) => item.value === kind)?.label ?? '未知跑法'
@@ -2659,6 +2659,29 @@ onMounted(() => {
   // 同理：?run=<id> 时把当时那一次研究读回来，刷新后不用再去列表里找。
   if (requestedRunId !== null) void openRun(requestedRunId)
 })
+
+/**
+ * 地址栏指名的实验 / 研究换了，就把新指的那一条读回来。
+ *
+ * 之前这两个 id 只在 `onMounted` 里算一次：刷新页面、或者把链接发给已经开着这一页的
+ * 人时，同一个 `/lab` 组件不会被重建，页面就一直停在原来那一条上——链接指名的记录
+ * 和屏幕上显示的记录对不上（ADR-221）。这里监听 query，命名的记录一变就跟着换。
+ *
+ * 页面自己写的地址（`rememberOpenRun` / `rememberOpenExperiment`）在写回同一个 id 时
+ * 由 `rememberOpenRun` 的幂等判断挡掉，所以正常操作不会多读一次。
+ */
+watch(
+  () => queryId('run'),
+  (id) => {
+    if (id !== null && id !== run.value?.run_id) void openRun(id)
+  },
+)
+watch(
+  () => queryId('experiment'),
+  (id) => {
+    if (id !== null && id !== openExperimentId.value) void openExperimentById(id)
+  },
+)
 
 onUnmounted(stopPolling)
 </script>

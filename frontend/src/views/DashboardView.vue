@@ -76,6 +76,16 @@ const labRunsError = ref('')
 const labLive = computed(() => labRuns.value.filter((r) => labRunIsLive(r.status)))
 /** 最近一次没有跑完、但原因已经存下来的研究（ADR-216：列表页也给得出原因）。 */
 const labFailed = computed(() => labRuns.value.filter((r) => r.status === 'failed'))
+/**
+ * 被系统或安全网关挡下来的研究：`rejected` 是后端真实的终态之一（`research.py` 的
+ * `_finish(..., "rejected", ...)`），存着原因，但既不是「还在跑」也不是「没有跑完」。
+ *
+ * 之前它落在三张卡的筛子之外：首页于是显示「没有正在跑或需要处理的 AI 研究」，而
+ * 这条研究其实存在、并且带着原因。用户据此以为系统没收到过这次请求。
+ * 它也不是死路：LabView 对 `rejected` 给的是「把问题问得更具体、材料补得更完整，重新
+ * 开始一次研究」，所以首页必须看得见它（ADR-221）。
+ */
+const labRejected = computed(() => labRuns.value.filter((r) => r.status === 'rejected'))
 /** 跑完但能力结论是「缺能力 / 部分支持」的研究——编译器没法自动往下走，等人来定。 */
 const labAwaitingDecisions = computed(() =>
   labRuns.value.filter(
@@ -103,8 +113,11 @@ function labRunLine(run: AIResearchRunSummary): string {
   const question =
     run.question.length > 40 ? `${run.question.slice(0, 40)}…` : run.question || `#${run.run_id}`
   const started = run.created_at ? formatDateTime(run.created_at) : ''
+  // `rejected` 同样把原因存下来了（`research.py` 的 `_finish(..., "rejected", ...,
+  // error=str(refused))`），所以和 `failed` 一起说清楚，不让用户对着一行「没有通过
+  // 校验」猜为什么（ADR-221）。
   const statusNote =
-    run.status === 'failed' && run.error_message
+    (run.status === 'failed' || run.status === 'rejected') && run.error_message
       ? `原因：${labRunFailureText(run.error_message)}`
       : run.status === 'completed' &&
           (run.capability_status === 'NEEDS_CAPABILITY' ||
@@ -424,6 +437,7 @@ const warnings = computed<string[]>(() => {
 function labWarnings(): string[] {
   const list: string[] = []
   const failed = labFailed.value
+  const rejected = labRejected.value
   const awaiting = labAwaitingDecisions.value
   const live = labLive.value
   if (awaiting.length) {
@@ -431,8 +445,17 @@ function labWarnings(): string[] {
       `有 ${awaiting.length} 条研究跑完了，但能力检查显示系统缺能力或只能部分支持：去「AI 研究实验室」把编译器列出的问题定下来，才能生成下一版草案。`,
     )
   }
+  if (rejected.length) {
+    list.push(
+      `最近有 ${rejected.length} 条研究被系统或安全网关挡下来了，没有生成草案：` +
+        '去「AI 研究实验室」把原因和违规清单看一遍，把问题问得更具体、材料补得更完整再重新提交。',
+    )
+  }
   if (failed.length) {
-    list.push(`最近有 ${failed.length} 条研究没有跑完，原因都记下来了：去「AI 研究实验室」打开看看是额度、配置还是材料问题。`)
+    list.push(
+      `最近有 ${failed.length} 条研究没有跑完，原因都记下来了：` +
+        '去「AI 研究实验室」打开看看是额度、配置还是材料问题。',
+    )
   }
   if (live.length) {
     list.push(`有 ${live.length} 条研究正在后台跑：不用守着，跑完会在「最近的研究」里等你。`)
@@ -700,18 +723,30 @@ onMounted(loadLabRuns)
         <p v-if="labAwaitingDecisions.length" class="answer-main">
           {{ labAwaitingDecisions.length }} 条研究跑完了，但能力检查说系统缺能力或只能部分支持——需要你去实验室把编译器列出的问题定下来，才能生成下一版草案。
         </p>
+        <p v-if="labRejected.length" class="answer-main">
+          {{ labRejected.length }} 条研究被系统或安全网关挡下来了，没有生成草案——原因和违规清单都记着，点开可以照着改。
+        </p>
         <p v-if="labFailed.length" class="answer-main">
           {{ labFailed.length }} 条研究没有跑完，原因都记下来了，点开看看能不能处理。
         </p>
         <p v-if="labLive.length" class="answer-main">
           {{ labLive.length }} 条研究在后台跑着，不用守着，跑完会在这里等你。
         </p>
-        <ul v-if="labAwaitingDecisions.length || labFailed.length || labLive.length" class="answer-list">
-          <li v-for="run in [...labAwaitingDecisions, ...labFailed, ...labLive].slice(0, 5)" :key="run.run_id">
+        <ul v-if="labAwaitingDecisions.length || labRejected.length || labFailed.length || labLive.length" class="answer-list">
+          <li v-for="run in [...labAwaitingDecisions, ...labRejected, ...labFailed, ...labLive].slice(0, 5)" :key="run.run_id">
             <RouterLink :to="labRunLink(run)">{{ labRunLine(run) }}</RouterLink>
           </li>
         </ul>
-        <p v-if="!labAwaitingDecisions.length && !labFailed.length && !labLive.length" class="muted" style="margin: 8px 0 0">
+        <p
+          v-if="
+            !labAwaitingDecisions.length &&
+            !labRejected.length &&
+            !labFailed.length &&
+            !labLive.length
+          "
+          class="muted"
+          style="margin: 8px 0 0"
+        >
           没有正在跑或需要处理的 AI 研究。想从一句想法开始：点「到 AI 研究实验室」写一条新研究。
         </p>
       </template>

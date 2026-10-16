@@ -1865,6 +1865,15 @@ async function applyResearchQuery() {
         await loadVersions()
         versionId.value = requestedVersion
         handedOver = true
+      } else {
+        // 指名的那一版不存在（被删掉了，或来自另一套数据）。这里不能当作"没给"：
+        // `load()` 早就把版本默认成了 strategies[0] 的当前版，静默留着它，用户会以为
+        // 上一步点名的那一版已经被选中并拿去回测，实际跑的是另一版（ADR-221）。
+        // 说清楚 + 把选择清空，逼用户自己选对的那一版。
+        versionId.value = null
+        error.value =
+          `地址里指名的策略版本 #${requestedVersion} 已经不存在了（可能被删除）。` +
+          '为免拿别的版本冒充它，这一版的选择已经清空：请在上面重新选一版策略版本再开始回测。'
       }
     } catch (e) {
       error.value = (e as Error).message

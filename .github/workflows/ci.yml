@@ -642,3 +642,88 @@ jobs:
       # belongs to the suite that owns the whole application.
       - name: Prove a lost child is redelivered under the same task id
         run: pytest -o addopts= tests/test_celery_redelivery.py -v
+
+  # 真实浏览器「Lab 竞态冒烟」(ADR-221 修复的回归守卫)。
+  # 仅在本仓库 CI 内拉起一个「离线、隔离」的栈：文件型 SQLite + 无 Redis/无网络 + 合成行情，
+  # 与 docker compose 生产路径无关，也不会触碰任何生产/NAS 数据。它在 windows-latest 上用
+  # 自带 Chrome 跑 scripts/Test-WebUi.ps1 -LabRace，确认「A 先请求但后返回、B 先到」时页面停留在 B。
+  # 与 scripts/Start-LocalStack.ps1 同构（Start-Process 后台 + 捕获 pid + 就绪轮询 + 按 pid 精准停止），
+  # 但使用与 scripts/seed_lab_race_runs.py 完全一致的文件型 SQLite 与密钥。
+  frontend-e2e:
+    name: frontend e2e (Lab race smoke)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 计算「与 seed 步骤完全一致」的文件型 SQLite 绝对路径（统一用正斜杠，避免 Windows 反斜杠歧义）。
+      - name: Compute DATABASE_URL
+        id: urls
+        shell: pwsh
+        run: |
+          $db = Join-Path ${{ github.workspace }} 'backend\.ci-race.sqlite3'
+          $url = 'sqlite+pysqlite:///' + ($db -replace '\\','/')
+          "dburl=$url" | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Create venv and install backend deps
+        shell: pwsh
+        run: |
+          python -m venv backend\.venv
+          backend\.venv\Scripts\python.exe -m pip install --upgrade pip
+          backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+
+      - name: Seed two completed Lab runs (offline SQLite)
+        shell: pwsh
+        env:
+          DATABASE_URL: ${{ steps.urls.outputs.dburl }}
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: backend\.venv\Scripts\python.exe scripts\seed_lab_race_runs.py
+
+      - name: Install frontend deps
+        working-directory: frontend
+        shell: pwsh
+        run: npm ci --no-audit --no-fund
+
+      - name: Boot the isolated stack
+        shell: pwsh
+        env:
+          DATABASE_URL: ${{ steps.urls.outputs.dburl }}
+          MARKET_DATA_PROVIDER: synthetic
+          SECRET_KEY: ci-race-secret-key-0123456789
+          APP_ENVIRONMENT: development
+          REDIS_URL: ''
+          CELERY_BROKER_URL: ''
+          CELERY_RESULT_BACKEND: ''
+        run: pwsh scripts/Start-CiRaceStack.ps1
+
+      - name: Run Lab browser race smoke test
+        shell: pwsh
+        run: pwsh scripts/Test-WebUi.ps1 -LabRace
+
+      # 仅停止本作业启动的 uvicorn/vite（按 pid），并清理占用 9342 的 CDP 无头 Chrome；不误伤其它进程。
+      - name: Tear down (kill own stack processes)
+        if: always()
+        shell: pwsh
+        run: |
+          $ids = @()
+          foreach ($f in @('ci-race-api.pid','ci-race-web.pid')) {
+            $p = Join-Path $env:TEMP $f
+            if (Test-Path -LiteralPath $p) { $ids += (Get-Content -LiteralPath $p | Where-Object { $_ }) }
+          }
+          foreach ($id in $ids) { try { taskkill /PID $id /T /F } catch {} }
+          try {
+            $holder = Get-NetTCPConnection -LocalPort 9342 -ErrorAction SilentlyContinue
+            if ($holder) { taskkill /PID $holder.OwningProcess /T /F }
+          } catch {}

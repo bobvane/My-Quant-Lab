@@ -1,0 +1,90 @@
+name: test-image
+
+# Build and push a throwaway, immutable *test* image for one specific commit.
+#
+# Design constraints (do not relax without re-authorization):
+#   * Triggered ONLY by workflow_dispatch (manual). Never by push/tag/schedule.
+#   * The tag is derived from the expected commit SHA: test-<short-sha>. It is
+#     therefore independent of, and cannot collide with, latest / nightly /
+#     vX.Y.Z. This run builds test-9107ec1 (short of 9107ec17997b...).
+#   * A hard gate fails the run unless the checked-out commit == expected_sha,
+#     so the wrong branch/commit can never become this test image.
+#   * Never creates a Git tag, a GitHub Release, or a version bump.
+#   * Uses the repo existing Dockerfile and GHCR naming; only adds the SHA as
+#     an OCI revision label so the image is traceable back to its source commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to check out (must resolve to expected_sha)"
+        required: false
+        default: "9107ec17997b59f75809e07af03c379b8725a52c"
+      expected_sha:
+        description: "Exact commit SHA the checked-out ref must resolve to"
+        required: false
+        default: "9107ec17997b59f75809e07af03c379b8725a52c"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  APP_IMAGE: ghcr.io/${{ github.repository_owner }}/my-quant-lab-app
+
+jobs:
+  build-test-image:
+    name: build and push test image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the requested ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Verify the checked-out commit matches expected_sha
+        id: verify
+        run: |
+          set -euo pipefail
+          expected="${{ inputs.expected_sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "expected=${expected}"
+          echo "actual=${actual}"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "::error::checked-out commit ${actual} does not match expected ${expected}" >&2
+            exit 1
+          fi
+          short="${expected:0:7}"
+          tag="test-${short}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${short}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build app (test tag)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/Dockerfile.app
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.APP_IMAGE }}:${{ steps.verify.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.expected_sha }}
+            org.opencontainers.image.title=My Quant Lab (test image)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Confirm the test tag exists in GHCR
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${{ env.APP_IMAGE }}:${{ steps.verify.outputs.tag }}"

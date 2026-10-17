@@ -1371,7 +1371,7 @@ async function loadAiStatus() {
   }
 }
 
-/** 这次回测是从「AI 研究实验室」带 `run=1` 交接过来的吗？只有这一条路自动解释（ADR-192）。 */
+/** 这次回测是从「研究中心」带 `run=1` 交接过来的吗？只有这一条路自动解释（ADR-192）。 */
 const labHandoff = ref(false)
 /** 已经自动解释过哪一次运行：轮询完成与手动打开会把同一次运行送进来多次。 */
 let autoExplainedRunId: number | null = null
@@ -1608,7 +1608,7 @@ const analysisStrategyName = computed(() => {
 // 这里每个数字都取自引擎已经存下来的读数（`detail.metrics`）或生命周期证据
 // （`/lifecycle/strategies/{id}`）；这一页不重新计算任何量化事实，缺读数就写清楚缺什么。
 // `MIN_MEANINGFUL_TRADES` 必须与后端 `lifecycle.py` 的 `min_backtest_trades` 相同，
-// 否则同一个策略在首页「够样本」、在回测页「样本太少」。
+// 否则同一个策略在首页「够样本」、在回测分析页「样本太少」。
 const MIN_MEANINGFUL_TRADES = 10
 
 const lifecycle = ref<StrategyLifecycle | null>(null)
@@ -1779,7 +1779,7 @@ const evidenceSentence = computed(() => {
 })
 
 /**
- * 「研究策略」页把这一页填好并直接开跑（评审 §7、§19；ADR-132）。
+ * 「快速回测」页把这一页填好并直接开跑（评审 §7、§19；ADR-132）。
  * Query 是用户能改的输入，所以每个值先过一遍白名单：不认识就当没给，
  * 页面仍然只是「默认状态」，不会因为一个手改的地址就出错。
  */
@@ -1935,7 +1935,7 @@ onMounted(async () => {
 
 <template>
   <div>
-    <h1 class="page-title">回测</h1>
+    <h1 class="page-title">回测分析</h1>
     <p class="page-sub">
       运行一次历史回测，然后看结论：这套策略过去表现如何、为什么、风险有多大、下一步该做什么。
       同一「策略版本 + 数据集 + 参数 + 引擎版本 + 特征版本」必然得到相同结果；样本不足的指标显示 N/A，不会编造。
@@ -2048,7 +2048,7 @@ onMounted(async () => {
         当前行情源：{{ providerLabel(marketProvider) }}
       </p>
       <p v-if="labHandoff" class="muted" style="margin: 6px 0 0">
-        这条回测是「AI 研究实验室」交过来的：用的是你选定的策略版本，跑的是历史数据，是模拟验证，不会下单。
+        这条回测是「研究中心」交过来的：用的是你选定的策略版本，跑的是历史数据，是模拟验证，不会下单。
       </p>
       <p v-if="runBlockedReason" class="muted" style="margin: 6px 0 0">{{ runBlockedReason }}</p>
 
@@ -2252,7 +2252,7 @@ onMounted(async () => {
         <p v-if="adoptError" class="error" style="margin: 8px 0 0">{{ adoptError }}</p>
         <p v-if="adoptNotice && adoptNotice.runId === detail.id" class="muted" style="margin: 8px 0 0">
           已保存为实验 #{{ adoptNotice.id }}「{{ adoptNotice.name }}」，里面是这条回测的原样结果。
-          <RouterLink :to="{ path: '/experiments' }">去「实验」页看它</RouterLink>
+          <RouterLink :to="{ path: '/experiments' }">去「稳健性与实验比较」页看它</RouterLink>
         </p>
       </div>
     </div>

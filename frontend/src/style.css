@@ -330,6 +330,12 @@ tbody tr:hover {
   background: var(--panel-2);
 }
 
+/* 当前在「AI 研究实验室」里打开的那条运行，与地址栏 ?run= 保持一致（ADR-221）。 */
+tbody tr.selected {
+  background: var(--panel-2);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 button {
   background: var(--accent);
   border: none;

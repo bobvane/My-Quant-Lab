@@ -68,15 +68,23 @@ onMounted(async () => {
       </div>
 
       <nav class="nav">
-        <RouterLink to="/">研究首页</RouterLink>
-        <RouterLink to="/research">研究策略</RouterLink>
+        <RouterLink to="/">投资总览</RouterLink>
+        <RouterLink to="/lab">研究中心</RouterLink>
+        <small style="display:block;color:var(--muted);font-size:11px;padding:0 10px;margin:-1px 0 4px;">从想法生成策略</small>
+
+        <div class="nav-group">策略与回测</div>
         <RouterLink to="/strategies">我的策略</RouterLink>
-        <RouterLink to="/backtest">回测</RouterLink>
-        <RouterLink to="/experiments">实验</RouterLink>
-        <RouterLink to="/paper">模拟验证</RouterLink>
+        <RouterLink to="/research">快速回测</RouterLink>
+        <RouterLink to="/backtest">回测分析</RouterLink>
+
+        <RouterLink to="/experiments">稳健性与实验比较</RouterLink>
+
+        <div class="nav-group">信号与模拟验证</div>
         <RouterLink to="/signals">信号</RouterLink>
+        <RouterLink to="/paper">模拟验证</RouterLink>
+
+        <div class="nav-group">数据与系统</div>
         <RouterLink to="/data">数据</RouterLink>
-        <RouterLink to="/lab">AI 研究实验室</RouterLink>
         <RouterLink to="/settings">系统管理</RouterLink>
       </nav>
 
@@ -103,8 +111,8 @@ onMounted(async () => {
       <p class="muted mode-note">
         {{
           isAdvanced
-            ? '高级模式：显示引擎版本、哈希与原始数据，方便排查问题。'
-            : '普通模式：只显示做决定要看的数字。'
+            ? '高级模式：显示引擎版本、哈希、原始 JSON 与技术错误文本，方便排查同步 / 计算问题。'
+            : '普通模式：只显示做决定要看的数字，隐藏工程细节，日常使用更清爽。'
         }}
       </p>
 

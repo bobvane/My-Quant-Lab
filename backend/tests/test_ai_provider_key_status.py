@@ -169,3 +169,26 @@ def test_the_refusal_says_which_provider_is_at_fault(client, db_session) -> None
 
 def test_the_refusal_stays_generic_without_a_broken_row(client, db_session) -> None:
     assert _unavailable_detail(db_session) == NOT_CONFIGURED_DETAIL
+
+
+def test_status_key_error_uses_literals_the_frontend_branches_on(client, db_session) -> None:
+    """Frontend pages decide between 未配置 / 解密失败 / 空密钥 using the literal value of
+    ai_status.key_error, so the backend must keep emitting the exact strings the UI compares
+    against ('undecryptable', 'empty', or null). Pin them here as a contract guard.
+    """
+
+    _provider(db_session, name="U", encrypted=_token_under_a_foreign_key())
+    db_session.commit()
+    assert client.get("/api/v1/ai/status").json()["key_error"] == KEY_UNDECRYPTABLE
+
+    db_session.query(AIProvider).delete()
+    db_session.commit()
+    _provider(db_session, name="E", encrypted=encrypt_secret(""))
+    db_session.commit()
+    assert client.get("/api/v1/ai/status").json()["key_error"] == KEY_EMPTY
+
+    db_session.query(AIProvider).delete()
+    db_session.commit()
+    none = client.get("/api/v1/ai/status").json()
+    assert none["key_error"] is None
+    assert NOT_CONFIGURED_TEXT in none["note"]

@@ -406,6 +406,74 @@ v1.7.0 的读数：上述 M8 已收下（豁免名单是一个只有两个探针
 
 
 
+### v2.7.2 — 第一轮小范围可用性修复（源码已改，未部署 NAS）
+
+本版是只读实机验收（v2.7.2 NAS 端到端 12/12 通过、ZERO console/page error、ZERO HTTP≥400）
+之后收下的第一轮小范围修复：**AI 配置失效提示** + **三处前端可用性**。全部只改源码、测试与文档；
+未触碰 NAS 源/DB/`SECRET_KEY`/compose/数据卷，未提交/推送/tag/Release/部署，未做任何业务写操作、
+未消耗付费 API。
+
+**1. AI 密钥解密失败的「根因」（只读，已证实 + 未证实边界）**
+
+- 已证实：后端 `ai_status` 返回 `key_error:"undecryptable"`、`provider_name:"OpenRouterFree"`。
+  代码链路 `decrypt_secret` 在「当前 `SECRET_KEY` 派生密钥」下解不开密文 → `_provider_key` 返回
+  `KEY_UNDECRYPTABLE` → `ai_status` 照实填 `key_error`。所以**根因是「存进去的密钥用现在的
+  `SECRET_KEY` 读不出来」**，与“没配置”是两回事（`docs/12`、后端 `explain.py` / `routers/ai.py`）。
+- 未证实（本机只改源码，不登录 NAS、不读 NAS DB / `.env`、不索取用户真实密钥、不改 NAS `SECRET_KEY`）：
+  具体是哪一个 `SECRET_KEY` 值变了、什么时候变得，以及密文确实绑定到“另一个”密钥——这几条只能由上述
+  代码路径与单一启用 Provider 的事实推断，未做密码学比对。
+- 结论：**用户需要手动恢复密钥**（二选一）：① 到「系统管理 → AI 设置」把 `OpenRouterFree` 那行的密钥
+  重新填一次（最稳，不需动全局 `SECRET_KEY`）；② 把 `SECRET_KEY` 恢复到当初加密那条密钥时的值。
+  **验证**：重填后 `GET /api/v1/ai/status` 的 `key_error` 应消失、`configured` 变 `true`；
+  「AI 解释」按钮可用，AI 任务不再是 `failed`。重填动作本身只写那一行密钥，不动其它数据。
+
+**2. AI 不可用提示不再一律说“未配置”（前端，无契约变更、不泄漏密钥）**
+
+- `DashboardView.aiUnavailableText` 与 `StrategyDetailView` 的 AI 提示，改为按 `ai_status.key_error`
+  分支：**`undecryptable`** → 说“有一个启用的 Provider（名称），但存的密钥现在读不出来（SECRET_KEY 变过），
+  去系统管理重填一次即可恢复”；**`empty`** → 说“那行存的是空密钥，去填进去”；否则才是“真的没配置”。
+  高级模式仍把后端 `note` 原文附在句末。后端已有 `key_error` / `key_status` 字段，本次未改任何 API 契约；
+  对实时 429/403（认证/额度/网络）后端没有独立状态码，仍按现状展示，不臆造为 `undecryptable`。
+  （复用 `BacktestView` 已有的同类文案，三处口径一致。）
+
+**3. 三处前端可用性修复**
+
+- **普通/高级模式**：`App.vue` 的模式说明从一句话扩成“用途/场景”——高级模式展示引擎版本、哈希、原始
+  JSON 与技术错误文本，便于排查同步/计算问题；普通模式只显示做决定要看的数字，隐藏工程细节。
+- **AI 研究实验室当前运行选中态**：`LabView` 的运行列表 `<tr>` 增加
+  `:class="{ selected: item.run_id === (run?.run_id ?? null) }"`，并在 `style.css` 加 `.selected`
+  （左侧强调条 + 高亮），让它和「详情 / 地址栏 `?run=`」始终一致。
+- **数据页已同步范围总览**：`DataView` 顶部新增「已同步的数据」卡片，从已加载的 `assets` + `series`
+  汇总“N 个标的 / M 段行情 / 覆盖 A → B”。这个范围只反映**已经同步回来**的数据，不捏造、不自动去拉，
+  不新增 API、不改动同步按钮（同步仍只能手动触发）。
+
+**4. 验证（本地，非 NAS）**
+
+- 后端：在 `tests/test_ai_provider_key_status.py` 追加
+  `test_status_key_error_uses_literals_the_frontend_branches_on`（断言前端分支依赖的字面量
+  `undecryptable` / `empty` / `null` 与“真的未配置”文案）。`pytest` 该文件 10 passed；
+  连同 `test_lab_request_race.py` 一并跑，全部通过 —— **Lab 实机竞态测试与 CI（`ci.yml`/`nightly.yml`/
+  `release.yml` 及 `lab_race_*` 脚本）原样保留，未删除/削弱。**
+- 前端：无单测框架（vitest 缺失），按仓库约定用 `npm run typecheck`（`vue-tsc --noEmit`）与
+  `npm run build`（`vue-tsc -b && vite build`）验证 —— 二者均通过；`StrategyDetailView` 为通过类型检查
+  把 AI 提示收敛成 `aiState` 计算属性（脚本内判定，模板只走 `v-if`），不改变运行时行为。
+
+**5. 修改文件清单（仅源码 / 测试 / 文档）**
+
+- `frontend/src/App.vue`（模式说明扩写）
+- `frontend/src/views/DashboardView.vue`（AI 提示按 `key_error` 分支）
+- `frontend/src/views/StrategyDetailView.vue`（AI 提示按 `key_error` 分支 + `aiState`）
+- `frontend/src/views/LabView.vue`（运行列表选中态）
+- `frontend/src/views/DataView.vue`（已同步范围总览 + 计算属性）
+- `frontend/src/style.css`（`.selected` 规则）
+- `backend/tests/test_ai_provider_key_status.py`（追加契约测试）
+- `docs/15_ROADMAP_ACCEPTANCE.md`（本段）
+
+**未验证的业务写操作**：无。本次所有改动均为前端展示层、后端只读契约测试与文档；未对 NAS、
+数据库、`SECRET_KEY`、compose 或 volume 做任何写操作，未提交/推送/tag/Release/部署，
+未触发任何付费 API 调用。用户侧“重填密钥”属于用户自己在生产实例上的手动操作，本机未代为执行。
+
+
 ## Phase 0 — Foundation
 
 交付：Docker Compose、DB、Redis、API、Web、基础认证、迁移、日志。

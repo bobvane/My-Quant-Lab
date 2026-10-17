@@ -63,7 +63,7 @@ const focusLifecycle = ref<StrategyLifecycle | null>(null)
 // 不是同一种东西：账本行用 `bar_timestamp` 而不是 `bar_time`（ADR-127）。
 const recentSignals = ref<SignalRecord[]>([])
 
-// ---- AI 研究实验室（/lab）活动：让首页也能看见「待我处理 / 进行中 / 失败了」的研究 ----
+// ---- 研究中心（/lab）活动：让首页也能看见「待我处理 / 进行中 / 失败了」的研究 ----
 // 服务端 `GET /ai/research` 返回的就是列表页那份投影（没有假设与草案正文），这里只用它
 // 判断「需要我做什么」，不复制任何业务状态；详情与操作全部留在 `/lab`。
 // 状态词与「还在跑」判定统一走 `wording.ts`（与 LabView 共用同一份，不各自造）。
@@ -317,7 +317,7 @@ const conclusion = computed(() => {
 
 const conclusionMissing = computed(() =>
   focusStrategy.value
-    ? '这个策略还没有回测结果。到「回测」运行一次，结论会出现在这里。'
+    ? '这个策略还没有回测结果。到「回测分析」运行一次，结论会出现在这里。'
     : '还没有可以研究的东西：先到「我的策略」创建或导入一个策略。',
 )
 
@@ -334,8 +334,8 @@ const nextStep = computed(() => {
       ? { path: '/backtest', query: { strategy_version_id: String(focusVersion.id) } }
       : '/backtest'
   if (stage) {
-    // 样本外验证（OOS）的真实入口在「回测」页的高级模式里，不是模拟盘；
-    // 所以 `oos_tested` 阶段指向回测页，让用户能真正进入 OOS 工具，而不是跳去模拟盘。
+    // 样本外验证（OOS）的真实入口在「回测分析」页的高级模式里，不是模拟盘；
+    // 所以 `oos_tested` 阶段指向回测分析页，让用户能真正进入 OOS 工具，而不是跳去模拟盘。
     const to = stage === 'oos_tested' ? backtestTo : stagePage(stage)?.to ?? ''
     const linkText = stage === 'oos_tested' ? `去「${OOS_PAGE}」` : stagePage(stage)?.label ?? ''
     return {
@@ -346,14 +346,14 @@ const nextStep = computed(() => {
     }
   }
   if (focusStrategy.value && latestRun.value) {
-    return { text: nextStepText('backtested'), reason: '', to: backtestTo, linkText: '去「回测」' }
+    return { text: nextStepText('backtested'), reason: '', to: backtestTo, linkText: '去「回测分析」' }
   }
   if (focusStrategy.value) {
     return {
       text: nextStepText('validated'),
       reason: '',
       to: backtestTo,
-      linkText: '去「回测」',
+      linkText: '去「回测分析」',
     }
   }
   return {
@@ -366,13 +366,13 @@ const nextStep = computed(() => {
 
 /**
  * ③「下一步」的实操说明：当下一步是做样本外验证时，普通用户需要知道去哪、怎么开始。
- * 其他阶段不显示（OOS 工具在回测页高级模式里，这是首页唯一需要单独说明的导航断点）。
+ * 其他阶段不显示（OOS 工具在回测分析页高级模式里，这是首页唯一需要单独说明的导航断点）。
  */
 const nextStepHow = computed(() => {
   const stage = focusLifecycle.value?.suggested_next
   if (stage !== 'oos_tested' && stage !== 'backtested') return ''
   if (stage === 'backtested') return OOS_STEP_TEXT
-  return `进入「回测」页 → 打开「高级模式」→ 找到「${OOS_TOOL_LABEL}」。它只是用另一段历史数据再验证一次，不代表未来一定盈利。`
+  return `进入「回测分析」页 → 打开「高级模式」→ 找到「${OOS_TOOL_LABEL}」。它只是用另一段历史数据再验证一次，不代表未来一定盈利。`
 })
 
 /** ④ 需要你注意的事情：能算出来的都算出来，算不出来的不编。 */
@@ -429,7 +429,7 @@ const warnings = computed<string[]>(() => {
 })
 
 /**
- * 「AI 研究实验室」那一侧的提醒：不依赖 focusStrategy，所以放在单独的计算里——
+ * 「研究中心」那一侧的提醒：不依赖 focusStrategy，所以放在单独的计算里——
  * 一个还没有任何策略、只有几条研究记录的人，也应该在这张卡里看见自己的研究动态。
  * 只读服务端列表投影（ADR-216），不复制业务状态。能力结论用后端真实枚举
  * （NEEDS_CAPABILITY / PARTIALLY_SUPPORTED），和 LabView 口径一致。
@@ -442,19 +442,19 @@ function labWarnings(): string[] {
   const live = labLive.value
   if (awaiting.length) {
     list.push(
-      `有 ${awaiting.length} 条研究跑完了，但能力检查显示系统缺能力或只能部分支持：去「AI 研究实验室」把编译器列出的问题定下来，才能生成下一版草案。`,
+      `有 ${awaiting.length} 条研究跑完了，但能力检查显示系统缺能力或只能部分支持：去「研究中心」把编译器列出的问题定下来，才能生成下一版草案。`,
     )
   }
   if (rejected.length) {
     list.push(
       `最近有 ${rejected.length} 条研究被系统或安全网关挡下来了，没有生成草案：` +
-        '去「AI 研究实验室」把原因和违规清单看一遍，把问题问得更具体、材料补得更完整再重新提交。',
+        '去「研究中心」把原因和违规清单看一遍，把问题问得更具体、材料补得更完整再重新提交。',
     )
   }
   if (failed.length) {
     list.push(
       `最近有 ${failed.length} 条研究没有跑完，原因都记下来了：` +
-        '去「AI 研究实验室」打开看看是额度、配置还是材料问题。',
+        '去「研究中心」打开看看是额度、配置还是材料问题。',
     )
   }
   if (live.length) {
@@ -468,10 +468,29 @@ function labWarnings(): string[] {
  * 英文原话留给高级模式 —— 排查问题的时候才需要它。
  */
 const aiUnavailableText = computed(() => {
-  const base =
-    'AI 还没有配置，所以「AI 解释」按钮用不了：到「系统管理 → AI 设置」填一个模型服务即可。' +
-    '回测、指标与模拟盘都不受影响。'
-  const note = aiStatus.value?.note ?? ''
+  // 后端已经把「未配置 / 解密失败 / 空密钥」区分清楚（ai_status 的 key_error）：
+  //   'undecryptable' → 有一行启用的 Provider，但密钥在当前的 SECRET_KEY 下读不出来
+  //   'empty'         → 有一行启用的 Provider，但存的是空密钥
+  //   null / 缺失    → 真的没有任何可路由的 Provider
+  // 不能把这三种都说成「AI 未配置」（评审 P1-5、ADR-194）。
+  const st = aiStatus.value
+  const note = st?.note ?? ''
+  let base: string
+  if (st?.key_error === 'undecryptable') {
+    const who = st.provider_name ? `（${st.provider_name}）` : ''
+    base =
+      `有一个启用的 AI Provider${who}，但存进去的密钥现在读不出来（加密用的 SECRET_KEY 变过），` +
+      '所以「AI 解释」用不了：到「系统管理 → AI 设置」重新填一次密钥就能恢复。回测、指标与模拟盘都不受影响。'
+  } else if (st?.key_error === 'empty') {
+    const who = st.provider_name ? `（${st.provider_name}）` : ''
+    base =
+      `有一个启用的 AI Provider${who}，但它存的是空密钥，所以「AI 解释」用不了：` +
+      '到「系统管理 → AI 设置」把密钥填进去就能恢复。回测、指标与模拟盘都不受影响。'
+  } else {
+    base =
+      'AI 还没有配置，所以「AI 解释」按钮用不了：到「系统管理 → AI 设置」填一个模型服务即可。' +
+      '回测、指标与模拟盘都不受影响。'
+  }
   return isAdvanced.value && note ? `${base}（后端原话：${note}）` : base
 })
 
@@ -638,7 +657,7 @@ onMounted(loadLabRuns)
 
 <template>
   <div>
-    <h1 class="page-title">研究首页</h1>
+    <h1 class="page-title">投资总览</h1>
     <p class="page-sub">
       这一页只回答四件事：你在研究什么、最近一次结论是什么、下一步做什么、有什么要注意的。
       更细的工程读数都在「系统管理」和高级模式里，不影响这里的判断。
@@ -647,7 +666,7 @@ onMounted(loadLabRuns)
     <p v-if="error" class="error">{{ error }}</p>
 
     <!-- 首次使用引导（评审报告 P2-12）：只在什么都还没有的时候出现，可以关掉。
-         v2.7.0 补上第四条路：手里只有一句想法（听到的说法、一个现象）时走「AI 研究实验室」，
+         v2.7.0 补上第四条路：手里只有一句想法（听到的说法、一个现象）时走「研究中心」，
          它同样走到一次回测，不是另一套架构（ADR-193）。 -->
     <div v-if="showGuide" class="card guide-card" style="margin-bottom: 14px">
       <div class="row" style="justify-content: space-between; align-items: flex-start">
@@ -657,10 +676,10 @@ onMounted(loadLabRuns)
       <ol class="guide-steps">
         <li><RouterLink to="/data">先同步一段行情</RouterLink>：有一个标的的历史数据才有得研究。</li>
         <li>
-          已经知道想试什么规则：<RouterLink to="/research">到「研究策略」选标的、选策略、点开始研究</RouterLink>。
+          已经知道想试什么规则：<RouterLink to="/research">到「快速回测」选标的、选策略、点开始研究</RouterLink>。
         </li>
         <li>
-          只有一句想法、说不上规则：<RouterLink to="/lab">到「AI 研究实验室」把想法写清楚</RouterLink>，
+          只有一句想法、说不上规则：<RouterLink to="/lab">到「研究中心」把想法写清楚</RouterLink>，
           让 AI 帮你整理成策略草案，再编译成一版策略去回测。它走的还是同一个引擎。
         </li>
         <li>回测跑完后，回这一页看②③④：结论是什么、下一步做什么、要注意什么。</li>
@@ -707,15 +726,15 @@ onMounted(loadLabRuns)
       <RouterLink to="/data">到「数据」同步更长的一段</RouterLink>，结论才更有分量。
     </p>
 
-    <!-- AI 研究实验室活动（Phase C）：只追加这一张卡，不动四问与既有面板。
+    <!-- 研究中心活动（Phase C）：只追加这一张卡，不动四问与既有面板。
          它回答的是「我交出去的研究怎么样了 / 有没有等我处理的事」，这是四问里
          ③ 下一步 与 ④ 需要你注意 都没有覆盖到的另一半：回测侧看得到结论，
          研究侧（/lab）以前只在进入那一页之后才看得见。能力结论用后端真实枚举，
          不把「缺能力 / 部分支持 / 正在跑 / 失败」混成同一种状态。 -->
     <div class="card" style="margin-top: 14px">
       <div class="row" style="justify-content: space-between">
-        <h3 style="margin: 0">AI 研究实验室动态</h3>
-        <RouterLink to="/lab">到「AI 研究实验室」</RouterLink>
+        <h3 style="margin: 0">研究中心动态</h3>
+        <RouterLink to="/lab">到「研究中心」</RouterLink>
       </div>
       <p v-if="labRunsError" class="error" style="margin: 8px 0 0">{{ labRunsError }}</p>
       <p v-else-if="labRunsLoading" class="muted" style="margin: 8px 0 0">正在读最近的研究记录…</p>
@@ -747,7 +766,7 @@ onMounted(loadLabRuns)
           class="muted"
           style="margin: 8px 0 0"
         >
-          没有正在跑或需要处理的 AI 研究。想从一句想法开始：点「到 AI 研究实验室」写一条新研究。
+          没有正在跑或需要处理的 AI 研究。想从一句想法开始：点下方「到研究中心」写一条新研究。
         </p>
       </template>
     </div>
@@ -756,7 +775,7 @@ onMounted(loadLabRuns)
     <div class="card" style="margin-top: 14px">
       <div class="row" style="justify-content: space-between">
         <h3 style="margin: 0">最近实验 / 最佳实验</h3>
-        <RouterLink to="/experiments">到「实验」页</RouterLink>
+        <RouterLink to="/experiments">到「稳健性与实验比较」页</RouterLink>
       </div>
       <p v-if="experimentError" class="error" style="margin: 8px 0 0">{{ experimentError }}</p>
       <p v-else-if="experimentsLoading" class="muted" style="margin: 8px 0 0">正在读最近几次实验…</p>
@@ -784,7 +803,7 @@ onMounted(loadLabRuns)
           </div>
         </div>
         <p class="muted" style="margin: 8px 0 0">
-          「最高」= 最近 20 条里已存总收益最高的一条（只比大小，这一页不重算）；完整读数在「实验」页里。
+          「最高」= 最近 20 条里已存总收益最高的一条（只比大小，这一页不重算）；完整读数在「稳健性与实验比较」页里。
         </p>
         <!-- Phase C：一句话说清「比简单持有好吗」（docs/30 §9.2）。两个数字都来自服务端。 -->
         <p v-if="comparisonLine" class="answer-main" style="margin: 8px 0 0">
@@ -793,7 +812,7 @@ onMounted(loadLabRuns)
         </p>
       </template>
       <p v-else class="muted" style="margin: 8px 0 0">
-        还没有实验。到「实验」页跑一次，或者在「回测」页把一条跑完的回测保存为实验。
+        还没有实验。到「稳健性与实验比较」页跑一次，或者在「回测分析」页把一条跑完的回测保存为实验。
       </p>
     </div>
 

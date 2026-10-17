@@ -43,6 +43,22 @@ const hashes = ref<
   Record<number, { intact: boolean; stored_hash: string; recomputed_hash: string }>
 >({})
 const ai = ref<AIStatus | null>(null)
+
+// 把 AI 状态归一成模板能安全判定的三种情况，避免链式 v-else-if 在 vue-tsc 下把 ai 窄化丢空。
+type AiState =
+  | { kind: 'unset'; name: string }
+  | { kind: 'undecryptable'; name: string }
+  | { kind: 'empty'; name: string }
+  | { kind: 'not-configured'; name: string }
+const aiState = computed<AiState>(() => {
+  const st = ai.value
+  if (!st) return { kind: 'unset', name: '' }
+  if (!st.configured && st.key_error === 'undecryptable')
+    return { kind: 'undecryptable', name: st.provider_name ?? '' }
+  if (!st.configured && st.key_error === 'empty') return { kind: 'empty', name: st.provider_name ?? '' }
+  if (!st.configured) return { kind: 'not-configured', name: '' }
+  return { kind: 'unset', name: '' }
+})
 const preview = ref<Record<string, any> | null>(null)
 const evidence = ref<Record<string, any> | null>(null)
 const explanation = ref<ExplainResult | null>(null)
@@ -738,8 +754,20 @@ onMounted(load)
         <p class="muted">
           AI 只解释已有数字，不参与任何计算：它读的是上面的回测、信号与证据，写不成一条交易。
         </p>
-        <p v-if="ai && !ai.configured" class="muted">
-          还没有配置 AI：{{ ai.note }}。上面的十段在没有任何 AI 的情况下也全部可用。
+        <p v-if="aiState.kind === 'undecryptable'" class="muted">
+          有一个启用的 AI Provider{{ aiState.name ? `（${aiState.name}）` : '' }}，但存进去的密钥现在读不出来
+          （加密用的 SECRET_KEY 变过），所以「解释当前信号 / 解释最近一次回测」暂时点不了：到
+          <RouterLink to="/settings">「系统管理 → AI 设置」</RouterLink> 重新填一次密钥就能恢复。
+          上面的十段在没有任何 AI 的情况下也全部可用。
+        </p>
+        <p v-else-if="aiState.kind === 'empty'" class="muted">
+          有一个启用的 AI Provider{{ aiState.name ? `（${aiState.name}）` : '' }}，但它存的是空密钥，
+          所以「解释当前信号 / 解释最近一次回测」暂时点不了：到
+          <RouterLink to="/settings">「系统管理 → AI 设置」</RouterLink> 把密钥填进去就能恢复。
+          上面的十段在没有任何 AI 的情况下也全部可用。
+        </p>
+        <p v-else-if="aiState.kind === 'not-configured'" class="muted">
+          还没有配置 AI：到「系统管理 → AI 设置」填一个模型服务即可。上面的十段在没有任何 AI 的情况下也全部可用。
         </p>
         <template v-if="ai && ai.configured">
           <p class="muted">

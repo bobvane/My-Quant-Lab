@@ -19,14 +19,14 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'dashboard', component: DashboardView },
-    { path: '/research', name: 'research', component: ResearchView },
+    { path: '/lab', name: 'lab', component: LabView },
     { path: '/strategies', name: 'strategies', component: StrategiesView },
+    { path: '/research', name: 'research', component: ResearchView },
     { path: '/backtest', name: 'backtest', component: BacktestView },
     { path: '/experiments', name: 'experiments', component: ExperimentsView },
-    { path: '/paper', name: 'paper', component: PaperView },
     { path: '/signals', name: 'signals', component: SignalsView },
+    { path: '/paper', name: 'paper', component: PaperView },
     { path: '/data', name: 'data', component: DataView },
-    { path: '/lab', name: 'lab', component: LabView },
     { path: '/settings', name: 'settings', component: SettingsView },
     // The old name of the strategy library. It had been the only name, so it stays
     // as a redirect rather than 404ing on every bookmark (ADR-131): a redirect has

@@ -652,7 +652,7 @@ function archiveConfirmText(item: ExperimentSummaryOut): string {
   const lines = [
     `把实验「${item.name}」归档。`,
     '',
-    '归档不是删除：这条实验会留在实验列表里（状态显示「已归档」），它背后那次回测运行、结果和成交明细也都保留在「回测」页里，随时能回读。',
+    '归档不是删除：这条实验会留在实验列表里（状态显示「已归档」），它背后那次回测运行、结果和成交明细也都保留在「回测分析」页里，随时能回读。',
     '归档之后服务端不允许它再运行；而且现在没有「取消归档」的接口，所以它会一直带着「已归档」这个标记（要彻底移走它只能用删除）。',
   ]
   if (statusFilter.value) {
@@ -913,7 +913,7 @@ function compareStatusText(row: Record<string, unknown>): string {
   return statusLabel(typeof status === 'string' ? status : null)
 }
 
-// ---- 权益曲线 / 交易记录：用链接把用户送回「回测」页 --------------------------
+// ---- 权益曲线 / 交易记录：用链接把用户送回「回测分析」页 --------------------------
 
 /**
  * `/backtest?run_id=<id>` 直接打开这条实验跑过的那一次回测（ADR-200），
@@ -1012,7 +1012,7 @@ onMounted(async () => {
 
 <template>
   <div>
-    <h1 class="page-title">实验</h1>
+    <h1 class="page-title">稳健性与实验比较</h1>
     <p class="page-sub">
       一次实验 = 一条留在服务端的记录：它冻住了当时的策略版本、参数、标的与时间范围。
       这一页可以看列表、新建、看详情、并排比较。每个数字都来自服务端存下来的结果，取不到就写「未知」。
@@ -1272,7 +1272,7 @@ onMounted(async () => {
               ? `这一版（#${scopeVersionId}）${statusFilter ? `在「${currentFilterLabel}」这个状态里` : ''}还没有跑过实验。`
               : statusFilter
                 ? `现在这个筛选（${currentFilterLabel}）里没有实验。`
-                : '还没有任何实验。用上面的「新建实验」跑一次，或者到「回测」页把一条跑完的回测收养成实验。'
+                : '还没有任何实验。用上面的「新建实验」跑一次，或者到「回测分析」页把一条跑完的回测收养成实验。'
         }}
       </p>
     </div>
@@ -1473,7 +1473,7 @@ onMounted(async () => {
         </div>
         <p v-if="analysis && analysis.benchmark" class="muted" style="margin-top: 6px">
           对照是同一段区间、同样初始资金的「买入并一直拿着」，不含手续费与滑点，所以它是一把偏乐观的尺子。
-          <RouterLink v-if="backtestLink" :to="backtestLink">到「回测」页看绩效 / 风险 / 对照明细</RouterLink>
+          <RouterLink v-if="backtestLink" :to="backtestLink">到「回测分析」页看绩效 / 风险 / 对照明细</RouterLink>
         </p>
 
         <h4>逐条结果</h4>
@@ -1510,7 +1510,7 @@ onMounted(async () => {
                 <td>
                   <template v-if="row.backtest_run_id !== null && row.backtest_run_id !== undefined">
                     <RouterLink v-if="backtestLink" :to="backtestLink">
-                      到「回测」页看 #{{ row.backtest_run_id }}
+                      到「回测分析」页看 #{{ row.backtest_run_id }}
                     </RouterLink>
                     <span v-else class="muted">#{{ row.backtest_run_id }}</span>
                   </template>
@@ -1531,7 +1531,7 @@ onMounted(async () => {
           <li>
             <template v-if="backtestLink">
               <RouterLink :to="backtestLink">权益曲线</RouterLink>
-              —— 到「回测」页直接打开这次回测 <strong>#{{ backtestRunId }}</strong>，
+              —— 到「回测分析」页直接打开这次回测 <strong>#{{ backtestRunId }}</strong>，
               权益曲线与下面的解读都在那一页上。
               <span class="muted">
                 （地址里的 <span class="mono">?run_id={{ backtestRunId }}</span>

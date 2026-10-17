@@ -827,27 +827,27 @@ def test_the_navigation_splits_research_from_the_strategy_library() -> None:
 
     nav = re.findall(r'<RouterLink to="([^"]+)">([^<]+)</RouterLink>', APP)
     assert [label for _, label in nav] == [
-        "研究首页",
-        "研究策略",
+        "投资总览",
+        "研究中心",
         "我的策略",
-        "回测",
-        "实验",
-        "模拟验证",
+        "快速回测",
+        "回测分析",
+        "稳健性与实验比较",
         "信号",
+        "模拟验证",
         "数据",
-        "AI 研究实验室",
         "系统管理",
     ]
     assert [path for path, _ in nav] == [
         "/",
-        "/research",
+        "/lab",
         "/strategies",
+        "/research",
         "/backtest",
         "/experiments",
-        "/paper",
         "/signals",
+        "/paper",
         "/data",
-        "/lab",
         "/settings",
     ]
 
@@ -855,6 +855,10 @@ def test_the_navigation_splits_research_from_the_strategy_library() -> None:
     # entry is reachable in both modes, and the shell's engineering readings are still
     # advanced-only (ADR-133).
     assert '<div class="nav-group">高级</div>' not in APP
+    # Phase 1 (v2.7.2): the multi-item sections ship as nav groups.
+    assert '<div class="nav-group">策略与回测</div>' in APP
+    assert '<div class="nav-group">信号与模拟验证</div>' in APP
+    assert '<div class="nav-group">数据与系统</div>' in APP
     assert '<RouterLink to="/resources">' not in APP
     assert "{ path: '/resources'" not in MAIN_TS
     assert 'v-if="isAdvanced" class="sidebar-meta' in APP

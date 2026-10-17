@@ -69,6 +69,26 @@ function assetSymbol(assetId: number): string {
   return found?.symbol ?? `#${assetId}`
 }
 
+/**
+ * 数据页顶部总览：从已经加载回来的 assets + series 汇总「有哪些标的、覆盖哪段时间」。
+ * 不发起新的同步请求、也不推断后端没给过的范围（评审 P0-2 / ADR-126）。
+ */
+const dataCoverage = computed(() => {
+  const rows = series.value
+  if (!rows.length) return { has: false, symbols: 0, runs: 0, start: '', end: '' }
+  const symbols = new Set<string>()
+  let start = ''
+  let end = ''
+  for (const s of rows) {
+    symbols.add(assetSymbol(Number(s.asset_id)))
+    const ss = String(s.series_start ?? '').slice(0, 10)
+    const se = String(s.series_end ?? '').slice(0, 10)
+    if (ss && (start === '' || ss < start)) start = ss
+    if (se && (end === '' || se > end)) end = se
+  }
+  return { has: true, symbols: symbols.size, runs: rows.length, start, end }
+})
+
 async function load() {
   error.value = ''
   try {
@@ -179,6 +199,15 @@ onMounted(load)
     <ul v-if="deleteNotices.length" class="notice">
       <li v-for="(item, index) in deleteNotices" :key="index">{{ item }}</li>
     </ul>
+
+    <div v-if="dataCoverage.has" class="card card-quiet">
+      <h3>已同步的数据</h3>
+      <p class="muted">
+        目前有 <strong>{{ dataCoverage.symbols }}</strong> 个标的、<strong>{{ dataCoverage.runs }}</strong> 段行情，
+        覆盖 {{ dataCoverage.start }} 至 {{ dataCoverage.end }}。
+        这个范围来自已经同步回来的数据，不会自动再去拉取。
+      </p>
+    </div>
 
     <div class="card card-quiet">
       <h3>同步行情</h3>

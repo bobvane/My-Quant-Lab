@@ -43,7 +43,7 @@ import {
   validationLabel,
 } from '@/wording'
 
-// 「AI 研究实验室」（§17 + v2.4.0 的编译/激活）：把一条最小但诚实的链路走完——
+// 「研究中心」（§17 + v2.4.0 的编译/激活）：把一条最小但诚实的链路走完——
 // 研究输入 → AI 理解 → 策略假设 → 策略草案 → 人工确认 → 编译 → 策略版本 → 激活 → 回测。
 //
 // 这一页刻意不做的事，也不假装做了：
@@ -182,7 +182,7 @@ type BacktestTarget = {
   quality: string
 }
 
-/** 与「研究策略」页第①步同一个来源、同一套映射（那里是 `symbolOptions`）。 */
+/** 与「快速回测」页第①步同一个来源、同一套映射（那里是 `symbolOptions`）。 */
 const backtestTargets = computed<BacktestTarget[]>(() =>
   seriesList.value
     .filter((s) => !s.is_archived)
@@ -782,7 +782,7 @@ async function loadStrategies() {
 }
 
 // --------------------------------------------------------------------------- //
-// 交接用的标的：数据是「研究策略」页和「数据」页的同一份，这里只读不写
+// 交接用的标的：数据是「快速回测」页和「数据」页的同一份，这里只读不写
 // --------------------------------------------------------------------------- //
 async function loadBacktestTargets() {
   loadingSeries.value = true
@@ -1892,7 +1892,7 @@ async function activate() {
   try {
     const updated = await api.activateVersion(version.id)
     compiledVersion.value = updated
-    notice.value = `策略版本 ${updated.version} 现在是当前版本。要验证它，下一步去「回测」用这一版跑一次。`
+    notice.value = `策略版本 ${updated.version} 现在是当前版本。要验证它，下一步去「回测分析」用这一版跑一次。`
   } catch (e) {
     handleFailure(e, 'version')
   } finally {
@@ -1901,10 +1901,10 @@ async function activate() {
 }
 
 /**
- * 交接到「回测」：把版本、标的、周期一次带过去，并要求那边直接跑（ADR-191）。
+ * 交接到「回测分析」：把版本、标的、周期一次带过去，并要求那边直接跑（ADR-191）。
  *
- * 带 `run=1` 是「研究策略」页已经用了很久的做法（`frontend/src/views/ResearchView.vue`）：
- * 用户在交接口已经选过一次标的，到回测页不该再让他选第二次、更不该让他自己点「开始回测」。
+ * 带 `run=1` 是「快速回测」页已经用了很久的做法（`frontend/src/views/ResearchView.vue`）：
+ * 用户在交接口已经选过一次标的，到回测分析页不该再让他选第二次、更不该让他自己点「开始回测」。
  * 标的不是策略内容，所以它必须由人在这里指定；没选就按钮点不动（见 `backtestBlockedReason`）。
  */
 function goToBacktest() {
@@ -2155,7 +2155,7 @@ const experimentBlockedReason = computed<string>(() => {
   }
   if (experimentKind.value === 'monte_carlo') {
     if (!experimentBacktestRunId.value) {
-      return '还差一次已经跑完的回测：在上面选一条记录；一条都没有的话，先去「回测」页跑一次。'
+      return '还差一次已经跑完的回测：在上面选一条记录；一条都没有的话，先去「回测分析」页跑一次。'
     }
     const runs = integerProblem(experimentRuns.value, '重采样次数', 1, 5000)
     if (runs) return runs
@@ -2439,7 +2439,7 @@ async function createExperiment() {
 async function removeExperiment(id: number, name: string) {
   const ok = window.confirm(
     `确定删除实验「${name}」吗？\n\n` +
-      '只会删掉这条实验记录和它存下来的结果。它背后那次回测运行不会被删除——在「回测」页里仍然找得到。\n' +
+      '只会删掉这条实验记录和它存下来的结果。它背后那次回测运行不会被删除——在「回测分析」页里仍然找得到。\n' +
       '删掉之后不能恢复。',
   )
   if (!ok) return
@@ -2634,15 +2634,15 @@ const experimentNextStep = computed<{ text: string; to: NextStepTarget; linkText
     (experimentVersionId.value ? Number(experimentVersionId.value) : null)
   if (versionId === null) {
     return {
-      text: '上面选一版策略跑一次实验；跑完之后，这一版随时可以拿去「回测」页看权益曲线和成交明细。',
+      text: '上面选一版策略跑一次实验；跑完之后，这一版随时可以拿去「回测分析」页看权益曲线和成交明细。',
       to: '',
       linkText: '',
     }
   }
   return {
-    text: '实验只把结果存下来做对照；要看权益曲线、逐笔成交和执行模型，用「回测」页打开这一版。',
+    text: '实验只把结果存下来做对照；要看权益曲线、逐笔成交和执行模型，用「回测分析」页打开这一版。',
     to: { path: '/backtest', query: { strategy_version_id: String(versionId) } },
-    linkText: '去「回测」',
+    linkText: '去「回测分析」',
   }
 })
 
@@ -2697,13 +2697,13 @@ const nextStep = computed<{ text: string; to: NextStepTarget; linkText: string }
       return {
         text: `策略版本 ${version.version} 已经是当前版本，可以用它去回测了。`,
         to: { path: '/backtest', query: { strategy_version_id: String(version.id) } },
-        linkText: '去「回测」用这一版',
+        linkText: '去「回测分析」用这一版',
       }
     }
     return {
-      text: `草案已经编译成策略版本 ${version.version}，但还没有激活。在下面「策略版本」里点「激活为当前版本」；也可以先去「回测」用它试跑一次（没激活也能回测）。`,
+      text: `草案已经编译成策略版本 ${version.version}，但还没有激活。在下面「策略版本」里点「激活为当前版本」；也可以先去「回测分析」用它试跑一次（没激活也能回测）。`,
       to: { path: '/backtest', query: { strategy_version_id: String(version.id) } },
-      linkText: '先去「回测」试跑这一版',
+      linkText: '先去「回测分析」试跑这一版',
     }
   }
   if (draftCompiledVersionId.value) {
@@ -2797,7 +2797,7 @@ onUnmounted(stopPolling)
 
 <template>
   <div>
-    <h1 class="page-title">AI 研究实验室</h1>
+    <h1 class="page-title">研究中心</h1>
     <p class="page-sub">
       把一个研究问题交给 AI：它先说出自己理解到了什么，再给出一份策略草案；你确认之后，
       系统把它编译成一条正式的策略版本，你决定要不要激活，然后拿去回测。
@@ -2817,7 +2817,7 @@ onUnmounted(stopPolling)
       <h3>这一页在做什么</h3>
       <ul class="answer-list">
         <li>
-          <b>你在哪：</b>「AI 研究实验室」。它和「研究策略」不同：这里不碰行情数据、不动回测引擎，
+          <b>你在哪：</b>「研究中心」。它和「快速回测」不同：这里不碰行情数据、不动回测引擎，
           先把文字材料交给 AI 读，再把它读出来的东西编译成一条正式策略。
         </li>
         <li>
@@ -3826,11 +3826,11 @@ onUnmounted(stopPolling)
         </button>
         <span v-else class="verdict ok">已是当前版本</span>
         <button class="ghost" :disabled="!chosenBacktestTarget" @click="goToBacktest">
-          去「回测」用这一版
+          去「回测分析」用这一版
         </button>
       </div>
       <p class="muted" style="margin-top: 8px">
-        点「去「回测」用这一版」会带上你选的标的直接开跑，跑完不用你再点一次运行。
+        点「去「回测分析」用这一版」会带上你选的标的直接开跑，跑完不用你再点一次运行。
       </p>
       <p class="muted">
         激活只改「哪一版是当前版本」：不改这一版的内容，不触发回测，也不会下单。
@@ -3889,7 +3889,11 @@ onUnmounted(stopPolling)
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in runs" :key="item.run_id">
+          <tr
+            v-for="item in runs"
+            :key="item.run_id"
+            :class="{ selected: item.run_id === (run?.run_id ?? null) }"
+          >
             <td class="muted">{{ formatDateTime(item.created_at) }}</td>
             <td>{{ item.question }}</td>
             <td>
@@ -4002,7 +4006,7 @@ onUnmounted(stopPolling)
           </select>
           <p v-if="loadingExperimentBacktests" class="muted">正在读回测记录…</p>
           <p v-else-if="!experimentBacktests.length" class="muted">
-            还没有已完成的回测记录：先去「回测」页跑一次，再回来重采样它的成交。
+            还没有已完成的回测记录：先去「回测分析」页跑一次，再回来重采样它的成交。
           </p>
           <p v-else class="muted">
             只会读那次回测存下来的成交记录，不会重跑回测、也不会产生新的回测运行。
@@ -4353,7 +4357,7 @@ onUnmounted(stopPolling)
       </table>
       <p v-if="experimentList.length" class="muted" style="margin-top: 8px">
         打开一条只会读回当时存下的结果，不会重新跑。删除实验只删这条记录和它的结果，
-        它背后那次回测运行不会被删掉——在「回测」页里仍然找得到。
+        它背后那次回测运行不会被删掉——在「回测分析」页里仍然找得到。
       </p>
 
       <div class="row" style="margin-top: 12px; align-items: center">
@@ -4366,7 +4370,7 @@ onUnmounted(stopPolling)
       </div>
       <p v-if="compareExperimentIds.length < 2" class="muted">
         勾两条以上才能对比（现在选了 {{ compareExperimentIds.length }} 条）：对比表用「总收益 / 最大回撤 /
-        夏普比率 / 胜率 / 交易次数」这五项，和「回测」页的对比口径一致。
+        夏普比率 / 胜率 / 交易次数」这五项，和「回测分析」页的对比口径一致。
       </p>
 
       <div v-if="experimentCompare" style="margin-top: 12px">

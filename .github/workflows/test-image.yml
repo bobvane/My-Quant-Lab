@@ -19,7 +19,7 @@ on:
       ref:
         description: "Branch, tag, or SHA to check out (must resolve to expected_sha)"
         required: false
-        default: "release/v2.7.2"
+        default: "9107ec17997b59f75809e07af03c379b8725a52c"
       expected_sha:
         description: "Exact commit SHA the checked-out ref must resolve to"
         required: false

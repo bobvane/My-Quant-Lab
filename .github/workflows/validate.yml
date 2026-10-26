@@ -1,0 +1,45 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create a throwaway .env
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          python3 scripts/bootstrap_env.py
+
+      - name: Render the compose file
+        run: docker compose config --quiet
+
+      - name: Reject local build sections
+        run: |
+          if docker compose config | grep -q 'build:'; then
+            echo "::error::docker-compose.yml must not contain build: sections; this stack only pulls images."
+            exit 1
+          fi
+
+      - name: Check that a missing password is rejected
+        run: |
+          set +e
+          POSTGRES_PASSWORD= docker compose config --quiet 2>/dev/null
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::error::The compose file started without POSTGRES_PASSWORD; the :? guard is missing."
+            exit 1
+          fi

@@ -1,0 +1,151 @@
+name: Publish backend image to GHCR
+
+# Build and publish the backend image to GitHub Container Registry, then
+# (for v* tags only) cut a GitHub Release with the auto-generated changelog.
+# The frontend image is built and released independently by the private
+# QuantDinger-Vue repo (see its release-frontend.yml).
+#
+# Triggers:
+#   - push of a version tag matching `v*` (e.g. v5.0.1) → publishes
+#     semver + latest tags AND a GitHub Release
+#   - manual workflow_dispatch → publishes only a short-SHA tag, no Release
+#
+# Multi-arch (linux/amd64 + linux/arm64) via QEMU + buildx. BUILD_REGION=global
+# keeps the GitHub-hosted runner off the Aliyun mirror detour.
+#
+# First-time setup: after the first successful run, visit
+#   https://github.com/orgs/<owner>/packages/container/quantdinger-backend/settings
+# and set package visibility to public if anonymous `docker pull` is desired.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Cancel an in-flight build when a newer tag/dispatch lands on the same ref.
+# Avoids two workflows racing for the same GHA cache scope.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/openbyteinc/quantdinger-backend
+
+jobs:
+  backend:
+    name: Build & push backend image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,format=short
+
+      - name: Resolve application version
+        id: app_version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            app_version="${GITHUB_REF_NAME#v}"
+            git_tag="${GITHUB_REF_NAME}"
+          else
+            app_version="0.0.0-${GITHUB_SHA::7}"
+            git_tag=""
+          fi
+          echo "app_version=${app_version}" >> "$GITHUB_OUTPUT"
+          echo "git_tag=${git_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push backend
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ./backend_api_python
+          file: ./backend_api_python/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BUILD_REGION=global
+            APP_VERSION=${{ steps.app_version.outputs.app_version }}
+            GIT_TAG=${{ steps.app_version.outputs.git_tag }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+          provenance: mode=max
+          sbom: true
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign backend image
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: >-
+          cosign sign --yes
+          "${IMAGE_NAME}@${IMAGE_DIGEST}"
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          generate_release_notes: true
+          append_body: true   # preserve UI-authored notes; append our snippet
+          body: |
+            ## Backend ${{ github.ref_name }}
+
+            **Docker image (multi-arch, amd64 + arm64):**
+
+            ```bash
+            docker pull ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ```
+
+            Pin in `docker-compose.ghcr.yml` via `IMAGE_TAG=${{ github.ref_name }}` in a project-root `.env`.
+
+            The image is signed with Sigstore keyless signing. Verify it with:
+
+            ```bash
+            cosign verify \
+              --certificate-identity-regexp '^https://github.com/OpenByteInc/QuantDinger/.github/workflows/docker-publish.yml@refs/tags/v.*$' \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ```
+
+            ---

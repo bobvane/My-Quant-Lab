@@ -1,0 +1,170 @@
+from decimal import Decimal
+from unittest.mock import MagicMock
+
+import pytest
+
+from app.services.live_trading.binance_spot import BinanceSpotClient
+from app.services.live_trading.bitget_spot import BitgetSpotClient
+from app.services.live_trading.htx import HtxClient
+from app.services.live_trading.spot_sizing import (
+    clamp_spot_close_quantity,
+    get_spot_free_base_balance,
+    get_spot_total_base_balance,
+    prepare_spot_live_order_sizes,
+    scale_spot_open_notional,
+)
+
+
+def test_scale_spot_open_notional_default_is_exact():
+    assert scale_spot_open_notional(1000.0) == 1000.0
+
+
+def test_legacy_spot_open_buffer_cannot_change_explicit_amount(monkeypatch):
+    monkeypatch.setenv("SPOT_OPEN_QUOTE_BUFFER", "0.5")
+    assert scale_spot_open_notional(1000.0) == 1000.0
+
+
+def test_clamp_spot_close_uses_free_and_normalize(monkeypatch):
+    monkeypatch.setenv("SPOT_CLOSE_SAFETY_RATIO", "1.0")
+    client = MagicMock(spec=BinanceSpotClient)
+    client.get_account.return_value = {"balances": [{"asset": "BTC", "free": "0.99"}]}
+    client._normalize_quantity.return_value = (Decimal("0.98"), 2)
+    final, meta = clamp_spot_close_quantity(client, symbol="BTC/USDT", requested_qty=1.0)
+    assert final == 0.98
+    assert meta.get("adjusted") is True
+    assert meta.get("exchange_free") == 0.99
+    assert meta.get("safety_ratio") == 1.0
+
+
+def test_spot_ownership_total_includes_locked_while_close_uses_free():
+    client = MagicMock(spec=BinanceSpotClient)
+    client.get_account.return_value = {
+        "balances": [{"asset": "BTC", "free": "0.6", "locked": "0.4"}],
+    }
+
+    assert get_spot_total_base_balance(client, symbol="BTC/USDT") == 1.0
+    assert get_spot_free_base_balance(client, symbol="BTC/USDT") == 0.6
+
+
+def test_spot_zero_free_balance_is_not_replaced_by_locked_total():
+    client = MagicMock(spec=BinanceSpotClient)
+    client.get_account.return_value = {
+        "balances": [{"asset": "BTC", "free": "0", "locked": "1"}],
+    }
+
+    assert get_spot_total_base_balance(client, symbol="BTC/USDT") == 1.0
+    assert get_spot_free_base_balance(client, symbol="BTC/USDT") == 0.0
+
+
+def test_prepare_spot_live_order_bitget_market_buy_uses_quote():
+    client = MagicMock(spec=BitgetSpotClient)
+    client._normalize_quote_size.return_value = (Decimal("50"), 2)
+    client._normalize_base_size.return_value = (Decimal("100"), 0)
+    base, quote, uses_quote = prepare_spot_live_order_sizes(
+        client,
+        symbol="DOGE/USDT",
+        side="buy",
+        reduce_only=False,
+        base_qty=1000.0,
+        ref_price=0.05,
+    )
+    assert uses_quote is True
+    assert quote == 50.0
+    assert base == 1000.0
+
+
+def test_clamp_spot_close_no_change_when_within_free():
+    client = MagicMock(spec=BinanceSpotClient)
+    client.get_account.return_value = {"balances": [{"asset": "ETH", "free": "10"}]}
+    client._normalize_quantity.return_value = (Decimal("0.5"), 1)
+    final, meta = clamp_spot_close_quantity(client, symbol="ETH/USDT", requested_qty=0.5, safety_ratio=1.0)
+    assert final == 0.5
+    assert "adjusted" not in meta or meta.get("adjusted") is not True
+
+
+def test_legacy_close_ratio_cannot_create_a_residual(monkeypatch):
+    monkeypatch.setenv("SPOT_CLOSE_SAFETY_RATIO", "0.5")
+    client = MagicMock(spec=BinanceSpotClient)
+    client.get_account.return_value = {"balances": [{"asset": "ETH", "free": "10"}]}
+    client._normalize_quantity.return_value = (Decimal("1"), 3)
+
+    final, meta = clamp_spot_close_quantity(
+        client,
+        symbol="ETH/USDT",
+        requested_qty=1.0,
+        safety_ratio=0.5,
+    )
+
+    assert final == 1.0
+    assert meta["safety_ratio"] == 1.0
+
+
+def test_htx_spot_ownership_includes_frozen_rows():
+    """HTX returns one row per (currency, type); ``frozen`` is still owned."""
+    client = MagicMock(spec=HtxClient)
+    client.market_type = "spot"
+    client.get_balance.return_value = {
+        "data": {
+            "list": [
+                {"currency": "btc", "type": "trade", "balance": "0.6", "available": "0.6"},
+                {"currency": "btc", "type": "frozen", "balance": "0.4"},
+                {"currency": "usdt", "type": "trade", "balance": "1200"},
+            ]
+        }
+    }
+
+    assert get_spot_total_base_balance(client, symbol="BTC/USDT") == 1.0
+    assert get_spot_free_base_balance(client, symbol="BTC/USDT") == 0.6
+
+
+def test_htx_spot_frozen_row_first_is_not_taken_for_the_whole_holding():
+    """The API does not guarantee ``trade`` comes before ``frozen``."""
+    client = MagicMock(spec=HtxClient)
+    client.market_type = "spot"
+    client.get_balance.return_value = {
+        "data": {
+            "list": [
+                {"currency": "eth", "type": "frozen", "balance": "2"},
+                {"currency": "eth", "type": "trade", "balance": "3", "available": "3"},
+            ]
+        }
+    }
+
+    assert get_spot_total_base_balance(client, symbol="ETH/USDT") == 5.0
+    assert get_spot_free_base_balance(client, symbol="ETH/USDT") == 3.0
+
+
+@pytest.mark.parametrize("balance_type", ["lock", "bank", "loan", "interest", "unknown", "", None])
+@pytest.mark.parametrize("extra_first", [False, True])
+def test_htx_spot_non_trading_rows_do_not_increase_sellable_inventory(balance_type, extra_first):
+    client = MagicMock(spec=HtxClient)
+    client.market_type = "spot"
+    rows = [
+        {"currency": "btc", "type": "trade", "balance": "0.6"},
+        {"currency": "btc", "type": "frozen", "balance": "0.4"},
+    ]
+    extra = {"currency": "btc", "balance": "2", "available": "2"}
+    if balance_type is not None:
+        extra["type"] = balance_type
+    rows.insert(0 if extra_first else len(rows), extra)
+    client.get_balance.return_value = {"data": {"list": rows}}
+
+    assert get_spot_total_base_balance(client, symbol="BTC/USDT") == 1.0
+    assert get_spot_free_base_balance(client, symbol="BTC/USDT") == 0.6
+    quantity, meta = clamp_spot_close_quantity(
+        client, symbol="BTC/USDT", requested_qty=3.0, safety_ratio=1.0,
+    )
+    assert quantity == 0.6
+    assert meta["exchange_free"] == 0.6
+
+
+def test_htx_spot_fully_frozen_inventory_has_zero_available():
+    client = MagicMock(spec=HtxClient)
+    client.market_type = "spot"
+    client.get_balance.return_value = {"data": {"list": [
+        {"currency": "btc", "type": " FROZEN ", "balance": "1", "available": "1"},
+        {"currency": "btc", "type": " TRADE ", "balance": "0"},
+    ]}}
+
+    assert get_spot_total_base_balance(client, symbol="BTC/USDT") == 1.0
+    assert get_spot_free_base_balance(client, symbol="BTC/USDT") == 0.0

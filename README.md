@@ -24,6 +24,12 @@ prebuilt container images, so there is no application source here.
 | `VERSION` | Version of this deployment layer; release tags must match it |
 | `.github/workflows/validate.yml` | Validates the Compose file on every push |
 | `.github/workflows/release.yml` | Turns a `v*` tag into a Release plus a matching package |
+| `AGENTS.md` | Repository conventions: language, boundary, release rules |
+
+Comments in the configuration files, script output, and workflow messages are
+written in Chinese: this instance is operated by one Chinese-speaking household,
+and untranslated English messages get misread at 2 a.m. Machine-readable
+identifiers (variable names, image references, tags, `VERSION`) stay English.
 
 ## Stack
 

@@ -1,8 +1,8 @@
-# Deployment bundle image.
+# 部署层打包镜像。
 #
-# This is not the application. It is a versioned, immutable snapshot of this
-# deployment layer so that every release tag has a matching container package.
-# It contains no code from the application images this stack pulls at runtime.
+# 这不是应用程序，而是「部署层」在某个版本上的不可变快照，
+# 目的是让每个发布标签都对应一个可以拉取的容器包。
+# 里面不含运行时要拉取的应用镜像的任何代码。
 
 FROM alpine:3.20
 
@@ -13,7 +13,7 @@ LABEL org.opencontainers.image.licenses="NOASSERTION"
 
 WORKDIR /bundle
 
-COPY docker-compose.yml .env.example VERSION README.md README_CN.md NOTICE.md ./
+COPY docker-compose.yml .env.example VERSION AGENTS.md README.md README_CN.md NOTICE.md ./
 COPY docs ./docs
 COPY scripts ./scripts
 

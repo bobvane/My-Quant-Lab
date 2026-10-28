@@ -1,15 +1,15 @@
-# My Quant Lab — single-NAS stack
+# My Quant Lab —— 单机 NAS 部署
 #
-# Ten containers, one host, no message broker. Everything is pulled as a
-# prebuilt image; nothing is compiled here.
+# 十个容器，一台主机，没有消息队列。所有镜像都是拉取预构建版本，
+# 本地不做任何编译。
 #
-#   1. cp .env.example .env      (fill in the three required secrets)
+#   1. cp .env.example .env      （填好三个必填密钥）
 #   2. docker compose pull
 #   3. docker compose up -d
-#   4. http://<nas-ip>:8888
+#   4. 浏览器打开 http://<NAS 的 IP>:8888
 #
-# Ports 5000/5432/6379 are bound to loopback on purpose: only the web port is
-# meant to be reachable from the LAN.
+# 5000 / 5432 / 6379 只绑定本机回环地址，这是有意为之：
+# 局域网里只应该访问到网页端口。
 
 x-runtime: &runtime
   init: true
@@ -28,7 +28,7 @@ x-backend-image: &backend-image ${BACKEND_IMAGE:-ghcr.io/openbyteinc/quantdinger
 x-backend-env: &backend-env
   TZ: ${TZ:-Asia/Shanghai}
   LOG_FORMAT: ${LOG_FORMAT:-json}
-  DATABASE_URL: postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required; set it in .env}@postgres:5432/${POSTGRES_DB:-quantdinger}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD:?必须在 .env 里设置 POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-quantdinger}
   DB_TYPE: postgresql
   REDIS_HOST: redis
   REDIS_PORT: 6379
@@ -57,12 +57,13 @@ x-backend-env: &backend-env
   LIVE_TRADING_WS_ORDER_RESPONSE_TIMEOUT_SEC: ${LIVE_TRADING_WS_ORDER_RESPONSE_TIMEOUT_SEC:-4}
   LIVE_TRADING_WS_ORDER_IDLE_RECONNECT_SEC: ${LIVE_TRADING_WS_ORDER_IDLE_RECONNECT_SEC:-20}
   LIVE_TRADING_WS_ORDER_MAX_CONNECTIONS: ${LIVE_TRADING_WS_ORDER_MAX_CONNECTIONS:-64}
-  # No message broker in this stack: publish and the distributed bar fan-out
-  # stay off, so strategies are evaluated in-process by the trading worker.
+  # 本栈没有消息队列：事件发布和分布式 K 线广播都关掉，
+  # 策略由 trading 进程在本地直接计算。
   KAFKA_EVENT_PUBLISH_ENABLED: "false"
   STRATEGY_DISTRIBUTED_BAR_ENABLED: "false"
 
 services:
+  # 唯一可信数据源。业务数据全在这里，备份就是备份这个卷。
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:18.3-alpine}
     container_name: mql-db
@@ -70,7 +71,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-quantdinger}
       POSTGRES_USER: ${POSTGRES_USER:-quantdinger}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required; set it in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须在 .env 里设置 POSTGRES_PASSWORD}
       PGDATA: ${POSTGRES_PGDATA:-/var/lib/postgresql/18/docker}
       TZ: ${TZ:-Asia/Shanghai}
     command:
@@ -92,6 +93,7 @@ services:
       retries: 10
       start_period: 20s
 
+  # 可丢的缓存。数据丢了只会让下一次查询变慢，不会丢业务数据。
   redis:
     image: ${REDIS_IMAGE:-redis:8-alpine}
     container_name: mql-redis
@@ -114,7 +116,8 @@ services:
       timeout: 5s
       retries: 5
 
-  # Durable Celery broker. Kept apart from the disposable cache above.
+  # 持久化的 Celery 队列。不要和上面那个可丢的缓存混用：
+  # 这个开了 AOF，排队中的任务重启后还能继续。
   redis-jobs:
     image: ${REDIS_IMAGE:-redis:8-alpine}
     container_name: mql-redis-jobs
@@ -137,7 +140,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # One-shot schema bootstrap. Runs to completion before the API starts.
+  # 一次性建表。必须跑完，接口才会启动；跑完就退出，这是正常的。
   migration:
     <<: *runtime
     image: *backend-image
@@ -152,7 +155,7 @@ services:
       - backend_data:/app/data
       - ./.env:/app/.env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required; set it in .env}@postgres:5432/${POSTGRES_DB:-quantdinger}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD:?必须在 .env 里设置 POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-quantdinger}
       DB_TYPE: postgresql
       DB_POOL_MIN: 1
       DB_POOL_MAX: 2
@@ -160,6 +163,7 @@ services:
     networks:
       - mql-network
 
+  # HTTP 接口。网页通过 mql-web 反向代理访问它，不对局域网直接开放。
   backend:
     <<: *runtime
     image: *backend-image
@@ -183,8 +187,8 @@ services:
     volumes:
       - backend_logs:/app/logs
       - backend_data:/app/data
-      # Must exist as a *file* on the host before `up`, otherwise Docker creates
-      # a directory here and shadows the container's /app/.env.
+      # 启动前宿主机上必须存在这个**文件**。文件缺失时 Docker 会在挂载点
+      # 建一个同名目录，把容器里的 /app/.env 遮住，后端就读不到配置。
       - ./.env:/app/.env
     environment:
       - PYTHON_API_HOST=0.0.0.0
@@ -192,7 +196,7 @@ services:
       - INDICATOR_PREVIEW_DIR=/app/data/indicator_previews
       - GIT_TAG=${BACKEND_TAG:-5.6.1}
       - TZ=${TZ:-Asia/Shanghai}
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required; set it in .env}@postgres:5432/${POSTGRES_DB:-quantdinger}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD:?必须在 .env 里设置 POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-quantdinger}
       - DB_TYPE=postgresql
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -234,7 +238,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # Strategy runtime: evaluates bars, records paper trades, applies commands.
+  # 策略运行时：算 K 线、记模拟单、执行策略指令。
   trading-worker:
     <<: *runtime
     image: *backend-image
@@ -267,7 +271,7 @@ services:
       retries: 3
       start_period: 30s
 
-  # Portfolio monitor, order bookkeeping, market catalog sync.
+  # 持仓监控、订单对账、品类同步。
   scheduler-worker:
     <<: *runtime
     image: *backend-image
@@ -298,6 +302,7 @@ services:
       retries: 3
       start_period: 30s
 
+  # 回测、AI 任务、维护任务。
   celery-worker:
     <<: *runtime
     image: *backend-image
@@ -330,6 +335,7 @@ services:
       retries: 3
       start_period: 45s
 
+  # 定时任务调度。只能有一个实例，多开会重复触发。
   celery-beat:
     <<: *runtime
     image: *backend-image
@@ -359,12 +365,12 @@ services:
       timeout: 5s
       retries: 3
 
+  # 网页。整套服务里唯一需要让局域网其他设备访问的端口。
   frontend:
     image: ${FRONTEND_IMAGE:-ghcr.io/openbyteinc/quantdinger-frontend}:${FRONTEND_TAG:-5.6.1}
     container_name: mql-web
     restart: unless-stopped
     ports:
-      # The only port that needs to be reachable from other devices.
       - "${FRONTEND_HOST:-0.0.0.0}:${FRONTEND_PORT:-8888}:80"
     environment:
       - BACKEND_URL=${BACKEND_URL:-http://backend:5000}

@@ -1,11 +1,11 @@
-name: Release
+name: 发布
 
-# Every version tag produces two things with the same version number:
-#   1. a GitHub Release, with the deployment layer attached as a zip;
-#   2. a container package on GHCR holding the same files.
+# 每打一个版本标签，产出两样同号的东西：
+#   1. 一个 GitHub Release，附件是部署层的 zip 包；
+#   2. 一个 GHCR 上的容器包，里面是同样的文件。
 #
-# The package is the deployment layer, not the application: this repository
-# does not build the application images the stack pulls at runtime.
+# 这个包是「部署层」的快照，不是应用镜像：本仓库不构建运行时要拉取的
+# 那些应用镜像。
 
 on:
   push:
@@ -21,23 +21,23 @@ env:
 
 jobs:
   checks:
-    name: Check tag against VERSION
+    name: 校验标签与 VERSION
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Compare VERSION with the tag
+      - name: 比对 VERSION 与标签
         run: |
           set -euo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
           expected="v${version}"
           if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match VERSION=${version} (expected ${expected})."
+            echo "::error::标签 ${GITHUB_REF_NAME} 与 VERSION=${version} 不一致（应为 ${expected}）。"
             exit 1
           fi
 
-      - name: Validate the compose file
+      - name: 渲染 Compose 文件
         run: |
           set -euo pipefail
           cp .env.example .env
@@ -45,27 +45,27 @@ jobs:
           docker compose config --quiet
 
   package:
-    name: Publish bundle package
+    name: 发布容器包
     needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      - name: Checkout
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
+      - name: 准备 Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: 登录 GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive tags and labels
+      - name: 生成标签与元数据
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -75,7 +75,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
 
-      - name: Build and push
+      - name: 构建并推送
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -88,41 +88,41 @@ jobs:
           cache-from: type=gha,scope=bundle
           cache-to: type=gha,mode=max,scope=bundle
 
-      - name: Summary
+      - name: 写入摘要
         run: |
           {
-            echo "### Package published"
+            echo "### 容器包已发布"
             echo ""
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
             echo ""
-            echo "Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "Digest：\`${{ steps.build.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    name: Create GitHub Release
+    name: 创建 GitHub Release
     needs: package
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Read version
+      - name: 读取版本号
         id: ver
         run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
 
-      - name: Build release archive
+      - name: 打包部署层
         run: |
           set -euo pipefail
           zip -r "my-quant-lab-${{ steps.ver.outputs.version }}.zip" \
             docker-compose.yml .env.example VERSION \
-            README.md README_CN.md NOTICE.md docs scripts \
+            README.md README_CN.md NOTICE.md AGENTS.md docs scripts \
             -x '*.pyc' -x '__pycache__/*'
 
-      - name: Create release
+      - name: 创建发行版
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
@@ -130,20 +130,20 @@ jobs:
           body: |
             ## My Quant Lab ${{ github.ref_name }}
 
-            Deployment layer only. The application runs from pinned upstream
-            images; nothing is built from this repository at deploy time.
+            本仓库只有部署层，不含应用源码。应用本身是从固定的上游镜像拉取的，
+            部署时不会在这里编译任何东西。
 
-            **Download:** `my-quant-lab-*.zip` below — unzip, then follow
-            [docs/NAS_DEPLOYMENT_CN.md](docs/NAS_DEPLOYMENT_CN.md).
+            **下载**：下面的 `my-quant-lab-*.zip` 解压后，按
+            [docs/NAS_DEPLOYMENT_CN.md](docs/NAS_DEPLOYMENT_CN.md) 操作。
 
-            **Container package** (same files, immutable):
+            **容器包**（内容相同，不可变）：
 
             ```bash
             docker pull ghcr.io/bobvane/my-quant-lab:${{ steps.ver.outputs.version }}
             docker run --rm ghcr.io/bobvane/my-quant-lab:${{ steps.ver.outputs.version }}
             ```
 
-            **Checked-out copy:**
+            **直接检出源码**：
 
             ```bash
             git clone https://github.com/bobvane/My-Quant-Lab.git

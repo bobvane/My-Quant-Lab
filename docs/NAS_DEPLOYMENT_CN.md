@@ -30,7 +30,7 @@
    python scripts/bootstrap_env.py
    ```
 
-   屏幕会打印一行 `Administrator password: xxxxxxxxxxxxxxxx`，**先记下来**，
+   屏幕会打印一行 `管理员密码：xxxxxxxxxxxxxxxx`，**先记下来**，
    这是登录用的初始密码。
 
    如果电脑上没有 Python，用任意方式生成三段 64 位十六进制随机串，分别填进

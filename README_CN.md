@@ -22,6 +22,11 @@
 | `VERSION` | 本部署层的版本号，发布标签必须与它一致 |
 | `.github/workflows/validate.yml` | 每次推送校验 Compose 文件 |
 | `.github/workflows/release.yml` | 打 `v*` 标签时自动出 Release 和对应版本包 |
+| `AGENTS.md` | 仓库约定：语言、边界、发布规则 |
+
+**语言约定**：配置文件里的注释、脚本输出、流水线提示一律用中文；
+变量名、镜像地址、标签、`VERSION` 这类给机器看的内容保持英文。
+详细规则见 [AGENTS.md](AGENTS.md)。
 
 ## 容器
 

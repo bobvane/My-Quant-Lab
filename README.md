@@ -69,15 +69,25 @@ succeeded.
 
 ## Ports
 
-| Port | Bound to | Why |
+**One published port: 8888.** Everything else — the API, PostgreSQL, both Redis
+instances — is reachable only inside the `mql-network` bridge, by service name.
+That is deliberate: a NAS usually already runs something on 5432 or 6379, and
+publishing internal ports only creates collisions.
+
+| Port | Published | Why |
 | --- | --- | --- |
-| 8888 | all interfaces | Web UI, needed from the LAN |
-| 5000 | loopback | API; reached through the web container's proxy |
-| 5432 | loopback | PostgreSQL; direct access for admin only |
-| 6379 | loopback | Redis cache; direct access for admin only |
+| 8888 | yes, all interfaces | Web UI, needed from the LAN |
+| 5000, 5432, 6379 | no | internal only; containers talk over `mql-network` |
+
+To use `psql` or `redis-cli`, go through the container instead of a host port:
+
+```bash
+docker compose exec mql-db psql -U quantdinger -d quantdinger
+docker compose exec mql-redis redis-cli ping
+```
 
 If the NAS is reachable from the internet, put a TLS reverse proxy in front of
-port 8888 and do not expose the others.
+port 8888.
 
 ## Operating
 

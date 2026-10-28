@@ -135,18 +135,14 @@ mql-trading  mql-scheduler  mql-celery  mql-beat  mql-web
 | 备份数据库 | 见下方命令，或用 fnOS 的容器终端 |
 | 改配置 | 改 `.env` 后必须「重新部署」，只重启容器不生效 |
 
-备份数据库（在电脑上执行，需要能和 NAS 通网）：
-
-```bash
-docker run --rm -e PGPASSWORD='你的POSTGRES_PASSWORD' postgres:18.3-alpine \
-  pg_dump -h <NAS的IP> -U quantdinger quantdinger > backup-$(date +%F).sql
-```
-
-前提是把 `DB_PORT` 临时映射出来；更省事的办法是直接用 fnOS 容器终端：
+备份数据库，用 fnOS 的容器终端（`mql-db` →「终端」）：
 
 ```bash
 pg_dump -U quantdinger quantdinger > /tmp/backup.sql
 ```
+
+再把 `/tmp/backup.sql` 拷出来。数据库没有对宿主机开放端口，
+所以不要试图从电脑上直连 5432 —— 那是故意的，避免和 NAS 上其他服务抢端口。
 
 ---
 
@@ -154,6 +150,7 @@ pg_dump -U quantdinger quantdinger > /tmp/backup.sql
 
 | 症状 | 原因 | 处理 |
 | --- | --- | --- |
+| `address already in use` / `failed to bind host port` | 宿主机上已有程序占了这个端口（常见是 5432 被 NAS 自带的 PostgreSQL 占用） | 先 `docker compose down`，再确认用的是本仓库最新版 compose（内部端口不对外发布） |
 | `mql-api` 反复重启，日志提 `SECRET_KEY` | `.env` 里 `SECRET_KEY` 是空值或太短 | 重新生成，≥ 10 字符 |
 | `mql-api` 日志里 `password authentication failed` | `POSTGRES_PASSWORD` 在数据库建好之后被改过 | 改回原值；或删卷重建（会丢数据） |
 | `mql-migration` 一直 `exited (1)` | 数据库还没起来，或 `.env` 不是文件 | 先看 `mql-db` 是否 healthy |

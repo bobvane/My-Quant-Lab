@@ -19,7 +19,9 @@
 | `.env.example` | 配置模板，复制成 `.env` 再填 |
 | `scripts/bootstrap_env.py` | 自动生成三个必填的随机密钥 |
 | `docs/NAS_DEPLOYMENT_CN.md` | 图形界面部署步骤 |
+| `VERSION` | 本部署层的版本号，发布标签必须与它一致 |
 | `.github/workflows/validate.yml` | 每次推送校验 Compose 文件 |
+| `.github/workflows/release.yml` | 打 `v*` 标签时自动出 Release 和对应版本包 |
 
 ## 容器
 
@@ -90,8 +92,32 @@ docker compose exec mql-db pg_dump -U quantdinger quantdinger > backup-$(date +%
 
 ## 版本
 
-本部署层独立编号：`0.1.0` 是第一个在目标 NAS 硬件上确认能跑起来的版本。
-标签用 `v0.1.0`、`v0.2.0`……；底层应用版本在 `.env` 里单独固定。
+本部署层独立编号。`0.0.1` 是第一个发布的版本；应用程序版本由 `.env` 里的
+`BACKEND_TAG` / `FRONTEND_TAG` 单独固定。
+
+版本号写在 `VERSION` 文件里，发版就是打一个与它同名的标签：
+
+```bash
+git tag v0.0.2
+git push origin v0.0.2
+```
+
+每打一个标签会生成两个同号产物：
+
+| 产物 | 是什么 |
+| --- | --- |
+| GitHub Release | 发布说明 + `my-quant-lab-<版本>.zip`，整个部署层的压缩包 |
+| GHCR 包 `ghcr.io/bobvane/my-quant-lab:<版本>` | 同样这些文件打成的极小容器镜像 |
+
+这个包是本部署层的快照，**不是**应用程序镜像。它的作用是让每个版本都有一个
+不可变、版本号对得上的产物可以拉取：
+
+```bash
+docker pull ghcr.io/bobvane/my-quant-lab:0.0.1
+docker run --rm ghcr.io/bobvane/my-quant-lab:0.0.1
+```
+
+`VERSION` 必须和标签一致，不一致时发布流水线会直接失败。
 
 ## 说明
 

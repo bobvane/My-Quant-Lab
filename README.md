@@ -21,7 +21,9 @@ prebuilt container images, so there is no application source here.
 | `.env.example` | Configuration template; copy to `.env` |
 | `scripts/bootstrap_env.py` | Fills the three required secrets with random values |
 | `docs/NAS_DEPLOYMENT_CN.md` | Step-by-step NAS deployment (Chinese) |
+| `VERSION` | Version of this deployment layer; release tags must match it |
 | `.github/workflows/validate.yml` | Validates the Compose file on every push |
+| `.github/workflows/release.yml` | Turns a `v*` tag into a Release plus a matching package |
 
 ## Stack
 
@@ -94,9 +96,34 @@ become unreadable.
 
 ## Versioning
 
-This deployment layer is versioned on its own: `0.1.0` is the first release that
-is known to boot on the target NAS hardware. Tags are `v0.1.0`, `v0.2.0`, and so
-on; the underlying application version is pinned separately in `.env`.
+This deployment layer is versioned on its own. `0.0.1` is the first published
+version; the application is pinned separately through `BACKEND_TAG` /
+`FRONTEND_TAG` in `.env`.
+
+The version lives in `VERSION` and is released by pushing a matching tag:
+
+```bash
+git tag v0.0.2
+git push origin v0.0.2
+```
+
+Each tag produces two artifacts with the same number:
+
+| Artifact | What it is |
+| --- | --- |
+| GitHub Release | Release notes plus `my-quant-lab-<version>.zip`, the whole deployment layer |
+| GHCR package `ghcr.io/bobvane/my-quant-lab:<version>` | The same files as a tiny container image |
+
+The package is a snapshot of this deployment layer, **not** the application. It
+exists so every release has an immutable, version-matched artifact you can pull:
+
+```bash
+docker pull ghcr.io/bobvane/my-quant-lab:0.0.1
+docker run --rm ghcr.io/bobvane/my-quant-lab:0.0.1
+```
+
+The version in `VERSION` must match the tag; the release workflow refuses to
+publish if they differ.
 
 ## Notes
 
